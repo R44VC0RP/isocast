@@ -240,13 +240,6 @@ impl Tracker {
                         json!({ "newOutputPath": path }),
                     )];
                 }
-                if self.recording && cause == Some(TakeCause::Retake) {
-                    return vec![ev(
-                        sub::OUTPUTS,
-                        "RecordFileChanged",
-                        json!({ "newOutputPath": path }),
-                    )];
-                }
                 self.recording = true;
                 vec![
                     record(false, "STARTING", None),

@@ -17,13 +17,11 @@ use isocast_protocol::devices::{Devices, PermissionsReport};
 use isocast_protocol::hotkeys::{
     Catalogue, Hotkeys, InputParams as HotkeyInput, SetParams as HotkeysSet,
 };
-use isocast_protocol::isoprj::{
-    ProjectOpenParams, ProjectOpened, RecentProjects, RecentProjectsParams,
-};
 use isocast_protocol::library::{
     Library, LibraryChange, LibraryCreateParams, LibraryDocument, LibraryImportObsParams,
     LibraryImportParams, LibraryRenameParams, LibrarySwitchParams, LibraryTarget,
 };
+use isocast_protocol::nle::{NleExported, TakeExportNleParams};
 use isocast_protocol::obs::{Discovery, Imported};
 use isocast_protocol::optimize::{
     ObsDiscoverParams, OptimizeParams, Optimized, SpeedTest, SpeedTestParams,
@@ -34,13 +32,6 @@ use isocast_protocol::project::{
     ListProjectsParams, ProjectRenamed, Projects, RenameProjectParams,
 };
 use isocast_protocol::stream::StreamService;
-use isocast_protocol::timeline::{
-    ExportStarted, NleExported, RecordTarget, RecordTargetParams, RetakeParams, Retaken,
-    TimelineAngleParams, TimelineClosed, TimelineCropParams, TimelineExportNleParams,
-    TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
-    TimelineOpenParams, TimelineRangeParams, TimelineRelinkParams, TimelineRemoveParams,
-    TimelineRollParams, TimelineSplitParams, TimelineTarget, TimelineTrimParams,
-};
 use isocast_protocol::{CanvasId, Setup, Transition};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -146,15 +137,6 @@ struct StartRecordingParams {
     folder: Option<String>,
     /// Stop on its own after this many seconds.
     seconds: Option<f64>,
-    /// Start a new project with its own timeline, whatever
-    /// record_target says. Not with `into`.
-    #[serde(default)]
-    new_project: bool,
-    /// Add this recording's takes to this timeline (an id from
-    /// list_timelines), in the folder of its last take. Not with
-    /// `new_project`. Neither: record_target's choice (a new project
-    /// unless a timeline was chosen).
-    into: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -399,7 +381,7 @@ struct OpenPermissionSettingsParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct AddMarkerParams {
-    /// What happens at this moment, like "intro" or "retake".
+    /// What happens at this moment, like "intro" or "take 2".
     label: String,
 }
 
@@ -757,7 +739,7 @@ impl Isocast {
     #[tool(
         description = "The recording projects, newest first: each recording session writes \
                        into its own folder (`<date> <time> Untitled` in the recordings folder) \
-                       with every take's program and ISO files, manifests and exports. Each \
+                       with every take's program and ISO files and manifests. Each \
                        has an id (stable across renames), name, folder, takes (manifests) and \
                        files. Optional `limit` (100 if absent).",
         annotations(read_only_hint = true)
@@ -772,8 +754,7 @@ impl Isocast {
     #[tool(
         description = "Rename a recording project (by id, from list_projects): its folder \
                        becomes `<date> <time> <name>` (numbered if taken). Refused while a \
-                       recording or an export writes into it. Manifests and timelines keep \
-                       finding its files. Returns the project, its old name and old folder.",
+                       recording writes into it. Manifests keep finding its files. Returns the project, its old name and old folder.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -788,411 +769,30 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Make a timeline (optional `name`), make it current and choose it for the \
-                       next recording (record_target): from then on every take that finishes \
-                       (stop_recording, or split_take) is added to its end as a clip, until \
-                       record_target says `new`. A timeline is takes in order, like a clip bar: retake records the \
-                       last one again, remove_clip and move_clip edit the order, and \
-                       export_timeline joins them into one file. Returns the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn new_timeline(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineNewParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineNew(Some(params))).await
-    }
-
-    #[tool(
-        description = "A timeline (the current one unless `timeline` gives an id): its clips in \
-                       order, each with its id (c1, c2…), place and length on the timeline, \
-                       take (session manifest), status and files (program and ISO files), and \
-                       the takes taken off it (their files are kept where they are).",
-        annotations(read_only_hint = true)
-    )]
-    async fn get_timeline(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineTarget>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineGet(Some(params))).await
-    }
-
-    #[tool(
-        description = "Every timeline (id, name, clips, length) and which is current (the one \
-                       the editor shows and timeline edits act on).",
-        annotations(read_only_hint = true)
-    )]
-    async fn list_timelines(&self) -> Result<Json<TimelineList>, String> {
-        self.call(Method::TimelineList).await
-    }
-
-    #[tool(
-        description = "Make a timeline current (by id): the one the editor shows and timeline \
-                       edits act on. Recordings go where record_target says.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn open_timeline(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineOpenParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineOpen(params)).await
-    }
-
-    #[tool(
-        description = "Make no timeline current; if it was chosen for the next recording, \
-                       recordings start new projects again. Returns the id of the timeline that \
-                       was current.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn close_timeline(&self) -> Result<Json<TimelineClosed>, String> {
-        self.call(Method::TimelineClose).await
-    }
-
-    #[tool(
-        description = "Where the next recording goes, and with `target`, choose it: `new` (the \
-                       default: each recording starts a new project folder with its own \
-                       timeline) or a timeline's id (list_timelines), whose next take it then \
-                       is, written into the folder of its last take. Kept across restarts and \
-                       shown in get_status (record_target); a recording running keeps its own. \
-                       Returns the choice: the timeline, its name and the take it would be.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn record_target(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<RecordTargetParams>>,
-    ) -> Result<Json<RecordTarget>, String> {
-        self.call(Method::RecordTarget(Some(params))).await
-    }
-
-    #[tool(
-        description = "Take a clip (by id, like c2) off a timeline (the current one unless \
-                       `timeline` is given). Only the timeline changes: the take's files stay \
-                       where they were recorded, listed under the timeline's `removed`. Returns \
-                       the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn remove_clip(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineRemoveParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineRemove(params)).await
-    }
-
-    #[tool(
-        description = "Move a clip (by id) to another place on a timeline: `index` counts from \
-                       0 (the first). Returns the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn move_clip(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineMoveParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineMove(params)).await
-    }
-
-    #[tool(
-        description = "Move a clip's in and/or out point (`in_seconds`, `out_seconds`, on the \
-                       clip's take's own clock, rounded to its frames). Only the timeline \
-                       changes, never the take's files; one undoable edit. Returns the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn trim_clip(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineTrimParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineTrim(params)).await
-    }
-
-    #[tool(
-        description = "Cut the clip at `at_seconds` (on the timeline, rounded to the frames \
-                       there) in two; the second gets a new id. One undoable edit. Returns the \
-                       timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn split_clip(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineSplitParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineSplit(params)).await
-    }
-
-    #[tool(
-        description = "Take `start_seconds` to `end_seconds` (on the timeline) out and close \
-                       the gap (ripple delete): clips across its ends are trimmed, clips in it \
-                       taken off. The takes' files are untouched; one undoable edit. Returns \
-                       the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn delete_range(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineRangeParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineDeleteRange(params)).await
-    }
-
-    #[tool(
-        description = "Choose what the edited video shows from `start_seconds` to \
-                       `end_seconds` on the timeline: `source` is `program` or an ISO source \
-                       every clip there recorded (clips are split at the span's ends). \
-                       export_timeline then writes an edited file with these angles and the \
-                       program's sound. One undoable edit. Returns the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn set_angle(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineAngleParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineAngle(params)).await
-    }
-
-    #[tool(
-        description = "Crop the edited video from `start_seconds` to `end_seconds` on the \
-                       timeline: `crop` is the part of each clip's picture to show ({x, y, \
-                       width, height} as fractions of the picture, from the top-left), \
-                       `preset` a shape (16:9, 9:16, 1:1, 4:5: the largest that fits inside \
-                       `crop` or the picture, centred), or `clear` the whole picture again. \
-                       Clips are split at the span's ends; the crop applies to the angle each \
-                       clip shows. export_timeline encodes cropped clips again, scaled to the \
-                       program's size, in the edited file (program and ISO files stay whole). \
-                       One undoable edit. Returns the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn crop_clip(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineCropParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineCrop(params)).await
-    }
-
-    #[tool(
-        description = "Move the cut between `clip` and the clip after it by `by_seconds` \
-                       (negative: earlier), a roll edit: the clip's out point and the next \
-                       clip's in point move together, so the timeline keeps its length. One \
-                       undoable edit. Returns the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn roll_cut(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineRollParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineRoll(params)).await
-    }
-
-    #[tool(
-        description = "Take back the last edit of a timeline (trim, split, delete, angle, \
-                       remove, move; not a recorded take). Returns the timeline, with how many \
-                       edits can still be undone and redone.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn undo_edit(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineTarget>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineUndo(Some(params))).await
-    }
-
-    #[tool(
-        description = "Put back the last edit undo_edit took back. Returns the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn redo_edit(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineTarget>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineRedo(Some(params))).await
-    }
-
-    #[tool(
-        description = "Point an offline clip (its take isn't where the timeline says: the \
-                       project folder was moved or copied) at where its take is now: `path` is \
-                       the take's manifest (….session.json) or the folder holding it; given a \
-                       folder, every take that was in the clip's old folder is looked for there \
-                       too. The take's files are never touched. Returns the timeline.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn relink_clip(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineRelinkParams>>,
-    ) -> Result<Json<TimelineInfo>, String> {
-        self.call(Method::TimelineRelink(params)).await
-    }
-
-    #[tool(
-        description = "Open a project file (`<name>.isoprj`, in every project folder) or a \
-                       project folder by full `path`: its timelines join the engine's (taken in \
-                       if the folder was copied from elsewhere, paths resolved where it is now), \
-                       one becomes the current timeline (`timeline`, else the current one if it \
-                       is the project's, else its newest; a project with none gets one of its \
-                       takes), and the app shows the editor on it unless `editor` is false. \
-                       Missing takes are listed in `offline` (relink_clip), never an error. \
-                       Allowed while recording. Whether the app opens the editor when a \
-                       recording stops is the setup's `recording.open_editor` (apply_change \
-                       with patch {\"recording\": {\"open_editor\": true}}). Returns the \
-                       project, its timelines and the one opened.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn open_project(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<ProjectOpenParams>>,
-    ) -> Result<Json<ProjectOpened>, String> {
-        self.call(Method::ProjectOpen(params)).await
-    }
-
-    #[tool(
-        description = "The project files opened lately (File › Open Recent), newest first, \
-                       each with whether it is still there; `clear` forgets them.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true
-        )
-    )]
-    async fn recent_projects(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<RecentProjectsParams>>,
-    ) -> Result<Json<RecentProjects>, String> {
-        self.call(Method::RecentProjects(Some(params))).await
-    }
-
-    #[tool(
-        description = "Record the last take again, on the current timeline. Not recording: take \
-                       the last clip off (its files stay) and start recording in the same folder \
-                       (or `folder`; `seconds` stops it on its own); while a stop is \
-                       finishing, the same once it has. Recording: drop the take being recorded \
-                       from the timeline (its files stay) and begin a new take about a quarter \
-                       second later without stopping any device; `begins_at` and \
-                       `begins_in_seconds` say when (what is said before then is in the dropped \
-                       take). Returns the new take's files and what was taken off. Program \
-                       export needs every clip's program file.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn retake(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<RetakeParams>>,
-    ) -> Result<Json<Retaken>, String> {
-        self.call(Method::Retake(Some(params))).await
-    }
-
-    #[tool(
-        description = "Join a timeline's clips (the current one unless `timeline` is given), in \
-                       order, into one program file and one file per ISO source every clip has, \
-                       each cut frame-accurately to the clips' in and out points (video copied \
-                       as recorded except from a cut to the next keyframe; audio re-encoded once \
-                       and cross-faded so it stays in sync at every join), an EDITED file when \
-                       clips show other angles (set_angle) or crops (crop_clip), a VERTICAL \
-                       (9:16) edited file with `vertical` (a 9:16 crop fills it), plus an \
-                       .export.json manifest, next \
-                       to the first take (or in \
-                       `folder`). Sources some clips lack are skipped, saying why. It runs in \
-                       the background: returns at once with the files it will write; \
-                       get_events shows export_progress and export_finished.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false
-        )
-    )]
-    async fn export_timeline(
-        &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineExportParams>>,
-    ) -> Result<Json<ExportStarted>, String> {
-        self.call(Method::TimelineExport(Some(params))).await
-    }
-
-    #[tool(
-        description = "Write a timeline (the current one unless `timeline` is given) as a \
-                       project another editor opens: `format` fcpxml (Final Cut Pro), xmeml \
-                       (Premiere Pro; with `app` resolve, DaVinci Resolve) or otio \
-                       (OpenTimelineIO). Every ISO source \
-                       on its own video track with the program on top, each clip's angle the \
-                       one track on at that clip, crops as crop and transform, markers, and each file's \
-                       audio on its own tracks (the program's on, the ISO files' off), lined up \
-                       from the take manifests. It points at the takes' own files: nothing is \
-                       encoded, copied or changed. Written next to the first take (or in \
+        description = "Write a take as a project another editor opens: `take` is the take's \
+                       manifest (`….session.json`, as start_recording, stop_recording and \
+                       take_finished events give it; list_projects lists them) or a project \
+                       folder holding one take, `format` \
+                       fcpxml (Final Cut Pro), xmeml (Premiere Pro; with `app` resolve, DaVinci \
+                       Resolve) or otio (OpenTimelineIO). Every ISO source on its own video \
+                       track with the program on top (the one track on), markers, and each \
+                       file's audio on its own tracks (the program's on, the ISO files' off), \
+                       lined up from the manifest. It points at the take's own files: nothing \
+                       is encoded, copied or changed. Written next to the take (or in \
                        `folder`, numbered so nothing is overwritten), or exactly at `path` \
                        (replacing an earlier Isocast export there, or any file with \
-                       `replace`). \
-                       Returns the file, its tracks and notes on anything not as in Isocast's \
-                       export.",
+                       `replace`). Returns the file, its tracks and notes.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = false
         )
     )]
-    async fn export_timeline_nle(
+    async fn export_take_nle(
         &self,
-        Parameters(Strict(params)): Parameters<Strict<TimelineExportNleParams>>,
+        Parameters(Strict(params)): Parameters<Strict<TakeExportNleParams>>,
     ) -> Result<Json<NleExported>, String> {
-        self.call(Method::TimelineExportNle(params)).await
+        self.call(Method::TakeExportNle(params)).await
     }
 
     #[tool(
@@ -2417,11 +2017,9 @@ impl Isocast {
 
     #[tool(
         description = "Start recording the live setup (or the given setup, which then replaces \
-                       the live setup): the program and every ISO source, each to its own file. \
-                       Its takes go where record_target says: a new project folder with its own \
-                       timeline unless a timeline was chosen (`new_project` or `into` choose for \
-                       this recording only). Returns once every file is created, with the \
-                       timeline its takes go to.",
+                       the live setup): the program and every ISO source, each to its own file, \
+                       in a new project folder in the recordings folder (or `folder`). Returns \
+                       once every file is created.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2436,8 +2034,6 @@ impl Isocast {
             setup: parse_setup(params.setup)?,
             folder: params.folder.map(Into::into),
             seconds: params.seconds,
-            new_project: params.new_project,
-            into: params.into,
         })))
         .await
     }
@@ -2490,7 +2086,7 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Pause the same recording files on a shared video/audio boundary. Streaming continues. Markers land at the paused playhead; resume before split or retake.",
+        description = "Pause the same recording files on a shared video/audio boundary. Streaming continues. Markers land at the paused playhead; resume before split.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2733,15 +2329,9 @@ Plugins (local folders with an isocast-plugin.toml) are installed with add_plugi
 exactly the permissions they ask for, and listed with list_plugins. \
 Text in scenes can show a data key (`data = \"score.home\"`); set_data changes it live \
 (get_data reads it), with no setup change. \
-Timelines line takes up like a clip bar: each recording starts a new project with its own \
-timeline unless record_target (or new_timeline) chose one to add takes to; retake records the last one again, remove_clip and move_clip edit \
-it, trim_clip, split_clip, delete_range, roll_cut, set_angle and crop_clip cut it (undo_edit, \
-redo_edit; takes' files are never touched), export_timeline joins it into one file, and \
-export_timeline_nle writes it as a Final Cut Pro, Premiere Pro or Resolve project. \
 Each recording session writes into its own project folder; list_projects finds them and \
-rename_project names one once it has stopped. Each has a `<name>.isoprj` project file that \
-open_project opens in the editor, wherever the folder was copied (recent_projects lists those \
-opened lately; relink_clip finds offline takes). \
+rename_project names one once it has stopped. export_take_nle writes a take as a Final Cut \
+Pro, Premiere Pro or Resolve project pointing at its program and ISO files. \
 Sources and scenes are addressed by id. Errors name the field and list valid options.";
 
 #[tool_handler(name = "isocast")]

@@ -78,8 +78,6 @@ pub fn run(options: &Options) -> Result<()> {
         .context("Slint could not open a window with Skia on the GPU")?;
 
     let app = AppWindow::new()?;
-    // Project files opened from the Finder (#88), the launch's too.
-    crate::documents::listen();
     // Decided before the window exists: Slint makes the window
     // see-through for the layers under it when it is created.
     app.global::<crate::CanvasArea>().set_native_picture(

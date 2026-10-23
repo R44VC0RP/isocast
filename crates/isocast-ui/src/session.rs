@@ -245,7 +245,7 @@ impl Session {
         self.status.as_ref().is_some_and(|x| x.finalizing)
     }
 
-    /// Recording can't be started, stopped, paused, split or retaken
+    /// Recording can't be started, stopped, paused or split
     /// just now: a record request is on its way or the files are being
     /// finished.
     pub fn record_busy(&self) -> bool {

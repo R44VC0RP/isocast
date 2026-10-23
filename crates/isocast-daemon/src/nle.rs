@@ -1,32 +1,25 @@
-//! `timeline_export_nle` (#104): a timeline as a project Final Cut Pro
-//! (FCPXML 1.10), Premiere Pro (xmeml 5, Final Cut Pro 7 XML) or DaVinci
-//! Resolve (either, or OpenTimelineIO) opens, pointing at the takes' own
-//! program and ISO files: nothing is encoded, copied or changed, and the
-//! only file written is the project file.
+//! `take_export_nle` (#104): a take as a project Final Cut Pro (FCPXML
+//! 1.10), Premiere Pro (xmeml 5, Final Cut Pro 7 XML) or DaVinci Resolve
+//! (either, or OpenTimelineIO) opens, pointing at the take's own program
+//! and ISO files: nothing is encoded, copied or changed, and the only file
+//! written is the project file.
 //!
 //! Layout, the same in every format: one video track per ISO source (in the
-//! order the takes list them) with the program's on top, each holding
-//! every clip's stretch of that source's file, so all angles stay lined up
-//! and a cut in another angle is a click away. At each clip only its angle's
-//! track is on (the others are there, switched off), so the sequence plays
-//! what Isocast's edited file shows; a crop is a crop and a transform on
-//! the clip's items (all of its angles, as a crop belongs to the clip). The
-//! program's audio tracks are on and each ISO file's are there but off, as
-//! the edited file has the program's sound. Each clip's video and audio
-//! from one file are linked.
+//! order the take lists them) with the program's on top, each holding that
+//! source's file, so all angles stay lined up and a cut to another angle is
+//! a click away. Only the program's track is on (the others are there,
+//! switched off). The program's audio tracks are on and each ISO file's are
+//! there but off. Each file's video and audio are linked.
 //!
 //! Why stacked tracks and not FCPXML's multicam clip: the same layout works
 //! in all three formats and in Resolve, which reads stacked lanes reliably
-//! but multicam clips only partly; and an angle switch stays a visible cut
-//! on its own track. (In FCPXML the lanes hang off one gap per clip: the
-//! ISO angles on lanes 1…n, the program above them, the audio below.)
+//! but multicam clips only partly. (In FCPXML the lanes hang off one gap:
+//! the ISO angles on lanes 1…n, the program above them, the audio below.)
 //!
-//! Timing comes from the take manifests: each file's `start_offset_seconds`
-//! places its first frame on the take's clock, so a clip's in point maps to
-//! the frame of each file that is on screen then (as Isocast's export picks
-//! it). The sequence runs at the first clip's program frame rate; frames
-//! are whole frames, so a file that started part of a frame after the
-//! take's zero is lined up to the frame, like the export.
+//! Timing comes from the take's manifest: each file's `start_offset_seconds`
+//! places its first frame on the take's clock. The sequence runs at the
+//! program's frame rate; frames are whole frames, so a file that started
+//! part of a frame after the take's zero is lined up to the frame.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,13 +27,27 @@ use std::path::{Path, PathBuf};
 use isocast_protocol::PROGRAM;
 use isocast_protocol::api::RpcError;
 use isocast_protocol::manifest::SessionManifest;
-use isocast_protocol::timeline::{
-    Crop, NleApp, NleExported, NleFormat, NleTrack, TimelineExportNleParams, take_length,
+use isocast_protocol::manifest::SessionStatus;
+use isocast_protocol::nle::{
+    NleApp, NleExported, NleFormat, NleTrack, TakeExportNleParams, take_length,
 };
 use serde_json::{Value, json};
 
-use crate::timeline::{failed, invalid, read_manifest, unfinished, wrong_state};
 use crate::{Daemon, check_folder};
+
+fn invalid(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: RpcError::INVALID_PARAMS,
+        message: message.into(),
+    }
+}
+
+fn failed(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: RpcError::FAILED,
+        message: message.into(),
+    }
+}
 
 /// Audio is 48 kHz in every recording (the engine's `SAMPLE_RATE`).
 const SAMPLE_RATE: u32 = 48_000;
@@ -131,18 +138,14 @@ fn timecode(frame: u64, rate: Rate) -> String {
     )
 }
 
-/// One clip of the timeline, read from its take's manifest.
-pub(crate) struct TakeClip {
-    pub id: String,
-    pub folder: PathBuf,
-    pub manifest: SessionManifest,
-    /// The clip's in point and length in frames of its take's grid.
-    pub in_frame: u64,
-    pub frames: u64,
-    pub fps: u32,
-    /// The source the edited video shows for it, and its crop.
-    pub angle: String,
-    pub crop: Option<Crop>,
+/// A take, read from its manifest.
+struct TakeClip {
+    id: String,
+    folder: PathBuf,
+    manifest: SessionManifest,
+    /// Its length in frames of its program's grid.
+    frames: u64,
+    fps: u32,
 }
 
 /// A media file the project points at.
@@ -173,7 +176,6 @@ struct Item {
     /// Its first frame in the file, in the file's frames.
     source_in: u64,
     enabled: bool,
-    crop: Option<Crop>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,7 +204,7 @@ struct Span {
     length: u64,
 }
 
-/// The timeline laid out on tracks, the same for every format.
+/// The takes laid out on tracks, the same for every format.
 #[derive(Debug, Clone)]
 struct Model {
     name: String,
@@ -224,7 +226,7 @@ struct Model {
 
 /// Lays the clips out on tracks (see the module docs).
 fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
-    let first = takes.first().ok_or("the timeline has no clips")?;
+    let first = takes.first().ok_or("no take to export")?;
     let rate = Rate::whole(first.fps);
     let size_file = first
         .manifest
@@ -283,6 +285,17 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
     let mut audio_index: Vec<Vec<usize>> = vec![Vec::new(); audio.len()];
     let mut elapsed = 0.0;
     for (index, take) in takes.iter().enumerate() {
+        // The track on: the program's, or (a take recorded without one) the
+        // top ISO source's.
+        let on = match take.manifest.files.iter().any(|f| f.source == PROGRAM) {
+            true => PROGRAM.to_string(),
+            false => sources
+                .iter()
+                .rev()
+                .find(|s| take.manifest.files.iter().any(|f| &f.source == *s))
+                .cloned()
+                .unwrap_or_default(),
+        };
         let take_rate = Rate::whole(take.fps);
         let start = (elapsed * rate.fps()).round() as u64;
         elapsed += take.frames as f64 / take_rate.fps();
@@ -300,14 +313,13 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
                 take.id, take.fps, first.fps
             ));
         }
-        let in_seconds = take.in_frame as f64 / take_rate.fps();
-        let out_seconds = in_seconds + take.frames as f64 / take_rate.fps();
+        let out_seconds = take.frames as f64 / take_rate.fps();
         for file in &take.manifest.files {
             let path = take.folder.join(&file.path);
             let (Some(offset), Some(seconds)) = (file.start_offset_seconds, file.duration_seconds)
             else {
                 note(format!(
-                    "clip {}'s {} file {} never finished (its take was interrupted); it is left \
+                    "take {}'s {} file {} never finished (the take was interrupted); it is left \
                      out",
                     take.id,
                     file.source,
@@ -317,7 +329,7 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
             };
             if !path.exists() {
                 note(format!(
-                    "clip {}'s {} file {} is missing: the editor shows it offline until it is \
+                    "take {}'s {} file {} is missing: the editor shows it offline until it is \
                      relinked",
                     take.id,
                     file.source,
@@ -327,9 +339,8 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
             let file_rate = Rate::whole(file.fps);
             // Its length on its own frame grid, from its duration: a file
             // that dropped frames still spans its whole time (an editor
-            // holds a picture over a dropped slot, as Isocast's export
-            // does), so its stored frame count would end it early and cut
-            // the angle short. A recovered file without final counters
+            // holds a picture over a dropped slot), so its stored frame
+            // count would end it early and cut the angle short. A recovered file without final counters
             // keeps its stored frames, when known.
             let from_duration = (seconds * file_rate.fps()).round().max(0.0) as u64;
             let file_frames = match (file.dropped_frames, file.frames) {
@@ -358,18 +369,16 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
                     media.len() - 1
                 }
             };
-            // The file's frame on screen at the clip's in point.
-            let first_frame =
-                ((in_seconds - offset) * file_rate.fps() + FRAME_SLACK).floor() as i64;
+            // The file's frame on screen at the take's start.
+            let first_frame = (-offset * file_rate.fps() + FRAME_SLACK).floor() as i64;
             let (lead, source_in) = match first_frame {
                 k if k < 0 => {
                     note(format!(
-                        "clip {}'s {} file starts {:.1} ms after the clip's in point: its first \
-                         frame comes {} frame(s) into the clip (Isocast's export holds it from \
-                         the clip's start)",
+                        "take {}'s {} file starts {:.1} ms after the take: its first frame comes \
+                         {} frame(s) in",
                         take.id,
                         file.source,
-                        (offset - in_seconds) * 1000.0,
+                        offset * 1000.0,
                         file_rate.convert(k.unsigned_abs(), rate)
                     ));
                     (file_rate.convert(k.unsigned_abs(), rate), 0)
@@ -380,8 +389,7 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
             let item_length = length.saturating_sub(lead).min(available);
             if item_length < length.saturating_sub(lead) {
                 note(format!(
-                    "clip {}'s {} file ends {} frame(s) before the clip does (Isocast's export \
-                     holds its last frame)",
+                    "take {}'s {} file ends {} frame(s) before the program does",
                     take.id,
                     file.source,
                     length.saturating_sub(lead) - item_length
@@ -396,8 +404,7 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
                 start: start + lead,
                 length: item_length,
                 source_in,
-                enabled: file.source == take.angle,
-                crop: take.crop,
+                enabled: file.source == on,
             };
             if let Some(track) = video.iter_mut().find(|t| t.source == file.source) {
                 track.items.push(item.clone());
@@ -409,17 +416,13 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
                 }) else {
                     continue;
                 };
-                audio[t].items.push(Item {
-                    enabled: file.source == PROGRAM,
-                    crop: None,
-                    ..item.clone()
-                });
+                audio[t].items.push(item.clone());
                 audio_index[t].push(number);
             }
         }
         for marker in &take.manifest.markers {
-            if marker.time_seconds >= in_seconds && marker.time_seconds < out_seconds {
-                let at = start + ((marker.time_seconds - in_seconds) * rate.fps()).round() as u64;
+            if marker.time_seconds >= 0.0 && marker.time_seconds < out_seconds {
+                let at = start + (marker.time_seconds * rate.fps()).round() as u64;
                 markers.push((at.min(end.saturating_sub(1)), marker.label.clone()));
             }
         }
@@ -455,65 +458,12 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
     })
 }
 
-/// How a clip item's picture is placed on the sequence: Isocast fits its
-/// crop (the whole picture without one) into the sequence's size, centred.
-#[derive(Debug, Clone, Copy)]
-struct Placement {
-    crop: Crop,
-    /// Sequence pixels per source pixel: Isocast's, and the plain fit that
-    /// editors apply to a picture of another size by themselves.
-    scale: f64,
-    fit: f64,
-    /// Where the picture's centre goes, in sequence pixels from the
-    /// sequence's centre (y down).
-    x: f64,
-    y: f64,
-    /// The source's width over its height.
-    aspect: f64,
-    /// The sequence's size.
-    sequence: (f64, f64),
-}
-
-fn placement(crop: Option<Crop>, source: (u32, u32), sequence: (u32, u32)) -> Placement {
+/// Sequence pixels per picture pixel when a picture of `source`'s size is
+/// fitted into the sequence's, centred.
+fn fit(source: (u32, u32), sequence: (u32, u32)) -> f64 {
     let (w, h) = (f64::from(source.0.max(1)), f64::from(source.1.max(1)));
     let (sw, sh) = (f64::from(sequence.0.max(1)), f64::from(sequence.1.max(1)));
-    let fit = (sw / w).min(sh / h);
-    let crop = crop.unwrap_or(Crop::FULL);
-    let scale = (sw / (crop.width * w)).min(sh / (crop.height * h));
-    let dx = (crop.x + crop.width / 2.0 - 0.5) * w;
-    let dy = (crop.y + crop.height / 2.0 - 0.5) * h;
-    Placement {
-        crop,
-        scale,
-        fit,
-        x: -dx * scale,
-        y: -dy * scale,
-        aspect: w / h,
-        sequence: (sw, sh),
-    }
-}
-
-impl Placement {
-    fn cropped(&self) -> bool {
-        !self.crop.is_full()
-    }
-
-    /// The picture is shown other than an editor shows it by itself
-    /// (fitted, centred).
-    fn moved(&self) -> bool {
-        (self.scale / self.fit - 1.0).abs() > 1e-6 || self.x.abs() > 1e-3 || self.y.abs() > 1e-3
-    }
-
-    /// The edges cut off, as fractions: left, right, top, bottom.
-    fn edges(&self) -> [f64; 4] {
-        let c = self.crop;
-        [
-            c.x,
-            (1.0 - c.x - c.width).max(0.0),
-            c.y,
-            (1.0 - c.y - c.height).max(0.0),
-        ]
-    }
+    (sw / w).min(sh / h)
 }
 
 /// A number for XML: up to 4 decimals, no trailing zeros, no `-0`.
@@ -630,6 +580,8 @@ const XML_HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 
 /// Marks a project file as one of these exports (near its start), so `path`
 /// replaces only its own files unless told to replace (`replace`).
+/// The mark that makes a project file ours (replaceable without `replace`).
+/// Still "timeline export", as 0.0.8 wrote it, so its exports count too.
 const MARK: &str = "Isocast timeline export";
 const MARK_COMMENT: &str = "<!-- Isocast timeline export -->\n";
 
@@ -717,12 +669,6 @@ fn fcpxml(model: &Model) -> String {
                 if !item.enabled {
                     clip = clip.attr("enabled", "0");
                 }
-                let place = placement(
-                    item.crop,
-                    (media.width, media.height),
-                    (model.width, model.height),
-                );
-                clip = clip.children(fcpxml_place(&place));
                 gap = gap.child(clip);
             }
         }
@@ -786,39 +732,6 @@ fn fcpxml(model: &Model) -> String {
     out
 }
 
-/// A clip's crop and transform in FCPXML. Final Cut Pro fits a picture of
-/// another size into the sequence by itself (scale 1), measures every edge
-/// of a trim crop in percent of the picture's height (the DTD: "a
-/// percentage of original frame height"; Resolve 21.1 reads it so too), and
-/// a position in percent of the sequence's height from its centre, up
-/// positive.
-fn fcpxml_place(place: &Placement) -> Vec<El> {
-    let mut out = Vec::new();
-    let [left, right, top, bottom] = place.edges();
-    let (_, sh) = place.sequence;
-    if place.cropped() {
-        out.push(
-            el("adjust-crop").attr("mode", "trim").child(
-                el("trim-rect")
-                    .attr("left", num(left * place.aspect * 100.0))
-                    .attr("top", num(top * 100.0))
-                    .attr("right", num(right * place.aspect * 100.0))
-                    .attr("bottom", num(bottom * 100.0)),
-            ),
-        );
-    }
-    if place.moved() {
-        let scale = place.scale / place.fit;
-        let (x, y) = (place.x / sh * 100.0, -place.y / sh * 100.0);
-        out.push(
-            el("adjust-transform")
-                .attr("position", format!("{} {}", num(x), num(y)))
-                .attr("scale", format!("{} {}", num(scale), num(scale))),
-        );
-    }
-    out
-}
-
 /// A file name without its extension.
 fn stem(name: &str) -> String {
     Path::new(name)
@@ -840,15 +753,17 @@ fn xmeml_timecode(rate: Rate) -> El {
         .child(leaf("displayformat", "NDF"))
 }
 
-/// A clip's crop and placement in xmeml: the Crop filter (percent of each
-/// side) and Basic Motion (centre as a fraction of the sequence's width and
-/// height from its centre, down positive; scale in percent). Premiere
-/// counts the scale in the picture's own pixels and shows a picture of
-/// another size at them, so a picture that only needs fitting gets a scale
-/// too; Resolve fits it first and counts the scale from there (measured:
-/// Resolve 21.1 rendered a 1920x1080 angle in a 1280x720 sequence at two
-/// thirds of the frame with Premiere's 66.7%).
-fn xmeml_place(place: &Placement, app: NleApp) -> Vec<El> {
+/// A picture of another size than the sequence in xmeml: Basic Motion's
+/// scale (in percent). Premiere counts the scale in the picture's own
+/// pixels and shows a picture of another size at them, so a picture that
+/// needs fitting gets its fit as a scale; Resolve fits it first by itself
+/// (measured: Resolve 21.1 rendered a 1920x1080 angle in a 1280x720
+/// sequence at two thirds of the frame with Premiere's 66.7%), so it gets
+/// none.
+fn xmeml_fit(fit: f64, app: NleApp) -> Option<El> {
+    if app == NleApp::Resolve || (fit - 1.0).abs() <= 1e-6 {
+        return None;
+    }
     let param = |id: &'static str, name: &'static str, min: &str, max: &str, value: f64| {
         el("parameter")
             .child(leaf("parameterid", id))
@@ -857,57 +772,27 @@ fn xmeml_place(place: &Placement, app: NleApp) -> Vec<El> {
             .child(leaf("valuemax", max))
             .child(leaf("value", num(value)))
     };
-    let effect = |name: &'static str, id: &'static str, params: Vec<El>| {
+    Some(
         el("filter").child(
             el("effect")
-                .child(leaf("name", name))
-                .child(leaf("effectid", id))
+                .child(leaf("name", "Basic Motion"))
+                .child(leaf("effectid", "basic"))
                 .child(leaf("effectcategory", "motion"))
                 .child(leaf("effecttype", "motion"))
                 .child(leaf("mediatype", "video"))
-                .children(params),
-        )
-    };
-    let mut out = Vec::new();
-    let (needed, scale) = match app {
-        NleApp::Resolve => (place.moved(), place.scale / place.fit),
-        _ => (
-            (place.scale - 1.0).abs() > 1e-6 || place.x.abs() > 1e-3 || place.y.abs() > 1e-3,
-            place.scale,
+                .child(param("scale", "Scale", "0", "1000", fit * 100.0))
+                .child(
+                    el("parameter")
+                        .child(leaf("parameterid", "center"))
+                        .child(leaf("name", "Center"))
+                        .child(
+                            el("value")
+                                .child(leaf("horiz", num(0.0)))
+                                .child(leaf("vert", num(0.0))),
+                        ),
+                ),
         ),
-    };
-    if needed {
-        let (sw, sh) = place.sequence;
-        out.push(effect(
-            "Basic Motion",
-            "basic",
-            vec![
-                param("scale", "Scale", "0", "1000", scale * 100.0),
-                el("parameter")
-                    .child(leaf("parameterid", "center"))
-                    .child(leaf("name", "Center"))
-                    .child(
-                        el("value")
-                            .child(leaf("horiz", num(place.x / sw)))
-                            .child(leaf("vert", num(place.y / sh))),
-                    ),
-            ],
-        ));
-    }
-    if place.cropped() {
-        let [left, right, top, bottom] = place.edges();
-        out.push(effect(
-            "Crop",
-            "crop",
-            vec![
-                param("left", "left", "0", "100", left * 100.0),
-                param("right", "right", "0", "100", right * 100.0),
-                param("top", "top", "0", "100", top * 100.0),
-                param("bottom", "bottom", "0", "100", bottom * 100.0),
-            ],
-        ));
-    }
-    out
+    )
 }
 
 /// A linked clip item in xmeml: is audio, track number, place on its track
@@ -1079,12 +964,8 @@ fn xmeml(model: &Model, app: NleApp) -> String {
                 Some(_) => {}
             }
         } else {
-            let place = placement(
-                item.crop,
-                (media.width, media.height),
-                (model.width, model.height),
-            );
-            clip = clip.children(xmeml_place(&place, app));
+            let fit = fit((media.width, media.height), (model.width, model.height));
+            clip = clip.children(xmeml_fit(fit, app));
         }
         for &(is_audio, track, place) in &groups[&(item.clip, item.media)] {
             let mut link = el("link")
@@ -1183,9 +1064,9 @@ fn otio_range(start: u64, duration: u64, rate: Rate) -> Value {
 
 /// OpenTimelineIO (JSON). Media paths are absolute, as plain paths: Resolve
 /// (21.1) imported no clip whose `target_url` was relative to the file or a
-/// `file://` URL, and writes plain paths itself. OpenTimelineIO has no crop
-/// effect or audio track selection: crops and which audio track of the file
-/// a clip is are kept in each clip's `metadata.isocast`.
+/// `file://` URL, and writes plain paths itself. OpenTimelineIO has no
+/// audio track selection: which audio track of the file a clip is is kept
+/// in each clip's `metadata.isocast`.
 fn otio(model: &Model) -> String {
     let rate = model.rate;
     let url = |path: &Path| path.to_string_lossy().into_owned();
@@ -1205,9 +1086,6 @@ fn otio(model: &Model) -> String {
                 "clip": model.clips[item.clip].id,
                 "source": track.source,
             });
-            if let Some(crop) = item.crop.filter(|c| !c.is_full()) {
-                meta["crop"] = json!(crop);
-            }
             if let Some((n, audio)) = &track.audio {
                 meta["audio_track"] = json!(n);
                 meta["audio"] = json!(audio);
@@ -1320,10 +1198,43 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
         .map_err(|err| format!("could not write {}: {err}", path.display()))
 }
 
+/// The take `path` names: a manifest, or a project folder holding exactly
+/// one.
+fn take_manifest(path: &Path) -> Result<PathBuf, RpcError> {
+    if !path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    let mut manifests: Vec<PathBuf> = std::fs::read_dir(path)
+        .map_err(|err| failed(format!("take: could not read {}: {err}", path.display())))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| p.to_string_lossy().ends_with(".session.json"))
+        .collect();
+    manifests.sort();
+    match manifests.len() {
+        1 => Ok(manifests.remove(0)),
+        0 => Err(invalid(format!(
+            "take: {} holds no take; give the take's `<name>.session.json`",
+            path.display()
+        ))),
+        n => Err(invalid(format!(
+            "take: {} holds {n} takes; give one take's `<name>.session.json`: {}",
+            path.display(),
+            manifests
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 impl Daemon {
-    pub(crate) fn timeline_export_nle(
+    /// See [`Method::TakeExportNle`](isocast_protocol::api::Method::TakeExportNle).
+    pub(crate) fn take_export_nle(
         &self,
-        params: TimelineExportNleParams,
+        params: TakeExportNleParams,
     ) -> Result<NleExported, RpcError> {
         check_folder(params.folder.as_deref())?;
         let format = params.format;
@@ -1364,53 +1275,64 @@ impl Daemon {
                 return Err(invalid(format!("path: {} is a folder", path.display())));
             }
         }
-        self.heal_timelines();
-        let (id, timeline) = {
-            let timelines = self.timelines.lock();
-            let id = timelines.resolve(params.timeline.as_deref())?;
-            let timeline = timelines.get(&id).cloned().expect("resolved");
-            (id, timeline)
-        };
-        if timeline.clips.is_empty() {
-            return Err(wrong_state(format!(
-                "timeline {id:?} has no clips to export yet; record a take while it is current"
+        // A network caller's `take` was checked against the folder roots
+        // (`check_params`).
+        let manifest_path = take_manifest(&params.take)?;
+        if !manifest_path.is_absolute() {
+            return Err(invalid(format!(
+                "take: {:?} isn't an absolute path; give the take's manifest (`….session.json`, \
+                 as `start`, `stop` and `take_finished` give it)",
+                manifest_path.display().to_string()
             )));
         }
-        let mut takes = Vec::new();
-        for clip in &timeline.clips {
-            let manifest = read_manifest(&clip.take)
-                .map_err(|problem| failed(format!("clip {}: {problem}", clip.id)))?;
-            if let Some(problem) = unfinished(&clip.id, &clip.take, &manifest) {
-                return Err(failed(problem));
-            }
-            // The clip's stretch on its take's frame grid, as the export
-            // rounds it.
-            let (take_frames, fps) = take_length(&manifest).unwrap_or((
-                (manifest.duration_seconds.unwrap_or(0.0) * 60.0).round() as u64,
-                60,
-            ));
-            let frame = |seconds: f64| (seconds * f64::from(fps)).round().max(0.0) as u64;
-            let in_frame = frame(clip.in_seconds).min(take_frames);
-            let out_frame = frame(clip.out_seconds).min(take_frames);
-            if out_frame <= in_frame {
-                return Err(failed(format!(
-                    "clip {} covers no frames of its take ({:.3}–{:.3} s); trim it (`isocast \
-                     timeline trim`, MCP trim_clip) or take it off",
-                    clip.id, clip.in_seconds, clip.out_seconds
-                )));
-            }
-            takes.push(TakeClip {
-                id: clip.id.clone(),
-                folder: clip.take.parent().unwrap_or(Path::new("/")).to_path_buf(),
-                manifest,
-                in_frame,
-                frames: out_frame - in_frame,
-                fps,
-                angle: clip.angle.clone().unwrap_or_else(|| PROGRAM.to_string()),
-                crop: clip.crop.filter(|crop| !crop.is_full()),
+        let manifest: SessionManifest = std::fs::read(&manifest_path)
+            .map_err(|err| {
+                failed(format!(
+                    "take: could not read {}: {err}",
+                    manifest_path.display()
+                ))
+            })
+            .and_then(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|err| {
+                    invalid(format!(
+                        "take: {} isn't a take's manifest (`….session.json`): {err}",
+                        manifest_path.display()
+                    ))
+                })
+            })?;
+        if manifest.status == SessionStatus::Recording {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: format!(
+                    "take: {} is still being recorded (or never finished: isocastd stopped \
+                     while it recorded); export it once it has finished",
+                    manifest_path.display()
+                ),
             });
         }
-        let model = build(&timeline.name, &takes).map_err(failed)?;
+        let Some((frames, fps)) = take_length(&manifest).filter(|(frames, _)| *frames > 0) else {
+            return Err(failed(format!(
+                "take: {} has no finished file to export",
+                manifest_path.display()
+            )));
+        };
+        let name = manifest_path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
+            .trim_end_matches(".session.json")
+            .to_string();
+        let take = TakeClip {
+            id: name.clone(),
+            folder: manifest_path
+                .parent()
+                .unwrap_or(Path::new("/"))
+                .to_path_buf(),
+            manifest,
+            frames,
+            fps,
+        };
+        let model = build(&name, std::slice::from_ref(&take)).map_err(failed)?;
         let text = render(&model, format, app);
         let path = match &params.path {
             Some(path) => {
@@ -1424,13 +1346,13 @@ impl Daemon {
                 // differ, but a take's file could be named anything).
                 if model.media.iter().any(|m| m.path == *path) {
                     return Err(invalid(format!(
-                        "path: {} is one of the takes' files",
+                        "path: {} is one of the take's files",
                         path.display()
                     )));
                 }
                 if path.symlink_metadata().is_ok() && !params.replace && !ours(path) {
                     return Err(failed(format!(
-                        "path: {} is there and isn't an Isocast timeline export; give replace: \
+                        "path: {} is there and isn't an Isocast export; give replace: \
                          true (`--replace`) to replace it, or another path",
                         path.display()
                     )));
@@ -1439,10 +1361,7 @@ impl Daemon {
                 path.clone()
             }
             None => {
-                let folder = params
-                    .folder
-                    .clone()
-                    .unwrap_or_else(|| takes[0].folder.clone());
+                let folder = params.folder.clone().unwrap_or_else(|| take.folder.clone());
                 // As for exports: the default folder is checked too.
                 let folder = self.checked_path(
                     "folder",
@@ -1455,7 +1374,6 @@ impl Daemon {
                         folder.display()
                     ))
                 })?;
-                let stem = crate::export::file_stem(&timeline.name);
                 let label = match format {
                     NleFormat::Otio => String::new(),
                     _ => format!(" {}", app.title()),
@@ -1468,7 +1386,7 @@ impl Daemon {
                         1 => String::new(),
                         n => format!(" {n}"),
                     };
-                    let path = folder.join(format!("{stem}{label}{number}.{}", format.extension()));
+                    let path = folder.join(format!("{name}{label}{number}.{}", format.extension()));
                     match std::fs::OpenOptions::new()
                         .write(true)
                         .create_new(true)
@@ -1505,15 +1423,8 @@ impl Daemon {
         if format == NleFormat::Fcpxml && app == NleApp::Resolve {
             notes.push(
                 "Resolve reads an FCPXML clip's picture and sound together (it ignores \
-                 srcEnable), so the program's sound doubles and uncropped angles show around \
-                 crops; export xmeml for Resolve (`--nle xmeml --app resolve`)"
-                    .into(),
-            );
-        }
-        if format == NleFormat::Otio && takes.iter().any(|t| t.crop.is_some()) {
-            notes.push(
-                "OpenTimelineIO has no crop: crops are in each clip's metadata.isocast, not \
-                 applied (export fcpxml or xmeml for them)"
+                 srcEnable), so the program's sound doubles; export xmeml for Resolve \
+                 (`--format xmeml --app resolve`)"
                     .into(),
             );
         }
@@ -1544,7 +1455,7 @@ impl Daemon {
                 .collect()
         };
         Ok(NleExported {
-            timeline: id,
+            take: manifest_path,
             format,
             app,
             path,
@@ -1587,28 +1498,19 @@ mod tests {
     }
 
     #[test]
-    fn placement_of_a_crop() {
-        // The right half of a 1920x1080 picture in a 1920x1080 sequence:
-        // twice the size, its centre (480 px right of the picture's)
-        // moved to the sequence's.
-        let half = Crop {
-            x: 0.5,
-            y: 0.0,
-            width: 0.5,
-            height: 1.0,
-        };
-        let p = placement(Some(half), (1920, 1080), (1920, 1080));
-        assert!((p.scale - 1.0).abs() < 1e-9 && (p.fit - 1.0).abs() < 1e-9);
-        // 960x1080 fits by height: scale 1, centre moved 480 px left.
-        assert!((p.x + 480.0).abs() < 1e-9 && p.y.abs() < 1e-9);
-        // A 4K picture in 1080p only needs fitting.
-        let p = placement(None, (3840, 2160), (1920, 1080));
-        assert!((p.scale - 0.5).abs() < 1e-9 && !p.moved() && !p.cropped());
+    fn pictures_of_another_size_are_fitted() {
+        // A 4K picture in 1080p: half size, which Premiere is told and
+        // Resolve works out by itself.
+        let half = fit((3840, 2160), (1920, 1080));
+        assert!((half - 0.5).abs() < 1e-9);
+        assert!(xmeml_fit(half, NleApp::Premiere).is_some());
+        assert!(xmeml_fit(half, NleApp::Resolve).is_none());
+        assert!(xmeml_fit(fit((1920, 1080), (1920, 1080)), NleApp::Premiere).is_none());
         assert_eq!(url_path(Path::new("/a b/é.mov")), "/a%20b/%C3%A9.mov");
     }
 
     #[test]
-    fn an_iso_that_dropped_frames_still_covers_the_clip() {
+    fn an_iso_that_dropped_frames_still_covers_the_take() {
         // A 5 s take at 30 fps whose ISO stored 122 of its 150 frame
         // slots (28 dropped, as on a loaded hosted runner): the file still
         // spans 5 s, so its angle must cover the whole clip like the
@@ -1630,23 +1532,20 @@ mod tests {
             "errors": []
         }))
         .unwrap();
-        let take = |manifest: SessionManifest| TakeClip {
-            id: "c1".into(),
+        let take = TakeClip {
+            id: "t1".into(),
             folder: PathBuf::from("/take"),
             manifest,
-            in_frame: 15,
-            frames: 120,
+            frames: 150,
             fps: 30,
-            angle: "bars".into(),
-            crop: None,
         };
-        let model = build("e2e", &[take(manifest.clone())]).unwrap();
-        assert_eq!(model.duration, 120);
+        let model = build("e2e", &[take]).unwrap();
+        assert_eq!(model.duration, 150);
         for track in &model.video {
             let covered: u64 = track.items.iter().map(|i| i.length).sum();
             assert_eq!(
-                covered, 120,
-                "{} covers {covered} of 120 frames",
+                covered, 150,
+                "{} covers {covered} of 150 frames",
                 track.source
             );
         }
@@ -1658,7 +1557,7 @@ mod tests {
     fn a_recovered_file_without_counters_keeps_its_stored_frames() {
         // A file recovered after a crash has a duration and its stored frame
         // count but no dropped_frames: its length is the frames it holds
-        // (100), not its duration on the frame grid (150), so its angle ends
+        // (100), not its duration on the frame grid (150), so its track ends
         // where its pictures do.
         let manifest: SessionManifest = serde_json::from_value(json!({
             "version": 1, "setup": "e2e", "status": "complete",
@@ -1679,14 +1578,11 @@ mod tests {
         let model = build(
             "e2e",
             &[TakeClip {
-                id: "c1".into(),
+                id: "t1".into(),
                 folder: PathBuf::from("/take"),
                 manifest,
-                in_frame: 0,
                 frames: 150,
                 fps: 30,
-                angle: "bars".into(),
-                crop: None,
             }],
         )
         .unwrap();
@@ -1694,7 +1590,7 @@ mod tests {
         assert_eq!(iso.frames, 100, "the recovered file's stored frames");
         let bars = model.video.iter().find(|t| t.source == "bars").unwrap();
         let covered: u64 = bars.items.iter().map(|i| i.length).sum();
-        assert_eq!(covered, 100, "its angle ends with its last stored frame");
+        assert_eq!(covered, 100, "its track ends with its last stored frame");
         let program = model.media.iter().find(|m| m.source == PROGRAM).unwrap();
         assert_eq!(program.frames, 150);
     }

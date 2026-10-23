@@ -9,7 +9,7 @@ Run:   python3 scripts/stress.py [--scenario NAME]… [--profile hardware|quick]
 
 Each scenario runs in its own worker process with its own isolated engine
 (scripts/e2e.py's Engine: a signed background app, socket, setup, plugins,
-timelines, logs and recordings under --work; inherited ISOCAST_* variables
+logs and recordings under --work; inherited ISOCAST_* variables
 dropped; synthetic sources only). The parent bounds each worker and kills
 its process group on timeout; a disk image the disk scenario mounted is
 detached then too.

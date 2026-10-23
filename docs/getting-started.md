@@ -70,8 +70,7 @@ Press **Record** (or `isocast start`, and `isocast stop`). Each recording
 gets its own project folder in the setup's recordings folder
 (`~/Movies/Isocast` for a setup made by "Start with this Mac"), named
 `2026-10-12 09-30-00 Untitled`, holding every take of that recording (a
-`split` adds a take to the same folder) and the timeline exports made from
-them:
+`split` adds a take to the same folder):
 
 - `2026-10-12 09-30-00.mov`: the program, what the scenes show;
 - `SCREEN-….mov`, `CAMERA-….mov`: each ISO source at its own resolution,
@@ -97,7 +96,7 @@ to its completion-waiting Stop. The CLI then returns the completed report
 `isocast marker "intro done"` marks a moment. `isocast project list` shows
 the projects and `isocast project rename <id> "Rust talk"` names one once it
 has stopped (the folder becomes `2026-10-12 09-30-00 Rust talk`; manifests
-and timelines keep finding its files). Recordings from before project
+keep finding its files). Recordings from before project
 folders stay where they are.
 
 `isocast pause` and `isocast resume` keep the same take and files. The paused
@@ -108,10 +107,9 @@ Both commands support `--json`; MCP exposes `pause_recording` and
 `resume_recording`. Watchers receive `recording_paused` on either change.
 
 A marker during a pause lands at the frozen recording playhead. Resume
-before splitting or retaking; stopping while paused finalizes the existing
+before splitting; stopping while paused finalizes the existing
 files. An explicit `start --seconds N` remains a wall-clock deadline, so it
-can stop a paused recording. A paused/resumed take adds one timeline clip,
-with only its recorded duration. The manifest's `pauses` list gives each
+can stop a paused recording. The manifest's `pauses` list gives each
 pause's uncut `start_seconds` / `end_seconds` and its `time_seconds` join on
 the saved take; an unfinished pause has a null end until resume or stop.
 
@@ -148,15 +146,13 @@ durable. A successful Stop finalizes the files. After interruption, recovery
 messages report unknown durations rather than claiming exact saved or lost
 seconds.
 
-To build one video from takes, open a timeline first:
-`isocast timeline new "My video"`. Every take that finishes (`isocast stop`,
-or a split) then lands at its end. `isocast retake` records the last take
-again (while recording, it drops the take in progress and returns once the
-new take has begun, about a quarter second later);
-`isocast timeline show`, `isocast timeline remove c2` and
-`isocast timeline move c3 1` edit the order; `isocast timeline export`
-joins the clips into `My video PROGRAM.mov` plus one file per ISO source,
-next to the takes. Taking a clip off a timeline never deletes its files.
+To edit a take, export it to your editor:
+`isocast project export-nle <take> --format fcpxml` (Final Cut Pro),
+`xmeml` (Premiere Pro; add `--app resolve` for Resolve) or `otio`
+(OpenTimelineIO). `<take>` is the take's `.session.json`, or a project
+folder with one take. The project puts every ISO source on its own track
+under the program and points at the take's own files; nothing is encoded
+or copied. On Windows only `otio` is available.
 
 Recording quality defaults to **high**. Choose `low`, `medium`, `high`,
 `very_high` or `incredible`, or keep using a numeric quality from 1–100.
@@ -203,7 +199,6 @@ The tools (`get_setup`, `plan_change`, `apply_change`, `start_recording`,
 - [Setup reference](setup-reference.md): every field of a setup file.
 - [CLI reference](cli.md): every command and option.
 - [Scenes as code](scenes.md): layout, live data and keyframe animations.
-- [Timelines](timelines.md): record takes in order and export one video.
 - [Plugins](plugins.md): process and WebAssembly plugins.
 
 ## When something is wrong

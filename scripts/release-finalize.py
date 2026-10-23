@@ -225,7 +225,7 @@ def runtime_check(app, output, hosted):
            if not k.startswith(("ISOCAST_", "APPLE_", "DEVELOPER_", "SPARKLE_"))
            and k not in ("GH_TOKEN", "GITHUB_TOKEN")}
     env.update(ISOCAST_SOCKET=str(sock), ISOCAST_SETUP=str(root / "setup.toml"),
-               ISOCAST_TIMELINES=str(root / "timelines"), ISOCAST_PLUGINS=str(root / "plugins"),
+               ISOCAST_PLUGINS=str(root / "plugins"),
                ISOCAST_LOG_DIR=str(root / "logs"), ISOCAST_DEV_APP=str(root / "absent.app"))
 
     def cli_call(*args):

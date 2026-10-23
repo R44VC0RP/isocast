@@ -17,7 +17,7 @@ use isocast_engine::hotkeys::GlobalHotkeys;
 use isocast_engine::hotkeys::{Edge, Key};
 use isocast_protocol::Setup;
 use isocast_protocol::api::{
-    ApplyParams, Event, Method, Request, RpcError, SnapshotParams, StartParams, StreamStartParams,
+    ApplyParams, Event, Method, Request, RpcError, SnapshotParams, StreamStartParams,
 };
 use isocast_protocol::caller::Caller;
 use isocast_protocol::change::Change;
@@ -26,7 +26,6 @@ use isocast_protocol::hotkeys::{
     Registration, SetParams,
 };
 use isocast_protocol::library::LibrarySwitchParams;
-use isocast_protocol::timeline::{TimelineExportParams, TimelineMoveParams, TimelineRemoveParams};
 use serde_json::{Value, json};
 
 use crate::{Daemon, State, failed};
@@ -466,6 +465,10 @@ impl Daemon {
             (state.revision, setup.clone())
         };
         let mut value = setup.hotkeys.value.clone().unwrap_or(json!({}));
+        // Bindings of the retired editor's actions (`timeline.*`, removed
+        // 2026-10-22) would make every edit fail validation, and the app
+        // can't show them to delete: the first edit drops them.
+        let stale = drop_retired(&mut value);
         match (params.bindings, params.patch) {
             (Some(all), None) => value = serde_json::to_value(all).unwrap(),
             (None, Some(patch)) => {
@@ -478,7 +481,7 @@ impl Daemon {
                     if let Some(binding) = binding {
                         bindings.insert(id, serde_json::to_value(binding).unwrap());
                     } else {
-                        if bindings.remove(&id).is_none() {
+                        if bindings.remove(&id).is_none() && !stale.contains(&id) {
                             return Err(invalid(format!(
                                 "patch.{}: no such binding; valid ids: {}",
                                 hotkeys::bounded(&id, 64),
@@ -518,6 +521,15 @@ impl Daemon {
             change: Change::Setup(Box::new(setup)),
             live: false,
         })?;
+        if !stale.is_empty() {
+            self.publish(Event::Warning {
+                message: format!(
+                    "hotkeys {} were removed from the profile: their actions belonged to the \
+                     editor, which Isocast no longer has",
+                    stale.join(", ")
+                ),
+            });
+        }
         Ok(self.hotkeys_get())
     }
 
@@ -632,22 +644,9 @@ impl Daemon {
     ) -> Result<(), RpcError> {
         let args = binding.arguments().map_err(invalid)?;
         let action = binding.action.as_str();
-        if let Some(reason) = hotkeys::catalogue()
-            .actions
-            .into_iter()
-            .find(|a| a.id == action)
-            .and_then(|a| a.unavailable_reason)
-        {
-            return Err(invalid(format!("action {action}: {reason}")));
-        }
         let method = match args {
             Arguments::Empty => match action {
-                "recording.start" => Method::Start(Box::new(StartParams {
-                    setup: None,
-                    folder: None,
-                    seconds: None,
-                    ..Default::default()
-                })),
+                "recording.start" => Method::Start(Box::default()),
                 "recording.stop" => Method::RequestStop(None),
                 "recording.pause" => Method::Pause,
                 "recording.resume" => Method::Resume,
@@ -666,16 +665,10 @@ impl Daemon {
                     if self.state.lock().session.is_some() {
                         Method::RequestStop(None)
                     } else {
-                        Method::Start(Box::new(StartParams {
-                            setup: None,
-                            folder: None,
-                            seconds: None,
-                            ..Default::default()
-                        }))
+                        Method::Start(Box::default())
                     }
                 }
                 "recording.split" => Method::Split,
-                "timeline.close" => Method::TimelineClose,
                 "studio.toggle" => {
                     let mut state = self.state.lock();
                     if state.preview.is_some() {
@@ -859,25 +852,6 @@ impl Daemon {
                     .map_err(|e| failed(e.into()))?;
                 return Ok(());
             }
-            Arguments::Retake(params) => Method::Retake(Some(params)),
-            Arguments::TimelineNew(params) => Method::TimelineNew(Some(params)),
-            Arguments::TimelineOpen(params) => Method::TimelineOpen(params),
-            Arguments::TimelineRemove(params) => Method::TimelineRemove(TimelineRemoveParams {
-                clip: params.clip,
-                timeline: params.timeline,
-            }),
-            Arguments::TimelineMove(params) => Method::TimelineMove(TimelineMoveParams {
-                clip: params.clip,
-                index: params.index,
-                timeline: params.timeline,
-            }),
-            Arguments::TimelineExport(params) => {
-                Method::TimelineExport(Some(TimelineExportParams {
-                    timeline: params.timeline,
-                    folder: params.folder,
-                    vertical: params.vertical,
-                }))
-            }
         };
         // A key sent by a client on another computer (`hotkeys_input`) is
         // held to the same local-only policy as its own requests.
@@ -886,16 +860,6 @@ impl Daemon {
         }
         let response = self.call(Request::new(0, method));
         response.error.map_or(Ok(()), |mut error| {
-            if action.starts_with("timeline.")
-                && let Some((field, _)) = error.message.split_once(':')
-                && matches!(
-                    field,
-                    "timeline" | "clip" | "index" | "folder" | "seconds" | "name"
-                )
-            {
-                error.message = format!("args.{}", hotkeys::bounded(&error.message, 2048));
-                return Err(error);
-            }
             // A canvas that can't do it (none, or following the main one).
             if error.message.starts_with("canvas: ") {
                 error.message = format!("args.{}", hotkeys::bounded(&error.message, 2048));
@@ -994,6 +958,27 @@ fn item_ids(items: &Value, ids: &mut Vec<String>) {
         }
         item_ids(&item["children"], ids);
     }
+}
+
+/// Take the bindings of the retired editor's actions (`timeline.*`) out of
+/// a stored hotkeys value; their ids, in order.
+fn drop_retired(value: &mut Value) -> Vec<String> {
+    let Some(bindings) = value.as_object_mut() else {
+        return Vec::new();
+    };
+    let stale: Vec<String> = bindings
+        .iter()
+        .filter(|(_, b)| {
+            b.get("action")
+                .and_then(Value::as_str)
+                .is_some_and(|a| a.starts_with("timeline."))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &stale {
+        bindings.remove(id);
+    }
+    stale
 }
 
 #[cfg(test)]

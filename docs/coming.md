@@ -11,6 +11,9 @@ be on the API, the CLI and MCP, as well as in the app.
   media playback, a faster start, the matched OBS comparison and an alpha.
 - **Faster.** More rounds of [benchmarks against OBS](benchmarks.md) and
   the fixes they point to.
+- **No in-app editor.** The editor window, timelines and `.isoprj` files
+  are removed; export a take to Final Cut Pro, Premiere Pro, Resolve or
+  OpenTimelineIO instead (`isocast project export-nle`).
 - **Follow-ups** for canvases (a separate audio mix per canvas, importing
   OBS 31 canvases), masks and automatic quality.
 
@@ -25,7 +28,7 @@ be on the API, the CLI and MCP, as well as in the app.
   [plugins](plugins.md).
 - Later: SRT and WHIP streaming, NDI, Syphon, Audio Unit plugins, Linux.
 
-Shipped in 0.0.8: a canvas for every destination, advanced masks,
-automatic quality and recording targets. Earlier: projectors and
-multiview, the vertical canvas, the editor, OBS import, the replay buffer,
+Shipped in 0.0.8: a canvas for every destination, advanced masks and
+automatic quality. Earlier: projectors and
+multiview, the vertical canvas, OBS import, the replay buffer,
 the virtual camera and obs-websocket. See the [README](../README.md#features).

@@ -53,10 +53,6 @@ pub fn load(window: &AppWindow) {
     flag("preview_locked", &|v| ui.set_preview_locked(v));
     flag("studio", &|v| ui.set_studio(v));
     flag("vertical_preview", &|v| ui.set_show_extra(v));
-    // The Create view (area G).
-    flag("create", &|v| {
-        window.global::<crate::CreateArea>().set_active(v)
-    });
     length("docks_height", &|v| ui.set_docks_height(v));
     length("scenes_width", &|v| ui.set_scenes_width(v));
     length("sources_width", &|v| ui.set_sources_width(v));
@@ -108,7 +104,6 @@ pub fn save(window: &AppWindow) {
         "studio": ui.get_studio(),
         "vertical_preview": ui.get_show_extra(),
         "canvas_monitor": ui.get_extra_choice().as_str(),
-        "create": window.global::<crate::CreateArea>().get_active(),
         "docks_height": ui.get_docks_height(),
         "scenes_width": ui.get_scenes_width(),
         "sources_width": ui.get_sources_width(),

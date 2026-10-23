@@ -353,16 +353,6 @@ impl Platform for StubPlatform {
         )))
     }
 
-    fn same_volume(&self, left: &Path, right: &Path) -> Result<bool> {
-        #[cfg(windows)]
-        return windows::same_volume(left, right).map_err(Into::into);
-        #[cfg(not(windows))]
-        {
-            let _ = (left, right);
-            Err(unsupported("comparing recording volumes"))
-        }
-    }
-
     fn process_cpu_seconds(&self) -> Option<f64> {
         #[cfg(windows)]
         return windows::process_cpu_seconds();

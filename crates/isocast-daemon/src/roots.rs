@@ -5,7 +5,7 @@
 //! sandbox (decision 26): paired clients are trusted show operators. Every
 //! path a network caller (a paired client or an obs-websocket client)
 //! chooses, read or written, and every path the engine derives for its
-//! request (a timeline's folder, a default export or report folder), must
+//! request (a default report folder), must
 //! resolve inside a root, symlinks included. Checked: method params
 //! (`check_params`, which also hands the resolved path onward), files a
 //! setup change, import or library switch brings in (`check_setup`), and
@@ -786,13 +786,8 @@ impl Daemon {
             Method::Start(params) => {
                 resolve_opt("params.folder", &mut params.folder, Access::Write)
             }
-            Method::Retake(Some(params)) => {
-                resolve_opt("params.folder", &mut params.folder, Access::Write)
-            }
-            Method::TimelineExport(Some(params)) => {
-                resolve_opt("params.folder", &mut params.folder, Access::Write)
-            }
-            Method::TimelineExportNle(params) => {
+            Method::TakeExportNle(params) => {
+                resolve_buf("params.take", &mut params.take, Access::Read)?;
                 resolve_opt("params.folder", &mut params.folder, Access::Write)?;
                 resolve_opt("params.path", &mut params.path, Access::Write)
             }
@@ -804,13 +799,6 @@ impl Daemon {
                 resolve_buf("params.out", out, Access::Write)
             }
             Method::BugReport(params) => resolve_opt("params.out", &mut params.out, Access::Write),
-            // It writes the project's file and timelines there.
-            Method::ProjectOpen(params) => {
-                resolve_buf("params.path", &mut params.path, Access::Write)
-            }
-            Method::TimelineRelink(params) => {
-                resolve_buf("params.path", &mut params.path, Access::Read)
-            }
             Method::FilesList(params) => resolve_buf("params.path", &mut params.path, Access::Read),
             Method::Doctor(params) => {
                 resolve_opt("params.folder", &mut params.folder, Access::Write)?;

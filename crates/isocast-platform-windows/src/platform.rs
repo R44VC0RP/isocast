@@ -497,10 +497,6 @@ impl Platform for WindowsPlatform {
         system::volume(path)
     }
 
-    fn same_volume(&self, left: &Path, right: &Path) -> Result<bool> {
-        system::same_volume(left, right)
-    }
-
     fn process_cpu_seconds(&self) -> Option<f64> {
         system::process_cpu_seconds()
     }

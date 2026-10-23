@@ -8,7 +8,7 @@ Run on a test Mac, never on Ryan's:
         [--crash-safe default|on|off] [--report FILE]
 
 BIN holds a release `isocastd`. Each run gets a fresh isolated daemon (its
-own ad-hoc signed bundle copy, socket, setup, timelines, logs and recordings
+own ad-hoc signed bundle copy, socket, setup, logs and recordings
 folder under DIR; inherited ISOCAST_* variables dropped) recording synthetic
 sources only (a test pattern and two tones) into the setup's recordings
 folder, which puts every take in a project folder (`<root>/<date> Untitled/`
@@ -324,7 +324,7 @@ class Engine:
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("ISOCAST_")}
         self.env.update(ISOCAST_SOCKET=str(self.sock), ISOCAST_SETUP=str(self.root / "setup.toml"),
                         ISOCAST_DEV_APP=str(harness.app), ISOCAST_PLUGINS=str(self.root / "plugins"),
-                        ISOCAST_TIMELINES=str(self.root / "timelines"), ISOCAST_MONITOR_SILENT="1",
+                        ISOCAST_MONITOR_SILENT="1",
                         ISOCAST_LOG_DIR=str(self.root / "logs"),
                         ISOCAST_REPORT_ENDPOINT="http://127.0.0.1:9/reports")
         if crash_safe == "on":

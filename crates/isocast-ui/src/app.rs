@@ -65,14 +65,11 @@ pub struct App {
     pub settings: areas::settings::Settings,
     pub canvas: areas::canvas::Canvas,
     pub library: areas::library::Library,
-    pub create: areas::create::Create,
     pub developer: areas::developer::Developer,
     pub permissions: areas::permissions::PermissionsStep,
     pub wizard: areas::wizard::Wizard,
     /// Projectors and the multiview (G.4): windows of their own.
     pub projectors: areas::projectors::Projectors,
-    /// Project files (#88): File › Open…, Open Recent, the Finder.
-    pub projects: areas::projects::Projects,
     /// Remote control (R2): Settings → Remote, the engine picker,
     /// presence, the engine file browser.
     pub remote: areas::remote::Remote,
@@ -124,12 +121,10 @@ impl App {
             settings: areas::settings::Settings::default(),
             canvas,
             library: areas::library::Library::default(),
-            create: areas::create::Create::default(),
             developer: areas::developer::Developer::default(),
             permissions: areas::permissions::PermissionsStep::default(),
             wizard: areas::wizard::Wizard::default(),
             projectors: areas::projectors::Projectors::default(),
-            projects: areas::projects::Projects::default(),
             remote: areas::remote::Remote::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
@@ -174,11 +169,9 @@ impl App {
         self.replies.borrow().len()
     }
 
-    /// The areas, in the order they update. Create comes first so that in
-    /// its view Delete takes off the selected clip, not a scene item.
-    pub fn areas(&self) -> [&dyn Area; 13] {
+    /// The areas, in the order they update.
+    pub fn areas(&self) -> [&dyn Area; 11] {
         [
-            &self.create,
             &self.canvas,
             &self.sources,
             &self.mixer,
@@ -189,7 +182,6 @@ impl App {
             &self.permissions,
             &self.wizard,
             &self.projectors,
-            &self.projects,
             &self.remote,
         ]
     }
@@ -433,10 +425,6 @@ impl App {
             Event::PluginChanged { .. } => {}
             // Data shows in the program's picture; the app has no data view.
             Event::DataChanged { .. } => {}
-            // The Create view (area G) reads them in its `event`.
-            Event::TimelineChanged { .. }
-            | Event::ExportProgress { .. }
-            | Event::ExportFinished { .. } => {}
             // Studio Mode is this window's view of the daemon's preview:
             // follow a hotkey that turned it on or off.
             Event::HotkeyFired { action, error, .. } => {
@@ -608,8 +596,6 @@ impl App {
             Event::Marker { .. } => {}
             // The Controls area shows its notice.
             Event::EncoderOverload { .. } => {}
-            // The Create area opens the editor on it.
-            Event::ProjectOpened { .. } => {}
             // Automatic quality (T.2): the status bar and Settings show it.
             Event::GovernorChanged { governor } => {
                 if let Some(status) = self.session.borrow_mut().status.as_mut() {
@@ -617,8 +603,6 @@ impl App {
                 }
                 self.changed(Changed::STATUS);
             }
-            // The Controls area shows where the next recording goes.
-            Event::RecordTarget { .. } => {}
             // Shown by the remote-engines UI (R2).
             Event::Refused { .. } => {}
             // Presence/remote settings are presented by the R2 remote UI.
@@ -1566,27 +1550,6 @@ impl App {
                 }
             }
         });
-    }
-
-    /// The editor window's menus (#94: its Export menu, a clip's menu),
-    /// shown in its own window, chosen as the studio's are.
-    pub fn connect_editor_menus(self: &Rc<Self>, editor: &crate::EditorWindow) {
-        let menus = editor.global::<Menus>();
-        menus.on_step(kit::step);
-        let weak = Rc::downgrade(self);
-        let window = editor.as_weak();
-        menus.on_request(move |owner, x, y, w, h| {
-            if let (Some(app), Some(editor)) = (weak.upgrade(), window.upgrade())
-                && let Some(menu) = app.menu_for(&owner)
-            {
-                let (list, submenus) = menu.build();
-                editor
-                    .global::<Menus>()
-                    .invoke_show(owner, list, submenus, x, y, w, h);
-            }
-        });
-        let weak = Rc::downgrade(self);
-        menus.on_activated(move |owner, id| Self::menu_activated(&weak, owner, id));
     }
 
     /// `owner`'s menu, built by the area that knows the owner.

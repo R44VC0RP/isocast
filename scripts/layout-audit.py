@@ -18,7 +18,7 @@ pictures (GitHub #107):
 
 BIN_DIR holds isocast, isocastd and isocast-ui from one build. Each picture
 is drawn by `isocast-ui --snapshot` against an engine of its own (its own
-socket, setup, timelines, recordings and UI prefs in a scratch folder under
+socket, setup, recordings and UI prefs in a scratch folder under
 /tmp), with the synthetic sources of scripts/screenshots/offscreen.toml, so
 states that act (record, go-live) touch nothing real and no window opens.
 --views and --sweep-views take names or shell patterns (settings-*); --sizes
@@ -95,7 +95,7 @@ SIZES = [
 ]
 # From the window's minimum width (900 points, ui/app.slint) up.
 SWEEP = "900-2700:200@900x1"
-SWEEP_VIEWS = ["main", "studio-mode", "vertical-canvas", "canvases", "settings-output", "editor"]
+SWEEP_VIEWS = ["main", "studio-mode", "vertical-canvas", "canvases", "settings-output"]
 
 MAIN = (
     "the main window: a Scenes dock and a Sources dock on the left, the "
@@ -104,8 +104,8 @@ MAIN = (
     "the controls (Record, Go Live and friends) and a status bar along the bottom"
 )
 # Every screen: (name, states, what it should contain, options). Options:
-# seed="editor" (an engine with three recorded takes), env (extra variables;
-# @OBS@ and @OPTIMIZED@ are replaced with generated fixtures).
+# env (extra variables; @OBS@ and @OPTIMIZED@ are replaced with generated
+# fixtures).
 VIEWS = [
     ("main", [], MAIN, {}),
     ("studio-mode", ["studio"], "Studio Mode: " + MAIN + ", with two pictures side by side, Preview "
@@ -145,16 +145,6 @@ VIEWS = [
                             "studio", "projector:multiview", "wait:1000"], "a Multiview projector "
      "window: large Preview and Program tiles on top, scene tiles below, and its last two tiles "
      "show the extra canvases' programs, labelled VERTICAL and SQUARE", {}),
-    ("editor", ["editor", "wait:800", "create-thumbs"], "the Editor window: the picture viewer on top "
-     "(no transport row: playback is by keys), a toolbar row (edit tools pill, the timeline's name "
-     "and length, Export, a zoom slider), and a timeline with a time ruler and playhead, a Program "
-     "track of three clips with thumbnails, and Camera and Slides angle tracks", {"seed": "editor"}),
-    ("editor-crop", ["editor", "wait:800", "create-thumbs", "create-playhead:3.5", "create-angle:slides", "wait:500",
-                     "create-crop:9:16", "wait:500", "create-crop-mode:on", "wait:300"], "the Editor window in crop mode: the viewer shows a 9:16 "
-     "crop frame with handles over the picture and crop controls, timeline below", {"seed": "editor"}),
-    ("editor-export", ["editor", "wait:800", "create-thumbs", "create-export", "wait:1500"], "the "
-     "Editor window just after an export: the toolbar row shows Export and Show in Finder (or "
-     "Exporting… with a progress bar while it runs), timeline below", {"seed": "editor"}),
     ("settings-output", ["settings:output"], "the Settings sheet over the main window, Output page: a "
      "sidebar of pages (Output, Video, Audio, Stream, General, Hotkeys, Advanced) and a form "
      "(recording folder, quality, files each take makes, ISO sources)", {}),
@@ -227,13 +217,6 @@ VIEWS = [
      "recording details popover open (files, sizes, dropped frames)", {}),
     ("paused", ["record", "wait:1000", "pause"], MAIN + "; a paused recording: the controls show "
      "Paused and resume", {}),
-    ("record-target", ["record", "wait:1500", "stop-record", "wait:2500", "record-target:last",
-                       "wait:800"], MAIN + "; next to Start Recording, where the next recording "
-     "goes (\"Take 2 · Untitled\", a row under it or a square button beside it), and the status bar "
-     "says \"Next recording: take 2 of …\"; a \"Saved as a new project\" toast", {}),
-    ("record-target-menu", ["record", "wait:1500", "stop-record", "wait:2500", "record-target-menu",
-                            "wait:300"], MAIN + "; the menu of where the next recording goes is "
-     "open next to Start Recording: Next Recording, New Project, Add a Take To and a timeline", {}),
     ("streaming", ["stream:live"], MAIN + "; streaming live: the Go Live control shows live with a "
      "timer and the status bar shows the stream's health", {}),
     ("streaming-details", ["stream:live", "details:live"], MAIN + "; streaming, with the stream "
@@ -475,7 +458,7 @@ def kill_children(*_):
 class Engine:
     """A throwaway engine in a scratch folder (like scripts/snapshot.sh)."""
 
-    def __init__(self, bin_dir, root, seed=None):
+    def __init__(self, bin_dir, root):
         self.bin = bin_dir
         # Short: the socket path must fit in 104 bytes.
         self.dir = tempfile.mkdtemp(prefix="la-", dir=root)
@@ -493,7 +476,6 @@ class Engine:
             "ISOCAST_SNAPSHOT_STILL": "1",
             "TZ": "UTC", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8",
         })
-        self.seed = seed
 
     def cli(self, *args, timeout=60, log=None):
         return run([(os.path.join(self.bin, "isocast"),) + args], env=self.env, cwd=self.dir,
@@ -508,26 +490,16 @@ class Engine:
         text = text.replace('folder = "recordings"', f'folder = "{self.dir}/recordings"')
         with open(toml, "w") as f:
             f.write(text)
-        if self.seed:
-            # The seed engine's live setup and timelines (its recordings stay
-            # where they are, in the seed's folder, for every copy).
-            for name in os.listdir(self.seed):
-                if name.startswith("engine.") and not name.endswith((".sock", ".lock", ".log")):
-                    src = os.path.join(self.seed, name)
-                    dst = os.path.join(self.dir, name)
-                    (shutil.copytree if os.path.isdir(src) else shutil.copyfile)(src, dst)
-        else:
-            self.cli("apply", "--revision", "0", toml, log=log)
+        self.cli("apply", "--revision", "0", toml, log=log)
         self.cli("engine", "start", log=log)
         try:
             status = json.loads(self.cli("status", "--json"))
             self.pid = (status.get("daemon") or {}).get("pid")
         except (ValueError, RuntimeError):
             self.pid = None
-        if not self.seed:
-            # Not `preview intro` as visual-shots.sh does: a preview scene
-            # turns Studio Mode on, and "main" is the window without it.
-            self.cli("scene", "main", "--cut", log=log)
+        # Not `preview intro` as visual-shots.sh does: a preview scene turns
+        # Studio Mode on, and "main" is the window without it.
+        self.cli("scene", "main", "--cut", log=log)
 
     def stop(self, keep=False):
         try:
@@ -577,33 +549,16 @@ def make_fixtures(out):
     return {"@OBS@": os.path.join(fx, "obs"), "@OPTIMIZED@": os.path.join(fx, "optimized.json")}
 
 
-def make_editor_seed(bin_dir, root, log):
-    """An engine with three short recorded takes on its current timeline."""
-    eng = Engine(bin_dir, root)
-    eng.start(log=log)
-    try:
-        eng.cli("timeline", "new", "Episode 12", log=log)
-    except RuntimeError as e:
-        log.write(f"(timeline new: {e})\n")
-    for _ in range(3):
-        eng.cli("start", timeout=60, log=log)
-        time.sleep(2.5)
-        eng.cli("stop", "--wait", timeout=60, log=log)
-    log.write(eng.cli("timeline", "show"))
-    eng.stop(keep=True)
-    return eng.dir
-
-
 # ---------------------------------------------------------------- render
 
 
-def render_one(args, view, size, out_png, fixtures, seed, logs_dir):
+def render_one(args, view, size, out_png, fixtures, logs_dir):
     name, states, _, opts = VIEWS[VIEW_NAMES.index(view)]
     states = [replace_all(s, fixtures) for s in states]
     log_path = os.path.join(logs_dir, os.path.basename(out_png)[:-4] + ".log")
     started = time.time()
     with open(log_path, "w") as log:
-        eng = Engine(args.bin, args.engines, seed=seed if opts.get("seed") == "editor" else None)
+        eng = Engine(args.bin, args.engines)
         try:
             for k, v in (opts.get("env") or {}).items():
                 eng.env[k] = replace_all(v, fixtures)
@@ -667,11 +622,6 @@ def cmd_render(args, manifest, items=None):
     os.makedirs(shots, exist_ok=True)
     os.makedirs(logs, exist_ok=True)
     fixtures = make_fixtures(args.out)
-    seed = None
-    if any(VIEWS[VIEW_NAMES.index(v)][3].get("seed") == "editor" for v, _ in items):
-        say("render: recording three takes for the editor's seed engine…")
-        with open(os.path.join(logs, "editor-seed.log"), "w") as log:
-            seed = make_editor_seed(args.bin, args.engines, log)
     started = time.time()
     lock = threading.Lock()
     done = [0]
@@ -680,7 +630,7 @@ def cmd_render(args, manifest, items=None):
         view, size = item
         iid = image_id(view, size)
         png = os.path.join(shots, iid + ".png")
-        res = render_one(args, view, size, png, fixtures, seed, logs)
+        res = render_one(args, view, size, png, fixtures, logs)
         with lock:
             entry = manifest["images"].setdefault(iid, {})
             entry.update(id=iid, view=view, size=size.label, w=size.w, h=size.h, scale=size.scale,
@@ -692,11 +642,7 @@ def cmd_render(args, manifest, items=None):
         say(f"render [{done[0]}/{len(items)}] {iid}: {'ok' if res['ok'] else 'FAILED ' + res['error'][:160]} "
             f"({res['seconds']} s)")
 
-    try:
-        pooled(args.jobs, job, items)
-    finally:
-        if seed:
-            shutil.rmtree(seed, ignore_errors=True)
+    pooled(args.jobs, job, items)
     manifest.setdefault("timing", {})["render_seconds"] = round(time.time() - started, 1)
     save_manifest(args.out, manifest)
 
@@ -1206,7 +1152,6 @@ CALIBRATION = [
     # (id, view, size, how it's broken)
     ("main", Size(420, 300, 2), "the main window forced far below its minimum size"),
     ("settings-output", Size(460, 320, 2), "Settings forced into a tiny window"),
-    ("editor", Size(480, 300, 2), "the editor forced into a tiny window"),
     ("properties-camera", Size(400, 280, 2), "a dialog forced into a tiny window"),
 ]
 

@@ -22,7 +22,7 @@ test = true
 isocast-diagnostics = { path = "../isocast-diagnostics" }
 anyhow = "1.0.104"
 base64 = "0.22.1"
-# Already in the build through isocast-engine: timelines' local times.
+# Already in the build through isocast-engine: local times in replies.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ctrlc = { version = "3", features = ["termination"] }
 isocast-engine = { path = "../isocast-engine" }

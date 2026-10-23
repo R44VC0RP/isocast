@@ -25,12 +25,9 @@ in Rust, MIT or Apache 2.0.
 - **Lighter on your Mac.** In our benchmarks Isocast used 25–29% of a core
   where OBS used 58–71%, and 88–356 MiB of memory where OBS used
   619–1344 MiB ([how it was measured](docs/benchmarks.md)).
-- **Edit what you recorded.** The editor window lays every ISO file out
-  on one timeline: trim, split, switch angles and crop (9:16 too), then
-  export frame-accurately without re-encoding what you didn't change,
-  or hand the edit to Final Cut Pro, Premiere Pro or Resolve with every
-  angle on its own track. Each project folder carries an `.isoprj` that
-  reopens your edits anywhere.
+- **Edit in the app you already use.** Export a take to Final Cut Pro,
+  Premiere Pro or Resolve: it opens with every angle on its own track,
+  pointing at the files you recorded. Nothing is re-encoded or copied.
 - **Bring your OBS setup.** On first launch Isocast finds your OBS scene
   collections and profiles and imports them; anything that can't come
   over is listed with the reason. Tools that speak obs-websocket (Touch
@@ -49,7 +46,7 @@ in Rust, MIT or Apache 2.0.
 | Each source as its own file (ISO), on one clock | Built in | Not built in (third-party Source Record plugin) |
 | CPU for the same recording ([benchmarks](docs/benchmarks.md)) | About half of OBS's | Baseline |
 | Memory, 1080p60 on a base M2 | 88 MiB | 630 MiB |
-| Edit the ISO files after recording | Built-in editor (trim, split, angles, crop), and export to Final Cut Pro, Premiere Pro or Resolve | No, use another editor |
+| Edit the ISO files after recording | Export a take to Final Cut Pro, Premiere Pro or Resolve, every angle on its own track | No, use another editor |
 | Control | App, `isocast` CLI, MCP, and obs-websocket v5 (off by default) | App, obs-websocket and scripts |
 | Stream Deck | Through obs-websocket (community plugins, Touch Portal); not Elgato's official OBS actions | Official Elgato plugin |
 | Replay buffer | Yes | Yes |
@@ -95,19 +92,10 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 - Crash-safe takes: files are committed every half second, so a crash
   loses about 0.5 s, and they are repaired on the next launch. Pause and
   resume in the same file, and markers.
-- The editor window (**Window › Editor**, ⌘E): every ISO track of your
-  takes on one timeline, with trim, split, ripple delete, rolls, per-span
-  angles, crops (free, 16:9, 9:16, 1:1, 4:5), waveforms, snapping, zoom,
-  undo and frame-accurate export (a 9:16 file too). The takes are never
-  changed. Playback has sound, in sync with the picture. **Open Editor
-  After Recording** in Settings › Output opens it when you stop.
-- **Export for Final Cut Pro, Premiere Pro or DaVinci Resolve:** File ›
-  Export writes a project that opens with every angle on its own track,
-  cut like your Isocast edit and pointing at your original files (no
-  re-encoding), with crops, markers and each source's audio.
-- Project files: every project folder has a `<name>.isoprj` with its takes
-  and edits. Copy the folder anywhere and double-click the file to reopen
-  it in the editor; File › Open and Open Recent.
+- A built-in editor (**Window › Editor**): trim, split, angles and crops
+  on one timeline of your ISO files, export, and File › Export to Final
+  Cut Pro, Premiere Pro or Resolve; recording targets and `.isoprj`
+  project files. Removed in the next release (see below).
 - **Projectors and multiview:** the program, preview, any scene or any
   source full screen on another display or in a window, and an OBS-style
   multiview with tally (red program, green preview).
@@ -138,20 +126,23 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   streams, previews and extra canvases when the Mac falls behind and back
   up when it recovers, never your program or ISO files. Settings you pin
   stay put.
-- **Recording targets:** next to Record, choose whether a recording starts
-  a new project or adds a take to the current timeline.
 - obs-websocket v5 compatibility (`isocast websocket enable`), so OBS
   remotes, Touch Portal, community Stream Deck plugins and obs-websocket
   scripts (obs-cmd, obsws-python) can drive Isocast.
-- Profiles and scene collections, as in OBS, global hotkeys, timelines
-  (record takes in order, export one video), the `isocast` CLI and MCP
-  tools for agents.
+- Profiles and scene collections, as in OBS, global hotkeys, the
+  `isocast` CLI and MCP tools for agents.
 - A warning when another app or a busy or hot Mac threatens the
   recording, before frames drop.
 - Automatic updates. macOS prompts name the engine "Isocast Engine".
 
 **Coming next** (not in a release yet; see [coming soon](docs/coming.md)):
 
+- **No more in-app editor:** the editor window, timelines, recording
+  targets and `.isoprj` files are gone, so Isocast stays a recorder.
+- **Export a take for Final Cut Pro, Premiere Pro or DaVinci Resolve:**
+  `isocast project export-nle` writes a take as a project that opens with
+  every angle on its own track, pointing at your original files (no
+  re-encoding), with markers and each source's audio.
 - **Windows:** recording works end to end in testing (screen, camera and
   microphone to the program and ISO files, with previews); streaming,
   media playback and an installer release come next.
@@ -197,12 +188,6 @@ or let another source's live picture, such as a video, decide what shows.
 ![The Filters dialog for the Host picture with a circle shape mask: its box with move, size and rotate handles over the picture, and below it the Shape, X, Y, Width, Height, Rotation, Combine and Feather fields](docs/images/masks-shape.png)
 
 ![The Filters dialog for the Reveal picture with a source mask: its Mask source is a looping video called swirl, the channel is Luminance, and Combine and Fit are set below](docs/images/masks-source.png)
-
-**Edit every angle.** The editor window shows a track per ISO source
-under the program; trim, split, pick the angle for each stretch, crop it
-(9:16 too) and export.
-
-![The Isocast Editor in crop mode: the Slides angle at the playhead with a 9:16 crop frame and its handles over the landscape photo, the Free, 16:9, 9:16, 1:1 and 4:5 presets, Reset and Done above it, and below a timeline with three takes on the Program track over the Camera and Slides tracks, the cropped Slides stretch outlined](docs/images/editor.png)
 
 **Choose what gets its own file** in Settings › Output.
 
@@ -284,12 +269,10 @@ transparency) and MKV files in media sources and stingers, so older OBS
 stingers in VP8 work too. Stinger audio isn't played yet.
 
 **Can I edit in Isocast?**
-Yes, the basics. Record takes into a [timeline](docs/timelines.md), then
-open the editor (**Window › Editor**, ⌘E) to trim, split, delete spans and
-choose which ISO angle shows when. Export is frame-accurate and copies
-the video as recorded except near a cut; the original files are never
-changed. For effects, colour and titles, open the ISO files in your usual
-editor.
+No, Isocast is a recorder. Export a take to your editor instead:
+`isocast project export-nle` writes a Final Cut Pro, Premiere Pro,
+Resolve or OpenTimelineIO project with every ISO source on its own track,
+pointing at the files you recorded. Nothing is re-encoded or copied.
 
 **Can it stream to Twitch or YouTube?**
 Yes: Twitch, YouTube, Kick, Facebook or any RTMP/RTMPS server, or
@@ -315,7 +298,6 @@ Not yet. Mac first; the engine is built so other platforms can follow.
 
 - [Getting started](docs/getting-started.md),
   [recording](docs/recording.md), [streaming](docs/streaming.md)
-- [Timelines](docs/timelines.md): record takes in order and export one video
 - [Hotkeys](docs/hotkeys.md), [scenes as code](docs/scenes.md),
   [plugins](docs/plugins.md)
 - References: [CLI](docs/cli.md), [setup files](docs/setup-reference.md),

@@ -92,17 +92,7 @@ pub fn run(command: HotkeysCommand) -> Result<ExitCode> {
                 println!("{}", serde_json::to_string_pretty(&catalogue)?);
             } else {
                 for action in &catalogue.actions {
-                    println!(
-                        "{}  [{}] {}{}",
-                        action.id,
-                        action.group,
-                        action.label,
-                        action
-                            .unavailable_reason
-                            .as_ref()
-                            .map(|s| format!(" ({s})"))
-                            .unwrap_or_default()
-                    );
+                    println!("{}  [{}] {}", action.id, action.group, action.label);
                 }
                 println!("\nArgument schemas and keys: --json. Syntax: docs/hotkeys.md.");
             }

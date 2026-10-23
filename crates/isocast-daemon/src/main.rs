@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -30,7 +30,7 @@ use isocast_engine::critical::{Critical, Transaction};
 use isocast_engine::data::DataStore;
 use isocast_engine::record::{
     DEFAULT_SLOTS, Engine as LiveEngineOf, EngineEvent, FrameFeed, JpegFrame, OnEngineEvent,
-    RecordOptions, SessionControl, SharedEvent, SharedFeed, SplitTake, SplitTiming, expand_home,
+    RecordOptions, SessionControl, SharedEvent, SharedFeed, SplitTake, expand_home,
     interrupted_note, interrupted_sessions,
 };
 use isocast_engine::stream::{KEY_ENV, LEGACY_KEY_SERVICE, OnChange, Stream};
@@ -95,11 +95,8 @@ mod canvases;
 mod data;
 mod debug;
 mod diagnostics;
-mod edit;
-mod export;
 mod governor;
 mod hotkeys;
-mod isoprj;
 mod library;
 mod machine;
 mod nle;
@@ -114,7 +111,6 @@ mod replay;
 mod roots;
 mod store;
 mod streams;
-mod timeline;
 mod virtual_camera;
 mod websocket;
 mod whep;
@@ -221,8 +217,6 @@ fn main() -> ExitCode {
             daemon.load_data();
             daemon.load_projectors();
             diagnostics::start(&daemon);
-            daemon.load_timelines();
-            isoprj::start(&daemon);
             start_plugins(&daemon);
             daemon.websocket.load(&daemon);
             daemon.remote.load(&daemon);
@@ -990,20 +984,14 @@ struct Daemon {
     plugins: plugins::Registry,
     /// The data store bound text shows (`data_*`).
     data: data::Data,
-    /// Timelines (`timeline_*`, `retake`), and which is current.
-    timelines: Mutex<timeline::Timelines>,
-    /// Held while a `retake` runs: one at a time.
-    retaking: Mutex<()>,
     /// Held while a recording picks its project folder and while a project
     /// is renamed, so a rename never races a recording into it.
     projects: Mutex<()>,
-    /// The export running, if one is.
-    export: Mutex<Option<export::Running>>,
     hotkeys: hotkeys::HotkeyRuntime,
     shutting_down: AtomicBool,
     shutdown_lock: Mutex<()>,
     /// Read-held by every call that starts something (a take, a stream,
-    /// an export, the virtual camera); `shutdown_if_idle` write-holds it,
+    /// the virtual camera); `shutdown_if_idle` write-holds it,
     /// so no start can slip between its idle check and the shutdown.
     starting: parking_lot::RwLock<()>,
     /// The obs-websocket compatibility server (`websocket_*`).
@@ -1011,8 +999,6 @@ struct Daemon {
     remote: remote::Runtime,
     /// Open projectors and where each view was last shown (`projector_*`).
     projectors: projectors::ProjectorState,
-    /// The project files' writer (#88).
-    isoprj: isoprj::Writer,
     /// Who last started or stopped each stream slot from another computer
     /// (`by` in its `stream` events); its own lock, since streams report
     /// while the state lock is held.
@@ -1161,13 +1147,6 @@ impl State {
     }
 }
 
-/// Why a split didn't happen, and whether because the recording is ending
-/// (`retake` then waits for it and retakes its last take).
-struct SplitFailed {
-    ending: bool,
-    error: RpcError,
-}
-
 /// A session's outcome once it has ended, and the signal that it has.
 type SessionDone = (Mutex<Option<Result<Report, String>>>, Condvar);
 
@@ -1187,8 +1166,8 @@ struct Session {
     stop: Arc<AtomicBool>,
     files: Arc<Mutex<Option<Vec<PathBuf>>>>,
     live: Arc<Mutex<Option<LiveStatus>>>,
-    /// Its takes, for the current timeline.
-    takes: Arc<timeline::SessionTakes>,
+    /// The take it records now: from 1, 0 before it has started.
+    take: Arc<AtomicU32>,
     /// The project folder it records into, once picked.
     project: Option<projects::ProjectRef>,
 }
@@ -1510,13 +1489,9 @@ impl Daemon {
             }
         }
         let _ = self.stream_stop(Default::default());
-        self.stop_export("isocastd was stopped (restarted or quit) during the export");
         self.stop_engine();
         self.flush_live_save();
         self.data.flush();
-        // A stop just before the quit: its project file is written now,
-        // not at the next start (#102).
-        self.isoprj.flush();
         // After the recording's end went out: OBS clients hear ExitStarted
         // and a close, not a dropped socket.
         self.websocket.stop();
@@ -1579,15 +1554,7 @@ impl Daemon {
         if state.tuning {
             return Some("benchmarking the encoders (`tune`); wait for it to finish".into());
         }
-        drop(state);
-        self.export_running().map(|export| {
-            format!(
-                "exporting timeline {:?} ({:.0}%); wait for it to finish (`isocast watch \
-                 --kinds export_finished`)",
-                export.timeline,
-                export.progress * 100.0
-            )
-        })
+        None
     }
 
     fn call(self: &Arc<Self>, mut request: Request) -> Response {
@@ -1601,9 +1568,7 @@ impl Daemon {
         let _starting = matches!(
             request.method,
             Method::Start(_)
-                | Method::Retake(_)
                 | Method::StreamStart(_)
-                | Method::TimelineExport(_)
                 | Method::VirtualCameraStart
                 | Method::ReplayStart(_)
                 | Method::Resume
@@ -1676,16 +1641,14 @@ impl Daemon {
             }
             Method::Apply(params) => self.apply(*params).and_then(to_json),
             Method::Split => self
-                .split_take(SplitTiming::WholeSecond, TakeCause::Split)
+                .split_take()
                 .map(|split| Started {
-                    begins_at: Some(timeline::split_text(&split)),
+                    begins_at: Some(split_text(&split)),
                     files: split.files,
                     notes: split.notes,
-                    timeline: None,
                     session: None,
                     already_recording: false,
                 })
-                .map_err(|failed| failed.error)
                 .and_then(to_json),
             Method::Tune(params) => self.tune(*params).and_then(to_json),
             Method::Snapshot(params) => self.snapshot(params).and_then(to_json),
@@ -1853,38 +1816,6 @@ impl Daemon {
                     }
                     to_json(changed.reply())
                 }),
-            Method::TimelineNew(params) => self
-                .timeline_new(params.unwrap_or_default())
-                .and_then(to_json),
-            Method::TimelineGet(target) => self
-                .timeline_get(target.unwrap_or_default())
-                .and_then(to_json),
-            Method::TimelineList => to_json(self.timeline_list()),
-            Method::TimelineOpen(params) => self.timeline_open(params).and_then(to_json),
-            Method::TimelineClose => self.timeline_close().and_then(to_json),
-            Method::RecordTarget(params) => self
-                .record_target(params.unwrap_or_default())
-                .and_then(to_json),
-            Method::TimelineRemove(params) => self.timeline_remove(params).and_then(to_json),
-            Method::TimelineMove(params) => self.timeline_move(params).and_then(to_json),
-            Method::Retake(params) => self.retake(params.unwrap_or_default()).and_then(to_json),
-            Method::TimelineExport(params) => self
-                .timeline_export(params.unwrap_or_default())
-                .and_then(to_json),
-            Method::TimelineTrim(params) => self.timeline_trim(params).and_then(to_json),
-            Method::TimelineSplit(params) => self.timeline_split(params).and_then(to_json),
-            Method::TimelineDeleteRange(params) => {
-                self.timeline_delete_range(params).and_then(to_json)
-            }
-            Method::TimelineAngle(params) => self.timeline_angle(params).and_then(to_json),
-            Method::TimelineUndo(target) => self
-                .timeline_step(target.unwrap_or_default(), false)
-                .and_then(to_json),
-            Method::TimelineRedo(target) => self
-                .timeline_step(target.unwrap_or_default(), true)
-                .and_then(to_json),
-            Method::TimelineCrop(params) => self.timeline_crop(params).and_then(to_json),
-            Method::TimelineRoll(params) => self.timeline_roll(params).and_then(to_json),
             Method::HotkeysGet => to_json(self.hotkeys_get()),
             Method::HotkeysSet(params) => self.hotkeys_set(*params).and_then(to_json),
             Method::HotkeysActions => to_json(isocast_protocol::hotkeys::catalogue()),
@@ -1897,12 +1828,7 @@ impl Daemon {
             Method::DebugSet(params) => debug::set(self, params).and_then(to_json),
             Method::ListProjects(params) => to_json(self.list_projects(params.unwrap_or_default())),
             Method::RenameProject(params) => self.rename_project(params).and_then(to_json),
-            Method::ProjectOpen(params) => self.project_open(params).and_then(to_json),
-            Method::RecentProjects(params) => {
-                to_json(self.recent_projects(params.unwrap_or_default()))
-            }
-            Method::TimelineRelink(params) => self.timeline_relink(params).and_then(to_json),
-            Method::TimelineExportNle(params) => self.timeline_export_nle(params).and_then(to_json),
+            Method::TakeExportNle(params) => self.take_export_nle(params).and_then(to_json),
             Method::EstimateCapacity(params) => self.estimate_capacity(*params).and_then(to_json),
             Method::RequestStop(params) => self
                 .request_stop(params.unwrap_or_default().session.as_deref())
@@ -2102,18 +2028,6 @@ impl Daemon {
                 // An unlinked vertical canvas starts from the main canvas's
                 // scene and preview (no engine or watchers yet).
                 let _ = sync_canvases(&mut state, &[], true);
-                // Sources renamed off reserved ids (#94): written now, so
-                // it happens once.
-                if state.file.renamed() {
-                    let (_, target) = state.file.prepare();
-                    let revision = state.revision;
-                    drop(state);
-                    if let Some(target) = target {
-                        for note in self.save(revision, &setup, &target) {
-                            isocast_diagnostics::diagnostic!("warn"; "isocastd: {note}");
-                        }
-                    }
-                }
             }
             None => match state.file.load_warning() {
                 Some(warning) => isocast_diagnostics::diagnostic!("warn"; "isocastd: {warning}"),
@@ -2732,51 +2646,40 @@ impl Daemon {
         Ok(recording)
     }
 
-    /// Split the running recording into a new take (at `timing`).
-    fn split_take(&self, timing: SplitTiming, cause: TakeCause) -> Result<SplitTake, SplitFailed> {
-        let refused = |ending: bool, code: i64, message: &str| SplitFailed {
-            ending,
-            error: RpcError {
-                code,
-                message: message.into(),
-            },
+    /// Split the running recording into a new take.
+    fn split_take(&self) -> Result<SplitTake, RpcError> {
+        let refused = |code: i64, message: &str| RpcError {
+            code,
+            message: message.into(),
         };
         let state = self.state.read();
         let (Some(session), Some(control)) = (&state.session, state.control()) else {
-            return Err(refused(true, RpcError::WRONG_STATE, "not recording"));
+            return Err(refused(RpcError::WRONG_STATE, "not recording"));
         };
         if session.stop.load(Ordering::SeqCst) {
             return Err(refused(
-                true,
                 RpcError::WRONG_STATE,
                 "the recording is stopping, so no new take can begin",
             ));
         }
         if session.files.lock().is_none() {
             return Err(refused(
-                false,
                 RpcError::WRONG_STATE,
                 "the recording is still starting; split once it has started (`isocast status` \
                  says when)",
             ));
         }
-        let reply = control.split(timing);
+        let reply = control.split();
         let current = session.files.clone();
-        let takes = session.takes.clone();
+        let take = session.take.clone();
         let project = session.project.clone();
         let token = session.token.clone();
         drop(state);
         match reply.recv_timeout(START_TIMEOUT) {
             Ok(Ok(split)) => {
                 *current.lock() = Some(split.files.clone());
-                let begins_at = timeline::split_text(&split);
-                *takes.current.lock() = timeline::TakeNow {
-                    number: split.take,
-                    files: split.files.clone(),
-                    begins: Some(std::time::Instant::now() + split.begins_in),
-                    begins_at: Some(begins_at.clone()),
-                };
-                self.take_began(&takes, split.take, &split.manifest);
+                let begins_at = split_text(&split);
+                take.store(split.take, Ordering::SeqCst);
                 self.publish(Event::Started {
                     files: split.files.clone(),
                     begins_at: Some(begins_at),
@@ -2784,14 +2687,13 @@ impl Daemon {
                     manifest: Some(split.manifest.clone()),
                     folder: split.manifest.parent().map(Path::to_path_buf),
                     project: project.map(|p| p.id),
-                    cause: Some(cause),
+                    cause: Some(TakeCause::Split),
                     session: Some(token),
                     by: callers::by(),
                 });
                 Ok(split)
             }
             Ok(Err(why)) => Err(refused(
-                why.ending,
                 match why.ending || why.busy {
                     true => RpcError::WRONG_STATE,
                     false => RpcError::FAILED,
@@ -2801,12 +2703,10 @@ impl Daemon {
             // Every split is answered, even once the recording has ended;
             // this is only isocastd's engine having gone.
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(refused(
-                true,
                 RpcError::WRONG_STATE,
                 "the recording stopped before it could split",
             )),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(refused(
-                false,
                 RpcError::FAILED,
                 "the recording did not split in time",
             )),
@@ -3198,18 +3098,6 @@ impl Daemon {
         ));
         // Each read under one lock, taken and let go here: a guard kept to
         // the end of the `Status` below would deadlock the next.
-        let (timeline, timeline_problem, record_target) = {
-            let timelines = self.timelines.lock();
-            (
-                timelines.current().and_then(|id| timelines.summary(id)),
-                timelines.current_problem().map(str::to_string),
-                timelines.record_target(),
-            )
-        };
-        let recording_into = state
-            .session
-            .as_ref()
-            .and_then(|session| self.recording_into(&session.takes));
         let mut status = Status {
             state: engine,
             finalizing,
@@ -3243,11 +3131,6 @@ impl Daemon {
                 health
             }),
             interrupted: self.interrupted.lock().clone(),
-            timeline,
-            timeline_problem,
-            record_target: Some(record_target),
-            recording_into,
-            export: self.export_running(),
             virtual_camera: Some(state.camera.status_for(state.setup.as_ref())),
             replay: Some(state.replay.status_for(state.setup.as_ref())),
             recording_free_bytes: None,
@@ -3435,16 +3318,8 @@ impl Daemon {
         ))
     }
 
+    /// Start recording.
     fn start(self: &Arc<Self>, params: StartParams) -> Result<Started, RpcError> {
-        self.start_as(params, TakeCause::Start)
-    }
-
-    /// Start recording; `cause` says why, for the `started` event.
-    pub(crate) fn start_as(
-        self: &Arc<Self>,
-        mut params: StartParams,
-        cause: TakeCause,
-    ) -> Result<Started, RpcError> {
         // As asked, for a repeated `start` (decision 17), and who asked.
         let asked = params.clone();
         let by = callers::by();
@@ -3452,18 +3327,6 @@ impl Daemon {
         // second `start` (maybe with another setup) waits, then finds this
         // session (decision 17; review M2).
         let admission = self.start_admission.lock();
-        // Where its takes go (#114): a new project, or a chosen timeline,
-        // written into the folder of that timeline's last take.
-        let (into, into_notes) = self.choose_into(&params)?;
-        if params.folder.is_none()
-            && let Some(id) = &into
-        {
-            params.folder = self
-                .timelines
-                .lock()
-                .get(id)
-                .and_then(timeline::last_take_folder);
-        }
         check_folder(params.folder.as_deref())?;
         if let Some(folder) = &params.folder {
             plugin_folder_refusal(
@@ -3496,12 +3359,12 @@ impl Daemon {
                 });
             }
             if let Some(session) = &state.session {
-                return already_recording(session, cause, &asked);
+                return already_recording(session, &asked);
             }
         }
         // A setup given with the request becomes the live setup; say so if
         // it replaces another, since that one is only kept in the .bak.
-        let mut notes = into_notes;
+        let mut notes = Vec::new();
         if let Some(setup) = params.setup {
             let (revision, replaced) = {
                 let state = self.state.read();
@@ -3538,9 +3401,8 @@ impl Daemon {
                 .unwrap_or_else(|| expand_home(&setup.recording.folder))
         };
         // For a network caller, where it records is inside the folder roots
-        // however it was chosen: given, a chosen timeline's last take's
-        // folder (`into`, `record_target`, a retake) or the setup's
-        // (decision 26), and used as checked.
+        // however it was chosen: given or the setup's (decision 26), and
+        // used as checked.
         let folder =
             self.checked_path("folder", &folder.to_string_lossy(), roots::Access::Write)?;
         // It records into a project folder in the recordings folder
@@ -3570,13 +3432,11 @@ impl Daemon {
             }
         }
         notes.extend(interrupted_note(&interrupted, true));
-        // A timeline that should be current but couldn't be read.
-        notes.extend(self.timelines.lock().current_problem().map(str::to_string));
         // The session is in the state before the engine warms up, so
         // `status` says it is starting and `stop` can cancel it.
         let mut state = self.state.lock();
         if let Some(session) = &state.session {
-            return already_recording(session, cause, &asked);
+            return already_recording(session, &asked);
         }
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(RpcError {
@@ -3601,7 +3461,7 @@ impl Daemon {
             stop: Arc::new(AtomicBool::new(false)),
             files: Arc::new(Mutex::new(None)),
             live: Arc::new(Mutex::new(None)),
-            takes: Arc::new(timeline::SessionTakes::default()),
+            take: Arc::new(AtomicU32::new(0)),
             project: None,
         };
         let id = session.id;
@@ -3611,7 +3471,7 @@ impl Daemon {
             session.stop.clone(),
             session.files.clone(),
             session.live.clone(),
-            session.takes.clone(),
+            session.take.clone(),
         );
         state.session = Some(session);
         drop(state);
@@ -3632,23 +3492,7 @@ impl Daemon {
             picked
         };
         let project = match picked {
-            Ok(project) => {
-                *options.3.into.lock() = match &into {
-                    Some(id) => timeline::SessionInto::Timeline {
-                        id: id.clone(),
-                        new_project: false,
-                    },
-                    None => timeline::SessionInto::NewProject {
-                        name: project
-                            .folder
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| project.id.clone()),
-                        created: project.created,
-                    },
-                };
-                project
-            }
+            Ok(project) => project,
             Err(err) => {
                 self.ended(
                     id,
@@ -3658,7 +3502,6 @@ impl Daemon {
                         error: Some(err.message.clone()),
                         project: None,
                         folder: None,
-                        timeline: None,
                         session: Some(token.clone()),
                         by: stopped_by.lock().clone().flatten(),
                     },
@@ -3697,7 +3540,6 @@ impl Daemon {
                         error: Some(err.message.clone()),
                         project: None,
                         folder: None,
-                        timeline: None,
                         session: Some(token.clone()),
                         by: stopped_by.lock().clone().flatten(),
                     },
@@ -3709,17 +3551,10 @@ impl Daemon {
         let daemon = self.clone();
         let recording = engine.clone();
         let session = token.clone();
-        let session_takes = options.3.clone();
         thread::spawn(move || {
-            let (stop, files, live, takes) = options;
+            let (stop, files, live, take) = options;
             let on_start = |paths: &[PathBuf], manifest: &Path, opened: &[String]| {
-                *takes.current.lock() = timeline::TakeNow {
-                    number: 1,
-                    files: paths.to_vec(),
-                    begins: None,
-                    begins_at: None,
-                };
-                daemon.take_began(&takes, 1, manifest);
+                take.store(1, Ordering::SeqCst);
                 *files.lock() = Some(paths.to_vec());
                 let _ = started_tx.send(Ok((paths.to_vec(), opened.to_vec())));
                 if project.created
@@ -3736,7 +3571,7 @@ impl Daemon {
                     manifest: Some(manifest.to_path_buf()),
                     folder: Some(project.folder.clone()),
                     project: Some(project.id.clone()),
-                    cause: Some(cause),
+                    cause: Some(TakeCause::Start),
                     session: Some(token.clone()),
                     by: by.clone(),
                 });
@@ -3748,14 +3583,12 @@ impl Daemon {
                 for message in status.new_drops(&mut reported.lock()) {
                     daemon.publish(Event::Warning { message });
                 }
-                let take = takes.current.lock().number;
-                daemon.note_overload(&overload, take, status);
+                daemon.note_overload(&overload, take.load(Ordering::SeqCst), status);
                 daemon.publish(Event::Status {
                     live: status.clone(),
                 });
             };
             let on_take = |number: u32, path: &Path, manifest: &SessionManifest| {
-                daemon.take_finished(&takes, number, path, manifest);
                 let folder = path.parent().unwrap_or(Path::new("")).to_path_buf();
                 daemon.publish(Event::TakeFinished {
                     take: number,
@@ -3784,7 +3617,6 @@ impl Daemon {
             let ended =
                 isocast_diagnostics::contain("recording coordinator", || engine.record(&options))
                     .and_then(|r| r.map_err(|err| format!("{err:#}")));
-            daemon.session_over(&takes);
             if ended.is_err() {
                 discard(&project);
             }
@@ -3794,7 +3626,6 @@ impl Daemon {
                 // Unless the folder went again (it held nothing).
                 project: project.folder.exists().then(|| project.id.clone()),
                 folder: project.folder.exists().then(|| project.folder.clone()),
-                timeline: daemon.recording_into(&takes),
                 session: Some(token.clone()),
                 by: stopped_by.lock().clone().flatten(),
             };
@@ -3818,26 +3649,10 @@ impl Daemon {
                     });
                     notes.push(message);
                 }
-                let timeline = self.recording_into(&session_takes);
-                if let Some(into) = &timeline {
-                    notes.push(match into.new_project {
-                        true => format!(
-                            "a new project, with its own timeline {:?} ({})",
-                            into.timeline, into.name
-                        ),
-                        false => format!(
-                            "take {} of timeline {:?} ({})",
-                            into.clips + 1,
-                            into.timeline,
-                            into.name
-                        ),
-                    });
-                }
                 Ok(Started {
                     files,
                     begins_at: None,
                     notes,
-                    timeline,
                     session: Some(session),
                     already_recording: false,
                 })
@@ -4536,14 +4351,17 @@ impl Daemon {
     }
 }
 
+/// When a split's take begins, as replies say it.
+fn split_text(split: &SplitTake) -> String {
+    split
+        .begins_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+}
+
 /// `start` while `session` records: the same `start` again (a retry
 /// after a lost answer) answers with the running session; anything else
 /// is refused.
-fn already_recording(
-    session: &Session,
-    cause: TakeCause,
-    asked: &StartParams,
-) -> Result<Started, RpcError> {
+fn already_recording(session: &Session, asked: &StartParams) -> Result<Started, RpcError> {
     if session.stop.load(Ordering::SeqCst) {
         return Err(RpcError {
             code: RpcError::WRONG_STATE,
@@ -4555,8 +4373,8 @@ fn already_recording(
         });
     }
     // "The same params": the parsed StartParams compare equal (setup,
-    // folder, seconds, new_project, into), whatever the JSON's spelling.
-    if cause != TakeCause::Start || session.asked != *asked {
+    // folder, seconds), whatever the JSON's spelling.
+    if session.asked != *asked {
         return Err(RpcError {
             code: RpcError::WRONG_STATE,
             message: format!(
@@ -4577,7 +4395,6 @@ fn already_recording(
         files: files.unwrap_or_default(),
         begins_at: None,
         notes,
-        timeline: None,
         session: Some(session.token.clone()),
         already_recording: true,
     })
@@ -4756,14 +4573,8 @@ fn plugin_folder_refusal(field: &str, root: &Path, roots: &[PathBuf]) -> Result<
 
 /// Hotkey actions that write into a folder their arguments name, the
 /// argument, and whether it names a file (in the folder) rather than the
-/// folder: `timeline.retake` records there (and remembers it as a
-/// recordings folder), `timeline.export` and `program.screenshot` write
-/// their files there.
-const PATH_ACTIONS: &[(&str, &str, bool)] = &[
-    ("timeline.retake", "folder", false),
-    ("timeline.export", "folder", false),
-    ("program.screenshot", "path", true),
-];
+/// folder: `program.screenshot` writes its file there.
+const PATH_ACTIONS: &[(&str, &str, bool)] = &[("program.screenshot", "path", true)];
 
 /// Refuse, for a plugin's request, a hotkey binding in `new` (new, or
 /// changed since `old`) whose [`PATH_ACTIONS`] path isn't in a recordings

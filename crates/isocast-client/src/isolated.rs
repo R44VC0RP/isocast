@@ -33,7 +33,7 @@ struct Exit {
 
 pub(super) struct SpawnOptions {
     pub input: PipeReader,
-    pub env: [(&'static str, PathBuf); 4],
+    pub env: [(&'static str, PathBuf); 3],
 }
 
 impl IsolatedDaemon {
@@ -75,7 +75,6 @@ impl IsolatedDaemon {
                 ("ISOCAST_SOCKET", socket),
                 ("ISOCAST_SETUP", workspace.join("setup.toml")),
                 ("ISOCAST_PLUGINS", workspace.join("plugins")),
-                ("ISOCAST_TIMELINES", workspace.join("timelines")),
             ],
         };
         let (started_tx, started_rx) = mpsc::channel();

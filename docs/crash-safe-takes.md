@@ -167,9 +167,8 @@ the probes), the finished state uses the audio edit list instead, like
 AVAssetWriter's movies; recovery knows both. Several AAC tracks are just
 several `traf`s and `trak`s. Pause works through the existing cut clock
 (`file.rs` maps times; the writer never sees paused media) plus the commit
-barrier; split/retake create a new writer per take as today, so a split
-is a normal Stop of the old file; timeline export and `join.rs` read
-finished files through AVFoundation as before.
+barrier; split creates a new writer per take as today, so a split
+is a normal Stop of the old file.
 
 Cost: the same hardware encodes (VideoToolbox does the work either way), a
 copy of each compressed sample out of its `CMBlockBuffer` into the fragment

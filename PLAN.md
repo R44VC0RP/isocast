@@ -64,7 +64,7 @@ task queue and its log are archived in `docs/archive/2026-10-22/`.
 ## Later
 
 - Remote engines hardening (R7) on the standard protocol.
-- Performance and governor follow-ups (#27, #110, #127), editor, canvases,
+- Performance and governor follow-ups (#27, #110, #127), canvases,
   masks and media follow-ups (0.0.9 milestone).
 - Linux (after remote engines; nothing above may block it).
 - Playout (#129), scenes as code (#22), plugins (#23).

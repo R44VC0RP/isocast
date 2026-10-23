@@ -428,7 +428,7 @@ try:
             PSModuleAnalysisCachePath=str(root/'scratch'/'ps-module-cache'),
             ISOCAST_BUILD_COMMIT=r['head']+'-worktree', ISOCAST_SCRATCH=str(root/'scratch'),
             ISOCAST_SOCKET=str(root/'scratch'/'isocastd.sock'), ISOCAST_SETUP=str(root/'scratch'/'setup.toml'),
-            ISOCAST_TIMELINES=str(root/'scratch'/'timelines'), ISOCAST_PLUGINS=str(root/'scratch'/'plugins'))
+            ISOCAST_PLUGINS=str(root/'scratch'/'plugins'))
         code = 0
         if r['op'] in ('cargo', 'build'):
             cargo = shutil.which('cargo') or 'cargo.exe'

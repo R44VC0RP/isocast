@@ -236,7 +236,7 @@ itself, a window per engine, and agents allowed. He can overrule the rest.
     - **Folder roots move into R1:**
       - every caller-chosen path, read or write, must resolve inside an
         engine-side root list, symlinks included: recording and setup
-        folders, replay, screenshots, exports, project open and relink,
+        folders, replay, screenshots, take exports (NLE project files),
         reports, text, image, media, slideshow and browser files, OBS
         import paths;
       - the roots are set only on the machine itself (Settings → Remote →

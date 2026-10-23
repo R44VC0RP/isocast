@@ -121,23 +121,6 @@ Targets, and how each is found in a frame:
   again each frame).
 - `none`: no tracking, for scenarios that only check flicker and blank
   frames.
-- `editor-trim`, `editor-playhead`, `editor-crop` (#87,
-  `scripts/motion/editor.toml`): the editor window's drags. Before the
-  scenario's `before` steps the harness records two takes onto a new
-  timeline, trims them to exactly 3 s and 2 s, and opens the editor on
-  them; the run then replays
-  into and draws the editor's own window. State: the first `ClipView`'s
-  right edge, the `Playhead`'s line, the crop's right edge (`CropBox` and
-  the crop). Pixels: the selected clip's accent ring where it ends (the
-  suite selects the clip), the playhead's 1 pt bone line low in the lanes,
-  the crop outline's bone column a quarter down the crop. The dragged
-  object, the playhead and the viewer's time readout (`ShownAt`) are left
-  out of the flicker check: they move with the drag. The takes record
-  only the block's ISO file (no sound) and the program with the tone
-  muted (#94): the test pattern and the beeps follow the engine's clock,
-  and a take's length the wall clock, so trimmed, still takes are what
-  make two lockstep runs draw the same pixels (compare.py: identical). CI
-  runs this suite in lockstep after the standard one.
 
 The standard suite: the Scenes|Sources splitter, the Mixer|Transitions
 splitter (it resizes the dock after it), the splitter above the docks (it
@@ -276,7 +259,6 @@ builds `isocast`, `isocastd` and `isocast-ui` (release), then
 ```sh
 scripts/motion.sh --suite scripts/motion/controls.toml --no-timing   # the harness's own controls
 scripts/motion.sh --clock lockstep --no-timing                       # the standard suite
-scripts/motion.sh --suite scripts/motion/editor.toml --clock lockstep --no-timing   # the editor's
 ```
 
 and uploads the output folders as `motion-results`. It is a real gate:
@@ -291,8 +273,8 @@ updated).
 ## Layout audit (#107)
 
 `scripts/layout-audit.py` draws every screen offscreen (the main window,
-Studio Mode, the vertical canvas, Multiview and projector windows, the
-editor with crop mode and export, every Settings page, the Properties and
+Studio Mode, the vertical canvas, Multiview and projector windows, every
+Settings page, the Properties and
 other dialogs, menus, toasts, first launch, OBS import, Optimize, and
 recording and streaming states; `list` shows them) at eight window sizes
 from 900x600@2 to 3440x1440@1 plus a tall one, and a width sweep (900, the
@@ -315,7 +297,7 @@ coordinating agent) triages the flagged pictures before filing anything;
 scripts/layout-audit.py run --bin target/release --out /tmp/layout   # ~500 pictures
 scripts/layout-audit.py run --bin target/release --out /tmp/layout \
     --views 'settings-*' --sizes 900x600@2,1440x900@2 --sweep none
-scripts/layout-audit.py check --out /tmp/layout --only 'editor-*' --recheck
+scripts/layout-audit.py check --out /tmp/layout --only 'settings-*' --recheck
 scripts/layout-audit.py calibrate --bin target/release --out /tmp/layout-cal
 ```
 

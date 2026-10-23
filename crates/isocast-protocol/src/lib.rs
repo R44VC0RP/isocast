@@ -22,13 +22,13 @@ pub mod h264;
 pub mod hello;
 pub mod hotkeys;
 pub mod init;
-pub mod isoprj;
 pub mod layout;
 pub mod library;
 pub mod located;
 pub mod machine;
 pub mod manifest;
 mod mask;
+pub mod nle;
 pub mod obs;
 pub mod openrpc;
 pub mod optimize;
@@ -41,7 +41,6 @@ pub mod replay;
 pub mod roots;
 mod source;
 pub mod stream;
-pub mod timeline;
 mod transition;
 pub mod virtual_camera;
 pub mod websocket;
@@ -1533,15 +1532,8 @@ pub const PROGRAM: &str = "program";
 /// and reports; reserved, so no source can use it.
 pub const VERTICAL_PROGRAM: &str = "vertical-program";
 
-/// Source ids no source can have: the program recordings' names, and a
-/// timeline export's derived files' labels ([`timeline::EDITED`],
-/// [`timeline::VERTICAL`]).
-pub const RESERVED_SOURCE_IDS: [&str; 4] = [
-    PROGRAM,
-    VERTICAL_PROGRAM,
-    timeline::EDITED,
-    timeline::VERTICAL,
-];
+/// Source ids no source can have: the program recordings' names.
+pub const RESERVED_SOURCE_IDS: [&str; 2] = [PROGRAM, VERTICAL_PROGRAM];
 
 fn default_true() -> bool {
     true
@@ -1566,13 +1558,21 @@ pub struct Recording {
     /// The replay buffer: how much of the program it keeps.
     #[serde(default, skip_serializing_if = "replay::ReplaySettings::is_default")]
     pub replay: replay::ReplaySettings,
-    /// The app opens the editor, in its own window, on the take's project
-    /// and timeline when a recording stops (a split doesn't). Off unless
-    /// set: a window after every stop gets in the way of a session of many
-    /// takes and of recordings driven from the CLI or MCP. While a stream
-    /// runs it opens behind the studio, never taking the keyboard.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub open_editor: bool,
+    /// Retired with the editor (2026-10-22): read and ignored, so setups
+    /// that set it still load; never written.
+    #[serde(default, skip_serializing)]
+    #[schemars(schema_with = "crate::retired_open_editor")]
+    pub open_editor: serde::de::IgnoredAny,
+}
+
+/// `recording.open_editor`'s schema: still allowed (old setups set it),
+/// deprecated, and ignored.
+fn retired_open_editor(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "boolean",
+        "deprecated": true,
+        "description": "Retired with the editor (2026-10-22): accepted and ignored.",
+    })
 }
 
 fn default_keep_free_gb() -> f64 {
@@ -2047,54 +2047,6 @@ impl Setup {
         })
     }
 
-    /// Give sources whose ids became reserved (`edited`, `vertical`, #94)
-    /// the first free `<id>-2`, `<id>-3`, …, everywhere the setup names
-    /// them (scene items, recording lists, filters' side-chains, the
-    /// virtual camera, hotkeys). Returns each (old, new) id; a setup
-    /// without such a source is left as it was.
-    pub fn rename_reserved_sources(&mut self) -> Vec<(String, String)> {
-        let reserved = [timeline::EDITED, timeline::VERTICAL];
-        if !self
-            .sources
-            .iter()
-            .any(|s| reserved.contains(&s.id.as_str()))
-        {
-            return Vec::new();
-        }
-        let Ok(mut value) = serde_json::to_value(&*self) else {
-            return Vec::new();
-        };
-        let mut taken: HashSet<String> = self.sources.iter().map(|s| s.id.clone()).collect();
-        taken.extend(RESERVED_SOURCE_IDS.iter().map(|id| id.to_string()));
-        let mut renamed = Vec::new();
-        for old in reserved {
-            if !self.sources.iter().any(|s| s.id == old) {
-                continue;
-            }
-            let new = (2..)
-                .map(|n| format!("{old}-{n}"))
-                .find(|id| !taken.contains(id))
-                .expect("a free id");
-            taken.insert(new.clone());
-            if let Some(sources) = value.get_mut("sources").and_then(|v| v.as_array_mut()) {
-                for source in sources {
-                    if source.get("id").and_then(|v| v.as_str()) == Some(old) {
-                        source["id"] = serde_json::Value::String(new.clone());
-                    }
-                }
-            }
-            rename_refs(&mut value, old, &new);
-            renamed.push((old.to_string(), new));
-        }
-        match Self::from_value(value) {
-            Ok(setup) => {
-                *self = setup;
-                renamed
-            }
-            Err(_) => Vec::new(),
-        }
-    }
-
     /// The setup as TOML, as `isocast get` and setup files write it.
     pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
@@ -2358,7 +2310,7 @@ impl Setup {
                 },
                 keep_free_gb: default_keep_free_gb(),
                 replay: Default::default(),
-                open_editor: false,
+                open_editor: serde::de::IgnoredAny,
             },
             stream: None,
             vertical: None,
@@ -2688,16 +2640,6 @@ impl Setup {
                     format!("sources[{i}].id"),
                     "\"vertical-program\" is reserved for the vertical program recording; pick \
                      another id",
-                );
-            }
-            // An export's derived files are labelled like sources (#94).
-            if [timeline::EDITED, timeline::VERTICAL].contains(&source.id.as_str()) {
-                issues.add(
-                    format!("sources[{i}].id"),
-                    format!(
-                        "{:?} is reserved for a timeline export's {} file; pick another id",
-                        source.id, source.id
-                    ),
                 );
             }
             source.kind.check(&format!("sources[{i}]"), &mut issues);
@@ -3556,53 +3498,6 @@ fn parse_pattern(arg: &str) -> Option<SourceKind> {
     }))
 }
 
-/// Rename source `old` to `new` wherever a setup's JSON names a source:
-/// `source`, `sidechain_source` (filters' and plugins' side-chains) and
-/// `mask_source` values, `sources` and `audio` lists, `source_audio`
-/// keys and every id in its lists, and `held_sources` keys. These are all
-/// the places `Setup::validate` checks a source id (#94).
-fn rename_refs(value: &mut serde_json::Value, old: &str, new: &str) {
-    use serde_json::Value;
-    let swap = |v: &mut Value| {
-        if v.as_str() == Some(old) {
-            *v = Value::String(new.to_string());
-        }
-    };
-    match value {
-        Value::Object(map) => {
-            for key in ["source_audio", "held_sources"] {
-                if let Some(Value::Object(inner)) = map.get_mut(key)
-                    && let Some(moved) = inner.remove(old)
-                {
-                    inner.insert(new.to_string(), moved);
-                }
-            }
-            // An ISO file's audio list names audio sources by id.
-            if let Some(Value::Object(inner)) = map.get_mut("source_audio") {
-                for list in inner.values_mut() {
-                    if let Value::Array(items) = list {
-                        items.iter_mut().for_each(swap);
-                    }
-                }
-            }
-            for (key, v) in map.iter_mut() {
-                match (key.as_str(), &mut *v) {
-                    ("source" | "sidechain_source" | "mask_source", Value::String(_)) => swap(v),
-                    ("sources" | "audio", Value::Array(items)) => items.iter_mut().for_each(swap),
-                    _ => {}
-                }
-                rename_refs(v, old, new);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                rename_refs(item, old, new);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -3613,80 +3508,6 @@ fn is_valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reserved_source_ids_are_renamed_with_their_references() {
-        let mut setup = Setup::from_toml(
-            r##"
-version = 1
-name = "Old"
-[canvas]
-width = 1280
-height = 720
-fps = 30
-[recording]
-folder = "/tmp/rec"
-program = { encoder = { codec = "hevc" }, audio = ["edited"] }
-iso = { enabled = true, sources = ["vertical", "vertical-2"], audio = ["edited"], source_audio = { vertical = ["edited", "mic"], vertical-2 = ["edited"] } }
-[[sources]]
-id = "vertical"
-kind = "test_pattern"
-[[sources]]
-id = "vertical-2"
-kind = "color"
-color = "#000000"
-filters = [ { kind = "source_mask", mask_source = "vertical" } ]
-[[sources]]
-id = "edited"
-kind = "tone"
-[[sources]]
-id = "mic"
-kind = "tone"
-audio_filters = [ { kind = "compressor", sidechain_source = "edited" } ]
-[[scenes]]
-id = "main"
-name = "Main"
-[[scenes.items]]
-source = "vertical"
-rect = { x = 0, y = 0, width = 1280, height = 720 }
-"##,
-        )
-        .unwrap();
-        assert!(!setup.validate().is_empty());
-        let renamed = setup.rename_reserved_sources();
-        assert_eq!(
-            renamed,
-            [
-                ("edited".to_string(), "edited-2".to_string()),
-                ("vertical".to_string(), "vertical-3".to_string())
-            ]
-        );
-        assert!(setup.validate().is_empty(), "{:?}", setup.validate());
-        assert_eq!(setup.recording.iso.sources, ["vertical-3", "vertical-2"]);
-        let source_audio: Vec<(&str, Vec<&str>)> = setup
-            .recording
-            .iso
-            .source_audio
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.iter().map(String::as_str).collect()))
-            .collect();
-        assert_eq!(
-            source_audio,
-            [
-                ("vertical-2", vec!["edited-2"]),
-                ("vertical-3", vec!["edited-2", "mic"])
-            ]
-        );
-        let json = serde_json::to_string(&setup).unwrap();
-        assert!(json.contains(r#""mask_source":"vertical-3""#), "{json}");
-        assert!(json.contains(r#""sidechain_source":"edited-2""#), "{json}");
-        assert_eq!(setup.recording.program.audio, ["edited-2"]);
-        assert_eq!(
-            setup.scenes[0].items[0].source.as_deref(),
-            Some("vertical-3")
-        );
-        assert!(setup.rename_reserved_sources().is_empty());
-    }
 
     #[test]
     fn json_errors_name_their_path() {

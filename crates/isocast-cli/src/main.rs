@@ -41,7 +41,6 @@ mod replay;
 mod roots;
 #[cfg(any(target_os = "macos", windows))]
 mod shared_frames;
-mod timeline;
 mod virtual_camera;
 mod websocket;
 
@@ -214,36 +213,13 @@ enum Command {
         #[command(subcommand)]
         command: data::DataCommand,
     },
-    /// Timelines: takes in order, joined into one file by `export`. Each
-    /// recording starts a new project with its own timeline unless
-    /// `isocast record-target` (or `timeline new`) chose one to add its
-    /// takes to; `retake` records the last one again.
-    Timeline {
-        #[command(subcommand)]
-        command: timeline::TimelineCommand,
-    },
     /// Recording projects: a folder per recording session
     /// (`<date> <time> Untitled` in the recordings folder) with every
-    /// take's files, manifests and exports.
+    /// take's files and manifests, and takes as projects for Final Cut Pro,
+    /// Premiere Pro or DaVinci Resolve (`project export-nle`).
     Project {
         #[command(subcommand)]
         command: project::ProjectCommand,
-    },
-    /// Record the last take again. Not recording (or while a stop is
-    /// finishing, once it has): take the current timeline's last clip off
-    /// (its files stay) and start recording. Recording: drop the take being
-    /// recorded from the timeline (its files stay) and begin a new take
-    /// about a quarter second later, without stopping any device; returns
-    /// once it has begun.
-    Retake {
-        /// Write the new take here; else where the take it replaces is.
-        #[arg(long)]
-        folder: Option<PathBuf>,
-        /// Stop on its own after this many seconds.
-        #[arg(long)]
-        seconds: Option<f64>,
-        #[arg(long)]
-        json: bool,
     },
     /// List displays, windows, cameras, microphones and audio outputs (for
     /// monitoring), with their ids and formats, and the permissions
@@ -280,11 +256,8 @@ enum Command {
     /// Start recording in the background (in isocastd, launched if needed)
     /// and return once every file is created. Same options as `record`;
     /// with neither a setup nor --source, records the live setup. A setup
-    /// or --source given here becomes the live setup.
-    ///
-    /// Its takes go where `isocast record-target` says (a new project with
-    /// its own timeline, unless a timeline was chosen); --new-project or
-    /// --into choose for this recording only.
+    /// or --source given here becomes the live setup. Its takes go into a
+    /// new project folder in the recordings folder (or --folder).
     Start {
         setup: Option<PathBuf>,
         #[arg(long = "source", value_name = "SPEC")]
@@ -294,23 +267,6 @@ enum Command {
         seconds: Option<f64>,
         #[arg(long)]
         folder: Option<PathBuf>,
-        /// Start a new project with its own timeline.
-        #[arg(long, conflicts_with = "into")]
-        new_project: bool,
-        /// Add a take to this timeline (an id from `isocast timeline
-        /// list`), in the folder of its last take.
-        #[arg(long, value_name = "TIMELINE")]
-        into: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Where the next recording goes, or choose it: `new` (each recording
-    /// starts a new project with its own timeline; the default) or a
-    /// timeline's id (its next take). Kept across restarts; a recording
-    /// running keeps its own.
-    RecordTarget {
-        /// `new`, or a timeline's id; absent: show the choice.
-        target: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -741,8 +697,7 @@ enum Command {
         /// (setup_changed, started, status, warning, scene_changed,
         /// preview_changed, marker, stream, stopped, levels,
         /// source_changed, engine_changed, library_changed,
-        /// plugin_changed, data_changed, timeline_changed, export_progress,
-        /// export_finished).
+        /// plugin_changed, data_changed, take_finished, …).
         #[arg(long, value_delimiter = ',', value_name = "KINDS")]
         kinds: Vec<String>,
         /// Leave out these kinds of events, like `status,source_changed`.
@@ -1626,13 +1581,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Plugin { command } => plugin::run(command),
         Command::Data { command } => data::run(command),
-        Command::Timeline { command } => timeline::run(command),
         Command::Project { command } => project::run(command),
-        Command::Retake {
-            folder,
-            seconds,
-            json,
-        } => timeline::retake(folder, seconds, json),
         Command::Hotkeys { command } => hotkeys::run(command),
         Command::GpuAdapter { json } => {
             let luid: Option<(u32, i32)> = Client::connect_or_launch()?.call(Method::GpuAdapter)?;
@@ -1682,18 +1631,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             sources,
             seconds,
             folder,
-            new_project,
-            into,
             json,
-        } => start(
-            setup.as_deref(),
-            &sources,
-            seconds,
-            folder,
-            (new_project, into),
-            json,
-        ),
-        Command::RecordTarget { target, json } => timeline::record_target(target, json),
+        } => start(setup.as_deref(), &sources, seconds, folder, json),
         Command::Stop {
             wait,
             session,
@@ -2739,7 +2678,6 @@ fn start(
     sources: &[String],
     seconds: Option<f64>,
     folder: Option<PathBuf>,
-    (new_project, into): (bool, Option<String>),
     json: bool,
 ) -> Result<ExitCode> {
     // Neither a setup nor sources: record the live setup.
@@ -2756,8 +2694,6 @@ fn start(
         setup,
         folder,
         seconds,
-        new_project,
-        into,
     })))?;
     if json {
         println!("{}", serde_json::to_string_pretty(&started)?);
@@ -2922,11 +2858,6 @@ fn status(json: bool) -> Result<ExitCode> {
             data: None,
             diagnostics: None,
             interrupted: Vec::new(),
-            timeline: None,
-            timeline_problem: None,
-            record_target: None,
-            recording_into: None,
-            export: None,
             virtual_camera: None,
             replay: None,
             recording_free_bytes: None,
@@ -2994,53 +2925,6 @@ fn status(json: bool) -> Result<ExitCode> {
     }
     if let Some(cpu) = status.cpu_percent {
         println!("CPU: {cpu:.1}% of this {} (isocastd)", wording::MACHINE);
-    }
-    if let Some(timeline) = &status.timeline {
-        println!(
-            "Timeline: {:?} ({}), {} clip{}, {:.2} s (current)",
-            timeline.name,
-            timeline.id,
-            timeline.clips,
-            if timeline.clips == 1 { "" } else { "s" },
-            timeline.duration_seconds
-        );
-    }
-    if let Some(into) = &status.recording_into {
-        println!(
-            "Recording into: {}",
-            match into.new_project {
-                true => format!(
-                    "a new project, timeline {:?} ({})",
-                    into.name, into.timeline
-                ),
-                false => format!(
-                    "take {} of {:?} ({})",
-                    into.clips + 1,
-                    into.name,
-                    into.timeline
-                ),
-            }
-        );
-    }
-    if let Some(target) = &status.record_target {
-        println!(
-            "Next recording: {} (`isocast record-target` changes it)",
-            timeline::target_words(target)
-        );
-        for note in &target.notes {
-            println!("note: {note}");
-        }
-    }
-    if let Some(problem) = &status.timeline_problem {
-        println!("warning: {problem}");
-    }
-    if let Some(export) = &status.export {
-        println!(
-            "Exporting timeline {:?}: {:.0}% (export {})",
-            export.timeline,
-            export.progress * 100.0,
-            export.export
-        );
     }
     if let Some(free) = status.recording_free_bytes {
         println!("Recording disk: {:.1} GB free", free as f64 / 1e9);
@@ -4459,25 +4343,11 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                     time_seconds,
                     ..
                 } => println!("marker {label:?} at {time_seconds:.2} s in take {take}"),
-                Event::Stopped {
-                    report,
-                    error,
-                    timeline,
-                    ..
-                } => match (report, error) {
+                Event::Stopped { report, error, .. } => match (report, error) {
                     (Some(report), _) => println!(
-                        "recording stopped after {:.2} s; manifest {}{}",
+                        "recording stopped after {:.2} s; manifest {}",
                         report.duration_seconds,
                         report.manifest.display(),
-                        timeline
-                            .map(|into| format!(
-                                "; {} take{} on timeline {} ({} clips)",
-                                into.takes,
-                                if into.takes == 1 { "" } else { "s" },
-                                into.timeline,
-                                into.clips
-                            ))
-                            .unwrap_or_default()
                     ),
                     (None, Some(error)) => println!("recording failed: {error}"),
                     (None, None) => println!("recording stopped"),
@@ -4540,33 +4410,6 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 Event::DataChanged { revision, keys } => {
                     println!("data changed (revision {revision}): {}", keys.join(", "));
                 }
-                Event::TimelineChanged {
-                    timeline,
-                    action,
-                    clip,
-                    clips,
-                    ..
-                } => {
-                    let action = serde_json::to_value(action)?;
-                    println!(
-                        "timeline {timeline} {}{}: {clips} clip{}",
-                        action.as_str().unwrap_or_default(),
-                        clip.map(|clip| format!(" {clip}")).unwrap_or_default(),
-                        if clips == 1 { "" } else { "s" }
-                    );
-                }
-                Event::ExportProgress {
-                    export, progress, ..
-                } => println!("export {export}: {:.0}%", progress * 100.0),
-                Event::ExportFinished {
-                    export,
-                    manifest,
-                    error,
-                    ..
-                } => match error {
-                    None => println!("export {export} finished: {}", manifest.display()),
-                    Some(error) => println!("export {export} failed: {error}"),
-                },
                 Event::HotkeyFired {
                     binding,
                     action,
@@ -4644,19 +4487,6 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                     }
                 }
                 Event::GovernorChanged { governor } => println!("{}", governor.reason),
-                Event::ProjectOpened {
-                    path,
-                    timeline,
-                    editor,
-                    ..
-                } => println!(
-                    "project {} opened on timeline {timeline}{}",
-                    path.display(),
-                    if editor { " (in the editor)" } else { "" }
-                ),
-                Event::RecordTarget { target } => {
-                    println!("next recording: {}", timeline::target_words(&target))
-                }
                 Event::RemoteHeartbeat => {}
                 Event::RemoteClientConnected { peer } => println!(
                     "remote client connected: {} ({})",

@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-125 tools. Arguments marked required must be given; ids, not names,
+104 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -20,7 +20,7 @@ Mark this moment in the recording with a label; it is written to the manifest wi
 
 | Argument | Type | Description |
 |---|---|---|
-| `label` (required) | string | What happens at this moment, like "intro" or "retake". |
+| `label` (required) | string | What happens at this moment, like "intro" or "take 2". |
 
 ## add_plugin
 
@@ -134,10 +134,6 @@ Close a projector by `id` (from list_projectors), or every one with `all`. Where
 | `id` | string (optional) | The projector's id (`projector_list`); absent with `all`. |
 | `reason` | string (optional) | Why, for the `projectors` event (the app says "the display was disconnected"). |
 
-## close_timeline
-
-Make no timeline current; if it was chosen for the next recording, recordings start new projects again. Returns the id of the timeline that was current.
-
 ## create_collection_or_profile
 
 Make a scene collection (one empty scene on the canvas in use) or a profile (60 fps, HEVC program and ISO files to ~/Movies/Isocast), or a copy of one (copy_of: its id, OBS's Duplicate); with switch, start using it.
@@ -150,19 +146,6 @@ Make a scene collection (one empty scene on the canvas in use) or a profile (60 
 | `name` (required) | string | Its name. |
 | `switch` | boolean | Switch to it once made (refused while recording or streaming). |
 
-## crop_clip
-
-Crop the edited video from `start_seconds` to `end_seconds` on the timeline: `crop` is the part of each clip's picture to show ({x, y, width, height} as fractions of the picture, from the top-left), `preset` a shape (16:9, 9:16, 1:1, 4:5: the largest that fits inside `crop` or the picture, centred), or `clear` the whole picture again. Clips are split at the span's ends; the crop applies to the angle each clip shows. export_timeline encodes cropped clips again, scaled to the program's size, in the edited file (program and ISO files stay whole). One undoable edit. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `clear` | boolean | Show the whole picture again over the span (no `crop` or `preset`). |
-| `crop` | Crop | The part of each clip's picture to show (fractions of its width and height, from the top-left); the whole picture if absent and a `preset` is given. |
-| `end_seconds` (required) | number |  |
-| `preset` | CropPreset | Make it this shape: the largest rectangle of it inside `crop` (or the picture), centred: `16:9`, `9:16`, `1:1` or `4:5`. |
-| `start_seconds` (required) | number | Where the span starts and ends, in seconds on the timeline, each rounded to the frame grid of the clip there. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
-
 ## delete_collection_or_profile
 
 Delete a scene collection or profile that isn't in use (switch away first); its file is kept in the library's deleted folder.
@@ -171,16 +154,6 @@ Delete a scene collection or profile that isn't in use (switch away first); its 
 |---|---|---|
 | `id` (required) | string |  |
 | `kind` (required) | LibraryKind |  |
-
-## delete_range
-
-Take `start_seconds` to `end_seconds` (on the timeline) out and close the gap (ripple delete): clips across its ends are trimmed, clips in it taken off. The takes' files are untouched; one undoable edit. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `end_seconds` (required) | number |  |
-| `start_seconds` (required) | number | Where the span starts and ends, in seconds on the timeline, each rounded to the frame grid of the clip there. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## developer_mode
 
@@ -213,28 +186,18 @@ Predict instantly, without benchmarking, whether a setup's files (the live setup
 | `setup` | object (optional) | The setup to judge; the live setup (at its sources' live formats) if absent (the shape get_setup returns). |
 | `stream` | boolean (optional) | Count the stream's encode. Default: the live setup's if it streams now; a given setup's if it has a stream. |
 
-## export_timeline
+## export_take_nle
 
-Join a timeline's clips (the current one unless `timeline` is given), in order, into one program file and one file per ISO source every clip has, each cut frame-accurately to the clips' in and out points (video copied as recorded except from a cut to the next keyframe; audio re-encoded once and cross-faded so it stays in sync at every join), an EDITED file when clips show other angles (set_angle) or crops (crop_clip), a VERTICAL (9:16) edited file with `vertical` (a 9:16 crop fills it), plus an .export.json manifest, next to the first take (or in `folder`). Sources some clips lack are skipped, saying why. It runs in the background: returns at once with the files it will write; get_events shows export_progress and export_finished.
-
-| Argument | Type | Description |
-|---|---|---|
-| `folder` | string (optional) | Where to write the joined files (made if missing); else the folder of the first clip's take. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
-| `vertical` | boolean | Also write a vertical (9:16) edited file, `<name> VERTICAL.<ext>`: each clip's angle (or its crop) fitted into the program's size turned on its side (1920x1080 → 1080x1920), so a 9:16 crop fills the frame; the program's sound. Every frame is encoded again. |
-
-## export_timeline_nle
-
-Write a timeline (the current one unless `timeline` is given) as a project another editor opens: `format` fcpxml (Final Cut Pro), xmeml (Premiere Pro; with `app` resolve, DaVinci Resolve) or otio (OpenTimelineIO). Every ISO source on its own video track with the program on top, each clip's angle the one track on at that clip, crops as crop and transform, markers, and each file's audio on its own tracks (the program's on, the ISO files' off), lined up from the take manifests. It points at the takes' own files: nothing is encoded, copied or changed. Written next to the first take (or in `folder`, numbered so nothing is overwritten), or exactly at `path` (replacing an earlier Isocast export there, or any file with `replace`). Returns the file, its tracks and notes on anything not as in Isocast's export.
+Write a take as a project another editor opens: `take` is the take's manifest (`….session.json`, as start_recording, stop_recording and take_finished events give it; list_projects lists them) or a project folder holding one take, `format` fcpxml (Final Cut Pro), xmeml (Premiere Pro; with `app` resolve, DaVinci Resolve) or otio (OpenTimelineIO). Every ISO source on its own video track with the program on top (the one track on), markers, and each file's audio on its own tracks (the program's on, the ISO files' off), lined up from the manifest. It points at the take's own files: nothing is encoded, copied or changed. Written next to the take (or in `folder`, numbered so nothing is overwritten), or exactly at `path` (replacing an earlier Isocast export there, or any file with `replace`). Returns the file, its tracks and notes.
 
 | Argument | Type | Description |
 |---|---|---|
 | `app` | NleApp | The editor it is for: `final_cut`, `premiere` or `resolve`. With xmeml, `resolve` writes the scale of a picture of another size than the sequence from Resolve's own fit, and each audio channel on its own track (Resolve reads xmeml audio a channel at a time). Absent: `final_cut` for fcpxml, `premiere` for xmeml, `resolve` for otio (the same file for any editor). Resolve's best format is xmeml: it ignores FCPXML's split of picture and sound. |
-| `folder` | string (optional) | Write it in this folder (made if missing), named after the timeline and numbered so nothing is overwritten; else the first clip's take's folder. Not with `path`. |
+| `folder` | string (optional) | Write it in this folder (made if missing), named after the take and numbered so nothing is overwritten; else the take's own folder. Not with `path`. |
 | `format` (required) | NleFormat | `fcpxml` (Final Cut Pro), `xmeml` (Premiere Pro, or Resolve with app `resolve`) or `otio` (OpenTimelineIO). |
-| `path` | string (optional) | Write exactly this file (an absolute path ending in the format's extension: .fcpxml, .xml or .otio). A file already there is replaced only if it is an earlier Isocast timeline export, or with `replace`. Not with `folder`. |
+| `path` | string (optional) | Write exactly this file (an absolute path ending in the format's extension: .fcpxml, .xml or .otio). A file already there is replaced only if it is an earlier Isocast export, or with `replace`. Not with `folder`. |
 | `replace` | boolean | With `path`: replace whatever file is there. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
+| `take` (required) | string | The take: its manifest (`<date> <time>.session.json`, as `start`, `stop` and `take_finished` give it), or a project folder holding exactly one take; an absolute path. |
 
 ## files_list
 
@@ -322,14 +285,6 @@ The JSON Schema of a setup document (what get_setup returns and plan_change, app
 ## get_status
 
 Whether Isocast is idle or recording, with live frame and drop counters, the files being written, the scene on air, the last session's report, the stream (state, bitrates, dropped frames, congestion, reconnects, whether a key is set), the live engine's frame rate (engine.fps of canvas.fps), each live source's size and frame rate (engine.sources: fps opened at, received_fps measured), isocastd's CPU use (cpu_percent, of all cores), the recording disk's free space (recording_free_bytes) and how fast the program file fills it at most (program_bytes_per_second), and which isocastd answered (daemon: version, build, commit, executable, pid; an engine left running from before an app update reports the old build).
-
-## get_timeline
-
-A timeline (the current one unless `timeline` gives an id): its clips in order, each with its id (c1, c2…), place and length on the timeline, take (session manifest), status and files (program and ISO files), and the takes taken off it (their files are kept where they are).
-
-| Argument | Type | Description |
-|---|---|---|
-| `timeline` | string (optional) | A timeline's id (`timeline_list` has them); the current one if absent. |
 
 ## gpu_adapter
 
@@ -440,15 +395,11 @@ The open projectors (what each shows, full screen on which display or where its 
 
 ## list_projects
 
-The recording projects, newest first: each recording session writes into its own folder (`<date> <time> Untitled` in the recordings folder) with every take's program and ISO files, manifests and exports. Each has an id (stable across renames), name, folder, takes (manifests) and files. Optional `limit` (100 if absent).
+The recording projects, newest first: each recording session writes into its own folder (`<date> <time> Untitled` in the recordings folder) with every take's program and ISO files and manifests. Each has an id (stable across renames), name, folder, takes (manifests) and files. Optional `limit` (100 if absent).
 
 | Argument | Type | Description |
 |---|---|---|
 | `limit` | integer (optional) | At most this many, newest first: 100 if absent. |
-
-## list_timelines
-
-Every timeline (id, name, clips, length) and which is current (the one the editor shows and timeline edits act on).
 
 ## live_engine
 
@@ -480,24 +431,6 @@ Cancel machine calibration and retain the previous valid profile.
 
 Show this machine's measured capabilities and calibration state; missing or stale measurements fall back to the per-chip table.
 
-## move_clip
-
-Move a clip (by id) to another place on a timeline: `index` counts from 0 (the first). Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `clip` (required) | string | The clip's id, like `c3`. |
-| `index` (required) | integer | Where it goes, counting from 0 (the first clip) to the number of clips less one (the last). |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
-
-## new_timeline
-
-Make a timeline (optional `name`), make it current and choose it for the next recording (record_target): from then on every take that finishes (stop_recording, or split_take) is added to its end as a clip, until record_target says `new`. A timeline is takes in order, like a clip bar: retake records the last one again, remove_clip and move_clip edit the order, and export_timeline joins them into one file. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `name` | string (optional) | Its name; "Timeline N" if absent. Its id is made from it. |
-
 ## open_permission_settings
 
 Open System Settings on the user's screen at the pane where a permission (screen_recording, camera, microphone or system_audio) is turned on by hand, for one that was refused.
@@ -505,16 +438,6 @@ Open System Settings on the user's screen at the pane where a permission (screen
 | Argument | Type | Description |
 |---|---|---|
 | `permission` (required) | PermissionKind | screen_recording, camera, microphone or system_audio. |
-
-## open_project
-
-Open a project file (`<name>.isoprj`, in every project folder) or a project folder by full `path`: its timelines join the engine's (taken in if the folder was copied from elsewhere, paths resolved where it is now), one becomes the current timeline (`timeline`, else the current one if it is the project's, else its newest; a project with none gets one of its takes), and the app shows the editor on it unless `editor` is false. Missing takes are listed in `offline` (relink_clip), never an error. Allowed while recording. Whether the app opens the editor when a recording stops is the setup's `recording.open_editor` (apply_change with patch {"recording": {"open_editor": true}}). Returns the project, its timelines and the one opened.
-
-| Argument | Type | Description |
-|---|---|---|
-| `editor` | boolean (optional) | Ask the app to show the editor on it (true if absent). |
-| `path` (required) | string | A `.isoprj` file, or a project folder (its `.isoprj`, or its takes if it has none yet). |
-| `timeline` | string (optional) | Which of the project's timelines to open (an id); else the current timeline if it is one of them, else its newest. |
 
 ## open_projector
 
@@ -533,14 +456,6 @@ Open a projector: the program, studio mode's preview, a scene (`scene` id), a vi
 | `vertical` | boolean (optional) | For `view = multiview`: show the vertical canvas's program in the grid's last tile, in place of a scene (the live setup needs a vertical canvas). Absent: as the open multiview has it, else no. |
 | `view` (required) | ProjectorView |  |
 
-## open_timeline
-
-Make a timeline current (by id): the one the editor shows and timeline edits act on. Recordings go where record_target says.
-
-| Argument | Type | Description |
-|---|---|---|
-| `timeline` (required) | string | The id of the timeline to make current. |
-
 ## optimize_setup
 
 Optimize the live setup for `goal` recording, streaming or both (OBS's Auto-Configuration Wizard). Recording favours quality and ISO files (HEVC High, an ISO file per captured source); streaming sets the service and a bitrate from the upload speed (upload_kbps, or measured like test_upload_speed; never for a custom server, test it first) and sizes the stream to it. Then it benchmarks this Mac like tune_encoders and steps down where it can't keep up. Returns a one-line `summary`, the optimized setup, its differences from the live setup, the benchmark and notes; with apply it becomes the live setup. Takes a minute or two; refused while recording or streaming.
@@ -556,7 +471,7 @@ Optimize the live setup for `goal` recording, streaming or both (OBS's Auto-Conf
 
 ## pause_recording
 
-Pause the same recording files on a shared video/audio boundary. Streaming continues. Markers land at the paused playhead; resume before split or retake.
+Pause the same recording files on a shared video/audio boundary. Streaming continues. Markers land at the paused playhead; resume before split.
 
 ## plan_change
 
@@ -598,30 +513,6 @@ Read a UTF-8 page (default 4096 bytes, max 16384) from a redacted bug-report pre
 | `offset` | integer |  |
 | `preview_id` (required) | string |  |
 
-## recent_projects
-
-The project files opened lately (File › Open Recent), newest first, each with whether it is still there; `clear` forgets them.
-
-| Argument | Type | Description |
-|---|---|---|
-| `clear` | boolean | Forget them all (File › Open Recent › Clear Menu). |
-
-## record_target
-
-Where the next recording goes, and with `target`, choose it: `new` (the default: each recording starts a new project folder with its own timeline) or a timeline's id (list_timelines), whose next take it then is, written into the folder of its last take. Kept across restarts and shown in get_status (record_target); a recording running keeps its own. Returns the choice: the timeline, its name and the take it would be.
-
-| Argument | Type | Description |
-|---|---|---|
-| `target` | string (optional) | `new` (each recording starts a new project with its own timeline) or a timeline's id (`timeline_list` has them): its next take. Absent: the choice is only read. |
-
-## redo_edit
-
-Put back the last edit undo_edit took back. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `timeline` | string (optional) | A timeline's id (`timeline_list` has them); the current one if absent. |
-
 ## refresh_browser
 
 Reload a browser source's page in the running recording, bypassing the cache, for example after changing the page or when it stopped updating.
@@ -629,16 +520,6 @@ Reload a browser source's page in the running recording, bypassing the cache, fo
 | Argument | Type | Description |
 |---|---|---|
 | `source` (required) | string | The browser source's id. |
-
-## relink_clip
-
-Point an offline clip (its take isn't where the timeline says: the project folder was moved or copied) at where its take is now: `path` is the take's manifest (….session.json) or the folder holding it; given a folder, every take that was in the clip's old folder is looked for there too. The take's files are never touched. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `clip` (required) | string | The clip's id, like `c2`. |
-| `path` (required) | string | The take's manifest (`….session.json`), or the folder holding a manifest of the same name. Given a folder, every take of every timeline that was in the clip's old folder is looked for there too. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## remote_clients
 
@@ -691,15 +572,6 @@ Revoke a client and close its live connections immediately. Local only.
 
 Read this engine's TLS remote-control status.
 
-## remove_clip
-
-Take a clip (by id, like c2) off a timeline (the current one unless `timeline` is given). Only the timeline changes: the take's files stay where they were recorded, listed under the timeline's `removed`. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `clip` (required) | string | The clip's id, like `c2`. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
-
 ## remove_plugin
 
 Stop a plugin's process and remove the plugin (by id); its data folder is kept if it wrote anything there. Refused while the live setup uses its kinds (the error lists where) unless `force`: the setup then keeps them, bypassed, until the plugin is added again.
@@ -721,7 +593,7 @@ Rename a scene collection or profile; its id stays. Renaming the collection in u
 
 ## rename_project
 
-Rename a recording project (by id, from list_projects): its folder becomes `<date> <time> <name>` (numbered if taken). Refused while a recording or an export writes into it. Manifests and timelines keep finding its files. Returns the project, its old name and old folder.
+Rename a recording project (by id, from list_projects): its folder becomes `<date> <time> <name>` (numbered if taken). Refused while a recording writes into it. Manifests keep finding its files. Returns the project, its old name and old folder.
 
 | Argument | Type | Description |
 |---|---|---|
@@ -760,25 +632,6 @@ Restart isocastd, which only sees a permission granted in System Settings (scree
 
 Resume a paused recording into its existing files. Paused time is cut out of the files and recorded in the manifest.
 
-## retake
-
-Record the last take again, on the current timeline. Not recording: take the last clip off (its files stay) and start recording in the same folder (or `folder`; `seconds` stops it on its own); while a stop is finishing, the same once it has. Recording: drop the take being recorded from the timeline (its files stay) and begin a new take about a quarter second later without stopping any device; `begins_at` and `begins_in_seconds` say when (what is said before then is in the dropped take). Returns the new take's files and what was taken off. Program export needs every clip's program file.
-
-| Argument | Type | Description |
-|---|---|---|
-| `folder` | string (optional) | Write the new take here; else the folder of the take it replaces (else the setup's `recording.folder`). Not while recording, where the new take goes where the recording writes. |
-| `seconds` | number (optional) | Stop on its own after this many seconds (not while recording). |
-
-## roll_cut
-
-Move the cut between `clip` and the clip after it by `by_seconds` (negative: earlier), a roll edit: the clip's out point and the next clip's in point move together, so the timeline keeps its length. One undoable edit. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `by_seconds` (required) | number | How far to move the cut, in seconds (negative: earlier), rounded to the clips' frame grid. Both clips must keep a frame and stay within their takes. |
-| `clip` (required) | string | The clip before the cut, like `c2`. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
-
 ## save_replay
 
 Save the replay buffer: write the last recording.replay.seconds of the program, up to this moment, to a new MOV/MP4 in the recordings folder (the running recording's project folder, if one records), without interrupting recording or streaming. Canvas "vertical" saves the vertical canvas's buffer (its file name ends in "vertical"). Returns the file's path, length, frames and any missed frames.
@@ -786,17 +639,6 @@ Save the replay buffer: write the last recording.replay.seconds of the program, 
 | Argument | Type | Description |
 |---|---|---|
 | `canvas` | CanvasId | `main` (the default: the program) or `vertical` (the setup's vertical canvas's program, kept with the same `recording.replay` settings, as its own buffer). One canvas's buffer starts, stops and saves without touching the other's. |
-
-## set_angle
-
-Choose what the edited video shows from `start_seconds` to `end_seconds` on the timeline: `source` is `program` or an ISO source every clip there recorded (clips are split at the span's ends). export_timeline then writes an edited file with these angles and the program's sound. One undoable edit. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `end_seconds` (required) | number |  |
-| `source` (required) | string | What the edited video shows over the span: `program`, or an ISO source's id that every clip in the span recorded. |
-| `start_seconds` (required) | number | Where the span starts and ends, in seconds on the timeline, each rounded to the frame grid of the clip there. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## set_audio
 
@@ -846,28 +688,17 @@ Keep a stream key in the macOS Keychain for a streaming service (the live setup'
 
 Shut down the recording daemon only if its atomic idle check permits it. Refuses active recording, streaming, exports, replay or camera work; cancels an idle calibration. Never launches or force-terminates a daemon; use before updating or uninstalling after closing the app.
 
-## split_clip
-
-Cut the clip at `at_seconds` (on the timeline, rounded to the frames there) in two; the second gets a new id. One undoable edit. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `at_seconds` (required) | number | Where to cut, in seconds on the timeline (0 is its start), rounded to the frame grid of the clip there. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
-
 ## split_take
 
 Split the recording into a new take at the next whole second without stopping any device: the current files end there and new files, with their own manifest, begin. Returns the new take's files.
 
 ## start_recording
 
-Start recording the live setup (or the given setup, which then replaces the live setup): the program and every ISO source, each to its own file. Its takes go where record_target says: a new project folder with its own timeline unless a timeline was chosen (`new_project` or `into` choose for this recording only). Returns once every file is created, with the timeline its takes go to.
+Start recording the live setup (or the given setup, which then replaces the live setup): the program and every ISO source, each to its own file, in a new project folder in the recordings folder (or `folder`). Returns once every file is created.
 
 | Argument | Type | Description |
 |---|---|---|
 | `folder` | string (optional) | Absolute folder for the files instead of the setup's recording.folder. |
-| `into` | string (optional) | Add this recording's takes to this timeline (an id from list_timelines), in the folder of its last take. Not with `new_project`. Neither: record_target's choice (a new project unless a timeline was chosen). |
-| `new_project` | boolean | Start a new project with its own timeline, whatever record_target says. Not with `into`. |
 | `seconds` | number (optional) | Stop on its own after this many seconds. |
 | `setup` | object (optional) | The setup to record; the live setup if absent (the shape get_setup returns; get_setup_schema has its JSON Schema). |
 
@@ -998,17 +829,6 @@ Measure the upload speed to a streaming service's ingest (the live setup's unles
 | `server` | string (optional) | Its ingest server (`rtmp://host/app`); the service's default, or the live setup's, if absent. Required for custom and Kick. |
 | `service` | StreamService | The service to test against; the live setup's stream service if absent. |
 
-## trim_clip
-
-Move a clip's in and/or out point (`in_seconds`, `out_seconds`, on the clip's take's own clock, rounded to its frames). Only the timeline changes, never the take's files; one undoable edit. Returns the timeline.
-
-| Argument | Type | Description |
-|---|---|---|
-| `clip` (required) | string | The clip's id, like `c2`. |
-| `in_seconds` | number (optional) | Where the clip starts, in seconds on its take's own clock (0 is the take's start); unchanged if absent. Rounded to the take's frame grid. |
-| `out_seconds` | number (optional) | Where the clip ends, on its take's clock, up to the take's length; unchanged if absent. Rounded to the take's frame grid. |
-| `timeline` | string (optional) | The timeline's id; the current one if absent. |
-
 ## tune_encoders
 
 Benchmark the hardware encoders on a setup's video files (the live setup if none is given), all at once as in a recording, and say whether this Mac keeps up: `capacity` is fits, no_margin (keeps up, nothing to spare) or cannot_keep_up (frames will drop). If it doesn't fit, it benchmarks changes closest first (a smaller program file, a lower quality preset, half the frame rate, one ISO file fewer) and recommends the closest that fits as `change`, a patch for plan_change. start_recording warns when a setup exceeds what this measured. Takes up to a minute or two; refused while recording.
@@ -1017,14 +837,6 @@ Benchmark the hardware encoders on a setup's video files (the live setup if none
 |---|---|---|
 | `folder` | string (optional) | Check this folder instead of the setup's recording.folder. |
 | `setup` | object (optional) | The setup to check; the live setup if absent (the shape get_setup returns; get_setup_schema has its JSON Schema). |
-
-## undo_edit
-
-Take back the last edit of a timeline (trim, split, delete, angle, remove, move; not a recorded take). Returns the timeline, with how many edits can still be undone and redone.
-
-| Argument | Type | Description |
-|---|---|---|
-| `timeline` | string (optional) | A timeline's id (`timeline_list` has them); the current one if absent. |
 
 ## virtual_camera_remove
 

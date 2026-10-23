@@ -292,9 +292,11 @@ pub struct ProfileRecording {
         skip_serializing_if = "crate::replay::ReplaySettings::is_default"
     )]
     pub replay: crate::replay::ReplaySettings,
-    /// The app opens the editor when a recording stops.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub open_editor: bool,
+    /// Retired with the editor (2026-10-22): read and ignored, so setups
+    /// that set it still load; never written.
+    #[serde(default, skip_serializing)]
+    #[schemars(schema_with = "crate::retired_open_editor")]
+    pub open_editor: serde::de::IgnoredAny,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -744,7 +746,7 @@ impl Profile {
                 },
                 keep_free_gb: default_keep_free_gb(),
                 replay: Default::default(),
-                open_editor: false,
+                open_editor: serde::de::IgnoredAny,
             },
             stream: None,
             vertical: None,

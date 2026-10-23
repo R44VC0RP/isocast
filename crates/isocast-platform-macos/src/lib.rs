@@ -28,8 +28,6 @@ pub mod diagnostics;
 mod frames;
 mod gpu;
 pub mod hotkeys;
-mod inband;
-mod join;
 mod jpeg;
 mod keychain;
 mod matroska;
@@ -40,7 +38,6 @@ mod pacing;
 mod permissions;
 pub mod plugin;
 pub mod pressure;
-mod recode;
 mod stream;
 mod system;
 mod tap;
@@ -246,11 +243,6 @@ impl Platform for MacPlatform {
 
     fn volume(&self, path: &Path) -> anyhow::Result<Volume> {
         volume(path)
-    }
-
-    fn same_volume(&self, left: &Path, right: &Path) -> anyhow::Result<bool> {
-        use std::os::unix::fs::MetadataExt;
-        Ok(std::fs::metadata(left)?.dev() == std::fs::metadata(right)?.dev())
     }
 
     fn process_cpu_seconds(&self) -> Option<f64> {
@@ -519,14 +511,6 @@ impl Platform for MacPlatform {
 
     fn delete_secret(&self, service: &str, account: &str) -> anyhow::Result<bool> {
         keychain::delete_secret(service, account)
-    }
-
-    fn join_files(
-        &self,
-        spec: &isocast_engine::JoinSpec,
-        progress: isocast_engine::OnJoinProgress,
-    ) -> anyhow::Result<isocast_engine::Joined> {
-        join::join(spec, progress)
     }
 }
 

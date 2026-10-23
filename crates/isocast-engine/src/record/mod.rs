@@ -76,11 +76,6 @@ const SPEED_MARGIN: f64 = 2.0;
 /// How far ahead a split is scheduled, so the next take's files exist in
 /// time.
 const SPLIT_LEAD: Duration = Duration::from_millis(500);
-/// How far ahead a [`SplitTiming::Soonest`] split is scheduled. The next
-/// take's files already exist when it is timed, and every frame and audio
-/// buffer a file has received is stamped before "now", so this only has to
-/// cover the moment it takes to hand the split to each file's writer.
-const SPLIT_SOON_LEAD: Duration = Duration::from_millis(250);
 /// How long a switch waits for a stinger video the setup only just gained
 /// to load.
 const STINGER_WAIT: Duration = Duration::from_secs(2);
@@ -249,7 +244,7 @@ struct ControlState {
     /// Something was added since the manifest was last written.
     changed: bool,
     /// A request to split into a new take, answered with its files.
-    split: Option<(SplitTiming, mpsc::Sender<SplitReply>)>,
+    split: Option<mpsc::Sender<SplitReply>>,
     /// The recording has ended (or never ran): splits are refused at once.
     finished: bool,
     clock: Option<Arc<pause::RecordingClock>>,
@@ -261,19 +256,6 @@ struct ControlState {
     /// reply: the generation, the recoverable seconds (if every file
     /// confirmed) and the files' commit errors.
     pause_outcome: Option<(u64, Option<f64>, Vec<String>)>,
-}
-
-/// When a split's new take begins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitTiming {
-    /// At the next whole second of the session clock at least half a
-    /// second away (`split`): whole seconds lie on every file's frame grid.
-    WholeSecond,
-    /// As soon as every file can switch (`retake`, where someone is waiting
-    /// to begin again): the next moment on every file's frame grid and the
-    /// audio's sample grid at least [`SPLIT_SOON_LEAD`] away (every 1/10 s
-    /// for 60 and 30 fps files; see `split_time`).
-    Soonest,
 }
 
 /// The take a split began.
@@ -576,11 +558,12 @@ impl SessionControl {
         failures.extend(failed);
     }
 
-    /// Ask the session to split into a new take (at `timing`), without
-    /// stopping any source. The receiver gets the new take, or why it
+    /// Ask the session to split into a new take (at the next whole second
+    /// of the session clock at least half a second away: whole seconds lie
+    /// on every file's frame grid), without stopping any source. The receiver gets the new take, or why it
     /// couldn't split; it is always answered, at once once the recording
     /// has ended.
-    pub fn split(&self, timing: SplitTiming) -> mpsc::Receiver<SplitReply> {
+    pub fn split(&self) -> mpsc::Receiver<SplitReply> {
         let (tx, rx) = mpsc::channel();
         let mut state = self.state.lock();
         if state.finished {
@@ -597,7 +580,7 @@ impl SessionControl {
             let _ = tx.send(Err(SplitRefused {
                 ending: false,
                 busy: false,
-                message: "recording.paused: resume before split or retake".into(),
+                message: "recording.paused: resume before split".into(),
             }));
         } else if state.splitting {
             let _ = tx.send(Err(SplitRefused {
@@ -609,12 +592,12 @@ impl SessionControl {
             }));
         } else {
             state.splitting = true;
-            state.split = Some((timing, tx));
+            state.split = Some(tx);
         }
         rx
     }
 
-    fn take_split(&self) -> Option<(SplitTiming, mpsc::Sender<SplitReply>)> {
+    fn take_split(&self) -> Option<mpsc::Sender<SplitReply>> {
         self.state.lock().split.take()
     }
 
@@ -623,7 +606,7 @@ impl SessionControl {
     fn finish_recording(&self) {
         let mut state = self.state.lock();
         state.finished = true;
-        if let Some((_, reply)) = state.split.take() {
+        if let Some(reply) = state.split.take() {
             let _ = reply.send(Err(SplitRefused {
                 ending: true,
                 busy: false,

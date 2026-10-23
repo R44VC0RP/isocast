@@ -5,7 +5,7 @@ Build: cargo build --release -p isocast-daemon --bins --examples
 Run:   python3 scripts/e2e.py [--only record] [--keep] [--json]
 
 Each scenario gets a signed, background-only app, socket, setup, library,
-plugins, timeline and recordings in its own temporary directory. No capture
+plugins and recordings in its own temporary directory. No capture
 devices or default user state are used. The parent bounds each worker and
 kills its process group on timeout, even if native shutdown is stuck. SIGINT
 and SIGTERM also clean up. JSON is always written (--report, e2e-report.json
@@ -83,11 +83,11 @@ from fractions import Fraction
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "timeline", "edit",
+SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "nle",
              "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
              "plugin_files", "replay", "vertical", "remote_files",
              # The frame oracle (#124), defined below.
-             "oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks",
+             "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern (Windows has no media files yet).
              "win_record", "win_takes", "win_scenes") + (("linux_record", "linux_recovery") if sys.platform.startswith("linux") else ())
@@ -380,7 +380,7 @@ class Engine:
             self.env["XDG_CONFIG_HOME"] = str(root / "config")
         self.env.update(ISOCAST_CALIBRATION="off", ISOCAST_SOCKET=str(self.sock), ISOCAST_SETUP=str(root / "setup.toml"),
                         ISOCAST_PLUGINS=str(root / "plugins"),
-                        ISOCAST_TIMELINES=str(root / "timelines"), ISOCAST_MONITOR_SILENT="1",
+                        ISOCAST_MONITOR_SILENT="1",
                         ISOCAST_STREAM_KEY="e2e", ISOCAST_LOG_DIR=str(root / "logs"),
                         # Never the real report service: bug_report's submit fails cleanly.
                         ISOCAST_REPORT_ENDPOINT="http://127.0.0.1:9/reports")
@@ -1116,168 +1116,109 @@ def scenario_vertical(e, cfg, evidence):
     ffmpeg("-xerror", "-i", output, "-map", "0", "-f", "null", "-")
 
 
-def scenario_timeline(e, cfg, evidence):
+def scenario_nle(e, cfg, evidence):
+    """take_export_nle (#104): a take as a Final Cut Pro, Premiere Pro,
+    Resolve and OpenTimelineIO project, read back in each format: one video
+    track per ISO source with the program's on top (the only one on), each
+    the take's own file lined up from its manifest's start offset, every
+    file's audio with its video (on only for the program), and the take's
+    files untouched."""
+    cfg["recording"]["iso"]["enabled"] = True
     e.apply(cfg)
-    e.rpc("timeline_new", {"name": "E2E"})
-    evidence["files"] = []
-    for _ in range(2):
-        path, manifest = take(e, 2)
-        evidence["files"].extend(check_take(path, manifest, 2, evidence=evidence))
-    before = e.rpc("timeline_get")
-    require(len(before["clips"]) == 2, "two takes did not append")
-    dropped = before["clips"][-1]
-    retaken = e.rpc("retake", {"seconds": 2})
-    until(lambda: e.rpc("status")["state"] == "idle", 35, "retake")
-    timeline = e.rpc("timeline_get")
-    require(len(timeline["clips"]) == 2 and timeline["clips"][-1]["id"] != dropped["id"],
-            "retake did not replace last clip")
-    require(any(r["take"] == dropped["take"] for r in timeline["removed"]), "dropped take not listed")
-    require(Path(dropped["take"]).exists() and all(Path(f["path"]).is_file() for f in dropped["files"]),
-            "retake deleted original files")
-    for clip in timeline["clips"]:
-        check_take(Path(clip["take"]), read_json(clip["take"]), evidence=evidence)
-    export = e.rpc("timeline_export", {"folder": str(e.root / "export")})
-    def exported():
-        value = read_json(export["manifest"])
-        return value if value["status"] != "exporting" else None
-    result = until(exported, 45, "timeline export")
-    require(result["status"] == "complete", f"export failed: {result}")
-    duration = sum(c["duration_seconds"] for c in timeline["clips"])
-    require(abs(timeline["duration_seconds"] - duration) < 0.00001, "timeline duration differs from clips")
-    require(bool(result["files"]), "export contains no files")
-    evidence["joined"] = []
-    for f in result["files"]:
-        # Export must retain every decoded picture of its parts, including
-        # their accounted losses, while spanning the complete clip timeline.
-        frames = sum(int(probe(Path(part["path"]))["streams"][0]["nb_read_frames"]) for part in f["parts"])
-        dropped = round(duration * f["fps"]) - frames
-        row = check_file(Path(f["path"]), duration, f["fps"], dropped=dropped if loss_limit(evidence) else 0)
-        require(row["frames"] == frames, "export lost decoded pictures at a join")
-        evidence["joined"].append(row)
-    evidence.update(timeline=timeline, retake=retaken)
-    record_targets(e, evidence)
-
-
-def timeline_of(e, manifest):
-    """The timelines whose clips include `manifest`."""
-    found = []
-    for summary in e.rpc("timeline_list")["timelines"]:
-        info = e.rpc("timeline_get", {"timeline": summary["id"]})
-        if any(Path(c["take"]).resolve() == Path(manifest).resolve() for c in info["clips"]):
-            found.append(info)
-    return found
-
-
-def record_targets(e, evidence):
-    """#114: each recording starts a new project with its own timeline
-    unless a timeline was chosen; a chosen one gets the take in its last
-    take's folder; a split and a retake stay with their recording; a
-    current timeline from before 0.0.8 is migrated, shown and not used."""
-    out = evidence["record_target"] = {}
-    # `timeline_new` chose "E2E" above; back to new projects.
-    e2e_clips = e.rpc("timeline_get", {"timeline": "e2e"})["clips"]
-    chose = e.rpc("record_target", {"target": "new"})
-    require(chose.get("timeline") is None, f"record_target new: {chose}")
-    folders, timelines = [], []
-    for _ in range(3):
-        path, _ = take(e, 1)
-        on = timeline_of(e, path)
-        require(len(on) == 1 and len(on[0]["clips"]) == 1,
-                f"a default recording's take is not alone on one timeline: {[t['id'] for t in on]}")
-        folders.append(path.parent)
-        timelines.append(on[0]["id"])
-    require(len(set(folders)) == 3 and len(set(timelines)) == 3 and "e2e" not in timelines,
-            f"three default recordings share a project or timeline: {folders} {timelines}")
-    require(e.rpc("timeline_get", {"timeline": "e2e"})["clips"] == e2e_clips,
-            "the E2E timeline changed")
-    out["new_projects"] = {"folders": [str(f) for f in folders], "timelines": timelines}
-    # Choose the first new project: the next take is its take 2, in its folder.
-    target = e.rpc("record_target", {"target": timelines[0]})
-    require(target["timeline"] == timelines[0] and target["take"] == 2
-            and Path(target["folder"]) == folders[0], f"record_target: {target}")
-    require(e.rpc("status")["record_target"]["timeline"] == timelines[0], "status lacks the target")
-    path, _ = take(e, 1)
-    chosen = e.rpc("timeline_get", {"timeline": timelines[0]})
-    require(path.parent == folders[0] and len(chosen["clips"]) == 2
-            and Path(chosen["clips"][1]["take"]).resolve() == path.resolve(),
-            f"a take into the chosen timeline did not land as its take 2: {path}")
-    # `into` for one recording; `new_project` overrides the choice.
-    started = e.rpc("start", {"seconds": 1, "into": timelines[1]})
-    until(lambda: finished(started["manifest"]), 40)
-    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
-    path = Path(started["manifest"])
-    require(path.parent == folders[1] and len(e.rpc("timeline_get", {"timeline": timelines[1]})["clips"]) == 2,
-            "start into did not add a take to that timeline")
-    started = e.rpc("start", {"seconds": 1, "new_project": True})
-    require(started.get("timeline", {}).get("new_project"), f"start new_project: {started}")
-    until(lambda: finished(started["manifest"]), 40)
-    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
-    require(Path(started["manifest"]).parent not in folders, "new_project reused a project folder")
-    require(e.rpc("record_target")["timeline"] == timelines[0], "a one-off start changed the choice")
-    for bad in ({"into": "nope"}, {"into": timelines[0], "new_project": True}):
+    path, manifest = take(e, 3)
+    evidence["files"] = check_take(path, manifest, 3, evidence=evidence)
+    files = {f["source"]: f for f in manifest["files"]}
+    program = files["program"]
+    fps = program["fps"]
+    frames = round(program["duration_seconds"] * fps)
+    order = [f["source"] for f in manifest["files"] if f["source"] != "program"] + ["program"]
+    hashes = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in files_of(path)}
+    rows = []
+    # Windows writes OpenTimelineIO only (no XML media URLs there yet).
+    formats = [("otio", None)] if WINDOWS else [
+        ("fcpxml", "final_cut"), ("fcpxml", "resolve"), ("xmeml", "premiere"), ("xmeml", "resolve"), ("otio", None)]
+    for fmt, app in formats:
+        params = {"take": str(path), "format": fmt, "folder": str(e.root / "nle")}
+        if app:
+            params["app"] = app
+        result = e.rpc("take_export_nle", params)
+        out = Path(result["path"])
+        require(out.is_file() and out.suffix == {"fcpxml": ".fcpxml", "xmeml": ".xml", "otio": ".otio"}[fmt],
+                f"{fmt}: no project file: {result}")
+        require(Path(result["take"]) == path, f"{out.name}: names take {result['take']}, not {path}")
+        if fmt != "otio":
+            ET.parse(out)  # well-formed
+        tracks, rate, audio = nle_tracks(fmt, out)
+        require(rate == fps, f"{out.name}: sequence at {rate} fps, the program at {fps}")
+        require([t["source"] for t in result["video_tracks"]] == order and len(tracks) == len(order),
+                f"{out.name}: video tracks {[t['source'] for t in result['video_tracks']]}, want {order}")
+        require(abs(result["duration_seconds"] - frames / fps) < 1e-6,
+                f"{out.name}: {result['duration_seconds']} s, the program has {frames / fps}")
+        for source, track in zip(order, tracks):
+            f = files[source]
+            require(len(track) == 1, f"{out.name}: {source} has {len(track)} items, want the take's one file")
+            start, end, file, first, enabled, crop = track[0]
+            require(Path(file).resolve() == (path.parent / f["path"]).resolve(),
+                    f"{out.name}: {source} points at {file}, not the take's {f['path']}")
+            require(enabled == (source == "program"), f"{out.name}: {source} enabled {enabled}")
+            require(crop is None, f"{out.name}: {source} has a crop {crop}")
+            # Lined up on the take's clock: the file's frame at sequence frame
+            # `start` is the one on screen then, within a frame.
+            offset = start / fps - first / f["fps"]
+            require(abs(offset - f["start_offset_seconds"]) <= 1 / min(fps, f["fps"]) + 1e-6,
+                    f"{out.name}: {source} placed at {offset:.4f} s, its manifest says "
+                    f"{f['start_offset_seconds']:.4f} s")
+            require(frames - 2 <= end <= frames, f"{out.name}: {source} covers {start}-{end} of {frames} frames")
+        video_items = {(i[2], i[0]): i for t in tracks for i in t}
+        program_file = tracks[-1][0][2]
+        require(audio, f"{out.name}: no audio")
+        for start, end, file, first, enabled, _ in audio:
+            v = video_items.get((file, start))
+            require(v is not None and v[3] == first and v[1] == end,
+                    f"{out.name}: audio of {Path(file).name} at {start} isn't with its video")
+            require(enabled == (file == program_file), f"{out.name}: audio of {Path(file).name} enabled {enabled}")
+        rows.append({"format": fmt, "app": result["app"], "file": out.name,
+                     "video_tracks": len(tracks), "audio_items": len(audio), "notes": result.get("notes", [])})
+    # `path`: exactly that file, an earlier export replaced, anything else
+    # only with `replace`.
+    exact = e.root / "nle" / "exact.otio"
+    e.rpc("take_export_nle", {"take": str(path), "format": "otio", "path": str(exact)})
+    e.rpc("take_export_nle", {"take": str(path), "format": "otio", "path": str(exact)})
+    other = e.root / "nle" / "other.otio"
+    other.write_text("not ours")
+    try:
+        e.rpc("take_export_nle", {"take": str(path), "format": "otio", "path": str(other)})
+        raise Failure("take_export_nle replaced a file that isn't an Isocast export")
+    except RpcError as exc:
+        require("replace" in exc.error["message"], f"replace refusal: {exc.error}")
+    require(other.read_text() == "not ours", "a refused export changed the file")
+    e.rpc("take_export_nle", {"take": str(path), "format": "otio", "path": str(other), "replace": True})
+    require(read_json(other)["OTIO_SCHEMA"].startswith("Timeline"), "replace did not write the project")
+    bad_params = [({"take": str(e.root / "nope.session.json"), "format": "otio"}, "take"),
+                  ({"take": str(path), "format": "otio", "path": str(e.root / "nle" / "x.xml")}, "path")]
+    for bad, field in bad_params:
         try:
-            e.rpc("start", bad)
-            e.rpc("stop")
-            raise Failure(f"start accepted {bad}")
+            e.rpc("take_export_nle", bad)
+            raise Failure(f"take_export_nle accepted {bad}")
         except RpcError as exc:
-            field = "into" if "nope" in str(bad) else "new_project"
-            require(field in exc.error["message"], f"start {bad}: {exc.error}")
-    # A split and a retake while recording stay on the recording's own
-    # (new) timeline.
-    e.rpc("record_target", {"target": "new"})
-    watch = Watch(e, ["stopped"])
-    first = e.rpc("start", {})
-    time.sleep(1.5)
-    second = e.rpc("split")
-    time.sleep(1.5)
-    # The engine refuses a retake while the split is still starting its
-    # files (busy, "retry once it has finished"); a loaded hosted runner can
-    # take longer than 1.5 s to finish one, so hosted runs retry as the
-    # error says, bounded. Test Macs must finish within the 1.5 s.
-    retries, deadline = 0, time.time() + 10
-    while True:
-        try:
-            e.rpc("retake")
-            break
-        except RpcError as exc:
-            if (not loss_limit(evidence) or "still starting its files" not in exc.error.get("message", "")
-                    or time.time() > deadline):
-                raise
-            retries += 1
-            time.sleep(0.2)
-    time.sleep(1.5)
-    e.rpc("stop")
-    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
-    until(lambda: watch.of("stopped"), 10, "stopped event")
-    watch.close()
-    into = watch.of("stopped")[0].get("timeline") or {}
-    session = e.rpc("timeline_get", {"timeline": into.get("timeline", "")}) if into else {}
-    require(into.get("new_project") and len(session.get("clips", [])) == 2
-            and Path(session["clips"][0]["take"]) == Path(first["manifest"])
-            and Path(session["clips"][1]["take"]).parent == Path(first["manifest"]).parent
-            and any(Path(r["take"]) == Path(second["manifest"]) for r in session["removed"]),
-            f"split and retake did not stay together: {into} {session.get('clips')}")
-    require(into["takes"] == 2 and into["clips"] == 2, f"stopped event timeline: {into}")
-    out["split_retake"] = {"timeline": into, "clips": [c["take"] for c in session["clips"]],
-                           "retake_retries_while_splitting": retries}
-    # A current timeline from before #114: migrated, shown, never used.
-    e.stop()
-    write_json(e.root / "timelines" / "current.json", {"timeline": "e2e"})
-    e.start()
-    status = e.rpc("status")
-    target = status.get("record_target", {})
-    require(status["timeline"]["id"] == "e2e" and target.get("timeline") is None
-            and any("e2e" in n and "new project" in n for n in target.get("notes", [])),
-            f"old current timeline not migrated visibly: {status.get('timeline')} {target}")
-    before = len(e.rpc("timeline_get", {"timeline": "e2e"})["clips"])
-    path, _ = take(e, 1)
-    require(len(e.rpc("timeline_get", {"timeline": "e2e"})["clips"]) == before
-            and len(timeline_of(e, path)) == 1, "a migrated current timeline was used")
-    require(read_json(e.root / "timelines" / "current.json").get("record") is not None,
-            "the migration was not written")
-    e.rpc("record_target", {"target": "new"})
-    require(not e.rpc("record_target").get("notes"), "the migration notice outlived a choice")
-    out["migrated"] = target
+            require(field in exc.error["message"], f"take_export_nle {bad}: {exc.error}")
+    require({p: hashlib.sha256(p.read_bytes()).hexdigest() for p in files_of(path)} == hashes,
+            "an export changed the take's files")
+    # A project folder with one take is that take.
+    by_folder = e.rpc("take_export_nle", {"take": str(path.parent), "format": "otio",
+                                          "path": str(e.root / "nle" / "folder.otio")})
+    require(Path(by_folder["take"]) == path, f"a project folder as the take: {by_folder['take']}")
+    # A take recorded without the program: the top ISO track is the one on.
+    cfg["recording"]["program"]["enabled"] = False
+    e.apply(cfg)
+    isos, _ = take(e, 2)
+    result = e.rpc("take_export_nle", {"take": str(isos), "format": "otio", "folder": str(e.root / "nle")})
+    tracks, _, audio = nle_tracks("otio", Path(result["path"]))
+    on = [t["source"] for t, items in zip(result["video_tracks"], tracks) if items and items[0][4]]
+    require(on == [result["video_tracks"][-1]["source"]] and result["video_tracks"][-1]["source"] != "program",
+            f"a take without the program: tracks on {on} of {[t['source'] for t in result['video_tracks']]}")
+    require(not audio or any(item[4] for item in audio), "a take without the program: no audio on")
+    evidence["nle"] = rows
 
 
 # Gray levels that split the test pattern's 75% bars into bright (white to
@@ -1326,20 +1267,6 @@ def pattern_frames(path, width, height, region=None):
     return frames
 
 
-def picture_region(path, width, height, shape):
-    """Where a picture of `shape` (w, h) sits in `path`'s letterboxed
-    pictures (width x height): (0, top, width, rows). The pattern's bars
-    start at its top (its bottom quarter is black between flashes)."""
-    raw = ffmpeg("-i", path, "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-").stdout
-    require(len(raw) == width * height, f"{path.name}: first picture isn't {width}x{height}")
-    lit = [y for y in range(height) if max(raw[y * width:(y + 1) * width]) > 40]
-    require(lit, f"{path.name}: the first picture is black")
-    rows = round(width * shape[1] / shape[0])
-    require(abs((height - rows) / 2 - lit[0]) <= 2,
-            f"{path.name}: the picture starts at row {lit[0]}, not centred ({(height - rows) / 2})")
-    return (0, lit[0], width, min(rows, height - lit[0]))
-
-
 def beep_onsets(samples):
     onsets, quiet = [], RATE
     for i, sample in enumerate(samples):
@@ -1350,360 +1277,6 @@ def beep_onsets(samples):
         else:
             quiet += 1
     return onsets
-
-
-def picture_rows(path, width, height, at):
-    """Per decoded picture, its gray rows at fractions `at` of its height."""
-    graph = "[0:v]format=gray,split={n}{outs};{crops}{ins}vstack={n}[out]".format(
-        n=len(at), outs="".join(f"[s{i}]" for i in range(len(at))),
-        crops="".join(f"[s{i}]crop={width}:1:0:{int(y * height)}[r{i}];" for i, y in enumerate(at)),
-        ins="".join(f"[r{i}]" for i in range(len(at))))
-    if len(at) == 1:
-        graph = f"[0:v]format=gray,crop={width}:1:0:{int(at[0] * height)}[out]"
-    raw = ffmpeg("-i", path, "-filter_complex", graph, "-map", "[out]", "-fps_mode", "passthrough",
-                 "-pix_fmt", "gray", "-f", "rawvideo", "-", timeout=90).stdout
-    size = len(at) * width
-    require(len(raw) % size == 0, f"{path.name}: rows don't divide into pictures")
-    return [[raw[i + k * width:i + (k + 1) * width] for k in range(len(at))]
-            for i in range(0, len(raw), size)]
-
-
-def cropped_picture(rows, crop, width, height, want):
-    """Why a picture of `crop` (scaled to fill width x height) isn't the
-    source picture `want` (pattern_frames' row), if it isn't: its bar edges
-    halfway down must sit where the source's do in the crop, the band row
-    (70% down: source 77.5%, the flashing band) must be the band, and the
-    row at 60% (source 70%) the bars."""
-    mid, bars, band = rows
-    scale = crop["width"]  # source pixels per output pixel
-    rise = (width - want[1] - 1) % width
-    fall = (width // 2 - want[1] - 1) % width
-    bits = mid.translate(BAR_LEVELS)
-    edges = [(i, bits[i:i + 2]) for i in range(3, width - 4) if bits[i] != bits[i + 1]]
-    if not edges:
-        return "no bar edge halfway down"
-    for i, kind in edges:
-        source_x = crop["x"] * width + (i + 0.5) * scale - 0.5
-        target = rise if kind == b"01" else fall
-        apart = abs(source_x - target)
-        if min(apart, width - apart) > 3:
-            return (f"a bar edge at {i} shows source column {source_x:.1f}; the source's "
-                    f"{'rise' if kind == b'01' else 'fall'} is at {target}")
-    if max(band) - min(band) > 48:
-        return f"the row at 70% isn't the band (levels {min(band)}–{max(band)})"
-    if abs(sum(band) / width - want[3]) > 48:
-        return f"the band is {sum(band) / width:.0f}, the source's {want[3]:.0f}"
-    if max(bars) - min(bars) < 96:
-        return f"the row at 60% isn't bars (levels {min(bars)}–{max(bars)})"
-    return None
-
-
-def video_packets(path):
-    """The video stream's packets, each hashed (copied ones hash the same)."""
-    lines = ffmpeg("-i", path, "-map", "0:v:0", "-c", "copy", "-f", "framemd5", "-").stdout.decode()
-    return [line.rsplit(",", 1)[-1].strip() for line in lines.splitlines() if line and not line.startswith("#")]
-
-
-def video_descriptions(path):
-    """How many sample descriptions the file's video track has (#94: one,
-    or Chrome can't decode HEVC exports)."""
-    data = Path(path).read_bytes()
-
-    def boxes(start, end):
-        while start + 8 <= end:
-            size, kind = struct.unpack(">I4s", data[start:start + 8])
-            head = 8
-            if size == 1:
-                size, head = struct.unpack(">Q", data[start + 8:start + 16])[0], 16
-            yield kind, start + head, start + (size or end - start)
-            start += size or end - start
-
-    def walk(start, end):
-        for kind, s, e in boxes(start, end):
-            if kind in (b"moov", b"trak", b"mdia", b"minf", b"stbl"):
-                yield from walk(s, e)
-            elif kind == b"hdlr" and data[s + 8:s + 12] == b"vide":
-                yield "video"
-            elif kind == b"stsd":
-                yield struct.unpack(">I", data[s + 4:s + 8])[0]
-
-    counts, video = [], False
-    for item in walk(0, len(data)):
-        if item == "video":
-            video = True
-        elif video:
-            counts.append(item)
-            video = False
-    return counts[0] if len(counts) == 1 else counts
-
-
-def scenario_edit(e, cfg, evidence):
-    """C.3's edits on two program + 2 ISO takes: trim, split, ripple delete,
-    an angle, undo and redo, export (with the vertical file, #94); then crops
-    (#87) and export again. Every
-    exported picture must be the take picture on screen at its moment (by
-    the test pattern; a cropped one the crop of it, scaled up), every pulse
-    must flash and beep together at the cuts, joins mustn't click, crops
-    must change only the edited file, and the takes' files must be
-    unchanged."""
-    fps = cfg["canvas"]["fps"]
-    cfg["recording"]["iso"]["enabled"] = True
-    e.apply(cfg)
-    e.rpc("timeline_new", {"name": "E2E edit"})
-    takes = [take(e, 5) for _ in range(2)]
-    evidence["files"] = [row for path, m in takes for row in check_take(path, m, 5, evidence=evidence)]
-    timeline = e.rpc("timeline_get")
-    require([Path(c["take"]).resolve() for c in timeline["clips"]] == [p.resolve() for p, _ in takes],
-            "the two takes did not append")
-    files = {}  # (take, source) -> (file, its first frame on the take's clock)
-    for clip in timeline["clips"]:
-        for f in clip["files"]:
-            path = Path(clip["take"]).parent / f["path"]
-            files[(clip["take"], f["source"])] = (path, f.get("start_offset_seconds") or 0.0)
-    hashes = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p, _ in files.values()}
-    (c1, a, a_len), (c2, b, b_len) = ((c["id"], c["take"], c["out_seconds"]) for c in timeline["clips"])
-    require(a_len >= 4.6 and b_len >= 4.6, f"takes too short: {a_len}, {b_len}")
-    # Pulses beep for 0.1 s every second of the engine's clock, at their own
-    # phase in each take: measure where (sample-accurate) and cut around
-    # them. Cuts land in quiet stretches, except the delete's end (quiet into
-    # mid-beep: a flash and beep at the cut) and c1's end (mid-beep into
-    # quiet: a click if the join were hard).
-    pulses_in = {}  # take -> its pulses' starts on the take's clock
-    for clip in (a, b):
-        program, offset = files[(clip, "program")]
-        pulses_in[clip] = [t + offset for t in beep_onsets(pcm(program))]
-        require(len(pulses_in[clip]) >= 4, f"{program.name}: only {len(pulses_in[clip])} beeps")
-    def grid(x):
-        return round(x * fps) / fps
-    def phase(clip):  # where pulses start within a second, in [-0.5, 0.5)
-        return (pulses_in[clip][1] + 0.5) % 1 - 0.5  # [0] may be cut by the take's start
-    qa, ma, qb = grid(phase(a) + 0.5), grid(phase(a) + 3.05), grid(phase(b) + 0.5)
-
-    def expect(label, segments):
-        clips = e.rpc("timeline_get")["clips"]
-        have = [(c["take"], c["in_seconds"], c["out_seconds"], c.get("angle")) for c in clips]
-        require(len(have) == len(segments) and all(
-            h[0] == s[0] and abs(h[1] - s[1]) < 1e-4 and abs(h[2] - s[2]) < 1e-4 and h[3] == s[3]
-            for h, s in zip(have, segments)), f"after {label}: clips {have}, expected {segments}")
-        return clips
-
-    edits = [
-        ("timeline_trim", {"clip": c1, "in_seconds": qa, "out_seconds": ma + 1},
-         [(a, qa, ma + 1, None), (b, 0, b_len, None)]),
-        ("timeline_trim", {"clip": c2, "in_seconds": qb},
-         [(a, qa, ma + 1, None), (b, qb, b_len, None)]),
-        ("timeline_split", {"at_seconds": 1.0},
-         [(a, qa, qa + 1, None), (a, qa + 1, ma + 1, None), (b, qb, b_len, None)]),
-        ("timeline_delete_range", {"start_seconds": 2.0, "end_seconds": 2.0 + ma - (qa + 2)},
-         [(a, qa, qa + 1, None), (a, qa + 1, qa + 2, None), (a, ma, ma + 1, None), (b, qb, b_len, None)]),
-        ("timeline_angle", {"start_seconds": 4.0, "end_seconds": 5.0, "source": "bars2"},
-         [(a, qa, qa + 1, None), (a, qa + 1, qa + 2, None), (a, ma, ma + 1, None),
-          (b, qb, qb + 1, None), (b, qb + 1, qb + 2, "bars2"), (b, qb + 2, b_len, None)]),
-    ]
-    for method, params, segments in edits:
-        e.rpc(method, params)
-        expect(method, segments)
-    try:
-        e.rpc("timeline_angle", {"start_seconds": 4.0, "end_seconds": 5.0, "source": "nope"})
-        raise Failure("an angle from an unknown source was accepted")
-    except RpcError as err:
-        require("bars2" in str(err), f"angle error doesn't list the sources: {err}")
-    e.rpc("timeline_undo")
-    expect("timeline_undo", edits[-2][2])
-    e.rpc("timeline_redo")
-    clips = expect("timeline_redo", edits[-1][2])
-    segments, start = [], 0.0  # (timeline start, take, in, out, angle)
-    for take_path, cut_in, cut_out, angle in edits[-1][2]:
-        segments.append((start, take_path, cut_in, cut_out, angle))
-        start += cut_out - cut_in
-    duration = start
-    require(all(abs(c["start_seconds"] - s[0]) < 1e-4 for c, s in zip(clips, segments)),
-            "clip starts differ from the clips' lengths added up")
-
-    def export_into(folder, vertical=False):
-        export = e.rpc("timeline_export", {"folder": str(e.root / folder), "vertical": vertical})
-        def exported():
-            value = read_json(export["manifest"])
-            return value if value["status"] != "exporting" else None
-        result = until(exported, 90, "timeline export")
-        require(result["status"] == "complete" and not result.get("errors"), f"export failed: {result}")
-        want = ["bars", "bars2", "edited", "program"] + (["vertical"] if vertical else [])
-        require(sorted(f["source"] for f in result["files"]) == want,
-                f"exported sources: {[f['source'] for f in result['files']]}, skipped {result.get('skipped')}")
-        return result
-
-    def in_pulse(clip, x, end=False):  # x is in a pulse (its end: the pulse ran up to it)
-        return any((p < x <= p + 0.1) if end else (p <= x < p + 0.1) for p in pulses_in[clip])
-    pulses = []  # where the edited timeline should flash and beep
-    for i, (start, clip, cut_in, cut_out, _) in enumerate(segments):
-        previous = segments[i - 1] if i else None
-        if in_pulse(clip, cut_in) and not (previous and in_pulse(previous[1], previous[3], end=True)):
-            pulses.append(start)
-        pulses += [start + p - cut_in for p in pulses_in[clip] if cut_in < p < cut_out]
-    joins = [s[0] for s in segments[1:]]
-    sources = {}
-
-    def check_export(result, cropped=None):
-        """Every file of an export, picture by picture; `cropped` (the crop
-        and the indexes of the segments it covers) applies to the edited
-        file's pictures there."""
-        rows = []
-        for f in result["files"]:
-            path, width, height = Path(f["path"]), f["width"], f["height"]
-            require(all(abs(p["start_seconds"] - s[0]) < 1e-3 for p, s in zip(f["parts"], segments))
-                    and len(f["parts"]) == len(segments), f"{path.name}: parts don't follow the clips")
-            dropped = 0
-            if loss_limit(evidence):
-                frames = int(probe(path)["streams"][0]["nb_read_frames"])
-                dropped = round(duration * fps) - frames
-            canvas = (cfg["canvas"]["width"], cfg["canvas"]["height"])
-            upright = f["source"] == "vertical"  # #94: the program's size on its side
-            require((width, height) == (canvas[::-1] if upright else canvas),
-                    f"{path.name}: the manifest says {width}x{height}")
-            row = check_file(path, duration, fps, (width, height), dropped=dropped)
-            descriptions = video_descriptions(path)
-            require(descriptions == 1, f"{path.name}: {descriptions} video sample descriptions, not one")
-            row["video_descriptions"] = descriptions
-            # Every picture: the one on screen in its take at that moment.
-            # A vertical file: each (uncropped) picture fitted into its
-            # middle, letterboxed; checked scaled back to the canvas.
-            region = picture_region(path, width, height, canvas) if upright else None
-            if upright:
-                row["picture_region"] = region
-                width, height = canvas
-            out = pattern_frames(path, width, height, region)
-            crop_rows = crop_check = None
-            if cropped and f["source"] == "edited":
-                crop_check, crop_segments = cropped
-                crop_rows = picture_rows(path, width, height, (0.5, 0.6, 0.7))
-                require(len(crop_rows) == len(out), f"{path.name}: rows and pictures disagree")
-            bad, checked_cropped = [], 0
-            for n, (t, shift, cell, _) in enumerate(out):
-                index = next((i for i, s in enumerate(segments)
-                              if s[0] - 1e-6 <= t < s[0] + s[3] - s[2] - 1e-6), None)
-                require(index is not None, f"{path.name}: a picture at {t:.4f} s, past the timeline")
-                seg = segments[index]
-                source = (seg[4] or "program") if f["source"] in ("edited", "vertical") else f["source"]
-                src_path, offset = files[(seg[1], source)]
-                if src_path not in sources:
-                    frames = pattern_frames(src_path, width, height)
-                    sources[src_path] = (frames, [x[0] - frames[0][0] for x in frames])
-                src, src_times = sources[src_path]
-                moment = seg[2] + (t - seg[0]) - offset
-                want = src[max(0, bisect.bisect_right(src_times, moment + 0.25 / fps) - 1)]
-                require((want[2] > 50) == (source == "bars2"), f"{src_path.name}: label cell can't tell the angles apart")
-                if crop_rows is not None and index in crop_segments:
-                    checked_cropped += 1
-                    problem = cropped_picture(crop_rows[n], crop_check, width, height, want)
-                    if problem:
-                        bad.append(f"{t:.4f} s (cropped {source} at {seg[2] + t - seg[0]:.4f} s of its "
-                                   f"take): {problem}")
-                    continue
-                apart = abs(shift - want[1])
-                # Scaled down and up again: a column of the vertical file is
-                # width / region width of the canvas's.
-                slack = 3 if region is None else 3 * width / region[2] + 1
-                if min(apart, width - apart) > slack or (cell > 50) != (want[2] > 50):
-                    bad.append(f"{t:.4f} s: bars at {shift}, label {cell:.0f}; {source} at "
-                               f"{seg[2] + t - seg[0]:.4f} s of its take has {want[1]}, {want[2]:.0f}")
-            require(not bad, f"{path.name}: {len(bad)} of {len(out)} pictures aren't their take's "
-                             f"at that moment: {bad[:4]}")
-            if crop_rows is not None:
-                want_cropped = sum(round((segments[i][3] - segments[i][2]) * fps) for i in crop_segments)
-                require(abs(checked_cropped - want_cropped) <= len(crop_segments),
-                        f"{path.name}: {checked_cropped} cropped pictures, expected {want_cropped}")
-                row["cropped_pictures_checked"] = checked_cropped
-            # Pulses: each expected one flashes and beeps; nothing else does
-            # (a crop keeps the band's bottom, so it flashes too).
-            flashes = [t for i, (t, _, _, band) in enumerate(out) if band > 128 and (i == 0 or out[i - 1][3] <= 128)]
-            samples = pcm(path)
-            beeps = beep_onsets(samples)
-            end = out[-1][0] + 1 / fps
-            def inner(xs):
-                return [x for x in xs if 0.15 < x < end - 0.15]
-            def near(x, xs, tolerance):
-                return min((abs(x - y) for y in xs), default=1) <= tolerance
-            for x in inner(pulses):
-                require(near(x, flashes, 1.5 / fps) and near(x, beeps, 1.5 / fps),
-                        f"{path.name}: no flash or beep at {x:.4f} s (flashes {flashes}, beeps {beeps})")
-            for x in inner(flashes) + inner(beeps):
-                require(near(x, pulses, 1.5 / fps), f"{path.name}: unexpected pulse at {x:.4f} s")
-            offsets = [min(abs(x - y) for y in beeps) for x in inner(flashes)]
-            require(max(offsets) <= 1 / fps + 1 / RATE,
-                    f"{path.name}: flash/beep apart by {max(offsets) * 1000:.2f} ms")
-            # Clicks: no sample step near a join larger than the tone's own.
-            window = RATE // 200
-            steps = [abs(y - x) for x, y in zip(samples, samples[1:])]
-            spans = [(max(0, round(t * RATE) - window), min(len(steps), round(t * RATE) + window)) for t in joins]
-            at_joins = max(max(steps[lo:hi]) for lo, hi in spans)
-            for lo, hi in spans:
-                steps[lo:hi] = [0.0] * (hi - lo)
-            tone = max(steps)
-            require(tone > 0.01, f"{path.name}: no tone")
-            require(at_joins <= tone * 1.05 + 1e-4,
-                    f"{path.name}: a join clicks (step {at_joins:.4f}, the tone's largest {tone:.4f})")
-            row.update(pictures_checked=len(out), pulses=len(inner(flashes)),
-                       max_sync_ms=round(max(offsets) * 1000, 3), join_step=round(at_joins, 4),
-                       tone_step=round(tone, 4), reencoded=[p.get("reencoded_frames") for p in f["parts"]])
-            rows.append(row)
-        return rows
-
-    # The first export also writes the vertical (9:16) file (#94).
-    result = export_into("export", vertical=True)
-    evidence["exported"] = check_export(result)
-    vertical = next(f for f in result["files"] if f["source"] == "vertical")
-    require(all(p["reencoded_frames"] == p["frames"] for p in vertical["parts"]),
-            f"vertical: not every frame was encoded again: {vertical['parts']}")
-
-    # Crop (#87): the edited file shows the lower-right three quarters of a
-    # program clip and of the bars2 angle, scaled up to the program's size
-    # (encoded again); every other picture, and the program and ISO files,
-    # are as before (copied the same).
-    crop = {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75}
-    crop_segments = (1, 4)
-    for i in crop_segments:
-        start, _, cut_in, cut_out, _ = segments[i]
-        e.rpc("timeline_crop", {"start_seconds": start, "end_seconds": start + cut_out - cut_in, "crop": crop})
-    clips = e.rpc("timeline_get")["clips"]
-    require([c.get("crop") for c in clips] == [crop if i in crop_segments else None for i in range(len(segments))],
-            f"crops: {[c.get('crop') for c in clips]}")
-    try:
-        e.rpc("timeline_crop", {"start_seconds": 0, "end_seconds": 1,
-                                "crop": {"x": 0.5, "y": 0, "width": 0.75, "height": 1}})
-        raise Failure("a crop past the picture's edge was accepted")
-    except RpcError as err:
-        require("crop.x, crop.width" in str(err), f"crop error doesn't name the fields: {err}")
-    cropped = export_into("export-crop")
-    require([c.get("crop") for c in cropped["clips"]] == [c.get("crop") for c in clips],
-            "the export's manifest doesn't list the crops")
-    evidence["exported_cropped"] = check_export(cropped, (crop, crop_segments))
-    by_source = {f["source"]: f for f in result["files"]}
-    for f in cropped["files"]:
-        before = by_source[f["source"]]
-        for i, (part, was) in enumerate(zip(f["parts"], before["parts"])):
-            if f["source"] == "edited" and i in crop_segments:
-                require(part["reencoded_frames"] == part["frames"],
-                        f"edited: cropped clip {part['clip']} was not encoded again whole: {part}")
-            else:
-                require(part.get("reencoded_frames") == was.get("reencoded_frames"),
-                        f"{f['source']}: clip {part['clip']} encoded {part.get('reencoded_frames')} frames "
-                        f"again, {was.get('reencoded_frames')} before the crop")
-        if f["source"] != "edited":
-            # Copied packets are the same bytes; only the frames encoded
-            # again at cuts (as before) may differ.
-            now, was = video_packets(Path(f["path"])), video_packets(Path(before["path"]))
-            again = sum(p.get("reencoded_frames") or 0 for p in f["parts"])
-            differ = sum(a != b for a, b in zip(now, was))
-            require(len(now) == len(was) and differ <= again,
-                    f"{f['source']}: the crop changed {differ} packets of a file that isn't the edited "
-                    f"one ({again} were encoded again at cuts)")
-    # NLE projects (#104): every track of each format must show, frame by
-    # frame, the take frames Isocast's export of that source shows, and the
-    # track that is on at each frame what the edited file shows.
-    evidence["nle"] = check_nle(e, cropped, segments, crop, crop_segments, fps, sources)
-    changed = [p.name for p, digest in hashes.items() if hashlib.sha256(p.read_bytes()).hexdigest() != digest]
-    require(not changed, f"edits or export changed take files: {changed}")
-    evidence.update(timeline=e.rpc("timeline_get"), take_files_unchanged=len(hashes))
 
 
 def seconds_of(text):
@@ -1798,96 +1371,6 @@ def nle_tracks(fmt, path):
     return tracks, int(rate), audio
 
 
-def by_slot(pictures, fps):
-    """`pictures` (pattern_frames rows, pts first) as the picture on screen
-    in each frame slot from the first picture's: a dropped slot shows the
-    picture before it, as an editor plays a file with gaps (and Isocast's
-    export holds it). Without drops, slot k is simply picture k."""
-    slots = []
-    for i, row in enumerate(pictures):
-        start = round((row[0] - pictures[0][0]) * fps)
-        end = round((pictures[i + 1][0] - pictures[0][0]) * fps) if i + 1 < len(pictures) else start + 1
-        require(start == len(slots) and end > start, "pictures off the frame grid or out of order")
-        slots.extend([row] * (end - start))
-    return slots
-
-
-def check_nle(e, export, segments, crop, crop_segments, fps, sources):
-    """timeline_export_nle in each format, checked against Isocast's own
-    export `export` frame by frame (by frame slot, so accounted drops in
-    either line up by time, not by stored picture)."""
-    exported = {f["source"]: f for f in export["files"]}
-    order = [s for s in exported if s not in ("program", "edited")] + ["program"]
-    want = {}  # export file -> its pictures
-    for f in export["files"]:
-        want[f["source"]] = by_slot(pattern_frames(Path(f["path"]), f["width"], f["height"]), f["fps"])
-    def same(a, b, width):
-        apart = abs(a[1] - b[1])
-        return min(apart, width - apart) <= 3 and (a[2] > 50) == (b[2] > 50)
-    rows, slotted = [], {}
-    for fmt, app in (("fcpxml", "final_cut"), ("fcpxml", "resolve"), ("xmeml", "premiere"),
-                     ("xmeml", "resolve"), ("otio", None)):
-        params = {"format": fmt, "folder": str(e.root / "nle")}
-        if app:
-            params["app"] = app
-        result = e.rpc("timeline_export_nle", params)
-        path = Path(result["path"])
-        require(path.is_file() and path.suffix == {"fcpxml": ".fcpxml", "xmeml": ".xml", "otio": ".otio"}[fmt],
-                f"{fmt}: no project file: {result}")
-        if fmt != "otio":
-            ET.parse(path)  # well-formed
-        tracks, rate, audio = nle_tracks(fmt, path)
-        require(rate == fps, f"{path.name}: sequence at {rate} fps, the program at {fps}")
-        require([t["source"] for t in result["video_tracks"]] == order and len(tracks) == len(order),
-                f"{path.name}: video tracks {[t['source'] for t in result['video_tracks']]}, want {order}")
-        width = exported["program"]["width"]
-        bad, compared = [], 0
-        for source, track in zip(order, tracks):
-            require(len(track) == len(segments), f"{path.name}: {source} has {len(track)} clips, {len(segments)} segments")
-            for (start, end, file, first, enabled, cropped), seg in zip(track, segments):
-                require(enabled == ((seg[4] or "program") == source),
-                        f"{path.name}: {source} at {start}: enabled {enabled}, the clip's angle is {seg[4] or 'program'}")
-                index = segments.index(seg)
-                want_crop = (crop["x"], crop["y"], crop["width"], crop["height"]) if index in crop_segments else None
-                require((cropped is None) == (want_crop is None) and (cropped is None or all(
-                        abs(a - b) < 1e-3 for a, b in zip(cropped, want_crop))),
-                        f"{path.name}: {source} at {start}: crop read back as {cropped}, the clip's is {want_crop}")
-                frames = slotted.get(Path(file))
-                if frames is None:
-                    src = sources.get(Path(file))
-                    if src is None:
-                        sources[Path(file)] = src = (pattern_frames(Path(file), width, exported[source]["height"]), None)
-                    slotted[Path(file)] = frames = by_slot(src[0], fps)
-                for j in range(start, end):
-                    k = first + j - start
-                    got = want[source][j] if j < len(want[source]) else None
-                    compared += 1
-                    if got is None or k >= len(frames) or not same(frames[k], got, width):
-                        bad.append(f"{source} frame {j}: file frame {k}")
-                    if enabled and index not in crop_segments:
-                        edited = want["edited"][j]
-                        compared += 1
-                        if k >= len(frames) or not same(frames[k], edited, width):
-                            bad.append(f"edited frame {j}: {source} file frame {k}")
-        covered = [sum(e - s for s, e, *_ in t) for t in tracks]
-        require(all(c == len(want["program"]) for c in covered),
-                f"{path.name}: tracks cover {covered} frames, the export has {len(want['program'])}")
-        require(not bad, f"{path.name}: {len(bad)} of {compared} frames differ from Isocast's export: {bad[:5]}")
-        # Audio: each file's audio sits with its video (same start and first
-        # frame), on only for the program.
-        video_items = {(i[2], i[0]): i for t in tracks for i in t}
-        program_files = {i[2] for i in tracks[order.index("program")]}
-        require(audio, f"{path.name}: no audio")
-        for start, end, file, first, enabled, _ in audio:
-            v = video_items.get((file, start))
-            require(v is not None and v[3] == first and v[1] == end,
-                    f"{path.name}: audio of {Path(file).name} at {start} isn't with its video")
-            require(enabled == (file in program_files), f"{path.name}: audio of {Path(file).name} enabled {enabled}")
-        rows.append({"format": fmt, "app": result["app"], "file": path.name, "frames_compared": compared,
-                     "video_tracks": len(tracks), "audio_items": len(audio), "notes": result.get("notes", [])})
-    return rows
-
-
 def snapshot(e, name):
     result = e.rpc("snapshot", {})
     path = e.root / (name + ".png")
@@ -1942,6 +1425,16 @@ def scenario_plugin(e, cfg, evidence):
 
 
 def scenario_hotkeys(e, cfg, evidence):
+    # A 0.0.8 profile with a binding of the retired editor (timeline.retake):
+    # it loads disabled, and the first edit still works and drops it.
+    old = copy.deepcopy(cfg)
+    old["hotkeys"] = {"old-retake": {"keys": "ctrl+alt+r", "action": "timeline.retake", "args": {}}}
+    e.apply(old)
+    require("old-retake" in (e.rpc("hotkeys_get")["configured"] or {}), "the stale binding wasn't kept")
+    e.rpc("hotkeys_set", {"patch": {"first": {"keys": "ctrl+alt+f11", "action": "recording.toggle"}}})
+    after = e.rpc("hotkeys_get")
+    require("first" in after["bindings"] and "old-retake" not in (after["configured"] or {}),
+            f"a patch over a stale timeline binding: {after['configured']}")
     e.apply(cfg)
     catalogue = e.rpc("hotkeys_actions")
     require(any(a["id"] == "recording.toggle" for a in catalogue["actions"]), "record action missing")
@@ -2069,8 +1562,10 @@ def files_of(manifest_path):
 
 def scenario_projects(e, cfg, evidence):
     """7.7: a folder per session, every lifecycle event once with its paths,
-    rename (refused while recording) keeping files, manifests, timelines and
-    exports resolving, and flat recordings from before projects untouched."""
+    rename (refused while recording) keeping files and manifests resolving,
+    flat recordings from before projects untouched, and what the retired
+    editor left on disk (timelines, .isoprj files, exports) never read,
+    changed or deleted."""
     root = e.root / "recordings"
     root.mkdir(parents=True)
     cfg["recording"]["iso"]["enabled"] = True
@@ -2089,7 +1584,13 @@ def scenario_projects(e, cfg, evidence):
         f["path"] = "legacy " + f["path"]
     write_json(flat_manifest, killed)
     flat_hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in flat[1:]}
-    e.rpc("timeline_new", {"name": "Projects"})
+    # The retired editor's timelines folder (as 0.0.8 left it) is ignored
+    # and kept as it is.
+    old_timelines = e.root / "timelines"
+    old_timelines.mkdir()
+    write_json(old_timelines / "current.json", {"timeline": "e2e", "record": None})
+    write_json(old_timelines / "e2e.timeline.json", {"version": 1, "id": "e2e", "name": "E2E", "clips": []})
+    old_hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in old_timelines.iterdir()}
     kinds = ["started", "take_finished", "stopped", "marker", "project_created",
              "project_renamed", "recording_paused"]
     watch = Watch(e, kinds)
@@ -2141,11 +1642,12 @@ def scenario_projects(e, cfg, evidence):
             and Path(stopped[0]["report"]["folder"]) == folder, f"stopped: {stopped}")
     markers = watch.of("marker")
     require(len(markers) == 1 and markers[0]["project"] == project, f"marker: {markers}")
-    # Export into the project (the first clip's folder) before renaming.
-    exported = e.rpc("timeline_export")
-    require(Path(exported["manifest"]).parent == folder, "export did not go into the project folder")
-    until(lambda: read_json(exported["manifest"])["status"] != "exporting", 45, "export")
-    require(read_json(exported["manifest"])["status"] == "complete", "export failed")
+    # An editor project file and export in the folder, as 0.0.8 wrote
+    # them: they move with the folder, unchanged.
+    leftovers = {"Untitled.isoprj": '{"format": "isocast-project", "version": 1}\n',
+                 "Untitled.export.json": '{"status": "complete", "files": []}\n'}
+    for name, text in leftovers.items():
+        (folder / name).write_text(text)
     # Rename, and everything still resolves from the new folder.
     watch = Watch(e, ["project_renamed"])
     renamed = e.rpc("rename_project", {"project": project, "name": "My Talk"})
@@ -2169,71 +1671,25 @@ def scenario_projects(e, cfg, evidence):
         evidence["files"].extend(check_take(Path(path), read_json(path), evidence=evidence))
     require(sorted(map(Path, listed[0]["files"])) ==
             sorted(f for t in listed[0]["takes"] for f in files_of(t)), "list_projects files differ")
-    timeline = e.rpc("timeline_get")
-    require(len(timeline["clips"]) >= 2, "takes did not reach the timeline")
-    for clip in timeline["clips"]:
-        require(Path(clip["take"]).parent == new and Path(clip["take"]).is_file()
-                and all(f["exists"] for f in clip["files"]) and not clip.get("problem"),
-                f"timeline clip does not resolve after rename: {clip}")
-    export = read_json(new / Path(exported["manifest"]).name)
-    for f in export["files"]:
-        require(Path(f["path"]).is_file() and all(Path(p["path"]).is_file() for p in f["parts"]),
-                f"export manifest does not resolve after rename: {f}")
-        # An export keeps every decoded picture of its parts, their accounted
-        # losses included (as in scenario_timeline).
-        frames = sum(int(probe(Path(part["path"]))["streams"][0]["nb_read_frames"]) for part in f["parts"])
-        dropped = round(f["duration_seconds"] * f["fps"]) - frames
-        row = check_file(Path(f["path"]), f["duration_seconds"], f["fps"],
-                         dropped=dropped if loss_limit(evidence) else 0)
-        require(row["frames"] == frames, f"{Path(f['path']).name}: the export lost decoded pictures at a join")
-    for clip in export["clips"]:
-        require(Path(clip["take"]).is_file(), "export clip take does not resolve after rename")
+    for name, text in leftovers.items():
+        require((new / name).read_text() == text, f"{name} changed in a rename")
     # Collisions get a number, and bad names name the field.
     try:
         e.rpc("rename_project", {"project": project, "name": "a/b"})
         raise Failure("a name with / was accepted")
     except RpcError as exc:
         require("name" in exc.error["message"], f"bad name error: {exc.error}")
-    # A rename behind Isocast's back (the Finder), and one whose timeline
-    # update never happened (isocastd stopped right after the folder
-    # rename): the timeline finds the takes by project id.
-    def resolves(where):
-        clips = e.rpc("timeline_get")["clips"]
-        return all(Path(c["take"]).parent == where and not c.get("problem")
-                   and all(f["exists"] for f in c["files"]) for c in clips)
+    # A rename behind Isocast's back (the Finder): list_projects finds it by
+    # its project id, with the new name.
     finder = new.with_name(new.name.replace("My Talk", "Finder Name"))
     new.rename(finder)
-    # Export manifests are healed too, by list_projects alone (#56).
-    e.rpc("list_projects")
-    export = read_json(finder / Path(exported["manifest"]).name)
-    require(all(Path(f["path"]).parent == finder and all(Path(p["path"]).is_file() for p in f["parts"])
-                for f in export["files"]) and all(Path(c["take"]).is_file() for c in export["clips"]),
-            f"export manifest not healed after a Finder rename: {export['files']}")
-    require(resolves(finder), "timeline broke after a Finder rename")
-    e.stop()
-    killed = finder.with_name(finder.name.replace("Finder Name", "Killed Rename"))
-    finder.rename(killed)
-    # Clips from before project ids: healed by file name, and given the
-    # id (#56).
-    # The project's timeline (#114: the take before it has a timeline of
-    # its own, in another project).
-    timelines = [t for t in (e.root / "timelines").glob("*.json") if "clips" in read_json(t)
-                 and any(Path(c["take"]).parent == finder for c in read_json(t)["clips"])]
-    require(timelines, "no timeline names the renamed project's takes")
-    for path in timelines:
-        saved = read_json(path)
-        for clip in saved["clips"]:
-            clip.pop("project", None)
-        write_json(path, saved)
-    e.start()
-    require(resolves(killed), "timeline broke after a rename with no timeline update")
-    for path in timelines:
-        require(all(c.get("project") == project for c in read_json(path)["clips"]),
-                f"a clip healed by file name has no project id: {path}")
-    e.stop()
-    e.start()
-    require(resolves(killed), "timeline did not stay healed across a restart")
-    evidence["healed"] = [str(finder), str(killed)]
+    listed = [p for p in e.rpc("list_projects")["projects"] if p["id"] == project]
+    require(len(listed) == 1 and Path(listed[0]["folder"]) == finder and listed[0]["name"] == "Finder Name"
+            and all(Path(t).parent == finder for t in listed[0]["takes"]),
+            f"list_projects after a Finder rename: {listed}")
+    for name, text in leftovers.items():
+        require((finder / name).read_text() == text, f"{name} changed after a Finder rename")
+    evidence["finder_rename"] = str(finder)
     # Flat recordings stay where they were, unchanged, and a killed one is
     # still recovered at launch.
     require({str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in flat[1:]} == flat_hashes,
@@ -2243,6 +1699,8 @@ def scenario_projects(e, cfg, evidence):
     interrupted = [Path(r["manifest"]) for r in e.rpc("status").get("interrupted", [])]
     require(flat_manifest in interrupted, f"flat killed take not recovered: {interrupted}")
     require(read_json(flat_manifest)["status"] == "interrupted", "flat manifest not marked")
+    require({str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in old_timelines.iterdir()} == old_hashes,
+            "the retired editor's timelines changed")
     counts["project_renamed"] = len(event)
     evidence.update(project=renamed["project"], events=counts,
                     flat=[str(p) for p in flat])
@@ -2708,10 +2166,10 @@ ORACLE_QUADS = {"tl": (0, 0), "tr": (8, 0), "bl": (0, 5), "br": (8, 5)}
 ORACLE_LEVELS = (24, 232)
 ORACLE_TAGS = {"a": 1, "b": 2, "c": 3, "m": 4}
 ORACLE_MARKERS = [600 + 200 * k for k in range(8)]
-ORACLE_SCENARIOS = ("oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks",
+ORACLE_SCENARIOS = ("oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
                     "oracle_canvases", "oracle_replay", "oracle_governor")
 # The lanes' suite while they work (about 3 minutes on the VM, --hosted).
-QUICK = ("oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks")
+QUICK = ("oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks")
 # Measured on main (2026-10-18): a media source restarting on activation
 # shows its first frame at the first picture its scene is on air.
 RESTART_FIRST_FRAME = 0
@@ -3438,362 +2896,6 @@ def scenario_oracle_takes(e, cfg, evidence):
     evidence.update(t0=t0, first_take_slots=slots, pauses=takes[1][1]["pauses"])
 
 
-class EditModel:
-    """The oracle's own timeline: the takes appended whole, then each
-    requested edit applied as the API documents it (trim a clip's in/out
-    points; split at a time; delete a range, closing the gap; an angle or a
-    crop over a range, splitting clips at its ends). Times are frame slots.
-    The engine's timeline is compared with it, never used in its place."""
-
-    def __init__(self, takes, frames):
-        self.segs = [{"take": str(t), "in": 0, "out": frames, "angle": None, "crop": None} for t in takes]
-
-    def starts(self):
-        out, at = [], 0
-        for seg in self.segs:
-            out.append(at)
-            at += seg["out"] - seg["in"]
-        return out, at
-
-    def split(self, at):
-        starts, _ = self.starts()
-        for i, (seg, start) in enumerate(zip(self.segs, starts)):
-            if start < at < start + seg["out"] - seg["in"]:
-                cut = seg["in"] + at - start
-                self.segs[i:i + 1] = [dict(seg, out=cut), dict(seg, **{"in": cut})]
-                return
-
-    def trim(self, index, cut_in=None, cut_out=None):
-        seg = self.segs[index]
-        seg["in"] = seg["in"] if cut_in is None else cut_in
-        seg["out"] = seg["out"] if cut_out is None else cut_out
-
-    def over(self, lo, hi):
-        self.split(lo)
-        self.split(hi)
-        starts, _ = self.starts()
-        return [i for i, start in enumerate(starts) if lo <= start and start + self.segs[i]["out"] - self.segs[i]["in"] <= hi]
-
-    def delete(self, lo, hi):
-        for i in reversed(self.over(lo, hi)):
-            del self.segs[i]
-
-    def set(self, lo, hi, key, value):
-        for i in self.over(lo, hi):
-            self.segs[i][key] = value
-
-    def compare(self, clips, fps):
-        """Why the engine's clips aren't this timeline, if they aren't."""
-        if len(clips) != len(self.segs):
-            return f"{len(clips)} clips, the requested edits make {len(self.segs)}"
-        for i, (c, seg) in enumerate(zip(clips, self.segs)):
-            got = (str(Path(c["take"]).resolve()), round(c["in_seconds"] * fps, 3), round(c["out_seconds"] * fps, 3),
-                   c.get("angle"), c.get("crop"))
-            want = (str(Path(seg["take"]).resolve()), seg["in"], seg["out"], seg["angle"], seg["crop"])
-            if got[0] != want[0] or abs(got[1] - want[1]) > 0.01 or abs(got[2] - want[2]) > 0.01 \
-                    or got[3] != want[3] or (got[4] is None) != (want[4] is None) \
-                    or (got[4] and any(abs(got[4][k] - want[4][k]) > 1e-4 for k in want[4])):
-                return (f"clip {i} is {Path(got[0]).stem} slots {got[1]}-{got[2]} angle {got[3]} crop {got[4]}; "
-                        f"the edits make {Path(want[0]).stem} slots {want[1]}-{want[2]} angle {want[3]} crop {want[4]}")
-        return None
-
-
-def scenario_oracle_edit(e, cfg, evidence):
-    """Two takes edited (trim, split, ripple delete, an angle, crops),
-    exported (an MP4 program where the codec allows, MOV ISOs, the edited
-    file and its 9:16 copy) and as FCPXML (Final Cut, Resolve), xmeml
-    (Premiere, Resolve) and OTIO. The expected timeline comes from the
-    requested edits (EditModel), never from the engine; the engine's
-    timeline must equal it; every exported picture and burst and every
-    project file's tracks, in and out points, crops and sound are checked
-    against it."""
-    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
-    cfg, count = oracle_base(e.root, cfg, {"a": ("a", False, 1), "b": ("b", False, 1)}, fps)
-    layout = [("a", (0, 0, 1, 1)), ("b", (0.5, 0.5, 0.5, 0.5))]
-    oracle_scene(cfg, layout)
-    cfg["recording"]["program"]["audio"] = ["a"]
-    if cfg["recording"]["program"]["encoder"]["codec"] in ("h264", "hevc"):
-        cfg["recording"]["program"]["encoder"]["container"] = "mp4"
-    cfg["recording"]["iso"].update(enabled=True, sources=["a", "b"], audio=["a"])
-    e.apply(cfg)
-    e.rpc("timeline_new", {"name": "Oracle edit"})
-    seconds = oracle_seconds(evidence, 3, 4)
-    takes = [take(e, seconds) for _ in range(2)]
-    evidence["files"] = [r for p, m in takes for r in check_take(p, m, seconds, evidence=evidence)]
-    # A take's anchor is its slot 0 (a program file that started late,
-    # hosted only, shows slot offset + n at its picture n; test Macs: strict).
-    hosted = loss_limit(evidence) > 0
-    late = {str(Path(p).resolve()): {f["source"]: round((f.get("start_offset_seconds") or 0) * fps) if hosted else 0
-                                     for f in m["files"]} for p, m in takes}
-    anchors = {str(Path(p).resolve()): (fit_anchor(oracle_decode(manifest_file(p, m, "program")[0],
-                                                                 oracle_regions(layout), fps), "a", count)
-                                        - late[str(Path(p).resolve())]["program"]) % count
-               for p, m in takes}
-    model = EditModel([Path(p).resolve() for p, _ in takes], seconds * fps)
-    problem = model.compare(e.rpc("timeline_get")["clips"], fps)
-    require(problem is None, f"edit: the two takes didn't append whole: {problem}")
-    ids = [c["id"] for c in e.rpc("timeline_get")["clips"]]  # names only
-    crop = {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75}
-    f = lambda x: round(x * fps)  # noqa: E731
-    edits = [("timeline_trim", {"clip": ids[0], "in_seconds": 0.5, "out_seconds": seconds - 0.5},
-              lambda: model.trim(0, f(0.5), f(seconds - 0.5))),
-             ("timeline_trim", {"clip": ids[1], "in_seconds": 0.3}, lambda: model.trim(1, f(0.3))),
-             ("timeline_split", {"at_seconds": 1.0}, lambda: model.split(f(1.0))),
-             ("timeline_delete_range", {"start_seconds": 1.4, "end_seconds": 1.7},
-              lambda: model.delete(f(1.4), f(1.7))),
-             ("timeline_angle", {"start_seconds": seconds - 0.7, "end_seconds": seconds - 0.2, "source": "b"},
-              lambda: model.set(f(seconds - 0.7), f(seconds - 0.2), "angle", "b"))]
-    for method, params, apply in edits:
-        e.rpc(method, params)
-        apply()
-        problem = model.compare(e.rpc("timeline_get")["clips"], fps)
-        require(problem is None, f"edit: after {method} {params}: {problem}")
-    # Crops on a program clip and on the angle's clip, chosen in the model.
-    starts, _ = model.starts()
-    for i in (1, len(model.segs) - 2):
-        lo, hi = starts[i], starts[i] + model.segs[i]["out"] - model.segs[i]["in"]
-        e.rpc("timeline_crop", {"start_seconds": lo / fps, "end_seconds": hi / fps, "crop": crop})
-        model.set(lo, hi, "crop", dict(crop))
-        problem = model.compare(e.rpc("timeline_get")["clips"], fps)
-        require(problem is None, f"edit: after timeline_crop of slots {lo}-{hi}: {problem}")
-    require(sum(1 for s in model.segs if s["crop"]) == 2 and any(s["angle"] == "b" for s in model.segs),
-            "edit: the model lost its crops or angle")
-    segments = model.segs
-    starts, total = model.starts()
-    evidence["segments"] = [dict(s, start=st) for s, st in zip(segments, starts)]
-    export = e.rpc("timeline_export", {"folder": str(e.root / "export"), "vertical": True})
-    result = until(lambda: (lambda v: v if v["status"] != "exporting" else None)(read_json(export["manifest"])),
-                   180, "timeline export")
-    require(result["status"] == "complete" and not result.get("errors"), f"export failed: {result}")
-    kinds = sorted(f["source"] for f in result["files"])
-    require(kinds == ["a", "b", "edited", "program", "vertical"],
-            f"export: files for {kinds}, expected a, b, edited, program and vertical")
-
-    def segment(slot):
-        i = max(k for k, st in enumerate(starts) if st <= slot)
-        return i, segments[i]
-
-    # Hosted: the take slots each file holds a picture for (a dropped slot
-    # has none). An export of it plays the picture before a dropped slot, as
-    # an editor does: a re-encoded export repeats it, a copied one keeps the
-    # gap (accounted in the take's drop row). Test Macs: every slot.
-    shown = {}
-    if hosted:
-        for p, m in takes:
-            for f in m["files"]:
-                if f.get("dropped_frames"):
-                    shown[(str(Path(p).resolve()), f["source"])] = {
-                        round(t * fps) + late[str(Path(p).resolve())][f["source"]]
-                        for t in video_times(Path(p).parent / f["path"])}
-
-    def take_frame(i, slot, source=None):
-        # An export slot -> its take's slot: the clip's in point plus the
-        # slots since the clip started, on the take's own frame grid. Before
-        # its file of `source` started (hosted late starts), the export holds
-        # that file's first picture (export.rs short_file_notes); over a slot
-        # the file dropped, the picture before it.
-        at = segments[i]["in"] + slot - starts[i]
-        if source is not None:
-            at = max(at, late[segments[i]["take"]][source])
-            held = shown.get((segments[i]["take"], source))
-            while held is not None and at not in held and at > min(held):
-                at -= 1
-        return (anchors[segments[i]["take"]] + at) % count
-
-    def dropped(i, slot, source):
-        held = shown.get((segments[i]["take"], source))
-        at = segments[i]["in"] + slot - starts[i]
-        return held is not None and at >= late[segments[i]["take"]][source] and at not in held
-
-    def sounding(i, slot, source):
-        # Its file's sound is silent before the file started: no burst there.
-        return None if segments[i]["in"] + slot - starts[i] < late[segments[i]["take"]][source] \
-            else take_frame(i, slot)
-
-    for f_ in result["files"]:
-        path, kind = Path(f_["path"]), f_["source"]
-        frames_at = video_times(path)
-        regions_of, files_of = [], []
-        for seg in segments:
-            if kind in ("a", "b"):
-                items, c = [(kind, (0, 0, 1, 1))], None
-            elif kind == "program":
-                items, c = layout, None
-            else:  # edited, vertical: the clip's angle and crop
-                items = [(seg["angle"], (0, 0, 1, 1))] if seg["angle"] else layout
-                c = seg["crop"]
-            files_of.append(kind if kind in ("a", "b") else "program" if kind == "program"
-                            else seg["angle"] or "program")
-            rect = (c["x"], c["y"], c["width"], c["height"]) if c else (0, 0, 1, 1)
-            place = fit_rect((rect[2] * w, rect[3] * h), (f_["width"], f_["height"])) if kind == "vertical" \
-                else (0, 0, 1, 1)
-            regions = oracle_regions(items, crop=rect, place=place)
-            require(regions, f"{path.name}: the oracle has nothing to read in a clip of it")
-            regions_of.append(regions)
-        slots = [round(t * fps) for t in frames_at]
-        # One picture per slot; hosted, a copied export may skip exactly the
-        # slots its clip's file dropped.
-        gaps = sorted(set(range(total)) - set(slots))
-        require(slots == sorted(set(slots)) and set(slots) <= set(range(total))
-                and all(dropped(segment(j)[0], j, files_of[segment(j)[0]]) for j in gaps),
-                f"{path.name}: {len(frames_at)} pictures, the edits make {total} (one per slot"
-                f"{', but for the slots its files dropped' if hosted else ''}; missing {gaps[:8]})")
-        w2, h2, frames = gray_frames(path)
-        oracle = Oracle(f"export {kind}", path, e.root, evidence, hold_ok=False)
-        for index, (t, pixels) in enumerate(frames):
-            slot = round(t * fps)
-            i, seg = segment(slot)
-            names = {}
-            for region in regions_of[i]:
-                name = (f"{region['name']} (clip {i}: take {Path(seg['take']).stem} "
-                        f"slot {seg['in'] + slot - starts[i]})")
-                names[name] = region
-                oracle.expect(index, t, name, ("id", region["tag"], take_frame(i, slot, files_of[i])),
-                              oracle_read(pixels, w2, h2, region))
-        evidence.setdefault("exports", []).append(oracle.verdict())
-        if kind in ("program", "a", "edited"):
-            # The edited file's sound is the program's; a's is its own.
-            heard = "a" if kind == "a" else "program"
-            oracle_markers(f"export {kind}", path, lambda j: sounding(segment(j)[0], j, heard), fps, evidence,
-                           cuts=starts[1:])
-    evidence["nle"] = oracle_nle(e, segments, starts, total, anchors, fps, count, evidence, late)
-
-
-def xmeml_sound_channels(path):
-    """An xmeml project's sound items with the channel each plays (its
-    sourcetrack's trackindex): {(start, end, file, first frame, enabled):
-    [channels]}, one entry per item, duplicates kept."""
-    seq = ET.parse(path).getroot().find("sequence")
-    files = {f.get("id"): urllib.parse.unquote(f.find("pathurl").text.removeprefix("file://localhost"))
-             for f in seq.iter("file") if f.find("pathurl") is not None}
-    out = {}
-    for track in seq.findall("media/audio/track"):
-        for c in track.findall("clipitem"):
-            key = (int(c.find("start").text), int(c.find("end").text), files[c.find("file").get("id")],
-                   int(c.find("in").text), c.find("enabled").text == "TRUE")
-            out.setdefault(key, []).append(int(c.findtext("sourcetrack/trackindex") or 0))
-    return out
-
-
-def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence, late=None):
-    """Each project format against the oracle's timeline: video tracks for
-    a, b and the program, each tiling the whole sequence with one item per
-    clip at the clip's slots; every sequence frame showing the media frame
-    the oracle expects (from the item's file, first frame and start); the
-    clip's crop on every track; only the clip's angle enabled; sound with
-    its picture, on for the program only. `late` {take: {source: slots}}:
-    files that started late (hosted), whose items start that much into a
-    clip whose in point is before them (nle.rs: the item's lead)."""
-    def lead(seg, source):
-        return max(0, ((late or {}).get(seg["take"], {}).get(source, 0)) - seg["in"])
-    files = {}
-    for take_path in {s["take"] for s in segments}:
-        for f in read_json(take_path)["files"]:
-            files[str((Path(take_path).parent / f["path"]).resolve())] = (
-                str(Path(take_path).resolve()), round((f.get("start_offset_seconds") or 0) * fps), f["source"])
-    rows, slotted = [], {}
-    for fmt, app in (("fcpxml", "final_cut"), ("fcpxml", "resolve"), ("xmeml", "premiere"),
-                     ("xmeml", "resolve"), ("otio", None)):
-        params = {"format": fmt, "folder": str(e.root / "nle")}
-        if app:
-            params["app"] = app
-        path = Path(e.rpc("timeline_export_nle", params)["path"])
-        name = f"{path.name} ({app or fmt})"
-        tracks, rate, audio = nle_tracks(fmt, path)
-        require(rate == fps, f"{name}: sequence at {rate} fps, the takes at {fps}")
-        sources = []
-        for track in tracks:
-            known = {files.get(str(Path(i[2]).resolve()), (None, None, None))[2] for i in track}
-            require(len(known) == 1 and None not in known, f"{name}: a track mixes or misses sources: {known}")
-            sources.append(known.pop())
-        require(sources == ["a", "b", "program"], f"{name}: video tracks {sources}, expected a, b, program")
-        bad, compared = [], 0
-        for source, track in zip(sources, tracks):
-            items = sorted(track, key=lambda i: i[0])
-            bounds = [(i[0], i[1]) for i in items]
-            want_bounds = [(st + lead(s, source), st + s["out"] - s["in"]) for st, s in zip(starts, segments)]
-            require(bounds == want_bounds, f"{name}: the {source} track's items are at {bounds}, the clips at "
-                                           f"{want_bounds} (all {total} sequence frames, no gaps or overlaps)")
-            for (start, end, file, first, enabled, crop), seg in zip(items, segments):
-                take_path, offset, _ = files[str(Path(file).resolve())]
-                want_crop = seg["crop"] and (seg["crop"]["x"], seg["crop"]["y"], seg["crop"]["width"],
-                                             seg["crop"]["height"])
-                if (crop is None) != (want_crop is None) or (crop and any(abs(x - y) > 1e-3
-                                                                          for x, y in zip(crop, want_crop))):
-                    bad.append(f"{source} item at {start}: crop {crop}, the clip's is {want_crop}")
-                if enabled != ((seg["angle"] or "program") == source):
-                    bad.append(f"{source} item at {start}: enabled {enabled}, the clip's angle is "
-                               f"{seg['angle'] or 'program'}")
-                for j in range(start, end):
-                    compared += 1
-                    shows = (anchors[take_path] + offset + first + j - start) % count
-                    want = (anchors[seg["take"]] + seg["in"] + j - start) % count
-                    if take_path != seg["take"] or shows != want:
-                        bad.append(f"{source} track, sequence frame {j}: {Path(file).name} frame {first + j - start} "
-                                   f"shows media frame {shows}, the oracle expects {want} from "
-                                   f"{Path(seg['take']).stem}")
-        leads = sum(lead(seg, source) for seg in segments for source in ("a", "b", "program"))
-        require(compared == 3 * total - leads, f"{name}: compared {compared} frames, expected {3 * total - leads}")
-        # Sound (#124 re-review B3): exactly one enabled item per clip, the
-        # program's sound with the program track's picture (same file, start,
-        # end and first frame), tiling the sequence; any other item disabled
-        # and with its own picture. Then the program sound as the project
-        # plays it (the referenced stretches of the take files laid end to
-        # end) must have the oracle's bursts where the oracle says.
-        video = {(i[2], i[0]): i for t in tracks for i in t}
-        program_items = sorted(tracks[2], key=lambda i: i[0])
-        # Exactly one enabled item per channel per program item, counted as
-        # written (never deduplicated first): one item per clip in FCPXML and
-        # OTIO, whose clips carry all their channels; in xmeml, Premiere's
-        # one stereo item (channel 1) per clip, Resolve's one item per
-        # channel (1..channels of the program's sound) per clip.
-        program_keys = [(i[0], i[1], i[2], i[3]) for i in program_items]
-        channels = {take: next((a["channels"] for f in read_json(take)["files"] if f["source"] == "program"
-                                for a in f.get("audio", [])), 2) for take in {s["take"] for s in segments}}
-        if fmt == "xmeml":
-            got = {k[:4]: sorted(v) for k, v in xmeml_sound_channels(path).items() if k[4]}
-            want = {k: (list(range(1, channels[files[str(Path(k[2]).resolve())][0]] + 1)) if app == "resolve"
-                        else [1]) for k in program_keys}
-        else:
-            got = {}
-            for i in audio:
-                if i[4]:
-                    got.setdefault((i[0], i[1], i[2], i[3]), []).append(None)
-            want = {k: [None] for k in program_keys}
-        if got != want:
-            show = lambda m: [(k[0], k[1], Path(k[2]).name, k[3], v) for k, v in sorted(m.items())]  # noqa: E731
-            bad.append(f"the enabled sound items (span: channels) are {show(got)}; the oracle expects {show(want)}: "
-                       f"exactly one per channel per program clip")
-        enabled = sorted({(i[0], i[1], i[2], i[3]): i for i in audio if i[4]}.values(), key=lambda i: i[0])
-        for start, end, file, first, on, _ in audio:
-            v = video.get((file, start))
-            if not on and (v is None or v[3] != first or v[1] != end or file in {i[2] for i in program_items}):
-                bad.append(f"disabled sound of {Path(file).name} at {start} isn't an angle's with its picture")
-        if not bad:
-            sound, cache = array.array("f", bytes(4 * round(total / fps * RATE))), {}
-            seg_at = lambda j: max(k for k, st in enumerate(starts) if st <= j)  # noqa: E731
-            silent = lambda j: j - starts[seg_at(j)] < lead(segments[seg_at(j)], "program")  # noqa: E731
-            for start, end, file, first, _, _ in enabled:
-                if file not in cache:
-                    cache[file] = pcm(Path(file))
-                a, n = round(first / fps * RATE), round((end - start) / fps * RATE)
-                piece = cache[file][a:a + n]
-                require(len(piece) == n, f"{name}: {Path(file).name} has no sound at frames {first}-{first + end - start}")
-                sound[round(start / fps * RATE):round(start / fps * RATE) + n] = piece
-            try:
-                oracle_markers(name, path, lambda j: None if silent(j) else
-                               (anchors[segments[seg_at(j)]["take"]] + segments[seg_at(j)]["in"]
-                                + j - starts[seg_at(j)]) % count,
-                               fps, evidence, cuts=starts[1:], samples=sound)
-            except Failure as exc:
-                bad.append(str(exc))
-        if bad:
-            raise Failure(f"{name}: {len(bad)} problems against the oracle; first: {bad[0]}")
-        rows.append({"format": fmt, "app": app, "frames_compared": compared, "tracks": sources,
-                     "sound_items": len(audio), "program_sound_items": len(enabled)})
-    return rows
-
-
 def bar_center(pixels, w, h, rect):
     """Where the bright vertical bar is across `rect`: its centre as a
     fraction of the rect's width, or None."""
@@ -4148,8 +3250,7 @@ def pattern_oracle(path, fps):
 
 def oracle_rules_selftest(work):
     """The oracle's own rules on made-up pictures: it is strict (any
-    mismatch fails, even one picture one frame late), and the edit model
-    catches an engine timeline that ignored or misplaced an edit."""
+    mismatch fails, even one picture one frame late)."""
     def run(changes, pictures=300, evidence=None):
         try:
             oracle = Oracle("rules", work / "none.mov", work, {} if evidence is None else evidence)
@@ -4270,17 +3371,6 @@ def oracle_rules_selftest(work):
             cases[label] = ("pass", "fail")
         except Failure:
             cases[label] = ("fail", "fail")
-    model = EditModel(["/t/1", "/t/2"], 90)
-    model.set(30, 60, "crop", {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75})
-    engine = [{"take": "/t/1", "in_seconds": 0, "out_seconds": 1, "angle": None},
-              {"take": "/t/1", "in_seconds": 1, "out_seconds": 2, "angle": None},
-              {"take": "/t/1", "in_seconds": 2, "out_seconds": 3, "angle": None},
-              {"take": "/t/2", "in_seconds": 0, "out_seconds": 3, "angle": None}]
-    cases["an ignored crop"] = ("fail" if model.compare(engine, 30) else "pass", "fail")
-    engine[1]["crop"] = {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75}
-    cases["the crop as asked"] = ("fail" if model.compare(engine, 30) else "pass", "pass")
-    engine[2]["in_seconds"] = 2 + 1 / 30
-    cases["a cut one frame late"] = ("fail" if model.compare(engine, 30) else "pass", "fail")
     wrong = {k: v for k, v in cases.items() if v[0] != v[1]}
     require(not wrong, f"oracle rules: {wrong}")
     return {k: v[0] for k, v in cases.items()}
