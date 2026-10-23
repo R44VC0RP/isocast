@@ -44,6 +44,10 @@ read it front to back.
   `decision` with `--option`s); keep working on whatever doesn't depend on
   the answer, and read it with `board inbox` or `board wait ASK-n`. Never
   ask in chat. Make ordinary design decisions yourself and record them.
+- **Never end your turn while your own builds, benchmarks or CI runs are
+  in flight.** Wait on them in the background and keep working on what
+  doesn't depend on them; ending the turn stops the lane until someone
+  notices.
 - **After three failed attempts** at the same problem, stop, write the most
   likely wrong assumption in REPORT, and hand back.
 

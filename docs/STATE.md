@@ -228,6 +228,21 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 - 2026-10-22: macOS 15 `AVAssetWriterInput appendSampleBuffer:` before `startSessionAtSourceTime:` returns YES; macOS
   26 throws. The pixel-buffer adaptor throws on both, as does any append on a writer that never started writing.
 
+- 2026-10-22: Mac server baseline (ISO-25, `0c1da2aa`, exonbook M4 Max): matched headless
+  1080p60 program + 1080p60 ISO, HEVC70/no B-frames/AAC256, n=3 interleaved, zero repeats/drops
+  in both apps: Isocast family CPU 43.80% vs OBS 97.16% of one core, RSS 208 vs 1192 MiB.
+  Family includes daemon/OBS, descendants and VT services attributed by launch interval (not authoritative
+  OS client ownership). The older Mac “half CPU” benchmark was already headless but did not match ISO
+  outputs. The new three-output 1080/4K cohorts overload OBS: report unique pictures and shortened ISO
+  durations beside CPU, never credit repeats as delivered work. Evidence: mac-perf/scratch/REPORT.md.
+  The AAC workspace-reuse candidate's paired A/B showed no demonstrated aggregate CPU improvement;
+  do not attribute differences between later, unpaired cohorts to that allocation change.
+- 2026-10-22: Preview demand audit (ISO-25): cold headless recording with an off-air scene staged
+  produces zero shared/H.264-monitor/scene-feed/Studio-preview renders; only the recording program
+  runs at 60 fps. Subscriber-created workers already provide demand control. Existing compositor/scene
+  demand has a 3s grace after the last request, and the daemon's `frames` status label lasts 15s for
+  idle shutdown; neither label nor recording GPU work proves an unwatched preview renderer.
+
 ## 7. Open decisions and waiting on Ryan
 
 - **Windows release:** needs Authenticode signing and Ryan's call on the first Windows release. Packages so far are
