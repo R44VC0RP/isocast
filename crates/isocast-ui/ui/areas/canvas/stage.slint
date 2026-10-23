@@ -14,7 +14,8 @@
 
 import { Theme } from "../../theme.slint";
 import { Ui } from "../../state.slint";
-import { Menus, Tag, TagTone, TextMenuButton, Tip } from "../../kit.slint";
+import { IconButton, Menus, Tag, TagTone, TextMenuButton, Tip } from "../../kit.slint";
+import { Icons } from "../../icons.slint";
 import { CanvasArea } from "state.slint";
 import { Monitor } from "monitor.slint";
 import { StudioColumn } from "../controls/studio.slint";
@@ -33,6 +34,22 @@ component LineText inherits Text {
     letter-spacing: Theme.tracking-xs;
     vertical-alignment: center;
     accessible-role: none;
+}
+
+// The program's sound on this computer, for another computer's engine: a
+// speaker toggle (muted until chosen).
+component RemoteSound inherits VerticalLayout {
+    alignment: center;
+    IconButton {
+        compact: true;
+        icon: CanvasArea.remote-sound && CanvasArea.remote-sound-blocked == "" ? Icons.volume : Icons.muted;
+        on: CanvasArea.remote-sound && CanvasArea.remote-sound-blocked == "";
+        enabled: !CanvasArea.remote-sound-final;
+        toggle: true;
+        label: CanvasArea.remote-sound-blocked != "" ? CanvasArea.remote-sound-blocked
+            : CanvasArea.remote-sound ? "Mute the program on this computer" : "Hear the program on this computer";
+        clicked => { CanvasArea.toggle-remote-sound(); }
+    }
 }
 
 // The main viewer line (Paper: 28px on the stage, 14px in): the format,
@@ -110,6 +127,7 @@ component ViewerLine inherits Rectangle {
         x: parent.width - Theme.pane-x - self.width;
         width: self.preferred-width;
         spacing: Theme.line-gap;
+        if CanvasArea.remote-sound-shown: RemoteSound { }
         VerticalLayout {
             alignment: center;
             scale := TextMenuButton {
@@ -141,6 +159,8 @@ component MonitorHead inherits Rectangle {
     // word alone (the format).
     in property <string> info;
     in property <string> info-value;
+    // The program's: the remote sound toggle.
+    in property <bool> sound;
 
     height: Theme.statusbar;
     accessible-role: groupbox;
@@ -175,6 +195,7 @@ component MonitorHead inherits Rectangle {
                 font-weight: Theme.weight-light;
             }
         }
+        if root.sound && CanvasArea.remote-sound-shown: RemoteSound { }
     }
 }
 
@@ -395,6 +416,7 @@ export component Stage inherits Rectangle {
         tone: TagTone.program;
         name: CanvasArea.program-name;
         info: Format.canvas;
+        sound: true;
     }
     // The chosen extra canvas's program: kept made and hidden (as Studio
     // Mode's program is), its line over it; as tall as the edited monitor

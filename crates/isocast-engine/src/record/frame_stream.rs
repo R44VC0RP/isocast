@@ -1,5 +1,5 @@
 //! Monitors' video (`frames`): a target's picture (the program, studio
-//! mode's preview or a source) as low-latency H.264 from the hardware
+//! mode's preview or a source) as low-latency H.264 from the platform
 //! encoder. Everyone watching the same target at the same size shares one
 //! encoder thread, which runs only while someone watches, at the highest
 //! rate any of them asks for (a viewer can change its rate at any time, as
@@ -7,9 +7,9 @@
 //! once (see `isocast_protocol::api::frames`) and the same bytes go to
 //! every viewer.
 //!
-//! The encoder scales and converts the frame itself (on the GPU and media
-//! engines), so the CPU only hands frames over and copies the compressed
-//! bytes, a few kilobytes each.
+//! A monitor-only GPU stage resizes mismatched frames before encoding;
+//! native encoders need not support implicit scaling. Both the stage and
+//! encoder are shared by `frames` clients and WHEP viewers at this width.
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -19,12 +19,16 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use isocast_protocol::ScaleFilter;
 use isocast_protocol::api::frames;
 
+use crate::gpu::Gpu;
 use crate::source::FrameSlot;
 use crate::stream::flv::avc_decoder_configuration;
-use crate::{EncodedVideo, LiveVideoSpec, Platform, Time, VideoEncoder};
+use crate::{EncodedVideo, EncoderFrameFormat, LiveVideoSpec, Platform, Time, VideoEncoder};
+
+use super::iso_frames::IsoFrames;
 
 /// Bits per pixel per frame: a sharp monitor picture of a screen.
 const BITS_PER_PIXEL: f64 = 0.1;
@@ -271,6 +275,12 @@ fn run<P: Platform>(
     source: impl Fn(u32) -> Result<Source<P::Frame>, String>,
 ) {
     let mut encoding: Option<Encoding<P::VideoEncoder>> = None;
+    // Reuse the existing bounded GPU resize/conversion machinery, but with
+    // an independent pool and no recording filters or routes. Matching-size
+    // and matching-format monitors bypass it. No pixel readback.
+    let mut scaling: Option<IsoFrames<P>> = None;
+    let mut gpu_retries = 0;
+    let (mut scaled_tx, mut scaled_rx) = sync_channel(1);
     let mut pace = Pace::default();
     loop {
         let fps = shared
@@ -298,15 +308,93 @@ fn run<P: Platform>(
             continue;
         };
         let size = platform.frame_size(&frame);
-        if encoding.as_ref().is_none_or(|e| e.input != size) {
-            match start_encoder(platform, size, key, fps) {
-                Ok(started) => {
+        let needs_stage = needs_conversion(
+            size,
+            scaled(size, key.max_width),
+            platform.frame_is_ycbcr(&frame),
+            platform.encoder_frame_format(),
+        );
+        if encoding.as_ref().is_none_or(|e| e.input != size) || scaling.is_some() != needs_stage {
+            let started = start_encoder(platform, size, key, fps).and_then(|started| {
+                let scaling = if needs_stage {
+                    Some(IsoFrames::new(
+                        platform,
+                        Gpu::for_platform(platform)?,
+                        &key.target,
+                        started.output,
+                        None,
+                        Time::from_nanos(0),
+                        ScaleFilter::Area,
+                    )?)
+                } else {
+                    None
+                };
+                Ok((started, scaling))
+            });
+            match started {
+                Ok((started, resized)) => {
                     encoding = Some(started);
+                    scaling = resized;
                     shared.want_keyframe.store(true, Ordering::SeqCst);
                 }
                 Err(err) => return end(streams, key, shared, &format!("{err:#}")),
             }
         }
+        let frame = match &mut scaling {
+            Some(stage) => {
+                let resized = stage.draw(&frame, at).and_then(|pending| {
+                    let Some(pending) = pending else {
+                        return Ok(None);
+                    };
+                    let tx = scaled_tx.clone();
+                    pending.then(move |frame, _| {
+                        let _ = tx.try_send(frame);
+                    });
+                    // Only this optional monitor worker waits. The GPU polling
+                    // thread never blocks, and unfinished pooled pixels cannot
+                    // reach the encoder (or return to their pool) early.
+                    scaled_rx
+                        .recv_timeout(Duration::from_secs(1))
+                        .map(Some)
+                        .context("monitor GPU resize did not complete")
+                });
+                match resized {
+                    Ok(Some(resized)) => {
+                        // GPU reads are complete; don't pin the source pool
+                        // while waiting for the native encoder's output.
+                        drop(frame);
+                        gpu_retries = 0;
+                        resized
+                    }
+                    Ok(None) => continue,
+                    Err(_) if stage.device_lost() && gpu_retries < 3 => {
+                        // Like the ISO stage, recover on a fresh shared device.
+                        // Retain subscribers, but never retry a persistently
+                        // failing device forever or spin while it reopens.
+                        gpu_retries += 1;
+                        scaling = None;
+                        encoding = None;
+                        // An old completion racing device loss must never be
+                        // mistaken for the new stage's frame/timestamp.
+                        (scaled_tx, scaled_rx) = sync_channel(1);
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    Err(err) if stage.device_lost() => {
+                        return end(
+                            streams,
+                            key,
+                            shared,
+                            &format!(
+                                "monitor GPU device lost after three recovery attempts: {err:#}"
+                            ),
+                        );
+                    }
+                    Err(err) => return end(streams, key, shared, &format!("{err:#}")),
+                }
+            }
+            None => frame,
+        };
         let encoding = encoding.as_mut().expect("started above");
         // A new rate goes to the running encoder: no new session, no
         // keyframe. One it refuses isn't fatal: it keeps its last rate
@@ -458,6 +546,16 @@ fn start_encoder<P: Platform>(
     })
 }
 
+/// Native encoders receive their own size and Y'CbCr/BGRA frame family.
+fn needs_conversion(
+    input: (u32, u32),
+    output: (u32, u32),
+    ycbcr: bool,
+    format: EncoderFrameFormat,
+) -> bool {
+    input != output || ycbcr != (format == EncoderFrameFormat::Ycbcr)
+}
+
 /// The bitrate for `size` at `fps`.
 fn bitrate_kbps((width, height): (u32, u32), fps: u32) -> u32 {
     let bits = f64::from(width) * f64::from(height) * f64::from(fps) * BITS_PER_PIXEL;
@@ -582,6 +680,24 @@ fn remove(running: &mut HashMap<Key, Arc<Shared>>, key: &Key, shared: &Arc<Share
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn monitor_conversion_matches_encoder_size_and_format() {
+        use super::{
+            EncoderFrameFormat::{Bgra, Ycbcr},
+            needs_conversion,
+        };
+        let size = (640, 480);
+        assert!(!needs_conversion(size, size, false, Bgra));
+        assert!(!needs_conversion(size, size, true, Ycbcr));
+        assert!(
+            needs_conversion(size, size, true, Bgra),
+            "native-size NV12 must become BGRA"
+        );
+        assert!(needs_conversion(size, size, false, Ycbcr));
+        assert!(needs_conversion(size, (480, 360), false, Bgra));
+        assert!(needs_conversion(size, (480, 360), true, Ycbcr));
+    }
+
     #[test]
     fn connection_keyframe_is_not_lost_to_feedback_rate_limit() {
         use super::*;

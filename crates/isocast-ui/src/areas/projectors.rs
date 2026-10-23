@@ -1166,6 +1166,8 @@ impl Projectors {
                                 Incoming::Lost(why) | Incoming::Unavailable(why) => {
                                     arrived.lost = Some(why)
                                 }
+                                // Projectors are silent.
+                                Incoming::SoundUnavailable(_) => {}
                             }
                         }
                         if !woken {

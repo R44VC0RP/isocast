@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real-file engine checks; Python stdlib + ffmpeg/ffprobe only.
 
-Build: cargo build --release -p isocast-daemon --bins --examples
+Build: cargo build --release -p isocast-daemon -p isocast-cli --bins --examples
 Run:   python3 scripts/e2e.py [--only record] [--keep] [--json]
 
 Each scenario gets a signed, background-only app, socket, setup, library,
@@ -863,11 +863,43 @@ def scenario_webrtc(e, cfg, evidence):
             raise Failure("malformed SDP was accepted")
         except RpcError as error:
             require(error.error["code"] == -32602, "wrong SDP error code")
+    cli = os.environ.get("ISOCAST_E2E_CLI")
+    require(cli, "monitor ladder verification needs the isocast CLI (--cli)")
+    evidence["monitor_ladder"] = []
+    for width in (480, 640, 960):
+        output = e.root / f"monitor-{width}.h264"
+        received = subprocess.run([cli, "frames", "--width", str(width), "--fps", "30",
+                                   "--seconds", "2", "--json", "-o", str(output)],
+                                  env=e.env, capture_output=True, timeout=15)
+        require(received.returncode == 0, f"monitor ladder failed: {received.stderr.decode()}")
+        result = json.loads(received.stdout)
+        target_width = min(cfg["canvas"]["width"], width)
+        expected_width = max(2, target_width & ~1)
+        expected_height = max(2, ((cfg["canvas"]["height"] * target_width
+                                  + cfg["canvas"]["width"] // 2) // cfg["canvas"]["width"]) & ~1)
+        require(result["frames"] > 15 and result["ended"] is None,
+                f"monitor ladder {width} did not sustain frames: {result}")
+        stream = next(s for s in probe(output)["streams"] if s["codec_type"] == "video")
+        require((stream["width"], stream["height"]) == (expected_width, expected_height),
+                f"monitor ladder encoded wrong dimensions: {stream}")
+        decoded = ffmpeg("-xerror", "-i", output, "-f", "null", "-", timeout=30)
+        require(not decoded.stderr.strip(), f"monitor ladder decode failed: {decoded.stderr.decode()}")
+        evidence["monitor_ladder"].append(result)
+    # Feedback is a transport test, not a protected-output pressure test.
+    # A recording may legitimately evict the newest WHEP viewer before its
+    # scheduled FIR; requiring three IDRs then mislabels shedding as broken
+    # PLI/FIR. Keep the strict feedback/content checks on an idle engine.
+    e.rpc("engine", {"running": True})
     evidence["viewers"] = []
     for count in (1, 3):
-        started = e.rpc("start", {})
         viewers = []
+        legacy = None
         try:
+            # Exercise frames and WHEP requests for the same 960-wide key
+            # together; both protocols must sustain decodable output.
+            legacy = subprocess.Popen([cli, "frames", "--width", "960", "--fps", "30",
+                "--seconds", "6", "--json", "-o", str(e.root / f"shared-monitor-{count}.h264")],
+                env=e.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             for index in range(count):
                 output = e.root / f"viewer-{count}-{index}.h264"
                 viewers.append((subprocess.Popen([str(e.webrtc_receiver), "6", str(output)],
@@ -892,14 +924,65 @@ def scenario_webrtc(e, cfg, evidence):
                 decoded = ffmpeg("-xerror", "-i", output, "-f", "null", "-", timeout=30)
                 require(not decoded.stderr.strip(), f"WebRTC H.264 decode failed: {decoded.stderr.decode()}")
                 evidence["viewers"].append(result)
+            stdout, stderr = legacy.communicate(timeout=15)
+            require(legacy.returncode == 0, f"concurrent frames client failed: {stderr}")
+            result = json.loads(stdout)
+            require(result["frames"] > 30 and result["ended"] is None,
+                    f"frames client failed beside WHEP: {result}")
+            evidence.setdefault("shared_frames_viewers", []).append(result)
         finally:
+            if legacy is not None and legacy.poll() is None:
+                legacy.kill()
+                legacy.wait(timeout=5)
             for process, _ in viewers:
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=5)
-            e.rpc("stop")
-        manifest = until(lambda: finished(started["manifest"]), description="WebRTC take finalization")
+
+    # The same shared monitor encoder/scaler must not damage recording.
+    # Keep WHEP audio/video running next to the take, but do not require it
+    # to survive: the governor may shed it to protect the recording. A frames
+    # client keeps the same 960-wide encoder/scaler active throughout.
+    output = e.root / "monitor-recording.h264"
+    legacy = subprocess.Popen([cli, "frames", "--width", "960", "--fps", "30",
+        "--seconds", "60", "--json", "-o", str(output)],
+        env=e.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    recording_viewer = None
+    try:
+        viewer_output = e.root / "recording-viewer.h264"
+        recording_env = dict(e.env)
+        recording_env.pop("ISOCAST_WEBRTC_FEEDBACK_TEST", None)
+        recording_env.pop("ISOCAST_WEBRTC_AV_SYNC_TEST", None)
+        recording_viewer = subprocess.Popen([str(e.webrtc_receiver), "60", str(viewer_output)],
+            env=recording_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        until(lambda: output.is_file() and output.stat().st_size > 0
+              and viewer_output.is_file() and viewer_output.stat().st_size > 0
+              and e.rpc("status")["governor"]["remote_viewers"] == 1,
+              seconds=5, description="WHEP media active before recording")
+        started = e.rpc("start", {"seconds": 4})
+        manifest = until(lambda: finished(started["manifest"]), description="monitor take finalization")
+        # This short protection take explicitly requires zero loss, including
+        # on hosted runners; viewer eviction is allowed instead of a failure.
+        for loss in drop_metrics(manifest):
+            check_loss(loss, 0)
         evidence.setdefault("files", []).extend(check_take(Path(started["manifest"]), manifest, evidence=evidence))
+    finally:
+        for name, process in (("recording_viewer", recording_viewer), ("recording_monitor", legacy)):
+            if process is None:
+                continue
+            # Lifetime is controlled by take completion, not a short client
+            # timer which could expire during slow hosted startup.
+            stopped = process.poll() is None
+            if stopped:
+                process.kill()
+            stdout, stderr = process.communicate(timeout=5)
+            text = e.root / f"{name}.jsonl"
+            log = e.root / f"{name}.log"
+            text.write_text(stdout)
+            log.write_text(stderr)
+            evidence[name] = {"exit_code": process.returncode, "stopped_by_harness": stopped,
+                              "stdout": str(text), "stderr": str(log)}
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder after monitor take")
 
 
     # A single offer must survive a real program-audio graph replacement.
@@ -4091,8 +4174,9 @@ def main():
             print(f"FAIL selftest: {exc}")
             return 1
         return 0
-    if args.cli is None and (args.daemon.parent / "isocast").is_file():
-        args.cli = args.daemon.parent / "isocast"
+    cli_name = "isocast.exe" if WINDOWS else "isocast"
+    if args.cli is None and (args.daemon.parent / cli_name).is_file():
+        args.cli = args.daemon.parent / cli_name
     if args.quick:
         if args.only or args.full:
             parser.error("--quick runs its own scenarios; not with --only or --full")

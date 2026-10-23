@@ -83,20 +83,77 @@ fn prefs_path() -> PathBuf {
     crate::prefs::path().with_file_name("isocast-ui-remote.json")
 }
 
-fn read_control_others() -> bool {
+fn read_prefs() -> Value {
     std::fs::read_to_string(prefs_path())
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|saved| saved.get("control_others").and_then(Value::as_bool))
-        .unwrap_or(false)
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
 }
 
-fn save_control_others(on: bool) {
+/// Change the app's remote choices, keeping the others.
+fn write_prefs(change: impl FnOnce(&mut serde_json::Map<String, Value>)) {
+    let mut saved = read_prefs();
+    if let Some(map) = saved.as_object_mut() {
+        change(map);
+    }
     let path = prefs_path();
     if let Some(folder) = path.parent() {
         let _ = std::fs::create_dir_all(folder);
     }
-    let _ = std::fs::write(&path, format!("{:#}\n", json!({ "control_others": on })));
+    let _ = std::fs::write(&path, format!("{saved:#}\n"));
+}
+
+fn read_control_others() -> bool {
+    read_prefs()
+        .get("control_others")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn save_control_others(on: bool) {
+    write_prefs(|map| {
+        map.insert("control_others".into(), json!(on));
+    });
+}
+
+/// Whether this window's engine (another computer's) plays its program's
+/// sound here: off until chosen, then remembered for that paired engine.
+pub fn sound_on() -> bool {
+    let Some(key) = sound_key() else {
+        return false;
+    };
+    read_prefs()
+        .get("sound")
+        .and_then(|sound| sound.get(&key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Remember [`sound_on`] for this window's engine.
+pub fn set_sound_on(on: bool) {
+    let Some(key) = sound_key() else { return };
+    write_prefs(|map| {
+        let sound = map.entry("sound").or_insert_with(|| json!({}));
+        if let Some(sound) = sound.as_object_mut() {
+            sound.insert(key, json!(on));
+        }
+    });
+}
+
+/// The window's engine as remembered: its paired identity, else the
+/// address it was opened with.
+fn sound_key() -> Option<String> {
+    let Engine::Remote { target } = crate::engine::current() else {
+        return None;
+    };
+    let paired = isocast_client::remote::engines().ok().and_then(|peers| {
+        peers
+            .into_iter()
+            .find(|peer| peer.id == target || peer.name == target)
+            .map(|peer| peer.id)
+    });
+    Some(paired.unwrap_or(target))
 }
 
 /// Whether `ip` is on a local network: private, link-local, loopback,

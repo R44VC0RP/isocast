@@ -383,6 +383,22 @@ impl Preview {
         }
     }
 
+    /// The window, while it's open.
+    pub fn app(&self) -> Option<AppWindow> {
+        self.app.upgrade()
+    }
+
+    /// Play another computer's engine's program sound here while this
+    /// monitor shows the program (see [`crate::frames::Feed::set_sound`]).
+    pub fn set_sound(&self, on: bool) {
+        self.feed.set_sound(on);
+    }
+
+    /// Offer the engine's WebRTC again now (see [`Feed::retry_webrtc`]).
+    pub fn retry_webrtc(&self) {
+        self.feed.retry_webrtc();
+    }
+
     /// Show `target` (none: nothing; the monitor says why itself).
     pub fn set_target(&mut self, target: Option<&str>) {
         if self.target.as_deref() == target {

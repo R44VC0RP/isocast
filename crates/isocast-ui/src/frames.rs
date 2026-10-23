@@ -23,6 +23,41 @@ use slint::{Rgba8Pixel, SharedPixelBuffer};
 /// previews: a few, at about 0.1 MB each on the network).
 pub const STILL_FPS: u32 = 5;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_engine_without_webrtc_gives_up_on_it() {
+        let now = Instant::now();
+        // An older engine: frames for good, even when the speaker is on.
+        let mut plan = WebRtcPlan::after_failure(true, false, now);
+        assert_eq!(plan, WebRtcPlan::Never);
+        assert!(!plan.use_now(now + Duration::from_secs(3600), true));
+        // A failure before the first picture (UDP, a canvas change,
+        // shedding, a full cap): frames for a while, then offer again.
+        let mut plan = WebRtcPlan::after_failure(false, false, now);
+        assert!(!plan.use_now(now + Duration::from_secs(5), false));
+        assert!(plan.use_now(now + WEBRTC_RETRY, false));
+        assert_eq!(plan, WebRtcPlan::Use);
+        // ...or at once when the speaker is turned on.
+        let mut plan = WebRtcPlan::after_failure(false, false, now);
+        assert!(plan.use_now(now + Duration::from_secs(1), true));
+        // The engine ended a viewer that played: offer again at once.
+        let mut plan = WebRtcPlan::after_failure(false, true, now);
+        assert!(plan.use_now(now, false));
+    }
+}
+
+/// The engine doesn't know a method (an older engine).
+fn unknown_method(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<isocast_client::DaemonError>()
+        .is_some_and(|e| {
+            e.code() == RpcError::METHOD_NOT_FOUND || e.0.message.contains("unknown variant")
+        })
+}
+
 /// Keyframes in a row that won't decode before a remote window gives up on
 /// the video and shows the engine's stills.
 const KEYFRAME_FAILURES: u32 = 3;
@@ -63,6 +98,52 @@ pub enum Incoming {
     /// its pictures here (`RpcError::UNSUPPORTED`). Not asked again until
     /// the target changes.
     Unavailable(String),
+    /// Another computer's engine's program sound can't play now (the
+    /// program came over `frames`, not WebRTC): why, and whether for good
+    /// (an older engine); none once it can.
+    SoundUnavailable(Option<(String, bool)>),
+}
+
+/// How long a feed stays on `frames` after WebRTC failed before it offers
+/// again (a canvas change, the engine shedding viewers under pressure, a
+/// full viewer cap: all pass).
+const WEBRTC_RETRY: Duration = Duration::from_secs(30);
+
+/// Whether a feed of the program uses WebRTC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebRtcPlan {
+    Use,
+    /// On `frames` until then (or until the speaker is turned on).
+    FramesUntil(Instant),
+    /// The engine has no WebRTC (an older version): `frames` for good.
+    Never,
+}
+
+impl WebRtcPlan {
+    /// After WebRTC failed: an engine without the method never will; a
+    /// failure before the first picture waits a while; one after it
+    /// offers again at once (the engine ended the viewer).
+    fn after_failure(unknown_method: bool, pictured: bool, now: Instant) -> Self {
+        match (unknown_method, pictured) {
+            (true, _) => Self::Never,
+            (false, false) => Self::FramesUntil(now + WEBRTC_RETRY),
+            (false, true) => Self::Use,
+        }
+    }
+
+    /// Whether to use WebRTC now; `sound_turned_on` (the speaker, just
+    /// now) offers again before the wait is over.
+    fn use_now(&mut self, now: Instant, sound_turned_on: bool) -> bool {
+        match *self {
+            Self::Use => true,
+            Self::Never => false,
+            Self::FramesUntil(until) if now >= until || sound_turned_on => {
+                *self = Self::Use;
+                true
+            }
+            Self::FramesUntil(_) => false,
+        }
+    }
 }
 
 /// A still picture, ready to show: its pixels and, for the program and the
@@ -145,6 +226,12 @@ struct Want {
 pub struct Feed {
     want: Arc<Mutex<Want>>,
     control: Arc<Mutex<Option<SharedController>>>,
+    /// Another computer's engine: play the program's sound here too while
+    /// this feed shows the program (one feed of the window does).
+    sound: Arc<std::sync::atomic::AtomicBool>,
+    /// Offer WebRTC again now, before the fallback's wait is over (the
+    /// speaker was clicked).
+    retry: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Feed {
@@ -166,6 +253,8 @@ impl Feed {
                 stopped: false,
             })),
             control: Arc::default(),
+            sound: Arc::default(),
+            retry: Arc::default(),
         };
         let thread_feed = feed.clone();
         thread::Builder::new()
@@ -183,6 +272,17 @@ impl Feed {
         }
         // The open stream ends at its next frame (or within 250 ms).
         want.target = target.map(str::to_string);
+    }
+
+    /// Play the program's sound here while this feed shows another
+    /// computer's engine's program (from its next connection).
+    pub fn set_sound(&self, on: bool) {
+        self.sound.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Offer WebRTC again now if the feed fell back to `frames`.
+    pub fn retry_webrtc(&self) {
+        self.retry.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// End the receiving thread (and its stream) for good.
@@ -301,6 +401,8 @@ impl Feed {
         // encoders take only the canvas's size so far): ask for them as
         // they are, and the monitor scales them.
         let mut unscaled = false;
+        let mut plan = WebRtcPlan::Use;
+        let mut sound_was = self.sound.load(std::sync::atomic::Ordering::SeqCst);
         loop {
             let want = self.want.lock().unwrap().clone();
             if want.stopped {
@@ -321,24 +423,66 @@ impl Feed {
                 },
             };
             let width = (!unscaled).then(|| crate::video::width_step(want.width));
+            // The program over WebRTC (picture and sound in sync) while the
+            // engine has it and UDP gets through; else the `frames` stream.
+            let sound = self.sound.load(std::sync::atomic::Ordering::SeqCst);
+            let retry = self.retry.swap(false, std::sync::atomic::Ordering::SeqCst);
+            let turned_on = (sound && !sound_was) || retry;
+            sound_was = sound;
+            let program = target == isocast_protocol::PROGRAM;
+            let webrtc = program && plan.use_now(Instant::now(), turned_on);
+            let fallback = match (program, plan) {
+                (true, WebRtcPlan::FramesUntil(until)) => Some(until),
+                _ => None,
+            };
+            if webrtc {
+                deliver(Incoming::SoundUnavailable(None));
+            }
+            let mut pictured = false;
             let result = crate::daemon::connect().and_then(|client| {
-                let mut source = crate::video::FramesSource::open(
-                    client,
-                    FramesParams {
-                        target: target.clone(),
-                        max_width: width,
-                        fps: Some(want.fps.clamp(1, 60)),
-                    },
-                )?;
+                let mut source: Box<dyn crate::video::Source> = match webrtc {
+                    true => Box::new(crate::video::WhepSource::open(client, self.sound.clone())?),
+                    false => Box::new(crate::video::FramesSource::open(
+                        client,
+                        FramesParams {
+                            target: target.clone(),
+                            max_width: width,
+                            fps: Some(want.fps.clamp(1, 60)),
+                        },
+                    )?),
+                };
                 self.play(
-                    &mut source,
+                    &mut *source,
                     &mut **decoder,
                     &target,
-                    width,
+                    width.filter(|_| !webrtc),
                     &deliver,
                     &mut delay,
+                    &mut pictured,
+                    fallback,
                 )
             });
+            if let Err(error) = &result
+                && webrtc
+                && (!pictured || unknown_method(error))
+            {
+                // An older engine for good; anything else (UDP blocked, a
+                // canvas change, shedding, a full viewer cap) for a while.
+                plan = WebRtcPlan::after_failure(unknown_method(error), pictured, Instant::now());
+                isocast_diagnostics::diagnostic!("info"; "video: WebRTC unavailable ({plan:?}), using the frames stream: {error:#}");
+                deliver(Incoming::SoundUnavailable(Some(match plan {
+                    WebRtcPlan::Never => (
+                        "No sound from this engine: it's an older version without WebRTC".into(),
+                        true,
+                    ),
+                    _ => (
+                        "No sound right now: the engine's WebRTC isn't available (click to try again)"
+                            .into(),
+                        false,
+                    ),
+                })));
+                continue;
+            }
             match result {
                 // The target or size changed: the new one at once.
                 Ok(()) => continue,
@@ -365,6 +509,10 @@ impl Feed {
     /// sources. A picture that won't decode is skipped (the decoders start
     /// again at the next keyframe); [`KEYFRAME_FAILURES`] keyframes in a
     /// row that won't end it with [`Undecodable`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the feed's state threaded through one loop"
+    )]
     fn play(
         &self,
         source: &mut dyn crate::video::Source,
@@ -373,8 +521,11 @@ impl Feed {
         width: Option<u32>,
         deliver: &impl Fn(Incoming),
         delay: &mut Duration,
+        pictured: &mut bool,
+        fallback: Option<Instant>,
     ) -> anyhow::Result<()> {
         use crate::video::Intake;
+        let mut sound_was = self.sound.load(std::sync::atomic::Ordering::SeqCst);
         let mut sets = None;
         let mut fps = self.want.lock().unwrap().fps;
         // Setup revisions by the picture time they start at.
@@ -389,6 +540,20 @@ impl Feed {
                 || width.is_some_and(|width| crate::video::width_step(now.width) != width)
             {
                 return Ok(());
+            }
+            // On `frames` after WebRTC failed: offer again when the wait
+            // is over or the speaker is turned on.
+            if let Some(until) = fallback {
+                let sound = self.sound.load(std::sync::atomic::Ordering::SeqCst);
+                let turned_on = sound && !sound_was;
+                sound_was = sound;
+                if Instant::now() >= until || turned_on {
+                    return Ok(());
+                }
+                if self.retry.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Left set for the loop above to take.
+                    return Ok(());
+                }
             }
             if now.fps != fps {
                 fps = now.fps;
@@ -439,6 +604,7 @@ impl Feed {
                         .find(|(at, _)| *at <= unit.time)
                         .map(|(_, revision)| *revision);
                     *delay = Duration::from_millis(250);
+                    *pictured = true;
                     deliver(Incoming::Still(Still { pixels, revision }));
                 }
             }

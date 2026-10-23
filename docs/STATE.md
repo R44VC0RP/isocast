@@ -217,7 +217,8 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   Annex B, unlike `frames`' avcC/AVCC records. The local desktop keeps `shared_frames`; see
   `docs/server-protocol.md` for the native media contract and unqualified areas.
 - 2026-10-23: WHEP Opus has a separate early-ready monitor mix and queried codec-lookahead compensation.
-  Recording/RTMP/replay still use the unchanged 200 ms program hold; monitor dependencies get only 40 ms.
+  Recording/RTMP/replay still use the unchanged 200 ms program hold; monitors get 40 ms capture slack plus
+  each required filter's lookahead (not a shared larger allowance for unfiltered inputs).
   Audio graph changes retap with bounded retries without replacing viewers. Desktop playout must align
   the session's program MIDs through actual RTCP SRs.
 
@@ -289,6 +290,9 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   program intact, bottleneck "encoder"): VM encoder capacity beyond the 25% allowance, still a failure.
   `/Volumes/IsocastBuild/ci-flakes/scratch/replay.py E2E_PY [--strict]` replays every kept hosted failure offline
   (logged RPCs, real files) against a version of e2e.py's rules.
+- 2026-10-23: A Windows engine's `whep_offer` ends with "program encoder ended": the 960-wide WebRTC rung needs scaling,
+  which Windows' encoders can't do yet (the server-protocol lane is adding a portable GPU scaler). The desktop client
+  falls back to `frames` at full size.
 - 2026-10-22: A Windows engine can't scale the `frames` stream: `max_width` below the canvas ends it with
   "video.size: encoder is 960x540, frame is 1280x720" (NVENC takes only the frame's size; Windows has no scaler
   yet, as for scaled streaming). The desktop client then asks for full size; the monitor scales.
@@ -312,6 +316,11 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 7. Open decisions and waiting on Ryan
 
+- **Visual judge key (2026-10-23):** `OPENCODE_API_KEY` is an OpenCode Console API key for Console inference
+  (https://opencode.ai/v2/docs/console/), added by Ryan 2026-10-23 14:07 UTC. **It expires after 30 days, about
+  2026-11-22**; a cronctl job (`isocast-visual-judge-key-expiry`) notifies Ryan on 2026-11-18. Rotating means a new
+  Console key, then replacing the secret in the `visual-judge` environment (main-only, Ryan's approval), where it
+  lives; there's no repository-level copy.
 - **Windows release:** needs Authenticode signing and Ryan's call on the first Windows release. Packages so far are
   unsigned test-key builds.
 - **exon-desk:** every reboot, Windows feature (Hyper-V) or driver change needs Ryan's approval.

@@ -380,6 +380,24 @@ impl Client {
     pub fn compatibility_error(&self) -> Option<&str> {
         self.compatibility_error.as_deref()
     }
+    /// The engine's address, for a client on another computer.
+    pub fn peer_addr(&self) -> Option<std::net::SocketAddr> {
+        self.writer.peer().map(|peer| peer.addr)
+    }
+
+    /// Start a WebRTC viewer of the program (`whep_offer`, see
+    /// docs/server-protocol.md): returns the engine's SDP answer and the
+    /// connection that owns the viewer. Closing it stops watching; the
+    /// engine closing it (an encoder reconfigure, a revocation) means the
+    /// viewer ended and a new connection must offer again.
+    pub fn whep(
+        mut self,
+        params: isocast_protocol::api::WhepOfferParams,
+    ) -> Result<(isocast_protocol::api::WhepAnswer, BufReader<UnixStream>)> {
+        let answer = self.call(Method::WhepOffer(params))?;
+        Ok((answer, self.reader))
+    }
+
     /// Watch a target's picture as H.264 (`frames`): returns the reply and
     /// the connection, positioned at the first binary record (see
     /// [`isocast_protocol::api::frames`]). Closing it stops watching.

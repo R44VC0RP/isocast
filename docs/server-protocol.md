@@ -109,8 +109,15 @@ every capture device or filter.
 The low-latency path is a separate monitor-only mixer fed non-blockingly from
 the same timestamped raw inputs, with independent filter state and meters.
 It may commit complete 10 ms blocks early, including all sidechains and
-filter lookahead; late inputs get only a **40 ms monitor allowance** before
-missing samples become silence, never the recording mix's 200 ms hold.
+filter lookahead; each input gets a **40 ms capture allowance plus its filter
+lookahead** before missing samples become silence, never the recording mix's
+200 ms hold. For example, a 20 ms denoiser gets 60 ms after the block's end,
+so ordinary device delay cannot make it commit not-yet-arrived lookahead as
+silence. An unfiltered input still expires after 40 ms, even beside a denoiser.
+This caps capture slack, not DSP latency: a chain declaring one second of
+lookahead can put the monitor about a second behind.
+WASM audio plugins can declare up to one second of lookahead each; a chain's
+lookahead is the sum of its enabled filters.
 Recording, streaming and replay continue using the original mixer, with its
 unchanged samples, settings-at-commit semantics and unconditional live hold.
 A source-graph change or reopened input triggers a fresh monitor tap without
@@ -127,6 +134,60 @@ authority. Revoking a paired identity or disabling remote control closes
 its signaling connections and media; recordings remain independent.
 
 ## Safety and implementation gates
+
+### Monitor resolution and GPU ownership
+
+`frames` and WHEP use the same `frame_stream::Streams` entry keyed by target
+and requested width. Clients snapping to 480/640/960 share that rung's encoder;
+WHEP's current program request is 960 wide. Rates are coalesced to the highest
+viewer demand, not encoded once per protocol or viewer.
+
+The monitor worker now resizes mismatched frames before handing them to a
+native encoder. Previously macOS delegated this to VideoToolbox, whereas
+Windows NVENC rejected a 1280×720 frame given to a 960×540 encoder. The
+portable path reuses the existing filterless `IsoFrames` GPU draw/conversion
+stage with its own bounded platform frame pool: Y'CbCr on macOS, BGRA on
+Windows and the Linux bootstrap. No pixel readback is added by the resizer
+(Linux's software encoder still needs its existing readback). Frames bypass
+this stage only when both size and Y'CbCr/BGRA family match the encoder. Monitor
+downscales use Area sampling; ISO stages explicitly retain their historical
+Bilinear sampling. Recording routes, frames and encoder settings are unchanged.
+
+The GPU completion callback only hands off a completed frame non-blockingly;
+only the optional monitor worker waits, for at most the one-second GPU fence
+budget. Device loss recreates the stage/encoder with up to three consecutive
+recovery attempts and 100 ms backoff, retaining subscribers. Permanent failure
+ends that monitor; it never blocks capture or a recording writer.
+
+Qualification so far: Mac native/VM ladder decoding, concurrent frames plus
+one/three WHEP viewers, unchanged recording timing/zero loss on basebook, and
+injected-device-loss recovery pass. Windows builds pass; the desktop-client
+lane owns fresh Windows runtime and bidirectional five-minute LAN qualification
+with the real app after merge. Linux scaler runtime proof remains deferred;
+matching its BGRA frame API is not a runtime qualification.
+
+The hosted PLI/FIR test runs on an idle engine: recording pressure may legally
+evict its viewer before the scheduled FIR (observed in run39926595275). It
+still requires both requests and at least three IDRs. Recording safety runs
+separately with the same shared960 monitor encoder/scaler and a WHEP viewer
+active before the take. That viewer has no feedback-test requirement and may
+be shed; only the take's zero-loss counters are required. Production shedding
+and keyframe-rate limits are unchanged.
+
+### LAN firewall requirements
+
+- The engine needs inbound R1 TCP (47470 by default) and inbound UDP for its
+  advertised host ICE candidate. Candidate UDP ports are allocated dynamically;
+  allowing the TCP control port alone does not permit media.
+- Windows Defender Firewall rules should be scoped to the engine executable
+  and the trusted viewer address/subnet. A Windows receiver also needs inbound
+  UDP from its engine for its host candidate. Apply rules to the actual LAN
+  interface/profile; do not change a network profile or disable the firewall.
+- Qualification uses only temporary, uniquely named rules scoped to the two
+  test-machine LAN addresses, removed after all owned processes exit. No
+  STUN/TURN, public port forwarding or host-wide firewall policy is needed.
+
+### Transport libraries and bounds
 
 Prefer **str0m 0.24.1**, MIT/Apache-2.0, released 2026-10-03: a sans-I/O
 implementation fits the engine's blocking-thread model, makes the packet
@@ -149,7 +210,7 @@ or a claim that all existing dependencies are advisory-free. The RustCrypto
 feature still pulls AWS-LC transitively for certificate support; both it
 and bundled libopus need CMake on the build host.
 
-Reuse `record/frame_stream.rs`'s shared hardware H.264 encoder, not one
+Reuse `record/frame_stream.rs`'s shared platform H.264 encoder, not one
 encoder per viewer. All WHEP viewers share one optional **monitor-only mix**
 and Opus encoder. Its bounded raw-input fan-out retains no video surfaces;
 filter histories, reports and meters are separate from the recording mix.
@@ -207,18 +268,33 @@ settings apply to recorded samples. Therefore it cannot be pulled early
 without changing recording behavior.
 
 The WHEP copy waits only for audible inputs and their sidechain/lookahead
-dependencies. Complete blocks can leave immediately; late dependencies get
-only 40 ms before missing input becomes silence. Both the original
+dependencies. Complete blocks can leave immediately; each late dependency gets
+40 ms of capture slack in addition to its own filter lookahead before missing
+input becomes silence. Both the original
 recording algorithm and its held RTMP/replay delivery are unchanged. The
 monitor's filter histories start independently, so startup and live-setting
 transients need not be sample-identical to the held program.
 
 The monitor input uses the existing bounded capture-burst reserve; raw mixed
 and encoded Opus queues cover one bounded catch-up pass (nine ten-ms blocks).
+Lookahead is excluded from stall detection, but never expands that batch:
+remaining ready blocks wait for the next pass rather than overflowing it.
 Older backlog is skipped with true PTS, never retimestamped as current audio.
 The headless receiver measures capture-to-receive age and decoded marker
 alignment using actual SRs; it does not implement hardware playout or claim
 glass-to-glass latency.
+
+For a two-machine receiver run, `ISOCAST_WEBRTC_SAME_CLOCK` is invalid. Use
+the measured receiver-minus-sender wall-clock offset in
+`ISOCAST_WEBRTC_CLOCK_OFFSET_MS` and a whole-run uncertainty bound in
+`ISOCAST_WEBRTC_CLOCK_UNCERTAINTY_MS`. Actual SRs then map capture time to the
+first packet's receiver arrival time and, separately, the complete media
+unit's delivery to the application before decoding. Calibration must include drift/clock
+adjustments since the sender initialized str0m's frozen wall-clock anchor;
+report every latency percentile with that uncertainty, not as playout delay.
+The receiver reports delivered RTP sequence-range gaps and capture cadence
+separately. These gaps include depacketizer omissions and exclude recovered
+loss; they are not a count of raw pre-recovery network loss.
 
 ### Monitor-audio verification, 2026-10-23
 

@@ -28,8 +28,13 @@ use slint::{Rgba8Pixel, SharedPixelBuffer};
 
 #[cfg(windows)]
 mod media_foundation;
+pub mod sound;
+pub mod sync;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
+mod whep;
+
+pub use whep::WhepSource;
 
 /// The widths a remote window asks for (the widest is enough for a
 /// monitor and cheap on the network, about 2 Mb/s at 30 fps): a monitor
@@ -72,7 +77,6 @@ pub struct AccessUnit {
 /// first when they changed), and the picture as AVCC. Its size isn't
 /// parsed from the SPS: `width` and `height` are 0 (unknown), and the
 /// decoders use the decoded picture's size.
-#[allow(dead_code, reason = "the WHEP source's adapter, used once it lands")]
 pub fn from_annex_b(data: &[u8], time: u64) -> (Option<ParameterSets>, AccessUnit) {
     let mut sets = ParameterSets::default();
     let mut avcc = Vec::with_capacity(data.len());
@@ -196,7 +200,9 @@ impl FramesSource {
         let halfway = asked + asked.elapsed() / 2;
         let offset = reply.host_time as i128 - crate::video::now_nanos(halfway) as i128;
         let writer = reader.get_ref().try_clone()?;
-        // No read timeout: a still picture sends nothing for as long as it
+        reader.get_ref().set_read_timeout(None)?;
+        // No read timeout (the call's own 30 s is cleared): a still picture
+        // sends nothing for as long as it
         // stays still, and a record cut by a timeout would lose the stream's
         // framing. A dead link (a pulled cable) is the window's to notice
         // (`crate::daemon::link`); `next` then ends the stream.

@@ -28,6 +28,10 @@ isocast-client = { path = "../isocast-client", features = ["wgpu"] }
 isocast-protocol = { path = "../isocast-protocol" }
 # The `frames` stream's connection (local or TLS): rate lines and hanging up.
 isocast-ipc = { path = "../isocast-ipc" }
+# Another computer's engine's program as WebRTC (src/video/whep.rs): the
+# engine's own stack and Opus binding, pinned the same as isocast-daemon's.
+str0m = { version = "=0.24.1", default-features = false, features = ["rust-crypto"] }
+opus2 = { version = "=0.4.0", features = ["bundled"] }
 # Engines on the network for the engine picker (remote control, R2).
 isocast-discovery = { path = "../isocast-discovery" }
 # The test-only element search API (accessible roles and names), used by
@@ -71,6 +75,8 @@ windows = { version = "0.62.2", features = [
     # Another computer's engine's live video (src/video/media_foundation.rs): Media
     # Foundation's H.264 decoder, DXVA through a D3D11 device.
     "Win32_Media_MediaFoundation", "Win32_System_Com",
+    # Its sound (src/video/sound.rs): WASAPI shared mode.
+    "Win32_Media_Audio", "Win32_Devices_FunctionDiscovery", "Win32_System_Com_StructuredStorage",
 ] }
 windows-numerics = "0.3.1"
 # Real process counters: Windows UI measurements must not report stub zeroes.
@@ -96,6 +102,10 @@ raw-window-handle = "0.6.2"
 # decodes its H.264 in hardware. All three already build for the engine.
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-video", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+# Its sound on the default output (src/video/sound.rs), as the engine plays
+# monitoring: already built for isocast-platform-macos.
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-media", "objc2-core-video", "VTDecompressionSession", "VTDecompressionProperties", "VTSession", "VTErrors"] }
 
 [build-dependencies]

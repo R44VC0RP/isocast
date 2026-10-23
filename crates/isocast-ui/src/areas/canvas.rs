@@ -346,6 +346,11 @@ impl Canvas {
             fps,
             move |incoming| to_editor(Role::Editor, incoming),
         );
+        // The edited monitor or Studio Mode's program, whichever shows the
+        // program, plays its sound for another computer's engine, once
+        // chosen (the speaker on the program monitor).
+        let sound = !crate::engine::is_local() && crate::areas::remote::sound_on();
+        feed.set_sound(sound);
         *self.preview.borrow_mut() = Some(Preview::new(
             &window,
             Role::Editor,
@@ -366,6 +371,7 @@ impl Canvas {
                 move |incoming| deliver(Role::Program, incoming)
             },
         );
+        feed.set_sound(sound);
         *self.program.borrow_mut() = Some(Preview::new(
             &window,
             Role::Program,
@@ -400,6 +406,14 @@ impl Canvas {
                 Incoming::Still(still) => preview.still(still),
                 Incoming::Lost(why) => preview.lost(why),
                 Incoming::Unavailable(_) => preview.unavailable(),
+                Incoming::SoundUnavailable(why) => {
+                    if let Some(app) = preview.app() {
+                        let canvas = app.global::<CanvasArea>();
+                        let (text, final_) = why.unwrap_or_default();
+                        canvas.set_remote_sound_blocked(text.into());
+                        canvas.set_remote_sound_final(final_);
+                    }
+                }
             }
         }
     }
@@ -1718,6 +1732,30 @@ impl Area for Canvas {
         canvas.on_pointer_up(move |_, _| {
             if let Some(app) = weak.upgrade() {
                 app.canvas.pointer_up(&app);
+            }
+        });
+        // Another computer's engine: the program's sound here, off until
+        // the speaker turns it on (remembered per engine).
+        canvas.set_remote_sound_shown(!crate::engine::is_local());
+        canvas.set_remote_sound(!crate::engine::is_local() && crate::areas::remote::sound_on());
+        let weak = Rc::downgrade(app);
+        canvas.on_toggle_remote_sound(move || {
+            let Some(app) = weak.upgrade() else { return };
+            let Some(window) = app.window() else { return };
+            let canvas = window.global::<CanvasArea>();
+            // On `frames` for a while: the click asks for WebRTC (and its
+            // sound) again now, sound on.
+            let retry = canvas.get_remote_sound_blocked() != "";
+            let on = retry || !canvas.get_remote_sound();
+            canvas.set_remote_sound(on);
+            crate::areas::remote::set_sound_on(on);
+            for cell in [&app.canvas.preview, &app.canvas.program] {
+                if let Some(preview) = cell.borrow().as_ref() {
+                    preview.set_sound(on);
+                    if retry {
+                        preview.retry_webrtc();
+                    }
+                }
             }
         });
         let weak = Rc::downgrade(app);

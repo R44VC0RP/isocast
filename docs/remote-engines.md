@@ -493,7 +493,26 @@ Tier 1.
     becomes another `Source`; decode and render don't change (H.264 framing
     is parsed in `isocast_protocol::h264`, fuzzed in `fuzz/`). A still
     picture sends nothing: the stream has no read timeout and ends only
-    when the window's own link drops or reconnects. Pictures are
+    when the window's own link drops or reconnects.
+  - WebRTC (2026-10-23, `video/whep.rs`): a remote window's program comes
+    over `whep_offer` (docs/server-protocol.md) when the engine has it:
+    str0m (the daemon's version and features) on a thread, its own R1
+    connection, UDP bound to the interface that reaches the engine, host
+    candidates only. Program sound is **off by default** (decision, Ryan
+    2026-10-23: as OBS's monitoring, and a window near the engine's
+    speakers would echo): a speaker toggle on the program monitor turns it
+    on, remembered per paired engine (`isocast-ui-remote.json`); it plays
+    on this computer's default output ("Listen on" choices are R4).
+    Lip-sync (`video/sync.rs`), only while sound plays: RTCP Sender
+    Reports map both streams to the engine's wallclock; a moment plays at
+    sender time plus a delay covering the slower stream's smallest transit,
+    40 ms and the output's read-ahead. It rises at once only for a packet
+    that would otherwise be late, and moves slowly otherwise. With sound
+    off, pictures play as soon as they decode. Sound waits in a timed queue
+    the output reads at its own presentation time (Core Audio's render
+    host time; WASAPI's queued frames plus stream latency). Other targets
+    (Studio Mode's preview, projectors of a source), an older engine, or
+    no picture 5 s after the offer (UDP blocked) use `frames`. Pictures are
     decoded to RGBA and shown as Slint images (`Mode::Image`); textures
     straight into the native layers are R3.
 

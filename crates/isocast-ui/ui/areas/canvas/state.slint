@@ -93,6 +93,18 @@ export global CanvasArea {
     // Studio Mode's monitor heads: the scenes in preview and on air.
     in property <string> preview-name;
     in property <string> program-name;
+    // Another computer's engine: its program's sound on this computer
+    // (off until chosen, as OBS's monitoring; remembered per engine), and
+    // the speaker that turns it on and off on the program monitor.
+    in property <bool> remote-sound-shown;
+    in property <bool> remote-sound;
+    // Why the sound can't play now (the program came over `frames`), or
+    // empty: the speaker shows disabled with this as its tooltip.
+    in property <string> remote-sound-blocked;
+    // ...for good (an older engine): the speaker is disabled. Otherwise a
+    // click offers WebRTC again.
+    in property <bool> remote-sound-final;
+    callback toggle-remote-sound();
 
     // The pointer over the editor, in canvas pixels: pressed (left
     // button), moved (pressed or not), released; and a right click. The

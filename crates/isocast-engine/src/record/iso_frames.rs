@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use isocast_protocol::Filter;
+use isocast_protocol::{Filter, ScaleFilter};
 
 use super::SourceFilters;
 use crate::filter::Filters;
@@ -35,6 +35,7 @@ pub(super) struct IsoFrames<P: Platform> {
     /// ever more memory.
     pool: P::FramePool,
     size: (u32, u32),
+    scale_filter: ScaleFilter,
     /// Every source's filters (which can change while recording), if the
     /// file records its source filtered.
     source_filters: Option<SourceFilters>,
@@ -86,7 +87,8 @@ impl<P: Platform> IsoFrames<P> {
     }
 
     /// Frames of source `id` drawn at `size` with `gpu`, through its
-    /// filters if `source_filters` is given.
+    /// filters if `source_filters` is given. Recording callers retain the
+    /// historical `Bilinear` sampling; monitors can choose a downscale filter.
     pub(super) fn new(
         platform: &P,
         gpu: Gpu,
@@ -94,6 +96,7 @@ impl<P: Platform> IsoFrames<P> {
         size: (u32, u32),
         source_filters: Option<SourceFilters>,
         epoch: Time,
+        scale_filter: ScaleFilter,
     ) -> Result<Self> {
         let importer = platform.frame_importer(&gpu)?;
         let (pool, to_ycbcr) = match platform.encoder_frame_format() {
@@ -110,6 +113,7 @@ impl<P: Platform> IsoFrames<P> {
             to_ycbcr,
             pool,
             size,
+            scale_filter,
             source_filters,
             drawing: None,
             epoch,
@@ -167,7 +171,8 @@ impl<P: Platform> IsoFrames<P> {
                     ),
                     None => imported,
                 };
-                let layer = Layer::full(&filtered, size.0, size.1);
+                let mut layer = Layer::full(&filtered, size.0, size.1);
+                layer.scale_filter = self.scale_filter;
                 let (picture, bound) = drawing.picture.as_ref().expect("made with a conversion");
                 drawing.renderer.render(gpu, picture, &[layer], size);
                 bound.clone()
@@ -217,7 +222,8 @@ impl<P: Platform> IsoFrames<P> {
             }
             None => imported,
         };
-        let layer = Layer::full(&filtered, size.0, size.1);
+        let mut layer = Layer::full(&filtered, size.0, size.1);
+        layer.scale_filter = self.scale_filter;
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         drawing.renderer.encode(
             gpu,

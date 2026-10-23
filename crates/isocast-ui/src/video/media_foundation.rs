@@ -171,7 +171,11 @@ impl Decoder for MediaFoundation {
             self.started = Some(started);
         }
         let transform = self.started.as_ref().unwrap().transform.clone();
+        let began = std::time::Instant::now();
         let result = decode(&transform, sets, unit);
+        if matches!(result, Ok(Some(_))) {
+            TIMING.with(|timing| timing.borrow_mut().picture(began.elapsed()));
+        }
         if result.is_err() {
             // Start again at the next keyframe.
             self.started = None;
@@ -288,6 +292,36 @@ fn input_sample(sets: &ParameterSets, unit: &AccessUnit) -> Result<IMFSample> {
     }
 }
 
+/// Where a picture's time goes (logged every [`TIMING_EVERY`] pictures):
+/// the whole decode, mapping the decoded surface for the CPU (a GPU copy
+/// and wait on DXVA) and the NV12 to RGBA conversion.
+#[derive(Default)]
+struct Timing {
+    pictures: u32,
+    total: std::time::Duration,
+    lock: std::time::Duration,
+    convert: std::time::Duration,
+}
+
+const TIMING_EVERY: u32 = 300;
+
+impl Timing {
+    fn picture(&mut self, took: std::time::Duration) {
+        self.pictures += 1;
+        self.total += took;
+        if self.pictures < TIMING_EVERY {
+            return;
+        }
+        let each = |d: std::time::Duration| d.as_secs_f64() * 1e3 / f64::from(self.pictures);
+        isocast_diagnostics::diagnostic!("debug"; "video: Media Foundation per picture: {:.2} ms in all, {:.2} ms mapping the surface, {:.2} ms NV12 to RGBA", each(self.total), each(self.lock), each(self.convert));
+        *self = Self::default();
+    }
+}
+
+thread_local! {
+    static TIMING: std::cell::RefCell<Timing> = std::cell::RefCell::default();
+}
+
 /// A decoded NV12 sample as RGBA, cropped to the picture's size.
 fn picture(transform: &IMFTransform, sample: &IMFSample, unit: &AccessUnit) -> Result<Picture> {
     unsafe {
@@ -330,12 +364,19 @@ fn picture(transform: &IMFTransform, sample: &IMFSample, unit: &AccessUnit) -> R
         if let Ok(two_d) = buffer.cast::<IMF2DBuffer>() {
             let mut scan0 = std::ptr::null_mut();
             let mut pitch = 0i32;
+            let locking = std::time::Instant::now();
             two_d.Lock2D(&mut scan0, &mut pitch)?;
+            let converting = std::time::Instant::now();
             let result = match pitch > 0 {
                 true => convert(scan0, pitch as usize, usize::MAX),
                 false => Err(anyhow!("a bottom-up decoded picture")),
             };
             let _ = two_d.Unlock2D();
+            TIMING.with(|timing| {
+                let mut timing = timing.borrow_mut();
+                timing.lock += converting - locking;
+                timing.convert += converting.elapsed();
+            });
             return result;
         }
         // A plain buffer: rows of the type's default stride (else the
