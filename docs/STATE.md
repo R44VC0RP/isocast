@@ -284,6 +284,10 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   A held picture may show any frame of its source from the previous picture's expected one up to before its own (a
   1.5x source); a flash whose slots were dropped or held may be late or missing, but every beep and every other flash
   still pairs within one frame. The zero-drop bar is the test Macs' (no `--hosted`).
+- 2026-10-23: Hosted `vertical`: its stream may drop max(3, 2% of frames sent), counted in the suite budget, and
+  the received FLV's video gaps may miss only those counted frames (any other gap, and any audio gap, fails); its
+  recordings follow the hosted recording rule. Strict runs: zero drops. The VM's stalls cost it 1 and 4 frames on
+  2026-10-23 (runs 39949752801, 39955241917); m2-a passed 8/8 strict on 77920d39 and on 68337b72.
 - 2026-10-23: Of 3,300 files in hosted runs 2026-10-17..22, 99.7% started on time, 0.3% 1–3 slots late and one
   (a cold first MP4 writer) 9 slots late. Four runs dropped 27–66% of one ISO pair (both ISOs at ~half rate, the
   program intact, bottleneck "encoder"): VM encoder capacity beyond the 25% allowance, still a failure.
