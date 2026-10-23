@@ -17,6 +17,7 @@ import { SettingsArea } from "state.slint";
 import { SetPage } from "parts.slint";
 import { AdvancedPage, AudioPage, GeneralPage, HotkeysPage, OutputPage, StreamPage, VideoPage } from "pages.slint";
 import { BugReportDialog } from "report.slint";
+import { RemotePage } from "../remote/page.slint";
 
 export component SettingsDialogs inherits Rectangle {
     in property <string> version;
@@ -71,7 +72,7 @@ export component SettingsDialogs inherits Rectangle {
                 }
                 pages := ScrollArea {
                     vertical-stretch: 1;
-                    if !SettingsArea.has-draft: SetPage {
+                    if !SettingsArea.has-draft && SettingsArea.tab != "remote": SetPage {
                         GroupHint {
                             text: "Set up your first scene to change its settings.";
                         }
@@ -83,6 +84,8 @@ export component SettingsDialogs inherits Rectangle {
                     if SettingsArea.has-draft && SettingsArea.tab == "video": VideoPage { }
                     if SettingsArea.has-draft && SettingsArea.tab == "hotkeys": HotkeysPage { }
                     if SettingsArea.has-draft && SettingsArea.tab == "advanced": AdvancedPage { }
+                    // Remote settings apply at once and don't need a setup.
+                    if SettingsArea.tab == "remote": RemotePage { }
                 }
                 if SettingsArea.has-draft: SheetSummary {
                     // The rate is the program file's (none when only ISO

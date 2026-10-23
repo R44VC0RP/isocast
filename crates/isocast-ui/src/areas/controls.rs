@@ -1447,8 +1447,13 @@ impl Controls {
                 crate::model::vertical_recovery(&why)
             ),
         )
-        .key("vertical-stopped")
-        .action("Restart Engine", restart_engine);
+        .key("vertical-stopped");
+        // Restarting is for someone at the engine's own computer.
+        let toast = if crate::engine::is_local() {
+            toast.action("Restart Engine", restart_engine)
+        } else {
+            toast
+        };
         app.show_toast(toast);
     }
 
@@ -2173,6 +2178,16 @@ fn split(app: &Rc<App>) {
     });
 }
 
+/// "Show in Finder": the Finder here, or the engine file browser for
+/// another computer's engine (area J's "Show on <engine>").
+fn show_file(app: &Rc<App>, path: &str) {
+    if crate::areas::remote::is_remote(app) {
+        crate::areas::remote::reveal(app, path);
+    } else {
+        reveal(path);
+    }
+}
+
 /// Show a file or folder in the Finder (File Explorer on Windows).
 #[cfg(windows)]
 fn reveal(path: &str) {
@@ -2895,7 +2910,9 @@ pub fn replay_saved(app: &Rc<App>, saved: &ReplaySaved) {
     let shown = saved.path.clone();
     app.show_toast(
         Toast::new(ToastKind::Success, "Replay saved", message)
-            .action(wording::SHOW_IN_FILES, move |_| reveal(&shown)),
+            .action(crate::areas::remote::reveal_label(app), move |app| {
+                show_file(app, &shown)
+            }),
     );
 }
 
@@ -2916,7 +2933,7 @@ fn vertical_stream_state(s: &crate::session::Session) -> (bool, bool, Option<&'s
     let problem = if !configured || all_off {
         None
     } else if enabled.is_empty() || enabled.iter().any(|x| !x.key_set) {
-        Some(wording::select(
+        Some(crate::engine::pick(
             "Add the vertical canvas’s stream key. It’s kept in the Keychain, apart from the main canvas’s.",
             "Add the vertical canvas’s stream key. It’s kept in the Credential Manager, apart from the main canvas’s.",
         ))
@@ -3037,7 +3054,7 @@ fn toggle_stream(app: &Rc<App>) {
         let missing = if s.setup.as_ref().is_some_and(|x| x.stream.is_none()) {
             Some("Choose where to stream first.")
         } else if s.stream.as_ref().is_some_and(|x| !x.key_set) {
-            Some(wording::select(
+            Some(crate::engine::pick(
                 "Add your stream key first. It’s kept in the Keychain, never in the setup.",
                 "Add your stream key first. It’s kept in the Credential Manager, never in the setup.",
             ))
@@ -3180,7 +3197,7 @@ pub(crate) fn governor_words(
     Some(if parts.is_empty() {
         format!(
             "Automatic quality is watching this {}’s load",
-            wording::MACHINE
+            crate::engine::words().machine
         )
     } else {
         format!("Automatic quality: {}", parts.join(", "))
@@ -3569,7 +3586,9 @@ fn saved_toast(
                 format!("{}{more} · {files} kept", crate::app::sentence(first)),
             )
             .key("recording-saved")
-            .action(wording::SHOW_IN_FILES, move |_| reveal(&shown)),
+            .action(crate::areas::remote::reveal_label(app), move |app| {
+                show_file(app, &shown)
+            }),
         );
         return;
     }
@@ -3578,7 +3597,9 @@ fn saved_toast(
         app.show_toast(
             Toast::new(ToastKind::Success, "Recording saved", files)
                 .key("recording-saved")
-                .action(wording::SHOW_IN_FILES, move |_| reveal(&shown)),
+                .action(crate::areas::remote::reveal_label(app), move |app| {
+                    show_file(app, &shown)
+                }),
         );
         return;
     };

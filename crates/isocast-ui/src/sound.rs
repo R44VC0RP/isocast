@@ -63,7 +63,12 @@ impl Sound {
     /// takes a moment; it starts in step with the playhead regardless).
     #[cfg(target_os = "macos")]
     pub fn start(plan: Plan) -> Option<Self> {
-        if plan.speed <= 0.0 || plan.stretches.iter().all(|s| s.path.is_none()) {
+        // Another computer's files aren't on this one (R2; R4 brings its
+        // sound over the network).
+        if !crate::engine::is_local()
+            || plan.speed <= 0.0
+            || plan.stretches.iter().all(|s| s.path.is_none())
+        {
             return None;
         }
         let (stop, stopped) = std::sync::mpsc::channel::<()>();

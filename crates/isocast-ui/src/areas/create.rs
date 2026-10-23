@@ -1093,9 +1093,12 @@ impl Create {
                             format!("Exported for {}", exported.app.title()),
                             detail,
                         )
-                        .action(isocast_protocol::platform_text::SHOW_IN_FILES, move |_| {
-                            crate::platform::reveal(&shown.display().to_string())
-                        }),
+                        .action(
+                            crate::areas::remote::reveal_label(app),
+                            move |app| {
+                                crate::areas::remote::reveal(app, &shown.display().to_string())
+                            },
+                        ),
                     );
                 }
                 Err(error) => app.failed("Couldn’t export the timeline", &error),
@@ -1130,7 +1133,7 @@ impl Create {
             .disabled(self.timeline.borrow().is_none())
     }
 
-    fn clip_menu(&self, id: &str) -> Option<MenuBuilder> {
+    fn clip_menu(&self, app: &Rc<App>, id: &str) -> Option<MenuBuilder> {
         let timeline = self.timeline.borrow();
         let clips = &timeline.as_ref()?.clips;
         let index = clips.iter().position(|c| c.id == id)?;
@@ -1140,7 +1143,7 @@ impl Create {
         let menu = MenuBuilder::new()
             .item("editor", "Open in Editor")
             .separator()
-            .item("reveal", isocast_protocol::platform_text::SHOW_IN_FILES)
+            .item("reveal", &crate::areas::remote::reveal_label(app))
             .disabled(!file);
         let menu = match offline {
             true => menu.item("relink", "Relink…"),
@@ -1174,7 +1177,7 @@ impl Create {
         match id {
             "reveal" => {
                 if let Some(file) = file {
-                    crate::platform::reveal(&file.display().to_string());
+                    crate::areas::remote::reveal(app, &file.display().to_string());
                 }
             }
             "earlier" if index > 0 => self.move_clip(app, clip, index - 1),
@@ -1351,7 +1354,8 @@ impl Create {
             if let Some(app) = weak.upgrade()
                 && let Some(path) = app.create.exported.borrow().as_ref()
             {
-                crate::platform::reveal(&path.display().to_string());
+                let path = path.display().to_string();
+                crate::areas::remote::reveal(&app, &path);
             }
         });
         let weak = Rc::downgrade(app);
@@ -2548,8 +2552,8 @@ impl Create {
                             mm_ss(seconds)
                         ),
                     )
-                    .action(isocast_protocol::platform_text::SHOW_IN_FILES, move |_| {
-                        crate::platform::reveal(&shown.display().to_string())
+                    .action(crate::areas::remote::reveal_label(app), move |app| {
+                        crate::areas::remote::reveal(app, &shown.display().to_string())
                     }),
                 );
             }
@@ -2622,7 +2626,7 @@ impl Area for Create {
         }
     }
 
-    fn context_menu(&self, _app: &Rc<App>, owner: &str) -> Option<MenuBuilder> {
+    fn context_menu(&self, app: &Rc<App>, owner: &str) -> Option<MenuBuilder> {
         match owner {
             "create:timelines" => Some(self.timelines_menu()),
             "create:export" => Some(
@@ -2631,7 +2635,7 @@ impl Area for Create {
                     .icon("download")
                     .item("vertical", "Export with Vertical (9:16)"),
             ),
-            _ => self.clip_menu(owner.strip_prefix("create:clip:")?),
+            _ => self.clip_menu(app, owner.strip_prefix("create:clip:")?),
         }
     }
 

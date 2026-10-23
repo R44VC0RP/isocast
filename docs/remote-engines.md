@@ -479,6 +479,16 @@ Tier 1.
     Foundation on Windows) into the preview.
   - JPEG stills are only the fallback when decoding isn't available.
   - R3 adds the rest: every monitor, adaptive bitrate, under 100 ms.
+  - Built (2026-10-22, `crates/isocast-ui/src/video/`): a `Source` of H.264
+    access units (today `FramesSource`, the `frames` stream on the window's
+    own TLS connection), a `Decoder` (VideoToolbox; Media Foundation with
+    DXVA) and the monitors' image path. The server protocol's WHEP video
+    becomes another `Source`; decode and render don't change (H.264 framing
+    is parsed in `isocast_protocol::h264`, fuzzed in `fuzz/`). A still
+    picture sends nothing: the stream has no read timeout and ends only
+    when the window's own link drops or reconnects. Pictures are
+    decoded to RGBA and shown as Slint images (`Mode::Image`); textures
+    straight into the native layers are R3.
 
 **Done when** the Mac app fully controls the Windows engine and vice versa:
 scenes, sources, settings, recording, streaming, library and profiles,

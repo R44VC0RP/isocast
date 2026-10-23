@@ -15,9 +15,11 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   export (refused). Windows work is tracked in #105 and its follow-up issues.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
-- **In progress:** R2 (app on a remote engine) paused as WIP on `agent/remote-r2-core`/`-ui`
-  (`/Volumes/IsocastBuild/remote-r2-*/scratch/REPORT.md`); Windows UI DirectComposition port (committed
-  on `agent/windows-perf`, CPU target still unmet) merging after pre-merge CI.
+- **Desktop client on a remote server (R2) is on `agent/desktop-client`** (R2-core + R2-ui merged): pairing in the
+  app, engine picker, one window per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA),
+  verified basebook ↔ exon-desk both ways (2026-10-22; `/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).
+  Windows UI DirectComposition port (committed on `agent/windows-perf`, CPU target still unmet) merging after
+  pre-merge CI.
 
 ## 2. Architecture map
 
@@ -103,6 +105,8 @@ the desktop session through an interactive launch-agent bridge (needed for windo
 - **Layout:** `C:\isocast-dev\{src,target,cargo,home,appdata,localappdata,scratch,staging,tmp}` is the main Windows
   root; each lane gets `C:\isocast-dev\lanes\<lane>` (`ISOCAST_WINDOWS_ROOT=C:/isocast-dev/lanes/<lane>`); `vm\` has Hyper-V.
 - **Locks:** every Cargo build or test takes `C:\isocast-dev\build.lock` and never starts while `gpu.lock` is held.
+  Anything else you run there (an engine, the app; both can hold NVENC or the GPU) runs only while you hold
+  `gpu.lock`, and stops before you release it (delegator, 2026-10-22).
   GPU/encoder benchmarks and timing runs take `C:\isocast-dev\gpu.lock`. Network-only runs need neither. Release in a
   `finally`, bound the wait and the hold, never delete a lock file.
 - **Disk:** keep ≥ 150 GB free on C: (311 GiB on 2026-10-22). After each slice, delete your lane's target and large
@@ -139,6 +143,8 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 - Build: `scripts/remote-build.sh build [isocastd isocast isocast-ui]` (release, copied to `$CARGO_TARGET_DIR/release`).
 - Per commit: `cargo fmt`, `scripts/remote-build.sh cargo clippy --release -p <crate> -- -D warnings`, and
   `… cargo test --release -p <crate>`. Once before hand-off: `scripts/remote-build.sh gates`.
+- Fuzz targets (untrusted parsers) are in `fuzz/` (its own workspace; `cargo +nightly fuzz run h264` there). Their
+  checks also run on stable in `cargo test` (e.g. `isocast-protocol` `h264::tests`). (2026-10-23)
 - After CLI, MCP or schema changes: `python3 scripts/reference-docs.py target/release/isocast` (CI runs `--check`).
 - Signing: `ISOCAST_DEV_APP="<scratch>/Isocast Dev.app" scripts/sign-dev.sh <isocastd>`. Without `ISOCAST_DEV_APP`
   it re-signs Ryan's own dev app.
@@ -244,6 +250,9 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   program intact, bottleneck "encoder"): VM encoder capacity beyond the 25% allowance, still a failure.
   `/Volumes/IsocastBuild/ci-flakes/scratch/replay.py E2E_PY [--strict]` replays every kept hosted failure offline
   (logged RPCs, real files) against a version of e2e.py's rules.
+- 2026-10-22: A Windows engine can't scale the `frames` stream: `max_width` below the canvas ends it with
+  "video.size: encoder is 960x540, frame is 1280x720" (NVENC takes only the frame's size; Windows has no scaler
+  yet, as for scaled streaming). The desktop client then asks for full size; the monitor scales.
 - 2026-10-22: macOS 15 `AVAssetWriterInput appendSampleBuffer:` before `startSessionAtSourceTime:` returns YES; macOS
   26 throws. The pixel-buffer adaptor throws on both, as does any append on a writer that never started writing.
 

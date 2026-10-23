@@ -30,9 +30,16 @@ impl Gpu {
             },
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
+        // A remote engine's adapter is on another machine: this one's own
+        // (and no connection before the window opens).
         #[cfg(windows)]
-        let adapter = isocast_client::shared::adapter(&mut crate::daemon::connect()?, &instance)
-            .context("could not select the daemon's preview adapter")?;
+        let adapter = if crate::engine::is_local() {
+            isocast_client::shared::adapter(&mut crate::daemon::connect()?, &instance)
+                .context("could not select the daemon's preview adapter")?
+        } else {
+            isocast_client::shared::local_adapter(&instance)
+                .context("could not select a graphics adapter")?
+        };
         #[cfg(not(windows))]
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,

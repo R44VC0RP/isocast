@@ -79,7 +79,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "timeline", "edit",
              "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
-             "plugin_files", "replay", "vertical",
+             "plugin_files", "replay", "vertical", "remote_files",
              # The frame oracle (#124), defined below.
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
@@ -2356,6 +2356,79 @@ def scenario_plugin_files(e, cfg, evidence):
             f"no grant could read a new recordings folder: {reruns['none']}")
     until(lambda: finished(Path(started["manifest"])), 40, "take in the new recordings folder")
     until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+
+
+def scenario_remote_files(e, cfg, evidence):
+    """The engine file browser (`files_list`) as a client on another
+    computer sees it, over R1's TLS on loopback (a loopback TCP peer is a
+    network caller, not local authority): hidden entries and a symlink out
+    of the roots are left out, a root has no parent, and a big folder is
+    cut at 2000 entries."""
+    cli = os.environ.get("ISOCAST_E2E_CLI")
+    if not cli or not Path(cli).is_file():
+        raise Skip("no isocast CLI (ISOCAST_E2E_CLI) to pair and call over TLS")
+    share, outside = e.root / "share", e.root / "outside"
+    (share / "sub").mkdir(parents=True)
+    (share / "big").mkdir()
+    outside.mkdir()
+    (share / "a.txt").write_text("a")
+    (share / ".hidden").write_text("h")
+    (outside / "secret.txt").write_text("s")
+    if WINDOWS:
+        # Hidden there is an attribute, not a leading dot.
+        command(["attrib", "+h", str(share / ".hidden")])
+    try:
+        os.symlink(outside / "secret.txt", share / "link-out.txt")
+        evidence["symlink"] = True
+    except OSError as exc:  # Windows without the symlink privilege
+        evidence["symlink"] = f"not made: {exc}"
+    for i in range(2001):
+        (share / "big" / f"f{i:04}.txt").write_bytes(b"")
+    e.rpc("folder_roots_set", {"folders": [str(share)]})
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    try:
+        e.rpc("remote_enable", {"bind": "127.0.0.1", "port": port})
+    except RpcError as exc:
+        # The engine's identity lives in the OS credential store.
+        if "credential" in str(exc).lower() or "keychain" in str(exc).lower():
+            raise Skip(f"no OS credential store for the engine's identity: {exc}") from exc
+        raise
+    env = dict(e.env, ISOCAST_REMOTE_CLIENT=str(e.root / "client.json"))
+    address = f"127.0.0.1:{port}"
+    try:
+        code = e.rpc("remote_pair_begin")["code"]
+        paired = subprocess.run([cli, "remote", "pair", address, "--code-stdin", "--name", "e2e", "--json"],
+                                input=code + "\n", env=env, capture_output=True, text=True, timeout=60)
+        if paired.returncode != 0 and "credential" in paired.stderr.lower():
+            raise Skip(f"no OS credential store for the client's identity: {paired.stderr.strip()[-300:]}")
+        require(paired.returncode == 0, f"pairing over loopback TLS failed: {paired.stderr.strip()[-400:]}")
+
+        def listing(path):
+            out = subprocess.run([cli, "files", "list", "--engine", address, str(path), "--json"],
+                                 env=env, capture_output=True, text=True, timeout=60)
+            require(out.returncode == 0, f"files list {path} over TLS failed: {out.stderr.strip()[-400:]}")
+            return json.loads(out.stdout)
+
+        root = listing(share)
+        names = sorted(entry["name"] for entry in root["entries"])
+        evidence["root_entries"] = names
+        require(".hidden" not in names, "a hidden entry was listed for a network caller")
+        require("link-out.txt" not in names, "a symlink out of the roots was listed for a network caller")
+        require({"a.txt", "sub", "big"} <= set(names), f"expected a.txt, sub and big; got {names}")
+        require(root.get("parent") is None,
+                f"a root has a parent for a network caller: {root.get('parent')}")
+        big = listing(share / "big")
+        evidence["big"] = {"entries": len(big["entries"]), "truncated": big.get("truncated", False)}
+        require(len(big["entries"]) == 2000 and big.get("truncated") is True,
+                f"a 2001-entry folder gave {len(big['entries'])} entries, truncated={big.get('truncated')}")
+        # The same root through the owner's local socket has a parent.
+        local = e.rpc("files_list", {"path": str(share)})
+        evidence["local_parent"] = local.get("parent")
+        require(local.get("parent") is not None, "the local caller sees no parent above a root")
+    finally:
+        e.rpc("remote_disable")
 
 
 def scenario_pause(e, cfg, evidence):

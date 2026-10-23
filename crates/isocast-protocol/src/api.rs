@@ -622,6 +622,15 @@ pub enum Method {
     /// or go back to the defaults. Only on this machine. Returns
     /// [`FolderRoots`](crate::roots::FolderRoots).
     FolderRootsSet(crate::roots::FolderRootsSetParams),
+    /// Where an engine file picker starts: the folders other computers can
+    /// use that exist, and the engine user's home folder. Returns
+    /// [`FilesRoots`](crate::roots::FilesRoots).
+    FilesRoots,
+    /// A folder's entries on the engine's disk (names, sizes, dates; never
+    /// contents), hidden ones left out. A client on another computer may
+    /// list only inside the folders other computers can use. Returns
+    /// [`FilesList`](crate::roots::FilesList).
+    FilesList(crate::roots::FilesListParams),
     /// Negotiate a program WebRTC viewer on this dedicated connection.
     /// Returns [`WhepAnswer`]. The connection owns the viewer; closing it
     /// (including remote revocation) stops media, never recording.

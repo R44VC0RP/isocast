@@ -1537,6 +1537,29 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Where an engine file picker starts: the folders other computers can use \
+                       that exist on the engine, and its user's home folder.",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn files_roots(&self) -> Result<Json<isocast_protocol::roots::FilesRoots>, String> {
+        self.call(Method::FilesRoots).await
+    }
+
+    #[tool(
+        description = "List a folder on the engine's disk: names, sizes and dates (never file \
+                       contents), folders first, hidden entries left out, optionally only \
+                       some extensions or only folders. From another computer only inside the \
+                       folders other computers can use (see files_roots).",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn files_list(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<isocast_protocol::roots::FilesListParams>>,
+    ) -> Result<Json<isocast_protocol::roots::FilesList>, String> {
+        self.call(Method::FilesList(params)).await
+    }
+
+    #[tool(
         description = "Read this engine's TLS remote-control status.",
         annotations(read_only_hint = true)
     )]

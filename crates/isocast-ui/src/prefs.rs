@@ -12,7 +12,7 @@ use slint::{ComponentHandle, Model};
 
 use crate::{AppWindow, MixerArea, Ui};
 
-fn path() -> PathBuf {
+pub fn path() -> PathBuf {
     if let Some(path) = std::env::var_os("ISOCAST_UI_PREFS") {
         return PathBuf::from(path);
     }

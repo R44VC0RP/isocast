@@ -403,7 +403,7 @@ export global SettingsArea {
     in-out property <string> layout: "bottom_right";
     in-out property <string> ob-canvas: "1920x1080";
     in-out property <string> ob-fps: "60";
-    in-out property <string> ob-folder: PlatformText.windows ? "~/Videos/Isocast" : "~/Movies/Isocast";
+    in-out property <string> ob-folder: PlatformText.engine-windows ? "~/Videos/Isocast" : "~/Movies/Isocast";
     in-out property <string> ob-name: "My setup";
     callback ob-close();
     callback ob-back();

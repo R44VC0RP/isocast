@@ -73,6 +73,9 @@ pub struct App {
     pub projectors: areas::projectors::Projectors,
     /// Project files (#88): File › Open…, Open Recent, the Finder.
     pub projects: areas::projects::Projects,
+    /// Remote control (R2): Settings → Remote, the engine picker,
+    /// presence, the engine file browser.
+    pub remote: areas::remote::Remote,
     /// `--drag-test`: how long each flush (the areas showing a change) and
     /// each update from the daemon took on the window's thread.
     pub work_log: RefCell<Option<WorkLog>>,
@@ -91,9 +94,17 @@ impl App {
         mode: Mode,
         canvas: areas::canvas::Canvas,
     ) -> Rc<Self> {
+        let words = window.global::<crate::PlatformText>();
+        words.set_windows(cfg!(windows));
+        // The engine's words (decision 22): this machine's until a remote
+        // engine says what it runs (`Update::Hello`).
+        words.set_engine_windows(crate::engine::windows());
         window
-            .global::<crate::PlatformText>()
-            .set_windows(cfg!(windows));
+            .global::<Ui>()
+            .set_engine_remote(!crate::engine::is_local());
+        window
+            .global::<Ui>()
+            .set_engine_name(crate::engine::name().unwrap_or_default().into());
         let app = Rc::new(Self {
             window: window.as_weak(),
             tx,
@@ -119,6 +130,7 @@ impl App {
             wizard: areas::wizard::Wizard::default(),
             projectors: areas::projectors::Projectors::default(),
             projects: areas::projects::Projects::default(),
+            remote: areas::remote::Remote::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
         if !mode.offscreen {
@@ -164,7 +176,7 @@ impl App {
 
     /// The areas, in the order they update. Create comes first so that in
     /// its view Delete takes off the selected clip, not a scene item.
-    pub fn areas(&self) -> [&dyn Area; 12] {
+    pub fn areas(&self) -> [&dyn Area; 13] {
         [
             &self.create,
             &self.canvas,
@@ -178,6 +190,7 @@ impl App {
             &self.wizard,
             &self.projectors,
             &self.projects,
+            &self.remote,
         ]
     }
 
@@ -251,6 +264,21 @@ impl App {
         method: Method,
         reply: impl FnOnce(&Rc<App>, Result<Value, CallError>) + 'static,
     ) {
+        // Machine control stays on the machine (decision 4): a window on
+        // another computer's engine never asks, as the engine would refuse.
+        if !crate::engine::is_local()
+            && let Some(reason) = isocast_protocol::caller::local_only_reason(&method)
+        {
+            let engine = crate::engine::name().unwrap_or_else(|| "the engine's computer".into());
+            reply(
+                self,
+                Err(CallError {
+                    message: format!("This only works on {engine} itself: {reason}."),
+                    code: Some(isocast_protocol::api::RpcError::NOT_PERMITTED),
+                }),
+            );
+            return;
+        }
         let id = self.next_call.get();
         self.next_call.set(id + 1);
         self.replies.borrow_mut().insert(id, Box::new(reply));
@@ -311,6 +339,18 @@ impl App {
             }
             Update::Watching(live) => self.watching(*live),
             Update::Event(event) => self.event(*event),
+            Update::Hello(hello) => {
+                crate::engine::set_hello(*hello);
+                if let Some(window) = self.window() {
+                    window
+                        .global::<crate::PlatformText>()
+                        .set_engine_windows(crate::engine::windows());
+                    window
+                        .global::<Ui>()
+                        .set_engine_name(crate::engine::name().unwrap_or_default().into());
+                }
+                self.changed(Changed::LINK);
+            }
         }
     }
 
@@ -638,18 +678,36 @@ impl App {
                 Some(Link::Connected) => ConnectionState::Connected,
                 Some(Link::Disconnected) => ConnectionState::Disconnected,
                 Some(Link::Failed) => ConnectionState::Failed,
+                Some(Link::Mismatch) => ConnectionState::Mismatch,
+                Some(Link::IdentityChanged) => ConnectionState::IdentityChanged,
             });
             ui.set_connection_error(s.link_error.as_str().into());
+            if let Some(hello) = crate::engine::hello() {
+                ui.set_engine_versions(
+                    format!(
+                        "This app: {} ({})\n{}: {} ({})",
+                        env!("CARGO_PKG_VERSION"),
+                        short_commit(isocast_client::COMMIT),
+                        hello.name,
+                        hello.build.version,
+                        short_commit(&hello.build.commit),
+                    )
+                    .into(),
+                );
+            }
         }
         if changed.any(Changed::SETUP | Changed::LINK) {
             ui.set_loaded(s.loaded);
             ui.set_has_setup(s.setup.is_some());
             let name = s.setup.as_ref().map(|x| x.name.clone()).unwrap_or_default();
-            window.set_title_text(if name.is_empty() {
-                "Isocast".into()
-            } else {
-                format!("Isocast — {name}").into()
-            });
+            // A window on another computer's engine names it (decision 5).
+            let title = match (crate::engine::name(), name.is_empty()) {
+                (None, true) => "Isocast".to_string(),
+                (None, false) => format!("Isocast — {name}"),
+                (Some(engine), true) => format!("Isocast — {engine}"),
+                (Some(engine), false) => format!("Isocast — {engine} — {name}"),
+            };
+            window.set_title_text(title.into());
             ui.set_setup_name(name.into());
             // The canvas being edited: an extra one's while editing it.
             if let Some(setup) = s.edited_setup() {
@@ -1264,7 +1322,7 @@ impl App {
                 app.changed(Changed::DEVICES);
             }
             Err(error) => app.failed(
-                isocast_protocol::platform_text::select(
+                crate::engine::pick(
                     "Couldn’t list this Mac’s devices",
                     "Couldn’t list this PC’s devices",
                 ),
@@ -1676,6 +1734,21 @@ impl App {
                 w.set_maximized(!w.is_maximized());
             }
             "bring_all_to_front" => crate::platform::bring_all_to_front(),
+            // Another engine in a window of its own (decision 5): `local`,
+            // or a paired engine's id or name. The engine picker (R2 UI)
+            // sends this; this window stays on its engine.
+            _ if id.starts_with("open_engine:") => {
+                let target = &id["open_engine:".len()..];
+                let opened = isocast_client::Engine::parse(target)
+                    .and_then(|engine| crate::engine::open_window(&engine));
+                if let Err(error) = opened {
+                    self.toast(
+                        ToastKind::Error,
+                        "Couldn’t open a window for that engine",
+                        format!("{error:#}"),
+                    );
+                }
+            }
             "quit" => ui.invoke_quit(),
             _ => {
                 let handled = self.areas().iter().any(|area| area.menu(self, id));
@@ -1824,4 +1897,9 @@ fn capital(text: &str) -> String {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
     }
+}
+
+/// A commit as people compare it: its first 8 hex digits.
+fn short_commit(commit: &str) -> &str {
+    commit.get(..8).unwrap_or(commit)
 }

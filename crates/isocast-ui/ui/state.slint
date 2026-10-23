@@ -14,15 +14,22 @@ export struct ExtraCanvas {
     height: int,
 }
 
-export enum ConnectionState { connecting, connected, disconnected, failed }
+// mismatch and identity-changed: a remote engine (R2) that can't be
+// controlled until it's updated or paired again.
+export enum ConnectionState { connecting, connected, disconnected, failed, mismatch, identity-changed }
 
 // Set once by App on both native and offscreen paths. Mac defaults preserve
 // the existing kit/gallery too; these are labels, never key-binding values.
+// `windows` is the app's machine (menus, shortcuts); `engine-windows` the
+// engine's (docs/remote-engines.md decision 22: its Keychain or Credential
+// Manager, Finder or Explorer, permissions, "this Mac" or "this PC"), the
+// same as `windows` unless the window controls another computer's engine.
 export global PlatformText {
     in property <bool> windows;
-    out property <string> machine: root.windows ? "PC" : "Mac";
-    out property <string> credential-store: root.windows ? "Credential Manager" : "Keychain";
-    out property <string> file-manager: root.windows ? "Explorer" : "Finder";
+    in property <bool> engine-windows;
+    out property <string> machine: root.engine-windows ? "PC" : "Mac";
+    out property <string> credential-store: root.engine-windows ? "Credential Manager" : "Keychain";
+    out property <string> file-manager: root.engine-windows ? "Explorer" : "Finder";
     out property <string> primary: root.windows ? "Ctrl+" : "⌘";
     out property <string> shift-primary: root.windows ? "Ctrl+Shift+" : "⇧⌘";
     out property <string> primary-key: root.windows ? "Ctrl" : "⌘";
@@ -33,6 +40,12 @@ export global Ui {
     in property <ConnectionState> connection: ConnectionState.connecting;
     // Why it isn't connected (failed, disconnected).
     in property <string> connection-error;
+    // A window on another computer's engine (R2): its name ("exon-desk"),
+    // and under a version mismatch both versions, a line each. Empty and
+    // false for this machine's own engine.
+    in property <bool> engine-remote;
+    in property <string> engine-name;
+    in property <string> engine-versions;
     // The live setup has been read at least once.
     in property <bool> loaded;
     // The live setup exists (no setup: the Welcome screen).

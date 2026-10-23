@@ -28,6 +28,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+/// The source commit this client was built from, as `hello` compares it
+/// with a remote engine's (decision 7).
+pub const COMMIT: &str = env!("ISOCAST_CLIENT_COMMIT");
+
 /// How long a freshly launched daemon may take to start listening.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a running daemon may refuse connections before giving up.
@@ -369,6 +373,12 @@ impl Client {
     }
     pub fn hello(&self) -> Option<&isocast_protocol::hello::Hello> {
         self.hello.as_ref()
+    }
+    /// Why this remote engine's version can't be used (decision 7): set
+    /// when `hello` showed a different version or commit. Only `hello`,
+    /// `status` and `remote_update_request` may be called then.
+    pub fn compatibility_error(&self) -> Option<&str> {
+        self.compatibility_error.as_deref()
     }
     /// Watch a target's picture as H.264 (`frames`): returns the reply and
     /// the connection, positioned at the first binary record (see

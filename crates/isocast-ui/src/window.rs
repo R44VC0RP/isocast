@@ -82,8 +82,9 @@ pub fn run(options: &Options) -> Result<()> {
     crate::documents::listen();
     // Decided before the window exists: Slint makes the window
     // see-through for the layers under it when it is created.
-    app.global::<crate::CanvasArea>()
-        .set_native_picture(options.preview == crate::preview::Mode::Layers);
+    app.global::<crate::CanvasArea>().set_native_picture(
+        options.preview == crate::preview::Mode::Layers && crate::engine::is_local(),
+    );
     let commands = daemon::start(|update: Update| {
         let _ = slint::invoke_from_event_loop(move || with_app(|app| app.apply(update)));
     });
@@ -323,9 +324,19 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
         #[cfg(windows)]
         crate::chrome_windows::style_windows_soon();
         crate::quit::install_terminate_question();
-        crate::update::start(&shell);
-        let output =
-            crate::preview::Output::new(&app, setup.mode, &setup.device, setup.test_outline);
+        // Updates replace this machine's app and engine: only a window on
+        // this machine's engine runs them (decision 21); a remote window
+        // never stops or restarts the local engine.
+        if crate::engine::is_local() {
+            crate::update::start(&shell);
+        }
+        // Another computer's engine sends stills, shown as images (R2).
+        let mode = if crate::engine::is_local() {
+            setup.mode
+        } else {
+            crate::preview::Mode::Image
+        };
+        let output = crate::preview::Output::new(&app, mode, &setup.device, setup.test_outline);
         match output {
             Ok(output) => {
                 #[cfg(any(target_os = "macos", windows))]
@@ -333,11 +344,38 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
                     shell.mixer.use_native_master(&app, layers.clone());
                 }
                 shell.canvas.set_max_fps(setup.fps);
+                // Decoded pictures (another computer's engine) wait in a
+                // one-picture mailbox per monitor: a busy window shows the
+                // newest and drops the rest instead of queueing them.
+                let mailboxes: std::sync::Arc<
+                    [std::sync::Mutex<Option<crate::frames::Incoming>>; 3],
+                > = std::sync::Arc::default();
                 shell
                     .canvas
-                    .start_pictures(&shell, output, setup.check, |role, incoming| {
+                    .start_pictures(&shell, output, setup.check, move |role, incoming| {
+                        let index = match role {
+                            crate::preview::Role::Editor => 0,
+                            crate::preview::Role::Program => 1,
+                            crate::preview::Role::Extra => 2,
+                        };
+                        let mut incoming = Some(incoming);
+                        if matches!(incoming, Some(crate::frames::Incoming::Still(_))) {
+                            let waiting = mailboxes[index]
+                                .lock()
+                                .unwrap()
+                                .replace(incoming.take().unwrap());
+                            if waiting.is_some() {
+                                // Already on its way; it'll take this one.
+                                return;
+                            }
+                        }
+                        let mailboxes = mailboxes.clone();
                         let _ = slint::invoke_from_event_loop(move || {
-                            with_app(|app| app.canvas.incoming(role, incoming));
+                            let incoming =
+                                incoming.or_else(|| mailboxes[index].lock().unwrap().take());
+                            if let Some(incoming) = incoming {
+                                with_app(|app| app.canvas.incoming(role, incoming));
+                            }
                             if role == crate::preview::Role::Editor {
                                 DRAG_STEP.with(|step| {
                                     if let Some(step) = step.borrow_mut().as_mut() {

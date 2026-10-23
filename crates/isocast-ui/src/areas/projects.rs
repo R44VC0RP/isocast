@@ -187,29 +187,32 @@ impl Projects {
                 "Their files aren’t where the project says. Choose the folder they’re in now.",
             )
             .action("Relink…", move |app| {
-                let chosen = crate::platform::choose(crate::platform::Choose {
+                let options = crate::platform::Choose {
                     folders: true,
                     multiple: false,
                     prompt: "Relink",
                     types: &[],
-                });
-                let Some(folder) = chosen.and_then(|paths| paths.into_iter().next()) else {
-                    return;
                 };
-                for clip in &clips {
-                    app.call_as::<TimelineInfo>(
-                        Method::TimelineRelink(TimelineRelinkParams {
-                            clip: clip.clone(),
-                            path: PathBuf::from(&folder),
-                            timeline: Some(timeline.clone()),
-                        }),
-                        |app, result| {
-                            if let Err(error) = result {
-                                app.failed("Couldn’t relink the take", &error);
-                            }
-                        },
-                    );
-                }
+                let (clips, timeline) = (clips.clone(), timeline.clone());
+                crate::areas::remote::choose(app, options, move |app, chosen| {
+                    let Some(folder) = chosen.and_then(|paths| paths.into_iter().next()) else {
+                        return;
+                    };
+                    for clip in &clips {
+                        app.call_as::<TimelineInfo>(
+                            Method::TimelineRelink(TimelineRelinkParams {
+                                clip: clip.clone(),
+                                path: PathBuf::from(&folder),
+                                timeline: Some(timeline.clone()),
+                            }),
+                            |app, result| {
+                                if let Err(error) = result {
+                                    app.failed("Couldn’t relink the take", &error);
+                                }
+                            },
+                        );
+                    }
+                });
             }),
         );
     }
@@ -217,15 +220,21 @@ impl Projects {
     /// A clip menu's Relink… (an offline clip of the current timeline):
     /// choose the folder its take is in now, or its manifest's.
     pub fn relink(&self, app: &Rc<App>, clip: &str) {
-        let chosen = crate::platform::choose(crate::platform::Choose {
+        let options = crate::platform::Choose {
             folders: true,
             multiple: false,
             prompt: "Relink",
             types: &[],
-        });
-        let Some(folder) = chosen.and_then(|paths| paths.into_iter().next()) else {
-            return;
         };
+        let clip = clip.to_string();
+        crate::areas::remote::choose(app, options, move |app, chosen| {
+            if let Some(folder) = chosen.and_then(|paths| paths.into_iter().next()) {
+                app.projects.relink_to(app, &clip, folder);
+            }
+        });
+    }
+
+    fn relink_to(&self, app: &Rc<App>, clip: &str, folder: String) {
         app.call_as::<TimelineInfo>(
             Method::TimelineRelink(TimelineRelinkParams {
                 clip: clip.to_string(),
@@ -242,15 +251,17 @@ impl Projects {
 
     /// File › Open…: choose a project file.
     fn choose(&self, app: &Rc<App>) {
-        let chosen = crate::platform::choose(crate::platform::Choose {
+        let options = crate::platform::Choose {
             folders: false,
             multiple: false,
             prompt: "Open",
             types: &[isocast_protocol::isoprj::EXTENSION],
+        };
+        crate::areas::remote::choose(app, options, |app, chosen| {
+            if let Some(path) = chosen.and_then(|paths| paths.into_iter().next()) {
+                app.projects.open(app, PathBuf::from(path));
+            }
         });
-        if let Some(path) = chosen.and_then(|paths| paths.into_iter().next()) {
-            self.open(app, PathBuf::from(path));
-        }
     }
 
     /// Files the Finder handed over, once the engine is there to open

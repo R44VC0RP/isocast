@@ -6,7 +6,7 @@
 //! reports where they are. A full-screen projector whose display goes away
 //! is closed, with the reason in the `projectors` event.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,15 @@ const MAX_WAITING: usize = 16;
 #[derive(Default)]
 pub(super) struct ProjectorState {
     saved: Mutex<Saved>,
+    /// Each remote client's open connections, and a count of its
+    /// disconnections (so a grace period ending after it came back and
+    /// went again doesn't close its new projectors early).
+    connections: Mutex<HashMap<String, (usize, u64)>>,
 }
+
+/// How long a remote client's projectors outlive its last connection: a
+/// pulled cable or a sleeping laptop that comes back keeps them.
+const OWNER_GRACE: Duration = Duration::from_secs(20);
 
 fn path() -> PathBuf {
     isocast_protocol::api::setup_path().with_extension("projectors.json")
@@ -69,7 +77,11 @@ fn key(projector: &Projector) -> String {
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default(),
     };
-    format!("{}/{what}", projector.canvas)
+    match &projector.owner {
+        // Another computer's windows have their own places.
+        Some(owner) => format!("{owner}:{}/{what}", projector.canvas),
+        None => format!("{}/{what}", projector.canvas),
+    }
 }
 
 /// The displays a projector can fill (none where they can't be listed).
@@ -145,6 +157,10 @@ impl ProjectorState {
             Err(_) => Saved::default(),
         };
         let mut saved = saved;
+        // No remote client is connected while the engine starts: their
+        // projectors closed with them (decision 24).
+        saved.open.retain(|p| p.owner.is_none());
+        saved.waiting.retain(|p| p.owner.is_none());
         if !saved.open.is_empty() {
             let displays = displays();
             for projector in &mut saved.open {
@@ -462,7 +478,17 @@ impl Daemon {
             canvases: tile_canvases.clone().unwrap_or_default(),
             placement: Placement::default(),
             shown: false,
+            owner: None,
+            owner_name: None,
         };
+        // Opened by another computer: its app shows it (decision 24).
+        if let isocast_protocol::caller::Origin::Remote {
+            client_id, name, ..
+        } = callers::current().origin
+        {
+            projector.owner = Some(client_id);
+            projector.owner_name = Some(name);
+        }
         let opened = {
             let mut saved = self.projectors.saved.lock();
             // Opened again by hand: no longer waiting for its display.
@@ -577,10 +603,20 @@ impl Daemon {
                         "id: leave it out with all = true, or give all = false",
                     ));
                 }
-                (None, true) => {
-                    saved.waiting.clear();
-                    std::mem::take(&mut saved.open)
-                }
+                // Another computer closes all of its own.
+                (None, true) => match callers::current().origin {
+                    isocast_protocol::caller::Origin::Remote { client_id, .. } => {
+                        let (mine, others) = std::mem::take(&mut saved.open)
+                            .into_iter()
+                            .partition(|p| p.owner.as_deref() == Some(client_id.as_str()));
+                        saved.open = others;
+                        mine
+                    }
+                    _ => {
+                        saved.waiting.clear();
+                        std::mem::take(&mut saved.open)
+                    }
+                },
                 (Some(id), false) => match saved.open.iter().position(|p| &p.id == id) {
                     Some(index) => vec![saved.open.remove(index)],
                     None => {
@@ -659,7 +695,13 @@ impl Daemon {
             .lock()
             .open
             .iter()
-            .filter(|p| p.placement.fullscreen && p.placement.display.as_deref() == Some(id))
+            // This machine's displays: another computer's projectors are
+            // on its own.
+            .filter(|p| {
+                p.owner.is_none()
+                    && p.placement.fullscreen
+                    && p.placement.display.as_deref() == Some(id)
+            })
             .map(|p| p.id.clone())
             .collect();
         for projector in closing {
@@ -668,6 +710,73 @@ impl Daemon {
                 all: false,
                 reason: Some(format!("the display {name} was disconnected")),
             });
+        }
+    }
+
+    /// A remote client connected (each of its connections counts).
+    pub(super) fn projector_owner_connected(&self, client_id: &str) {
+        self.projectors
+            .connections
+            .lock()
+            .entry(client_id.to_string())
+            .or_default()
+            .0 += 1;
+    }
+
+    /// One of a remote client's connections ended: once it has none left
+    /// for [`OWNER_GRACE`], its projectors close (decision 24).
+    pub(super) fn projector_owner_disconnected(self: &Arc<Self>, client_id: &str, name: &str) {
+        let generation = {
+            let mut connections = self.projectors.connections.lock();
+            let entry = connections.entry(client_id.to_string()).or_default();
+            entry.0 = entry.0.saturating_sub(1);
+            if entry.0 > 0 {
+                return;
+            }
+            entry.1 += 1;
+            entry.1
+        };
+        let owns = self
+            .projectors
+            .saved
+            .lock()
+            .open
+            .iter()
+            .any(|p| p.owner.as_deref() == Some(client_id));
+        if !owns {
+            return;
+        }
+        let daemon = Arc::downgrade(self);
+        let (client_id, name) = (client_id.to_string(), name.to_string());
+        let _ = std::thread::Builder::new()
+            .name("projector owner grace".into())
+            .spawn(move || {
+                std::thread::sleep(OWNER_GRACE);
+                let Some(daemon) = daemon.upgrade() else {
+                    return;
+                };
+                let gone = daemon
+                    .projectors
+                    .connections
+                    .lock()
+                    .get(&client_id)
+                    .is_some_and(|(open, latest)| *open == 0 && *latest == generation);
+                if gone {
+                    daemon.projectors_close_owned(&client_id, &name);
+                }
+            });
+    }
+
+    /// Close every projector a remote client opened.
+    fn projectors_close_owned(&self, client_id: &str, name: &str) {
+        let closed = {
+            let mut saved = self.projectors.saved.lock();
+            let before = saved.open.len();
+            saved.open.retain(|p| p.owner.as_deref() != Some(client_id));
+            before != saved.open.len()
+        };
+        if closed {
+            self.projectors_changed(Some(format!("{name} disconnected")));
         }
     }
 

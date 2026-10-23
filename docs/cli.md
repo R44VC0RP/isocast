@@ -147,6 +147,9 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 - [`isocast roots`](#isocast-roots)
   - [`isocast roots show`](#isocast-roots-show)
   - [`isocast roots set`](#isocast-roots-set)
+- [`isocast files`](#isocast-files)
+  - [`isocast files roots`](#isocast-files-roots)
+  - [`isocast files list`](#isocast-files-list)
 - [`isocast projector`](#isocast-projector)
   - [`isocast projector open`](#isocast-projector-open)
   - [`isocast projector close`](#isocast-projector-close)
@@ -229,6 +232,7 @@ Commands:
   replay         The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
   websocket      The obs-websocket v5 server, so OBS tools (Stream Deck, Touch Portal, Streamer.bot, scripts) drive Isocast. Off until enabled
   roots          The folders other computers can use (remote control and obs-websocket clients): see and, on this machine, choose them
+  files          Browse the engine's disk (names, sizes and dates only), as the app's engine file pickers do: on another computer, only inside the folders other computers can use
   projector      Projectors: the program, the preview, a scene, a source or a multiview grid, full screen on a display or in a window (the app shows them)
   vcam           Feed a picture to Isocast Virtual Camera (extension approval required once)
   api            The engine API itself: its methods, params and results
@@ -2655,6 +2659,54 @@ Options:
       --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --json             
   -h, --help             Print help
+```
+
+## isocast files
+
+```text
+Browse the engine's disk (names, sizes and dates only), as the app's engine file pickers do: on another computer, only inside the folders other computers can use
+
+Usage: isocast files [OPTIONS] <COMMAND>
+
+Commands:
+  roots  Where a file picker starts: the folders other computers can use that exist
+  list   A folder's entries, folders first; hidden ones left out
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
+```
+
+## isocast files roots
+
+```text
+Where a file picker starts: the folders other computers can use that exist
+
+Usage: isocast files roots [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast files list
+
+```text
+A folder's entries, folders first; hidden ones left out
+
+Usage: isocast files list [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>  The folder, absolute or ~/...
+
+Options:
+      --engine <ENGINE>   Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --ext <EXTENSIONS>  Only files with this extension (repeatable); folders are always listed
+      --folders           Only folders
+      --json              
+  -h, --help              Print help
 ```
 
 ## isocast projector

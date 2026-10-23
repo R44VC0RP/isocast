@@ -58,6 +58,10 @@ pub struct RemotePeer {
     pub last_seen: Option<u64>,
     /// Client-side only: the last explicitly paired engine address.
     pub address: Option<String>,
+    /// In `remote_clients` only (never stored): how many connections the
+    /// client has open now; 0 when it isn't connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

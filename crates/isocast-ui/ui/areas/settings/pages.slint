@@ -17,7 +17,7 @@ import { BindingRow, SettingsArea } from "state.slint";
 import { Centred, SetGroup, SetPage, ShortcutKeys } from "parts.slint";
 
 // A place in a group of `count` rows, for row `i`.
-global Rows {
+export global Rows {
     public pure function place(i: int, count: int) -> RowPlace {
         if count <= 1 { return RowPlace.only; }
         if i == 0 { return RowPlace.first; }
@@ -35,7 +35,7 @@ component Stepper inherits NumberField {
 }
 
 // A switch's row: 8px from the edge, the switch in the middle.
-component SwitchRow inherits GroupRow {
+export component SwitchRow inherits GroupRow {
     in-out property <bool> on;
     callback toggled(bool);
     trailing-pad: Theme.space-2;
@@ -142,8 +142,8 @@ export component GeneralPage inherits SetPage {
                     size: ControlSize.small;
                     on-control: true;
                     // The engine measures only on macOS so far.
-                    enabled: !PlatformText.windows;
-                    tooltip: PlatformText.windows ? "Not available on Windows yet: Isocast uses its built-in capacity table." : "";
+                    enabled: !PlatformText.engine-windows;
+                    tooltip: PlatformText.engine-windows ? "Not available on Windows yet: Isocast uses its built-in capacity table." : "";
                     clicked => { Ui.menu(SettingsArea.machine-calibrating ? "machine_cancel" : "machine_calibrate"); }
                 }
             }
@@ -180,12 +180,12 @@ export component GeneralPage inherits SetPage {
     }
     SetGroup {
         title: "Permissions";
-        hint: PlatformText.windows ? "Windows asks no permission for screens and what this PC plays. Its privacy settings can turn off the camera and microphone for desktop apps; Review shows whether they do."
+        hint: PlatformText.engine-windows ? "Windows asks no permission for screens and what this PC plays. Its privacy settings can turn off the camera and microphone for desktop apps; Review shows whether they do."
             : PermissionsArea.unknown-access
             ? "Access is checked when capture starts. Review the status and Windows privacy settings here."
             : "What macOS lets Isocast record. Each is asked for once; what you skipped or turned off can be allowed here.";
         GroupRow {
-            label: PlatformText.windows ? "Camera, Microphone" : "Screen, Camera, Microphone";
+            label: PlatformText.engine-windows ? "Camera, Microphone" : "Screen, Camera, Microphone";
             place: RowPlace.only;
             trailing-pad: Theme.space-2;
             Centred {
@@ -1308,7 +1308,7 @@ component ChordField inherits Rectangle {
 
 export component HotkeysPage inherits SetPage {
     GroupHint {
-        text: SettingsArea.bindings-note != "" ? SettingsArea.bindings-note : PlatformText.windows ? "Click a shortcut and type the keys. Windows or another app may reserve a shortcut; unavailable bindings are reported below. Changes apply at once to this profile." : "Click a shortcut and type the keys: they work everywhere (or, when macOS keeps a key for itself, while Isocast is in front). Changes apply at once to this profile.";
+        text: SettingsArea.bindings-note != "" ? SettingsArea.bindings-note : PlatformText.engine-windows ? "Click a shortcut and type the keys. Windows or another app may reserve a shortcut; unavailable bindings are reported below. Changes apply at once to this profile." : "Click a shortcut and type the keys: they work everywhere (or, when macOS keeps a key for itself, while Isocast is in front). Changes apply at once to this profile.";
     }
     for warning in SettingsArea.bindings-warnings: Callout {
         kind: CalloutKind.info;

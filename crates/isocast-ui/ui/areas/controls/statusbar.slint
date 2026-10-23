@@ -14,6 +14,8 @@ import { Icons } from "../../icons.slint";
 import { Ui, ConnectionState } from "../../state.slint";
 import { Badge, BadgeTone, Button, Popover, PopoverPlacement, Rule, Tag, TextField, Tip, Toasts } from "../../kit.slint";
 import { ControlsArea } from "state.slint";
+import { RemoteArea } from "../remote/state.slint";
+import { EnginePicker } from "../remote/picker.slint";
 
 // A part of the bar that can open its details: `hover` and `text` under
 // the pointer while it can.
@@ -304,6 +306,9 @@ export component StatusBar inherits Rectangle {
         padding-right: Theme.pane-x;
         spacing: Theme.line-gap;
 
+        // Which engine this window controls, once remote control is on
+        // (area J, ui/areas/remote/picker.slint).
+        if RemoteArea.control-others || RemoteArea.remote-window || RemoteArea.others.length > 0: EnginePicker { }
         // LIVE (while streaming) and REC (while recording), else READY
         // (IDLE before there is a setup: Paper's Welcome board).
         if root.streaming: live-item := StatusItem {

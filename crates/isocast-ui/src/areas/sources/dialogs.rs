@@ -1034,7 +1034,7 @@ impl Dialogs {
                         app.changed(crate::session::Changed::DEVICES);
                     }
                     Err(error) => app.failed(
-                        isocast_protocol::platform_text::select(
+                        crate::engine::pick(
                             "Couldn’t list this Mac’s devices",
                             "Couldn’t list this PC’s devices",
                         ),

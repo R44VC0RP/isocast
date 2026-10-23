@@ -23,7 +23,6 @@ use isocast_protocol::library::{
     Library as Listing, LibraryAction, LibraryChange, LibraryCreateParams, LibraryDocument,
     LibraryEntry, LibraryKind, LibraryRenameParams, LibrarySwitchParams, LibraryTarget,
 };
-use isocast_protocol::platform_text::SHOW_IN_FILES;
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use super::{Area, Changed};
@@ -440,19 +439,19 @@ impl Library {
             LibraryKind::Collection => &["toml", "json"],
             LibraryKind::Profile => &["toml", "json", "ini"],
         };
-        let chosen = platform::choose(Choose {
+        let options = Choose {
             types,
             prompt: "Import",
             ..Choose::default()
-        });
-        match chosen {
+        };
+        crate::areas::remote::choose(app, options, move |app, chosen| match chosen {
             Some(paths) => {
                 if let Some(path) = paths.into_iter().next() {
-                    self.import_path(app, kind, &path);
+                    app.library.import_path(app, kind, &path);
                 }
             }
             None => no_panel(app),
-        }
+        });
     }
 
     /// Add the scene collection or profile at `path` (an exported one, a
@@ -512,10 +511,15 @@ impl Library {
                 });
             match written {
                 Ok(name) => {
+                    // The file was saved on this machine (its save panel),
+                    // even in a window on another computer's engine: shown
+                    // in this machine's file manager, in its words.
                     let reveal = path.clone();
                     app.show_toast(
                         Toast::new(ToastKind::Success, format!("Exported “{name}”"), path)
-                            .action(SHOW_IN_FILES, move |_| platform::reveal(&reveal)),
+                            .action(isocast_protocol::platform_text::SHOW_IN_FILES, move |_| {
+                                platform::reveal(&reveal)
+                            }),
                     );
                 }
                 Err(error) => {

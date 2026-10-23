@@ -64,3 +64,75 @@ pub fn run(command: Command) -> Result<ExitCode> {
     }
     Ok(ExitCode::SUCCESS)
 }
+
+#[derive(clap::Subcommand)]
+pub enum FilesCommand {
+    /// Where a file picker starts: the folders other computers can use
+    /// that exist.
+    Roots {
+        #[arg(long)]
+        json: bool,
+    },
+    /// A folder's entries, folders first; hidden ones left out.
+    List {
+        /// The folder, absolute or ~/...
+        path: PathBuf,
+        /// Only files with this extension (repeatable); folders are always
+        /// listed.
+        #[arg(long = "ext")]
+        extensions: Vec<String>,
+        /// Only folders.
+        #[arg(long)]
+        folders: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+pub fn files(command: FilesCommand) -> Result<ExitCode> {
+    use isocast_protocol::roots::{FilesList, FilesListParams, FilesRoots};
+    match command {
+        FilesCommand::Roots { json } => {
+            let roots: FilesRoots = Client::connect_or_launch()?.call(Method::FilesRoots)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&roots)?);
+            } else {
+                for root in &roots.roots {
+                    println!(
+                        "{}{}",
+                        root.path.display(),
+                        if root.read_only { " (read only)" } else { "" }
+                    );
+                }
+            }
+        }
+        FilesCommand::List {
+            path,
+            extensions,
+            folders,
+            json,
+        } => {
+            let list: FilesList =
+                Client::connect_or_launch()?.call(Method::FilesList(FilesListParams {
+                    path,
+                    extensions: (!extensions.is_empty()).then_some(extensions),
+                    folders_only: folders,
+                }))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+            } else {
+                println!("{}", list.path.display());
+                for entry in &list.entries {
+                    match entry.size {
+                        Some(size) if !entry.folder => println!("  {}  {size}", entry.name),
+                        _ => println!("  {}/", entry.name),
+                    }
+                }
+                if list.truncated {
+                    println!("  … (more not shown)");
+                }
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}

@@ -18,6 +18,7 @@ pub mod diagnostics;
 mod fields;
 mod filter;
 pub mod governor;
+pub mod h264;
 pub mod hello;
 pub mod hotkeys;
 pub mod init;

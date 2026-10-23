@@ -331,8 +331,8 @@ component PermissionsStep inherits VerticalLayout {
     spacing: 0;
     alignment: start;
     StepTitle {
-        title: PlatformText.windows ? "Turn on camera and microphone access" : "Let Isocast see and hear";
-        lead: PlatformText.windows ? "A Windows privacy setting is keeping desktop apps like Isocast from using them. Open its page in Settings, turn access on, and this updates by itself. You can skip this and turn it on later."
+        title: PlatformText.engine-windows ? "Turn on camera and microphone access" : "Let Isocast see and hear";
+        lead: PlatformText.engine-windows ? "A Windows privacy setting is keeping desktop apps like Isocast from using them. Open its page in Settings, turn access on, and this updates by itself. You can skip this and turn it on later."
             : PermissionsArea.unknown-access
             ? "Access is checked when capture starts; no per-app permission prompt is available. See each item for guidance."
             : "macOS asks you once for each. You can skip any of them now; your setup leaves out what it can’t use, and you can allow it later.";
@@ -581,7 +581,7 @@ export component Onboarding inherits Rectangle {
                     alignment: start;
                     if SettingsArea.ob-access: StepItem {
                         index: 0;
-                        label: PlatformText.windows ? "Access" : "Permissions";
+                        label: PlatformText.engine-windows ? "Access" : "Permissions";
                     }
                     StepItem {
                         index: 1;

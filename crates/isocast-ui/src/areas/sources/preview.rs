@@ -3,7 +3,8 @@
 //! shared GPU surfaces (`shared_frames` with the source as its target), a
 //! thread of its own receives them, and the window shows the newest as a
 //! Slint image on the same GPU device, without copying it. It stops when
-//! the dialog closes.
+//! the dialog closes. A window on another computer's engine shows its
+//! JPEG stills instead, a few a second (R2's interim previews).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,11 +19,13 @@ use isocast_protocol::api::SharedFramesParams;
 use slint::wgpu_30::wgpu;
 
 type Slot = Arc<Mutex<Option<SharedFrame>>>;
+type StillSlot = Arc<Mutex<Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>>>;
 
 struct Watching {
     source: String,
     stop: Arc<AtomicBool>,
     newest: Slot,
+    still: StillSlot,
     images: HashMap<(u64, u32), slint::Image>,
     /// The frames shown now and just before (the GPU may still read it).
     showing: Option<SharedFrame>,
@@ -59,16 +62,25 @@ impl SourcePreview {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let newest: Slot = Arc::default();
+        let still: StillSlot = Arc::default();
         {
             let (stop, newest, target) = (stop.clone(), newest.clone(), source.to_string());
+            let still = still.clone();
             let _ = thread::Builder::new()
                 .name("source preview".into())
-                .spawn(move || receive(&target, &stop, &newest));
+                .spawn(move || {
+                    if crate::engine::is_local() {
+                        receive(&target, &stop, &newest)
+                    } else {
+                        receive_stills(&target, &stop, &still)
+                    }
+                });
         }
         *self.watching.borrow_mut() = Some(Watching {
             source: source.to_string(),
             stop,
             newest,
+            still,
             images: HashMap::new(),
             showing: None,
             previous: None,
@@ -107,6 +119,11 @@ fn tick(
     {
         let mut watching = watching.borrow_mut();
         let Some(w) = watching.as_mut() else { return };
+        if let Some(pixels) = w.still.lock().ok().and_then(|mut s| s.take()) {
+            let aspect = pixels.width() as f32 / pixels.height().max(1) as f32;
+            show(slint::Image::from_rgba8(pixels), aspect);
+            return;
+        }
         let Some(frame) = w.newest.lock().ok().and_then(|mut f| f.take()) else {
             return;
         };
@@ -164,6 +181,35 @@ fn receive(target: &str, stop: &AtomicBool, newest: &Slot) {
         match result {
             Err(error) if !crate::frames::unsupported(&error) => {}
             _ => break,
+        }
+        thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_secs(5));
+    }
+}
+
+/// A remote engine's source: its stills into `newest`, until stopped.
+fn receive_stills(target: &str, stop: &AtomicBool, newest: &StillSlot) {
+    let mut delay = Duration::from_millis(250);
+    while !stop.load(Ordering::Relaxed) {
+        let result = crate::daemon::connect().and_then(|mut client| {
+            let mut after = None;
+            while !stop.load(Ordering::Relaxed) {
+                let started = std::time::Instant::now();
+                let fps = crate::frames::STILL_FPS;
+                if let Some((seq, still)) =
+                    crate::frames::still(&mut client, target, 1280, after, 30)?
+                {
+                    after = Some(seq);
+                    if let Ok(mut slot) = newest.lock() {
+                        *slot = Some(still.pixels);
+                    }
+                }
+                thread::sleep((Duration::from_secs(1) / fps).saturating_sub(started.elapsed()));
+            }
+            Ok(())
+        });
+        if result.is_ok() {
+            break;
         }
         thread::sleep(delay);
         delay = (delay * 2).min(Duration::from_secs(5));

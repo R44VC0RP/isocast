@@ -1,0 +1,27 @@
+# Fuzz targets for parsers of untrusted input (AGENTS.md). Not a workspace
+# member: run with cargo-fuzz on nightly, e.g. `cargo +nightly fuzz run h264`
+# from this folder. `cargo test` runs the same checks on fixed and
+# pseudo-random inputs (isocast-protocol h264.rs's tests).
+[package]
+name = "isocast-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+isocast-protocol = { path = "../crates/isocast-protocol" }
+
+[[bin]]
+name = "h264"
+path = "fuzz_targets/h264.rs"
+test = false
+doc = false
+bench = false
+
+# Its own workspace, so the main one doesn't need it.
+[workspace]
+members = ["."]

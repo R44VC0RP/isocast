@@ -1,0 +1,145 @@
+// Area J: remote control (docs/remote-engines.md, R2). src/areas/remote.rs
+// fills this.
+//
+// Isocast opens standalone, like OBS: nothing here shows until Settings →
+// Remote turns one of its two switches on. "Control other computers" (the
+// app's own choice) adds the engine picker in the status bar and pairing
+// with other engines; "Let other computers control this one" (the engine's
+// `remote_enable`) shows its name and identity, "Pair a computer", the
+// paired computers and the folders they can use. Those are the engine
+// machine's own: a window on another computer's engine shows "Change
+// remote settings on <engine>" instead.
+
+import { NavTab } from "../../kit.slint";
+
+// A computer paired with this engine (Settings → Remote), or one connected
+// to the engine this window controls (presence): its id, name, a few words
+// ("Connected now", "Last seen 5 min ago"), and whether it is this app.
+export struct RemotePeerRow {
+    id: string,
+    name: string,
+    detail: string,
+    connected: bool,
+    me: bool,
+}
+
+// A folder other computers can use: its path, why ("Chosen", "Recordings",
+// "Fonts, read only") and whether it can be taken off the list.
+export struct RemoteFolderRow {
+    path: string,
+    why: string,
+    removable: bool,
+}
+
+// An entry of an engine folder (the engine file browser).
+export struct RemoteFileRow {
+    name: string,
+    path: string,
+    folder: bool,
+    detail: string,
+}
+
+export global RemoteArea {
+    // ---- This window's engine
+    // The window controls another computer's engine (its remote settings
+    // are that computer's own, its files that computer's).
+    in-out property <bool> remote-window;
+    // That engine's name ("exon-desk"); this machine's words otherwise
+    // ("This Mac", "This PC").
+    in-out property <string> engine-name;
+    in-out property <string> this-machine: "This Mac";
+    // "Mac" or "PC", for "this Mac".
+    in-out property <string> this-machine-word: "Mac";
+
+    // ---- Settings → Remote
+    // The two switches.
+    in-out property <bool> control-others;
+    in-out property <bool> allow-control;
+    // A switch's change is on its way.
+    in-out property <bool> busy;
+    // Why listening or discovery isn't working ("" if it is).
+    in-out property <string> listen-problem;
+    // This engine's name, the address it listens on and its identity's
+    // fingerprint (grouped, for reading aloud when pairing).
+    in-out property <string> identity-name;
+    in-out property <string> address;
+    in-out property <string> fingerprint;
+    // The address is outside the local network: "Not recommended over the
+    // internet (for now)".
+    in-out property <bool> address-public;
+    // Pairing: the code while a window is open ("" when closed), and its
+    // seconds left.
+    in-out property <string> pair-code;
+    in-out property <int> pair-seconds;
+    in-out property <string> pair-problem;
+    in-out property <[RemotePeerRow]> clients;
+    in-out property <[RemoteFolderRow]> folders;
+    // The folders were chosen here (not the defaults).
+    in-out property <bool> folders-custom;
+    // The engines this app is paired with (Forget).
+    in-out property <[RemotePeerRow]> paired;
+    callback set-control-others(bool);
+    callback set-allow-control(bool);
+    callback pair-begin();
+    callback pair-cancel();
+    callback revoke(string);
+    callback forget(string);
+    callback add-folder();
+    callback remove-folder(string);
+    callback default-folders();
+    callback copy-fingerprint();
+    // Add Engine…: pair with an engine by its address.
+    callback add-engine();
+
+    // ---- Presence: the other computers connected to this window's engine
+    // now, and a few words about them for the status bar ("2 others").
+    in-out property <[RemotePeerRow]> others;
+    in-out property <string> presence;
+
+    // ---- Pairing with an engine (over whatever dialog is open, Settings
+    // included)
+    in-out property <bool> pairing-shown;
+    // "address" (Add engine…: its host or IP), "code" (the engine's code),
+    // "done" (paired).
+    in-out property <string> pairing-step: "address";
+    in-out property <string> pairing-address;
+    in-out property <string> pairing-name;
+    // The code as typed.
+    in-out property <string> pairing-typed;
+    // The address isn't on the local network: confirm to go on.
+    in-out property <bool> pairing-public;
+    in-out property <bool> pairing-confirmed;
+    in-out property <bool> pairing-busy;
+    in-out property <string> pairing-error;
+    callback pairing-next(string);
+    callback pairing-code(string);
+    callback pairing-open();
+    callback pairing-cancel();
+
+    // ---- The engine file browser (a remote window's file pickers)
+    in-out property <bool> browser-open;
+    in-out property <string> browser-title;
+    in-out property <string> browser-prompt: "Choose";
+    // Choosing a folder (else files).
+    in-out property <bool> browser-folders;
+    // Only showing where something is ("Show on exon-desk").
+    in-out property <bool> browser-show-only;
+    in-out property <string> browser-path;
+    // Whose disk it is: "exon-desk", or "This PC" for this machine's.
+    in-out property <string> browser-where;
+    in-out property <bool> browser-has-parent;
+    // The folders it can browse (the sidebar), and the one the folder
+    // shown is in.
+    in-out property <[NavTab]> browser-roots;
+    in-out property <string> browser-root;
+    in-out property <[RemoteFileRow]> browser-entries;
+    in-out property <string> browser-selected;
+    in-out property <string> browser-note;
+    in-out property <bool> browser-busy;
+    callback browser-go(string);
+    callback browser-up();
+    callback browser-select(string);
+    callback browser-open-entry(string);
+    callback browser-choose();
+    callback browser-cancel();
+}

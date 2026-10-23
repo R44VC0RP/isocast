@@ -61,6 +61,8 @@ const SCENE_TILE_FPS: u32 = 30;
 #[derive(Default)]
 struct Arrived {
     frame: Option<SharedFrame>,
+    /// A remote engine's still (R2's interim previews).
+    still: Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>,
     lost: Option<String>,
 }
 
@@ -510,6 +512,11 @@ impl Projectors {
     /// Show `projectors` (the daemon's list): open windows for new ones,
     /// close the rest, move the ones whose placement changed elsewhere.
     fn sync(&self, app: &Rc<App>, projectors: Vec<Projector>, reason: Option<String>) {
+        // This app's own (decision 24): this machine's for a local window,
+        // this client's for a window on another computer's engine.
+        let own = crate::engine::own_projector_owner();
+        let projectors: Vec<Projector> =
+            projectors.into_iter().filter(|p| p.owner == own).collect();
         let gone: Vec<String> = self
             .shown
             .borrow()
@@ -1152,6 +1159,10 @@ impl Projectors {
                                     arrived.frame = Some(frame);
                                     arrived.lost = None;
                                 }
+                                Incoming::Still(still) => {
+                                    arrived.still = Some(still.pixels);
+                                    arrived.lost = None;
+                                }
                                 Incoming::Lost(why) | Incoming::Unavailable(why) => {
                                     arrived.lost = Some(why)
                                 }
@@ -1178,10 +1189,22 @@ impl Projectors {
         for shown in self.shown.borrow().values() {
             let mut tiles = shown.tiles.borrow_mut();
             for (index, tile) in tiles.iter_mut().enumerate() {
-                let (frame, lost) = {
+                let (frame, still, lost) = {
                     let mut arrived = tile.arrived.lock().unwrap();
-                    (arrived.frame.take(), arrived.lost.take())
+                    (
+                        arrived.frame.take(),
+                        arrived.still.take(),
+                        arrived.lost.take(),
+                    )
                 };
+                if let Some(picture) = still
+                    && let Some(mut row) = shown.model.row_data(index)
+                {
+                    row.picture = slint::Image::from_rgba8(picture);
+                    row.shown = true;
+                    shown.model.set_row_data(index, row);
+                    continue;
+                }
                 if let Some(why) = lost
                     && frame.is_none()
                     && let Some(mut row) = shown.model.row_data(index)

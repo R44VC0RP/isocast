@@ -1,0 +1,228 @@
+// Area J's sheets, shown over whatever dialog is open (Settings among
+// them), so choosing a file from Settings or a source's properties keeps
+// that dialog and its edits:
+//
+// - Pairing with an engine: its address (Add Engine…; a public address
+//   needs "Connect anyway": not recommended over the internet, for now),
+//   then the code shown on the engine, then Open.
+// - The engine file browser: a remote window's file and folder pickers,
+//   and "Show on <engine>", browse the engine's disk through `files_roots`
+//   and `files_list` (names only, inside the folders other computers can
+//   use). Its sidebar is those folders; double-click opens a folder.
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import {
+    Callout, CalloutKind, Checkbox, Dialog, DialogFooter, IconButton, List, ListRow, NavList, ScrollArea,
+    SheetHeader, Spinner, TextField,
+} from "../../kit.slint";
+import { RemoteArea } from "state.slint";
+
+component Note inherits Text {
+    color: Theme.text-2;
+    font-size: Theme.fs-sm;
+    letter-spacing: Theme.tracking-sm;
+    line-height-factor: Theme.leading-sm;
+    wrap: word-wrap;
+}
+
+component PairingDialog inherits Dialog {
+    title: RemoteArea.pairing-step == "address" ? "Add Engine"
+        : RemoteArea.pairing-step == "code" ? "Pair with " + RemoteArea.pairing-name
+        : "Paired with " + RemoteArea.pairing-name;
+    subtitle: RemoteArea.pairing-step == "address" ? "Its name or IP address on your network."
+        : RemoteArea.pairing-step == "code" ? "Type the code it shows."
+        : "Open it in a window of its own.";
+    icon: Icons.link;
+    dialog-width: 480px;
+    ok-text: RemoteArea.pairing-step == "address" ? "Next" : RemoteArea.pairing-step == "code" ? "Pair" : "Open";
+    ok-enabled: !RemoteArea.pairing-busy
+        && (RemoteArea.pairing-step != "address" || (RemoteArea.pairing-address != "" && (!RemoteArea.pairing-public || RemoteArea.pairing-confirmed)))
+        && (RemoteArea.pairing-step != "code" || RemoteArea.pairing-typed.character-count >= 6);
+    cancel-text: RemoteArea.pairing-step == "done" ? "Done" : "Cancel";
+    accepted => {
+        if RemoteArea.pairing-step == "address" {
+            RemoteArea.pairing-next(RemoteArea.pairing-address);
+        } else if RemoteArea.pairing-step == "code" {
+            RemoteArea.pairing-code(RemoteArea.pairing-typed);
+        } else {
+            RemoteArea.pairing-open();
+        }
+    }
+    cancelled => { RemoteArea.pairing-cancel(); }
+
+    VerticalLayout {
+        padding-left: Theme.sheet-pad;
+        padding-right: Theme.sheet-pad;
+        spacing: Theme.space-3;
+        if RemoteArea.pairing-step == "code": Note {
+            text: "On " + RemoteArea.pairing-name + ", open Settings → Remote and choose Pair a Computer. Type the 6-digit code it shows; it works once, for 2 minutes.";
+        }
+        // Made after the dialog takes focus, so the field keeps it.
+        if RemoteArea.pairing-step == "address": TextField {
+            text: RemoteArea.pairing-address;
+            placeholder: "exon-desk.local or 10.0.10.149";
+            label: "Engine address";
+            mono: true;
+            auto-focus: true;
+            edited(text) => {
+                RemoteArea.pairing-address = text;
+                RemoteArea.pairing-confirmed = false;
+            }
+        }
+        if RemoteArea.pairing-step == "code": TextField {
+            text: RemoteArea.pairing-typed;
+            placeholder: "000000";
+            label: "Pairing code";
+            mono: true;
+            auto-focus: true;
+            edited(text) => { RemoteArea.pairing-typed = text; }
+        }
+        if RemoteArea.pairing-step == "address" && RemoteArea.pairing-public: Callout {
+            kind: CalloutKind.info;
+            title: "Not recommended over the internet (for now)";
+            message: "This address isn't on your local network or Tailscale. Isocast's remote control is made for computers on the same network.";
+        }
+        if RemoteArea.pairing-step == "address" && RemoteArea.pairing-public: Checkbox {
+            text: "Connect anyway";
+            checked <=> RemoteArea.pairing-confirmed;
+        }
+        if RemoteArea.pairing-error != "": Callout {
+            kind: CalloutKind.error;
+            title: "Couldn’t pair";
+            message: RemoteArea.pairing-error;
+        }
+        if RemoteArea.pairing-busy: HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            Spinner { }
+            Note {
+                text: RemoteArea.pairing-step == "address" ? "Looking for it…" : "Pairing…";
+            }
+        }
+    }
+}
+
+component FileBrowser inherits Dialog {
+    title: RemoteArea.browser-title;
+    header: false;
+    footer: false;
+    drag-height: 76px;
+    dialog-width: 760px;
+    dialog-height: 520px;
+    ok-text: RemoteArea.browser-show-only ? "Done" : RemoteArea.browser-prompt;
+    ok-enabled: RemoteArea.browser-show-only || RemoteArea.browser-selected != "" || RemoteArea.browser-folders;
+    accepted => { RemoteArea.browser-choose(); }
+    cancelled => { RemoteArea.browser-cancel(); }
+
+    property <int> current: -1;
+
+    HorizontalLayout {
+        vertical-stretch: 1;
+        spacing: 0;
+        NavList {
+            label: "Folders on " + RemoteArea.browser-where;
+            tabs: RemoteArea.browser-roots;
+            current: RemoteArea.browser-root;
+            selected(id) => { RemoteArea.browser-go(id); }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 0;
+            SheetHeader {
+                inset: Theme.sheet-pad-wide;
+                title: RemoteArea.browser-title;
+                subtitle: RemoteArea.browser-where + ": " + RemoteArea.browser-path;
+                icon: Icons.folder-open;
+            }
+            HorizontalLayout {
+                padding-left: Theme.sheet-pad-wide;
+                padding-right: Theme.sheet-pad-wide;
+                padding-bottom: Theme.space-2;
+                spacing: Theme.space-2;
+                IconButton {
+                    icon: Icons.chevron-up;
+                    label: "Enclosing folder";
+                    enabled: RemoteArea.browser-has-parent && !RemoteArea.browser-busy;
+                    clicked => { RemoteArea.browser-up(); }
+                }
+                Note {
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    text: RemoteArea.browser-note;
+                    color: Theme.text-3;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+                if RemoteArea.browser-busy: Spinner { }
+            }
+            HorizontalLayout {
+                vertical-stretch: 1;
+                padding-left: Theme.sheet-pad-wide;
+                padding-right: Theme.sheet-pad-wide;
+                Rectangle {
+                    background: Theme.surface-inset;
+                    border-width: 1px;
+                    border-color: Theme.line-strong;
+                    border-radius: Theme.r;
+                    clip: true;
+                    List {
+                        x: 1px;
+                        y: 1px;
+                        width: parent.width - 2px;
+                        height: parent.height - 2px;
+                        label: "Files on " + RemoteArea.browser-where;
+                        count: RemoteArea.browser-entries.length;
+                        empty-text: RemoteArea.browser-busy ? "" : RemoteArea.browser-folders ? "No folders here" : "Nothing to choose here";
+                        empty-icon: Icons.folder;
+                        current: root.current;
+                        navigate(index) => {
+                            root.current = index;
+                            RemoteArea.browser-select(RemoteArea.browser-entries[index].path);
+                        }
+                        // Return opens the selected folder (or chooses the
+                        // file); Backspace goes up.
+                        unhandled-key(event) => {
+                            if event.text == "\n" && RemoteArea.browser-selected != "" {
+                                RemoteArea.browser-open-entry(RemoteArea.browser-selected);
+                                return true;
+                            }
+                            if event.text == Key.Backspace && RemoteArea.browser-has-parent {
+                                RemoteArea.browser-up();
+                                return true;
+                            }
+                            false
+                        }
+                        for entry[i] in RemoteArea.browser-entries: ListRow {
+                            text: entry.name;
+                            icon: entry.folder ? Icons.folder : Icons.media;
+                            selected: entry.path == RemoteArea.browser-selected;
+                            description: entry.detail;
+                            index: i;
+                            count: RemoteArea.browser-entries.length;
+                            clicked => {
+                                root.current = i;
+                                RemoteArea.browser-select(entry.path);
+                            }
+                            double-clicked => { RemoteArea.browser-open-entry(entry.path); }
+                        }
+                    }
+                }
+            }
+            DialogFooter {
+                inset: Theme.sheet-pad-wide;
+                pad-top: Theme.space-4;
+                ok-text: RemoteArea.browser-show-only ? "Done" : RemoteArea.browser-prompt;
+                ok-enabled: RemoteArea.browser-show-only || RemoteArea.browser-selected != "" || RemoteArea.browser-folders;
+                cancel-text: RemoteArea.browser-show-only ? "" : "Cancel";
+                ok => { RemoteArea.browser-choose(); }
+                cancel => { RemoteArea.browser-cancel(); }
+            }
+        }
+    }
+}
+
+export component RemoteDialogs inherits Rectangle {
+    if RemoteArea.pairing-shown: PairingDialog { }
+    if RemoteArea.browser-open: FileBrowser { }
+}

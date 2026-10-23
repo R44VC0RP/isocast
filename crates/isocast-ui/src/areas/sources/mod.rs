@@ -1637,15 +1637,19 @@ fn quick_button(app: &Rc<App>) {
             if app.mode.offscreen {
                 return;
             }
-            if let Some(path) = files::choose(files::IMAGE_TYPES, false, "Choose")
-                .into_iter()
-                .next()
-            {
-                app.edit(
-                    json!({ "sources": [{ "id": source.id, "path": path }] }),
-                    EditOptions::default(),
-                );
-            }
+            let options = crate::platform::Choose {
+                types: files::IMAGE_TYPES,
+                prompt: "Choose",
+                ..crate::platform::Choose::default()
+            };
+            crate::areas::remote::choose(app, options, move |app, chosen| {
+                if let Some(path) = chosen.unwrap_or_default().into_iter().next() {
+                    app.edit(
+                        json!({ "sources": [{ "id": source.id, "path": path }] }),
+                        EditOptions::default(),
+                    );
+                }
+            });
         }
         "browser" => {
             app.call(

@@ -120,6 +120,13 @@ const TABS: &[(&str, &str, &str, &str, &str)] = &[
         "System",
         "Automatic quality, what a stream does when its connection drops, and developer mode.",
     ),
+    (
+        "remote",
+        "Remote",
+        "link",
+        "System",
+        "Control other computers running Isocast, or let them control this one, on the local network.",
+    ),
 ];
 
 /// Streaming services, and where each one's key (and for Kick, server)
@@ -456,11 +463,13 @@ impl Area for Settings {
             }
         })));
         // What makes the files (shown after the codec: Paper's Encoder row).
-        let engine = if cfg!(target_os = "macos") {
-            "Apple VideoToolbox"
+        // The engine machine's encoder (decision 22).
+        let mac = if crate::engine::is_local() {
+            cfg!(target_os = "macos")
         } else {
-            ""
+            crate::engine::os() == isocast_protocol::hello::EngineOs::Macos
         };
+        let engine = if mac { "Apple VideoToolbox" } else { "" };
         area.set_codecs(model(
             CODECS
                 .iter()
@@ -600,10 +609,10 @@ impl Area for Settings {
         on!(on_save_key, |app, key| app.settings.save_key(&app, &key));
         on!(on_clear_key, |app| app.settings.clear_key(&app));
         on!(on_browse_folder, |app| {
-            if let Some(folder) = choose_folder(&app) {
+            choose_folder(&app, |app, folder| {
                 app.settings
-                    .change(&app, json!({"recording": {"folder": folder}}));
-            }
+                    .change(app, json!({"recording": {"folder": folder}}));
+            });
         });
         on!(on_refresh_devices, |app| app.settings.look_again(&app));
 
@@ -644,10 +653,10 @@ impl Area for Settings {
             .settings
             .first_run_set(&app, &field, &value));
         on!(on_ob_browse, |app| {
-            if let Some(folder) = choose_folder(&app) {
+            choose_folder(&app, |app, folder| {
                 app.settings.first_run.borrow_mut().folder = folder;
-                app.settings.show_first_run(&app);
-            }
+                app.settings.show_first_run(app);
+            });
         });
     }
 
@@ -921,6 +930,9 @@ impl Settings {
             self.hotkeys.load(app);
         } else {
             self.hotkeys.closed(app);
+        }
+        if tab == "remote" {
+            app.remote.page_shown(app);
         }
     }
 
@@ -1615,7 +1627,7 @@ impl Settings {
                         "Stream key saved",
                         format!(
                             "It’s in your {}; Isocast never shows it again.",
-                            wording::CREDENTIAL_STORE
+                            crate::engine::words().credential_store
                         ),
                     );
                     app.refresh_status(true);
@@ -1635,7 +1647,10 @@ impl Settings {
                 Ok(_) => {
                     app.toast(
                         ToastKind::Info,
-                        &format!("Stream key removed from the {}", wording::CREDENTIAL_STORE),
+                        &format!(
+                            "Stream key removed from the {}",
+                            crate::engine::words().credential_store
+                        ),
                         "",
                     );
                     app.refresh_status(true);
@@ -1690,7 +1705,7 @@ impl Settings {
                     app.changed(Changed::DEVICES);
                 }
                 Err(error) => app.failed(
-                    wording::select(
+                    crate::engine::pick(
                         "Couldn’t list this Mac’s devices",
                         "Couldn’t list this PC’s devices",
                     ),
@@ -3111,14 +3126,19 @@ fn camera_short(kind: CameraKind) -> &'static str {
     }
 }
 
-/// Ask for a folder (the open panel); says so where there is none.
-fn choose_folder(app: &Rc<App>) -> Option<String> {
-    let chosen = platform::choose(Choose {
+/// Ask for a folder (the open panel, or another computer's engine's
+/// disk); says so where there is no panel.
+fn choose_folder(app: &Rc<App>, done: impl FnOnce(&Rc<App>, String) + 'static) {
+    let options = Choose {
         folders: true,
         prompt: "Choose",
         ..Choose::default()
+    };
+    crate::areas::remote::choose(app, options, move |app, chosen| {
+        if let Some(folder) = first_chosen(app, chosen) {
+            done(app, folder);
+        }
     });
-    first_chosen(app, chosen)
 }
 
 fn choose_file(app: &Rc<App>, types: &[&str], prompt: &str) -> Option<String> {

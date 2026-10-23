@@ -31,7 +31,13 @@ pub struct FileKey {
 
 impl FileKey {
     /// `path`'s key, if it is there.
+    /// Never for a window on another computer's engine: its paths are
+    /// that computer's (decision 6), so its thumbnails and waveforms
+    /// aren't made here.
     pub fn of(path: &Path) -> Option<Self> {
+        if !crate::engine::is_local() {
+            return None;
+        }
         let meta = std::fs::metadata(path).ok()?;
         Some(Self {
             path: path.to_path_buf(),

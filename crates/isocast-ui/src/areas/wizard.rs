@@ -754,7 +754,7 @@ fn verdict(o: &Optimized) -> String {
         (Some(recommendation), Some(_)) => {
             format!(
                 "Stepped down to fit this {}: {recommendation}.",
-                isocast_protocol::platform_text::MACHINE
+                crate::engine::words().machine
             )
         }
         _ => format!("{base}{speed}."),

@@ -44,6 +44,7 @@ mod chrome_windows;
 mod clock;
 mod daemon;
 mod documents;
+mod engine;
 mod form;
 mod frames;
 mod gpu;
@@ -74,6 +75,7 @@ mod thumbs;
 mod toasts;
 mod update;
 mod usage;
+mod video;
 mod waves;
 mod window;
 
@@ -111,10 +113,17 @@ pub struct Options {
     /// Measured windows float above others unless this is set (a window
     /// capture only sees windows at the normal level).
     pub no_float: bool,
+    /// `--engine`: the engine this window controls (`local`, a paired
+    /// engine's name or id, or host[:port]); `$ISOCAST_ENGINE` if absent,
+    /// else this machine's (src/engine.rs).
+    pub engine: Option<String>,
 }
 
 const USAGE: &str = "usage: isocast-ui [--bench SECONDS] [--check] [--drag-test SECONDS] [--fps N]
                   [--drag-mode move|resize|resize-select|columns|rows] [--preview layers|image] [--no-float]
+                  [--engine local|NAME|ID|HOST[:PORT]]  (a window on another computer's engine)
+       isocast-ui --pair HOST[:PORT]       pair this app with an engine (its code on stdin;
+                                           for scripts; Settings → Remote pairs in the app)
        isocast-ui --snapshot OUT.png [--size WxH] [--scale N] [--state STATE]… [--a11y] [--wait-ms MS]
                   [--crop AREA|X,Y,W,H] [--snapshot OUT2.png [--state STATE]…]…
        isocast-ui --snapshot-watch DIR [--size WxH] [--scale N] [--state STATE]… [--crop AREA|X,Y,W,H]
@@ -156,6 +165,7 @@ fn parse() -> Result<Options> {
         drag_mode: window::DragMode::Move,
         frame_check: false,
         no_float: false,
+        engine: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -209,6 +219,7 @@ fn parse() -> Result<Options> {
             }
             "--check" => options.frame_check = true,
             "--no-float" => options.no_float = true,
+            "--engine" => options.engine = Some(value("--engine")?),
             "--drag-test" => {
                 options.drag_test = Some(
                     value("--drag-test")?
@@ -336,6 +347,32 @@ fn main() {
         }
     }
     let _logs = isocast_diagnostics::init("isocast-ui", true);
+    // Interim, until the Settings → Remote pairing screen (R2 UI lane):
+    // pair this app's own identity (its key is the app's, in the Keychain or
+    // Credential Manager, which the CLI's pairing can't hand it) with an
+    // engine showing a code (`isocast remote pair --show` there), the code
+    // on stdin. Prints the paired engine as JSON.
+    if std::env::args().nth(1).as_deref() == Some("--pair") {
+        let result = (|| -> Result<serde_json::Value> {
+            let target = std::env::args()
+                .nth(2)
+                .context("--pair needs the engine's address: --pair HOST[:PORT] (code on stdin)")?;
+            let mut code = String::new();
+            std::io::stdin().read_line(&mut code)?;
+            let peer = isocast_client::remote::pair(&target, code.trim(), None)?;
+            Ok(serde_json::to_value(peer)?)
+        })();
+        exit(match result {
+            Ok(peer) => {
+                println!("{peer}");
+                0
+            }
+            Err(error) => {
+                eprintln!("Error: {error:#}");
+                1
+            }
+        });
+    }
     if std::env::args().nth(1).as_deref() == Some("--motion") {
         exit(match motion::main(std::env::args().skip(1).collect()) {
             Ok(true) => 0,
@@ -347,6 +384,7 @@ fn main() {
         });
     }
     let result = parse().and_then(|options| {
+        engine::select(options.engine.as_deref())?;
         if !options.snapshots.is_empty()
             || options.watch.is_some()
             || options.a11y
@@ -374,6 +412,12 @@ fn main() {
 /// hours. They need `ISOCAST_SOCKET` pointing at a throwaway engine, as
 /// scripts/snapshot.sh and scripts/visual-shots.sh set up.
 fn refuse_real_engine() -> Result<()> {
+    if !engine::is_local() {
+        bail!(
+            "offscreen runs (--snapshot, --snapshot-watch, --a11y, --soak) never use another \
+             computer's engine: their states start recordings and streams for real"
+        );
+    }
     let socket = isocast_protocol::api::socket_path();
     let own = isocast_protocol::api::default_socket_path();
     // The same folder reached through a symlink still counts as the same.

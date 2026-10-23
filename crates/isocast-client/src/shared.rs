@@ -79,6 +79,14 @@ pub fn adapter(client: &mut Client, instance: &wgpu::Instance) -> Result<wgpu::A
     isocast_surfaces::dx12_adapter(instance, luid)
 }
 
+/// The renderer's adapter for a window on another machine's engine: that
+/// engine's adapter means nothing here (shared surfaces never cross
+/// machines), so this machine's own DX12 choice.
+#[cfg(all(windows, feature = "wgpu"))]
+pub fn local_adapter(instance: &wgpu::Instance) -> Result<wgpu::Adapter> {
+    isocast_surfaces::dx12_adapter(instance, None)
+}
+
 /// Register the actual rendering queue before receiving Windows previews.
 /// Slint/Skia and the app must submit through this same queue. A frame must
 /// remain alive until no future render will reference its image; its drop

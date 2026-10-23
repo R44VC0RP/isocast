@@ -272,7 +272,9 @@ pub fn local_only_reason(method: &Method) -> Option<&'static str> {
         | Method::RecordTarget(_)
         | Method::GpuAdapter
         | Method::Hello
-        | Method::FolderRoots => None,
+        | Method::FolderRoots
+        | Method::FilesRoots
+        | Method::FilesList(_) => None,
     }
 }
 

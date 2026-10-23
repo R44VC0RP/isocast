@@ -470,6 +470,8 @@ pub fn result(method: &str, g: &mut SchemaGenerator) -> Option<(String, Schema)>
         "gpu_adapter" => of::<Option<(u32, i32)>>(g),
         "hello" => of::<hello::Hello>(g),
         "folder_roots" | "folder_roots_set" => of::<roots::FolderRoots>(g),
+        "files_roots" => of::<roots::FilesRoots>(g),
+        "files_list" => of::<roots::FilesList>(g),
         "whep_offer" => of::<api::WhepAnswer>(g),
         // Null, then the connection closes.
         "whep_close" => of::<()>(g),

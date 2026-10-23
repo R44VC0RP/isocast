@@ -56,6 +56,13 @@ pub enum Link {
     Disconnected,
     /// It couldn't be reached at all (not launched, or refused).
     Failed,
+    /// A remote engine answered with another version (decision 7): it
+    /// can't be controlled until the two match. The reason names both.
+    Mismatch,
+    /// A remote engine presented a key other than the one paired with: it
+    /// was reinstalled (or something else answers at its address), so it
+    /// must be paired again.
+    IdentityChanged,
 }
 
 /// What comes back to the window's thread.
@@ -73,6 +80,9 @@ pub enum Update {
     Watching(Box<Live>),
     /// An event from the daemon.
     Event(Box<Event>),
+    /// A remote engine said who it is (`hello`): its name, operating system
+    /// and version, on each connection of the window's watcher.
+    Hello(Box<isocast_protocol::hello::Hello>),
 }
 
 /// Start the worker and the watcher. `deliver` runs on their threads and
@@ -81,7 +91,34 @@ pub enum Update {
 /// so the new app starts its own, so this one doesn't launch it again.
 pub static NO_LAUNCH: AtomicBool = AtomicBool::new(false);
 
+/// Counts the watcher's connections: when it has connected again, the
+/// engine (or the link to it) went away meanwhile, so the worker's own
+/// connection is dead too and is replaced before the next call, instead of
+/// failing that call (a pulled cable to a remote engine, a restart).
+static LINK_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The watcher is connected now (its `watch` is live).
+static LINK_UP: AtomicBool = AtomicBool::new(false);
+
+/// Whether the window's link to its engine is up now, and its generation
+/// (it changes each time the watcher connects again): a stream opened on
+/// another generation went with the link it began on.
+pub fn link() -> (bool, u64) {
+    (
+        LINK_UP.load(Ordering::SeqCst),
+        LINK_GENERATION.load(Ordering::SeqCst),
+    )
+}
+
+/// A connection to the window's engine (src/engine.rs). Only this
+/// machine's engine is ever launched; another computer's is connected to,
+/// or not.
 pub fn connect() -> anyhow::Result<Client> {
+    if !crate::engine::is_local() {
+        let engine = crate::engine::current();
+        return engine
+            .connect()?
+            .ok_or_else(|| anyhow::anyhow!("the engine isn't reachable"));
+    }
     if NO_LAUNCH.load(Ordering::SeqCst) {
         Client::connect()?.ok_or_else(|| anyhow::anyhow!("isocastd was stopped for an update"))
     } else {
@@ -94,6 +131,10 @@ pub fn connect() -> anyhow::Result<Client> {
 /// cannot leave capture pinned if the app exits or window creation fails.
 #[cfg(windows)]
 pub fn prewarm_preview() {
+    // Shared surfaces only exist for this machine's engine.
+    if !crate::engine::is_local() {
+        return;
+    }
     let _ = thread::Builder::new()
         .name("preview preparation".into())
         .spawn(|| {
@@ -132,11 +173,12 @@ pub fn start(deliver: impl Fn(Update) + Send + Clone + 'static) -> Sender<Reques
 }
 
 fn worker(rx: Receiver<Request>, deliver: impl Fn(Update)) {
-    let mut client: Option<Client> = None;
+    let mut client: Option<(Client, u64)> = None;
     while let Ok(request) = rx.recv() {
+        let generation = LINK_GENERATION.load(Ordering::SeqCst);
         let connection = match client.take() {
-            Some(c) => Ok(c),
-            None => connect(),
+            Some((c, at)) if at == generation => Ok(c),
+            _ => connect(),
         };
         let mut c = match connection {
             Ok(c) => c,
@@ -154,13 +196,13 @@ fn worker(rx: Receiver<Request>, deliver: impl Fn(Update)) {
         let result: anyhow::Result<Value> = c.call(request.method);
         let result = match result {
             Ok(value) => {
-                client = Some(c);
+                client = Some((c, generation));
                 Ok(value)
             }
             Err(error) => match error.downcast_ref::<DaemonError>() {
                 // The daemon refused: the connection is still good.
                 Some(refusal) => {
-                    client = Some(c);
+                    client = Some((c, generation));
                     Err(CallError {
                         message: refusal.0.message.clone(),
                         code: Some(refusal.code()),
@@ -180,13 +222,26 @@ fn worker(rx: Receiver<Request>, deliver: impl Fn(Update)) {
 }
 
 /// Follow the daemon's events; reconnect with back-off when it goes away.
+/// A remote engine's `hello` goes to the window first; an engine of another
+/// version, or one whose identity changed, is shown as such and asked
+/// again less often (nothing else may be called on it).
 fn watcher(deliver: impl Fn(Update)) {
     let mut delay = Duration::from_millis(250);
     let mut ever_connected = false;
     deliver(Update::Link(Link::Connecting, String::new()));
     loop {
+        let mut blocked = None;
         let result = connect().and_then(|client| {
+            if let Some(hello) = client.hello() {
+                deliver(Update::Hello(Box::new(hello.clone())));
+            }
+            if let Some(why) = client.compatibility_error() {
+                blocked = Some(Link::Mismatch);
+                anyhow::bail!("{why}");
+            }
             let (live, events) = client.watch()?;
+            LINK_GENERATION.fetch_add(1, Ordering::SeqCst);
+            LINK_UP.store(true, Ordering::SeqCst);
             delay = Duration::from_millis(250);
             ever_connected = true;
             deliver(Update::Link(Link::Connected, String::new()));
@@ -196,16 +251,29 @@ fn watcher(deliver: impl Fn(Update)) {
             }
             Ok(())
         });
-        let reason = match result {
+        LINK_UP.store(false, Ordering::SeqCst);
+        let reason = match &result {
             Ok(()) => "isocastd closed the connection".to_string(),
             Err(error) => format!("{error:#}"),
         };
-        let link = if ever_connected {
-            Link::Disconnected
-        } else {
-            Link::Failed
+        if let Err(error) = &result
+            && blocked.is_none()
+            && isocast_client::remote::identity_changed(error)
+        {
+            blocked = Some(Link::IdentityChanged);
+        }
+        let link = match blocked {
+            Some(link) => link,
+            None if ever_connected => Link::Disconnected,
+            None => Link::Failed,
         };
         deliver(Update::Link(link, reason));
+        if blocked.is_some() {
+            // Retrying at once can't help: another version or key needs a
+            // person (an update, or pairing again).
+            thread::sleep(Duration::from_secs(10));
+            continue;
+        }
         thread::sleep(delay);
         delay = (delay * 2).min(Duration::from_secs(5));
     }

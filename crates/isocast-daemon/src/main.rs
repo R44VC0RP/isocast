@@ -1652,6 +1652,8 @@ impl Daemon {
             },
             Method::FolderRoots => to_json(self.folder_roots()),
             Method::FolderRootsSet(params) => self.folder_roots_set(params).and_then(to_json),
+            Method::FilesRoots => to_json(self.files_roots()),
+            Method::FilesList(params) => self.files_list(params).and_then(to_json),
             Method::EncoderOptions => to_json(isocast_protocol::Codec::options()),
             Method::BugReport(params) => diagnostics::bug_report(self, &params).and_then(to_json),
             Method::ReportFile(params) => isocast_diagnostics::preview::read(&params)

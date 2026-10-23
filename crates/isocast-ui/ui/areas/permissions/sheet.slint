@@ -62,7 +62,7 @@ component Action inherits HorizontalLayout {
             }
         }
         Text {
-            text: root.item.action == "relaunch" ? (PlatformText.windows ? "Restarting…" : "Relaunching…") : root.item.action == "ask" ? (PlatformText.windows ? "Checking…" : "Waiting for you…") : "Opening…";
+            text: root.item.action == "relaunch" ? (PlatformText.engine-windows ? "Restarting…" : "Relaunching…") : root.item.action == "ask" ? (PlatformText.engine-windows ? "Checking…" : "Waiting for you…") : "Opening…";
             color: Theme.text-3;
             font-size: Theme.fs-sm;
             letter-spacing: Theme.tracking-sm;
@@ -257,7 +257,7 @@ export component PermissionsSheet inherits Rectangle {
                     accessible-role: AccessibleRole.text;
                 }
                 Text {
-                    text: PlatformText.windows
+                    text: PlatformText.engine-windows
                         ? "The recording engine is isocastd.exe. In Windows Settings, Camera and Microphone must allow desktop apps. Isocast only records the sources you add to a scene."
                         : PermissionsArea.unknown-access
                         ? "Access is checked when capture starts; no per-app permission prompt is available. See each item for guidance."
@@ -298,7 +298,7 @@ export component PermissionsSheet inherits Rectangle {
                     }
                     Text {
                         horizontal-stretch: 1;
-                        text: PlatformText.windows ? "Open Windows Settings › Privacy & security (Privacy on Windows 10), then Camera or Microphone. Turn on access for desktop apps; isocastd.exe is the recording engine." : "In System Settings, drag " + PermissionsArea.app-name + " from the small window beside it into the list, then switch it on. This updates by itself.";
+                        text: PlatformText.engine-windows ? "Open Windows Settings › Privacy & security (Privacy on Windows 10), then Camera or Microphone. Turn on access for desktop apps; isocastd.exe is the recording engine." : "In System Settings, drag " + PermissionsArea.app-name + " from the small window beside it into the list, then switch it on. This updates by itself.";
                         color: Theme.text-2;
                         font-size: Theme.fs-sm;
                         letter-spacing: Theme.tracking-sm;

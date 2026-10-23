@@ -374,7 +374,7 @@ impl HotkeysPage {
             .collect();
         if current.pending {
             warnings.push(
-                isocast_protocol::platform_text::select(
+                crate::engine::pick(
                     "macOS is still taking the new keys; they work in a moment.",
                     "Windows is still registering the new shortcuts; they work in a moment.",
                 )

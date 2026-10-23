@@ -29,7 +29,10 @@
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Component;
 
-use isocast_protocol::roots::{FolderRoot, FolderRoots, FolderRootsSetParams};
+use isocast_protocol::roots::{
+    FILES_LIST_MAX, FileEntry, FilesList, FilesListParams, FilesRoots, FolderRoot, FolderRoots,
+    FolderRootsSetParams,
+};
 
 use super::*;
 
@@ -125,6 +128,21 @@ fn is_unc(path: &Path) -> bool {
         let _ = path;
         false
     }
+}
+
+/// `path` as people write it: on Windows without the `\\?\` a resolved
+/// path starts with (`\\?\C:\Users` is `C:\Users`).
+fn plain(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\")
+            && rest.as_bytes().get(1) == Some(&b':')
+        {
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 /// Whether names in `path` (a folder that exists) compare without case:
@@ -411,6 +429,128 @@ impl Daemon {
         Ok(self.folder_roots())
     }
 
+    /// See [`Method::FilesRoots`].
+    pub(crate) fn files_roots(&self) -> FilesRoots {
+        FilesRoots {
+            roots: self
+                .roots()
+                .into_iter()
+                .filter(|root| root.path.is_dir())
+                .map(|root| FolderRoot {
+                    path: root.shown,
+                    read_only: root.read_only,
+                    why: root.why.into(),
+                })
+                .collect(),
+            home: isocast_protocol::api::home_folder(),
+        }
+    }
+
+    /// See [`Method::FilesList`]. A network caller's `path` was resolved
+    /// inside a root by `check_params`; each entry it gets must resolve
+    /// inside one too (a link out of the roots is left out). Listing only:
+    /// nothing is opened but the folder.
+    pub(crate) fn files_list(&self, params: FilesListParams) -> Result<FilesList, RpcError> {
+        let local = callers::current().is_local();
+        let shown = params.path.display().to_string();
+        let invalid = |problem: String| RpcError {
+            code: RpcError::INVALID_PARAMS,
+            message: format!("params.path: {shown:?}: {problem}"),
+        };
+        let path = if local {
+            let path = expand_home(&params.path.to_string_lossy());
+            if !path.is_absolute() {
+                return Err(invalid(
+                    "give an absolute path (or one starting with ~/)".into(),
+                ));
+            }
+            std::fs::canonicalize(&path).map_err(|err| invalid(err.to_string()))?
+        } else {
+            params.path.clone()
+        };
+        let roots = if local { Vec::new() } else { self.roots() };
+        let allowed =
+            |path: &Path| local || self.resolve_in(&roots, "", path, Access::Read).is_ok();
+        let read = std::fs::read_dir(&path).map_err(|err| invalid(err.to_string()))?;
+        let extensions: Option<Vec<String>> = params.extensions.map(|list| {
+            list.iter()
+                .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
+                .collect()
+        });
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                // FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM, on the
+                // entry itself (a junction like "Application Data" is
+                // hidden; what it points at isn't).
+                if entry
+                    .metadata()
+                    .is_ok_and(|own| own.file_attributes() & 0x6 != 0)
+                {
+                    continue;
+                }
+            }
+            // Follows a link: what it points at decides folder or file.
+            let Ok(meta) = std::fs::metadata(entry.path()) else {
+                continue;
+            };
+            let folder = meta.is_dir();
+            if params.folders_only && !folder {
+                continue;
+            }
+            if !folder && let Some(extensions) = &extensions {
+                let extension = Path::new(&name)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !extensions.contains(&extension) {
+                    continue;
+                }
+            }
+            let entry_path = path.join(&name);
+            if !allowed(&entry_path) {
+                continue;
+            }
+            if entries.len() == FILES_LIST_MAX {
+                truncated = true;
+                break;
+            }
+            entries.push(FileEntry {
+                name,
+                path: plain(entry_path),
+                folder,
+                size: (!folder).then_some(meta.len()),
+                modified: meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs()),
+            });
+        }
+        entries.sort_by(|a, b| {
+            b.folder
+                .cmp(&a.folder)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        let parent = path
+            .parent()
+            .filter(|parent| allowed(parent))
+            .map(|parent| plain(parent.to_path_buf()));
+        Ok(FilesList {
+            path: plain(path),
+            parent,
+            entries,
+            truncated,
+        })
+    }
+
     /// `path` (given at `field`) resolved, if it is inside a root that
     /// allows `access`; refused otherwise.
     fn resolve_in(
@@ -671,6 +811,7 @@ impl Daemon {
             Method::TimelineRelink(params) => {
                 resolve_buf("params.path", &mut params.path, Access::Read)
             }
+            Method::FilesList(params) => resolve_buf("params.path", &mut params.path, Access::Read),
             Method::Doctor(params) => {
                 resolve_opt("params.folder", &mut params.folder, Access::Write)?;
                 match &params.setup {

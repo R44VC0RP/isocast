@@ -3,13 +3,46 @@
 //! drawing, and hands it to the window's thread. Reconnects with back-off
 //! when the daemon goes away, and at once when the target changes (the
 //! edited monitor shows `preview` in Studio Mode, `program` otherwise).
+//!
+//! A window on another computer's engine can't share GPU surfaces (the
+//! engine refuses `shared_frames` to network callers): it shows the
+//! engine's live H.264 video instead, decoded here in hardware
+//! (`crate::video`), each picture as an [`Incoming::Still`]. If this
+//! machine can't decode it, the engine's JPEG stills (`frame`), a few a
+//! second.
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use isocast_client::shared::{SharedController, SharedFrame};
-use isocast_protocol::api::SharedFramesParams;
+use isocast_protocol::api::{FrameParams, FramesParams, Method, RpcError, SharedFramesParams};
+use slint::{Rgba8Pixel, SharedPixelBuffer};
+
+/// The most stills a second a remote window asks for (R2's interim
+/// previews: a few, at about 0.1 MB each on the network).
+pub const STILL_FPS: u32 = 5;
+
+/// Keyframes in a row that won't decode before a remote window gives up on
+/// the video and shows the engine's stills.
+const KEYFRAME_FAILURES: u32 = 3;
+
+/// The engine's video keeps failing to decode here
+/// ([`KEYFRAME_FAILURES`] keyframes in a row).
+#[derive(Debug)]
+struct Undecodable(String);
+
+impl std::fmt::Display for Undecodable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{KEYFRAME_FAILURES} keyframes in a row didn't decode: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for Undecodable {}
 
 /// The engine can't share pictures here at all (asking again won't help).
 pub fn unsupported(error: &anyhow::Error) -> bool {
@@ -21,12 +54,78 @@ pub fn unsupported(error: &anyhow::Error) -> bool {
 /// What the window gets.
 pub enum Incoming {
     Frame(SharedFrame),
+    /// A picture from another computer's engine, decoded (its live video,
+    /// or a JPEG still).
+    Still(Still),
     /// No picture: why (the daemon can't be reached, or refused).
     Lost(String),
     /// No picture, and asking again won't help: this engine can't share
     /// its pictures here (`RpcError::UNSUPPORTED`). Not asked again until
     /// the target changes.
     Unavailable(String),
+}
+
+/// A still picture, ready to show: its pixels and, for the program and the
+/// preview, the setup revision it was drawn from.
+pub struct Still {
+    pub pixels: SharedPixelBuffer<Rgba8Pixel>,
+    pub revision: Option<u64>,
+}
+
+impl Still {
+    pub fn image(&self) -> slint::Image {
+        slint::Image::from_rgba8(self.pixels.clone())
+    }
+}
+
+/// Decode one of `frame`'s replies.
+pub fn decode(frame: &isocast_protocol::api::Frame) -> anyhow::Result<Still> {
+    use base64::Engine as _;
+    let jpeg = base64::engine::general_purpose::STANDARD.decode(&frame.jpeg_base64)?;
+    let picture = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)?.to_rgba8();
+    let pixels =
+        SharedPixelBuffer::clone_from_slice(picture.as_raw(), picture.width(), picture.height());
+    Ok(Still {
+        pixels,
+        revision: frame.revision,
+    })
+}
+
+/// The newest still of `target` after `after` (one `frame` call), fit in
+/// `max_width`: `None` when none came within its wait (ask again). `fps`
+/// is how often the engine draws the picture meanwhile (as for a local
+/// window's preview, so its program rate reads the same), not how many
+/// stills are fetched.
+pub fn still(
+    client: &mut isocast_client::Client,
+    target: &str,
+    max_width: u32,
+    after: Option<u64>,
+    fps: u32,
+) -> anyhow::Result<Option<(u64, Still)>> {
+    let reply = client.call::<isocast_protocol::api::Frame>(Method::Frame(FrameParams {
+        target: target.into(),
+        max_width: Some(max_width.max(16)),
+        after,
+        timeout_ms: Some(1000),
+        quality: Some(0.7),
+        fps: Some(fps.clamp(1, 60)),
+    }));
+    match reply {
+        Ok(frame) => Ok(Some((frame.seq, decode(&frame)?))),
+        // Nothing newer within the wait (the picture didn't change, or the
+        // engine is busy): not an error.
+        Err(error)
+            if error
+                .downcast_ref::<isocast_client::DaemonError>()
+                .is_some_and(|e| {
+                    e.code() == RpcError::FAILED && e.0.message.contains("ask again")
+                }) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// What the window wants: the target (none: nothing), the picture's size
@@ -120,6 +219,9 @@ impl Feed {
     }
 
     fn receive(&self, deliver: impl Fn(Incoming)) {
+        if !crate::engine::is_local() {
+            return self.receive_video(deliver);
+        }
         let mut delay = Duration::from_millis(250);
         loop {
             let want = self.want.lock().unwrap().clone();
@@ -179,6 +281,205 @@ impl Feed {
                     delay = Duration::from_millis(250);
                     continue;
                 }
+                Err(error) => deliver(Incoming::Lost(format!("{error:#}"))),
+            }
+            thread::sleep(delay);
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
+    }
+
+    /// A remote engine's live video (`frames`, H.264), decoded here,
+    /// reconnecting with back-off; its stills if this machine can't decode
+    /// it. The pictures fit in the monitor, at a width on
+    /// [`crate::video::width_step`]'s ladder.
+    fn receive_video(&self, deliver: impl Fn(Incoming)) {
+        // Made once there's something to show (a hidden monitor costs no
+        // decoder, and on Windows no D3D11 device).
+        let mut decoder: Option<Box<dyn crate::video::Decoder>> = None;
+        let mut delay = Duration::from_millis(250);
+        // The engine can't scale its pictures for the stream (Windows'
+        // encoders take only the canvas's size so far): ask for them as
+        // they are, and the monitor scales them.
+        let mut unscaled = false;
+        loop {
+            let want = self.want.lock().unwrap().clone();
+            if want.stopped {
+                return;
+            }
+            let Some(target) = want.target.clone() else {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            let decoder = match &mut decoder {
+                Some(decoder) => decoder,
+                None => match crate::video::decoder() {
+                    Ok(made) => decoder.insert(made),
+                    Err(error) => {
+                        isocast_diagnostics::diagnostic!("warn"; "video: no H.264 decoder, stills instead: {error:#}");
+                        return self.receive_stills(deliver);
+                    }
+                },
+            };
+            let width = (!unscaled).then(|| crate::video::width_step(want.width));
+            let result = crate::daemon::connect().and_then(|client| {
+                let mut source = crate::video::FramesSource::open(
+                    client,
+                    FramesParams {
+                        target: target.clone(),
+                        max_width: width,
+                        fps: Some(want.fps.clamp(1, 60)),
+                    },
+                )?;
+                self.play(
+                    &mut source,
+                    &mut **decoder,
+                    &target,
+                    width,
+                    &deliver,
+                    &mut delay,
+                )
+            });
+            match result {
+                // The target or size changed: the new one at once.
+                Ok(()) => continue,
+                Err(error) if !unscaled && format!("{error:#}").contains("video.size") => {
+                    isocast_diagnostics::diagnostic!("info"; "video: the engine can't scale its pictures; asking for them full size ({error:#})");
+                    unscaled = true;
+                    continue;
+                }
+                // This machine can't decode the stream at all, or keeps
+                // failing on it: the engine's stills instead.
+                Err(error) if crate::video::no_decoder(&error) || error.is::<Undecodable>() => {
+                    isocast_diagnostics::diagnostic!("warn"; "video: can't decode the engine's video, stills instead: {error:#}");
+                    return self.receive_stills(deliver);
+                }
+                Err(error) => deliver(Incoming::Lost(format!("{error:#}"))),
+            }
+            thread::sleep(delay);
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
+    }
+
+    /// Show `source`'s pictures until the target or size step changes
+    /// (`Ok`) or the source fails. Only the transport differs between
+    /// sources. A picture that won't decode is skipped (the decoders start
+    /// again at the next keyframe); [`KEYFRAME_FAILURES`] keyframes in a
+    /// row that won't end it with [`Undecodable`].
+    fn play(
+        &self,
+        source: &mut dyn crate::video::Source,
+        decoder: &mut dyn crate::video::Decoder,
+        target: &str,
+        width: Option<u32>,
+        deliver: &impl Fn(Incoming),
+        delay: &mut Duration,
+    ) -> anyhow::Result<()> {
+        use crate::video::Intake;
+        let mut sets = None;
+        let mut fps = self.want.lock().unwrap().fps;
+        // Setup revisions by the picture time they start at.
+        let mut revisions: std::collections::VecDeque<(u64, u64)> = Default::default();
+        let mut stats = crate::video::Stats::default();
+        let mut said = false;
+        let mut failed_keyframes = 0;
+        loop {
+            let now = self.want.lock().unwrap().clone();
+            if now.stopped
+                || now.target.as_deref() != Some(target)
+                || width.is_some_and(|width| crate::video::width_step(now.width) != width)
+            {
+                return Ok(());
+            }
+            if now.fps != fps {
+                fps = now.fps;
+                source.set_fps(fps)?;
+            }
+            match source.next(Duration::from_millis(250))? {
+                None => {}
+                Some(Intake::Config(new)) => sets = Some(new),
+                Some(Intake::Revision { time, revision }) => {
+                    revisions.push_back((time, revision));
+                    while revisions.len() > 8 {
+                        revisions.pop_front();
+                    }
+                }
+                Some(Intake::Unit(unit)) => {
+                    let Some(sets) = &sets else { continue };
+                    let started = Instant::now();
+                    let pixels = match decoder.decode(sets, &unit) {
+                        Ok(Some(pixels)) => pixels,
+                        Ok(None) => continue,
+                        Err(error) if crate::video::no_decoder(&error) => return Err(error),
+                        Err(error) => {
+                            isocast_diagnostics::diagnostic!("debug"; "video: skipped a picture of {target}: {error:#}");
+                            if unit.keyframe {
+                                failed_keyframes += 1;
+                                if failed_keyframes >= KEYFRAME_FAILURES {
+                                    return Err(Undecodable(format!("{error:#}")).into());
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                    if unit.keyframe {
+                        failed_keyframes = 0;
+                    }
+                    let late = source.clock_offset().map(|offset| {
+                        let here = crate::video::now_nanos(Instant::now()) as i128 + offset;
+                        (here - unit.time as i128) as f64 / 1e6
+                    });
+                    if !said {
+                        said = true;
+                        isocast_diagnostics::diagnostic!("info"; "video: {target} {}x{} (sent as {}x{}) decoded by {}", pixels.width(), pixels.height(), unit.width, unit.height, decoder.name());
+                    }
+                    stats.add(late, started.elapsed().as_secs_f64() * 1e3);
+                    let revision = revisions
+                        .iter()
+                        .rev()
+                        .find(|(at, _)| *at <= unit.time)
+                        .map(|(_, revision)| *revision);
+                    *delay = Duration::from_millis(250);
+                    deliver(Incoming::Still(Still { pixels, revision }));
+                }
+            }
+        }
+    }
+
+    /// A remote engine's pictures: its JPEG stills, at most [`STILL_FPS`]
+    /// a second, on one connection, reconnecting with back-off.
+    fn receive_stills(&self, deliver: impl Fn(Incoming)) {
+        let mut delay = Duration::from_millis(250);
+        loop {
+            let want = self.want.lock().unwrap().clone();
+            if want.stopped {
+                return;
+            }
+            let Some(target) = want.target.clone() else {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            let result = crate::daemon::connect().and_then(|mut client| {
+                let mut after = None;
+                loop {
+                    let now = self.want.lock().unwrap().clone();
+                    if now.stopped || now.target.as_deref() != Some(target.as_str()) {
+                        return Ok(());
+                    }
+                    let fps = now.fps.clamp(1, STILL_FPS);
+                    let started = Instant::now();
+                    if let Some((seq, picture)) =
+                        still(&mut client, &target, now.width, after, now.fps)?
+                    {
+                        after = Some(seq);
+                        delay = Duration::from_millis(250);
+                        deliver(Incoming::Still(picture));
+                    }
+                    let period = Duration::from_secs(1) / fps;
+                    thread::sleep(period.saturating_sub(started.elapsed()));
+                }
+            });
+            match result {
+                Ok(()) => continue,
                 Err(error) => deliver(Incoming::Lost(format!("{error:#}"))),
             }
             thread::sleep(delay);

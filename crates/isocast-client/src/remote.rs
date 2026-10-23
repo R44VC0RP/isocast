@@ -107,6 +107,18 @@ fn load_identity() -> Result<(Identity, RemoteIdentity)> {
         )
 }
 
+/// Whether connecting failed because the engine presented a key other than
+/// the one paired with (a reinstalled engine, or someone else at its
+/// address): the person must forget it and pair again. The pin verifier's
+/// refusal is the one way this shows (isocast-remote's tls.rs).
+pub fn identity_changed(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("identity is not paired (or has changed)")
+    })
+}
+
 pub fn identity() -> Result<RemoteIdentity> {
     Ok(load_identity()?.1)
 }
@@ -254,6 +266,7 @@ pub fn pair(target: &str, code: &str, name: Option<&str>) -> Result<RemotePeer> 
         paired_at: store::now(),
         last_seen: None,
         address: Some(format!("tls://{}", endpoint(target)?)),
+        connections: None,
     };
     drop(stream);
     // Persist confirmed trust before an optional second connection. Losing the

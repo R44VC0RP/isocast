@@ -32,7 +32,7 @@ import { StatusBar } from "areas/controls/statusbar.slint";
 import { ControlsDialogs } from "areas/controls/dialogs.slint";
 import { SettingsArea } from "areas/settings/state.slint";
 import { SettingsDialogs } from "areas/settings/dialogs.slint";
-import { ConnectingState, Welcome } from "areas/settings/states.slint";
+import { ConnectingState, RemoteLinkOverlay, Welcome } from "areas/settings/states.slint";
 import { Onboarding } from "areas/settings/onboarding.slint";
 import { LibraryArea } from "areas/library/state.slint";
 import { LibraryDialogs } from "areas/library/dialogs.slint";
@@ -48,6 +48,8 @@ import { PermissionsSheet } from "areas/permissions/sheet.slint";
 import { WizardArea } from "areas/wizard/state.slint";
 import { WizardSheet } from "areas/wizard/sheet.slint";
 import { ProjectorsArea } from "areas/projectors/projector.slint";
+import { RemoteArea } from "areas/remote/state.slint";
+import { RemoteDialogs } from "areas/remote/dialogs.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, ExtraCanvas, Menus, Toasts, EditCommands, SettingsForms }
@@ -55,6 +57,7 @@ export { PlatformText }
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
 export { CreateArea }
 export { DeveloperArea }
+export { RemoteArea, RemotePeerRow, RemoteFolderRow, RemoteFileRow } from "areas/remote/state.slint";
 export { ProjectsArea, RecentRow } from "areas/projects/state.slint";
 export { StatRow, OutputStat } from "areas/developer/state.slint";
 export { PermissionsArea, PermissionItem } from "areas/permissions/state.slint";
@@ -428,7 +431,8 @@ export component AppWindow inherits Window {
         edit-fallback.running = true;
     }
 
-    property <bool> ready: Ui.loaded || (Ui.connection == ConnectionState.connected && Ui.has-setup);
+    property <bool> ready: (Ui.loaded || (Ui.connection == ConnectionState.connected && Ui.has-setup))
+        && Ui.connection != ConnectionState.mismatch && Ui.connection != ConnectionState.identity-changed;
 
     title: root.title-text;
     preferred-width: 1280px;
@@ -646,7 +650,7 @@ export component AppWindow inherits Window {
             MenuItem { title: "Copy Diagnostics"; activated => { Ui.menu("dev_copy_diagnostics"); } }
             MenuItem { title: "Show Update Feed"; activated => { Ui.menu("dev_update_feed"); } }
             MenuSeparator { }
-            MenuItem { title: "Restart Engine"; activated => { Ui.menu("dev_restart_engine"); } }
+            MenuItem { title: "Restart Engine"; enabled: !Ui.engine-remote; activated => { Ui.menu("dev_restart_engine"); } }
         }
         Menu {
             title: "Window";
@@ -757,6 +761,14 @@ export component AppWindow inherits Window {
         height: root.height - (Ui.show-status-bar ? Theme.statusbar : 0px);
     }
 
+    // A remote engine's link dropped after the window had read it (R2).
+    if root.ready && Ui.engine-remote && Ui.connection != ConnectionState.connected: RemoteLinkOverlay {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+    }
+
     // Over the window: Welcome (no setup yet), the dialogs, the gallery,
     // the menu and the toasts.
     if Ui.loaded && !Ui.has-setup && !Ui.onboarding && !PermissionsArea.shown && !WizardArea.shown: Welcome { }
@@ -775,6 +787,9 @@ export component AppWindow inherits Window {
     // The permissions step (area H), over Welcome, the first run and
     // Settings, which open it.
     if PermissionsArea.shown: PermissionsSheet { }
+    // Pairing with an engine and the engine file browser (area J), over
+    // any dialog that opened them.
+    RemoteDialogs { }
     QuitDialog { }
 
     if root.kit-gallery: KitGallery {

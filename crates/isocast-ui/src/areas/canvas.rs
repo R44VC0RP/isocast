@@ -397,6 +397,7 @@ impl Canvas {
         if let Some(preview) = cell.borrow_mut().as_mut() {
             match incoming {
                 Incoming::Frame(frame) => preview.frame(frame),
+                Incoming::Still(still) => preview.still(still),
                 Incoming::Lost(why) => preview.lost(why),
                 Incoming::Unavailable(_) => preview.unavailable(),
             }

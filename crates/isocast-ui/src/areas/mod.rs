@@ -12,6 +12,7 @@
 //! | G the Create view (clip bar) | `create.rs` (+ thumbs.rs) | `create/` | `CreateArea` |
 //! | H the permissions step | `permissions.rs` (+ helper.rs) | `permissions/` | `PermissionsArea` |
 //! | I the setup wizard (OBS, optimize) | `wizard.rs` | `wizard/` | `WizardArea` |
+//! | J remote control | `remote.rs` | `remote/` | `RemoteArea` |
 //!
 //! What is shared lives outside the areas and changes rarely: the widget
 //! kit (ui/kit.slint, ui/widgets/), the tokens (ui/theme.slint), icons
@@ -79,6 +80,7 @@ pub mod mixer;
 pub mod permissions;
 pub mod projectors;
 pub mod projects;
+pub mod remote;
 pub mod report;
 pub mod settings;
 pub mod sources;
@@ -107,6 +109,7 @@ pub const STATES: &[&[&str]] = &[
     wizard::STATES,
     projectors::STATES,
     projects::STATES,
+    remote::STATES,
 ];
 
 /// What `App` asks of an area. Everything but `connect` and `update` has

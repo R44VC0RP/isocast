@@ -1,0 +1,29 @@
+// The engine picker (docs/remote-engines.md, decision 5), at the status
+// bar's left: which engine this window controls ("This Mac", "exon-desk")
+// and who else is connected to it ("+2"). Its menu (src/areas/remote.rs,
+// owner "engine:") lists this machine, the paired engines, those found on
+// the network, "Add Engine…" and the others connected; choosing an engine
+// opens it in a window of its own. Shown only with "Control other
+// computers" on, in a window on another computer's engine, or while other
+// computers are connected to this one.
+
+import { Theme } from "../../theme.slint";
+import { Menus, Rule, TextMenuButton } from "../../kit.slint";
+import { RemoteArea } from "state.slint";
+
+export component EnginePicker inherits HorizontalLayout {
+    spacing: Theme.line-gap;
+    horizontal-stretch: 0;
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 0;
+        TextMenuButton {
+            text: RemoteArea.remote-window ? RemoteArea.engine-name : RemoteArea.this-machine;
+            value: RemoteArea.presence;
+            label: "Engine: " + self.text + (RemoteArea.presence != "" ? ", " + RemoteArea.presence : "");
+            menu-open: Menus.open && Menus.owner == "engine:";
+            clicked => { Menus.request("engine:", self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+        }
+    }
+    Rule { }
+}

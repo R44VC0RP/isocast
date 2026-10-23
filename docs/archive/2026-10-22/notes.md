@@ -3554,6 +3554,33 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-22 (R2 core: the app on a remote engine): **one window = one
+  process.** `isocast-ui --engine <target>` (or `$ISOCAST_ENGINE`) chooses
+  the window's engine once, in `src/engine.rs`, which also selects it for
+  `isocast_client::Engine` so every `Client::connect*` in the app reaches
+  it; another engine opens another process (`engine::open_window`, menu id
+  `open_engine:<id>`). Chosen over several windows in one process because
+  the app keeps per-window state in thread-locals (`window::APP`, quit,
+  keys, the updaters, the macOS menu bar), and a crashed remote window
+  can't take the local one with it. Cost: a second Dock icon on macOS.
+  Local-only flows check `engine::is_local()`: the updaters aren't started
+  in a remote window (stale-engine restart and `stop_engine` also refuse),
+  `daemon::connect` never launches for a remote engine, `App::call`
+  refuses `caller::local_only_reason` methods before sending (Restart
+  Engine, `shutdown_if_idle`, permission prompts), and the Developer
+  menu's Restart Engine is disabled. Remote windows show the engine's
+  JPEG `frame` stills at 5 a second (`frames.rs`, `Incoming::Still`, the
+  previews in `Mode::Image`), asking the engine to draw at the window's
+  rate so its program FPS reads as locally. Engine words follow
+  `hello.os` (`engine::os/words/pick`, `PlatformText.engine-windows`);
+  app words (menus, shortcuts) stay `PlatformText.windows`. Projectors
+  carry `owner` (the paired client id; none for this machine) and each
+  app syncs only its own; a client's projectors close 20 s after its last
+  connection ends (`OWNER_GRACE`), so a pulled cable that comes back keeps
+  them; remote-owned projectors aren't restored when the engine starts.
+  The worker drops its connection when the watcher reconnects
+  (`LINK_GENERATION`), so the first call after a reconnect doesn't fail.
+
 - 2026-10-22 (R1 remote API, third review): every stream-key resolver
   holds the state lock (`stream_key`/`has_stream_key` take `&State` as
   proof), so a resolved key always belongs to the destination as checked
@@ -8639,6 +8666,15 @@ each section. Delete entries that stop being true.
   runs the scenarios through its `run` under the shared GPU lock.
 
 ## Gotchas
+
+- 2026-10-22 (R2 core): on macOS a client identity's key is a Keychain
+  item only the binary that created it reads without a prompt, so the
+  CLI's `isocast remote pair` can't pair the app (the app reads "could not
+  load the client identity", worded as a stream key by the credentials
+  crate). Until Settings → Remote pairs (R2 UI), pair the app itself with
+  `echo CODE | isocast-ui --pair HOST[:PORT]`, and give dev builds a stable
+  signature (`codesign -s "Apple Development: …" --identifier
+  dev.isocast.<name>.ui isocast-ui`), or every rebuild loses the key.
 
 - 2026-10-22 (R1.d, Windows 10 22H2 DNS-SD on exon-desk; revised after
   review): what the watch works around, all seen in real runs:

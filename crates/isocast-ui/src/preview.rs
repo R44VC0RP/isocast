@@ -296,6 +296,9 @@ pub struct Preview {
     /// back until the screen has surely moved on from it).
     showing: Option<SharedFrame>,
     previous: Option<SharedFrame>,
+    /// A remote engine's still is on screen (R2's interim previews), and
+    /// the setup revision it was drawn from.
+    still: Option<Option<u64>>,
     waiting: Option<(SharedFrame, Instant)>,
     last_shown_at: Option<Instant>,
     check: bool,
@@ -353,6 +356,7 @@ impl Preview {
             style: BoxStyle::default(),
             showing: None,
             previous: None,
+            still: None,
             waiting: None,
             last_shown_at: None,
             check,
@@ -389,6 +393,7 @@ impl Preview {
         // Waiting (a spinner) until the new target's first frame; the
         // frame on screen is held until then.
         self.previous = self.showing.take();
+        self.still = None;
         if let Some(app) = self.app.upgrade() {
             self.set_waiting(&app, target.is_some(), "");
         }
@@ -450,6 +455,16 @@ impl Preview {
     pub fn lost(&mut self, why: String) {
         self.stats.lost += 1;
         self.waiting = None;
+        // Another computer's engine: keep the last picture under the
+        // window's Reconnecting overlay (which says what's wrong) until
+        // video comes back. With none yet, say why on the monitor.
+        if !crate::engine::is_local()
+            && matches!(self.output, Output::Image(_))
+            && self.still.is_some()
+        {
+            self.stats.last_lost = Some(why);
+            return;
+        }
         match &mut self.output {
             #[cfg(any(target_os = "macos", windows))]
             Output::Layers(layers) => layers.borrow_mut().clear(self.role),
@@ -467,6 +482,7 @@ impl Preview {
         self.images.clear();
         self.previous = None;
         self.showing = None;
+        self.still = None;
         if let Some(app) = self.app.upgrade() {
             self.set_waiting(&app, false, &format!("No picture: {why}"));
         }
@@ -545,9 +561,45 @@ impl Preview {
         let Some(app) = self.app.upgrade() else {
             return;
         };
-        let revision = self.showing.as_ref().and_then(|f| f.revision);
+        let revision = self
+            .showing
+            .as_ref()
+            .and_then(|f| f.revision)
+            .or(self.still.flatten());
         let rect = self.box_rect(&app, revision);
         self.put(&app, None, rect);
+    }
+
+    /// A still from another computer's engine (R2's interim previews): in
+    /// the monitor's image, with the box at the layout it was drawn from.
+    /// Remote windows show pictures as images (`Mode::Image`).
+    pub fn still(&mut self, still: crate::frames::Still) {
+        self.stats.received += 1;
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        if !matches!(self.output, Output::Image(_)) {
+            return;
+        }
+        let canvas = app.global::<CanvasArea>();
+        let image = still.image();
+        match self.role {
+            Role::Editor => canvas.set_picture(image),
+            Role::Program => canvas.set_program_picture(image),
+            Role::Extra => canvas.set_extra_picture(image),
+        }
+        if self.role == Role::Editor {
+            let rect = self.box_rect(&app, still.revision);
+            self.put(&app, None, rect);
+        }
+        if self.still.replace(still.revision).is_none() {
+            self.set_waiting(&app, false, "");
+        }
+        self.stats.shown += 1;
+        let now = crate::clock::now();
+        if let Some(last) = self.last_shown_at.replace(now) {
+            self.stats.longest_gap = self.stats.longest_gap.max(now - last);
+        }
     }
 
     /// `--drag-test`: the pointer's mark in the native layers, with the

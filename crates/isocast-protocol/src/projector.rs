@@ -5,6 +5,12 @@
 //! and reports where it is. `projector_open`, `projector_close`,
 //! `projector_list` and `projector_place` are on the one method table, so
 //! the CLI and agents open them as the app does.
+//!
+//! A projector belongs to the app that opened it (docs/remote-engines.md,
+//! decision 24): `owner` is the paired client's id when another computer
+//! opened it, none when this machine did (its app, CLI or an agent). Each
+//! app shows only its own, and the engine closes a remote client's once it
+//! has stayed disconnected for a short while.
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -174,6 +180,13 @@ pub struct Projector {
     /// app runs: the app opens it when it starts.
     #[serde(default)]
     pub shown: bool,
+    /// The paired client (its id) whose app shows it, when another
+    /// computer opened it; none for this machine's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// That client's name ("basebook"), for people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_name: Option<String>,
 }
 
 impl Projector {
@@ -224,10 +237,12 @@ impl Projector {
     }
 
     /// Whether `other` shows the same picture (the same view of the same
-    /// scene or source on the same canvas): opening it again moves this
-    /// one rather than adding another.
+    /// scene or source on the same canvas) for the same owner: opening it
+    /// again moves this one rather than adding another. Another app's
+    /// projector of the same view is its own.
     pub fn same_view(&self, other: &Projector) -> bool {
-        self.view == other.view
+        self.owner == other.owner
+            && self.view == other.view
             && self.canvas == other.canvas
             && self.scene == other.scene
             && self.source == other.source

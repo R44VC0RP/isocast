@@ -695,6 +695,13 @@ enum Command {
         #[command(subcommand)]
         command: roots::Command,
     },
+    /// Browse the engine's disk (names, sizes and dates only), as the
+    /// app's engine file pickers do: on another computer, only inside the
+    /// folders other computers can use.
+    Files {
+        #[command(subcommand)]
+        command: roots::FilesCommand,
+    },
     /// Projectors: the program, the preview, a scene, a source or a
     /// multiview grid, full screen on a display or in a window (the app
     /// shows them).
@@ -1952,6 +1959,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Replay { command } => replay::run(command),
         Command::Websocket { command } => websocket::run(command),
         Command::Roots { command } => roots::run(command),
+        Command::Files { command } => roots::files(command),
         Command::Debug { command } => debug::run(command),
         Command::Api {
             command: ApiCommand::Spec { json },

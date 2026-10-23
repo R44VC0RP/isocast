@@ -132,7 +132,6 @@ mod mac {
     use std::time::{Duration, Instant};
 
     use block2::{Block, RcBlock};
-    use isocast_client::Client;
     use isocast_protocol::api::Method;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, Bool, NSObject};
@@ -539,6 +538,11 @@ mod mac {
     /// or does other work (`busy`), a notice says it restarts afterwards.
     /// Once per engine process.
     fn restart_stale_engine(app: &Rc<App>, busy: Option<&'static str>) {
+        // Only this machine's engine is compared with the bundled build and
+        // restarted; another computer's is never touched (decision 21).
+        if !crate::engine::is_local() {
+            return;
+        }
         if RESTART_PAUSE
             .get()
             .is_some_and(|until| Instant::now() < until)
@@ -673,7 +677,11 @@ mod mac {
     /// atomically while it records, streams, exports or feeds the virtual
     /// camera; then wait for it to finish and let go of its socket.
     fn stop_engine() -> Stopped {
-        let mut client = match Client::connect() {
+        // This machine's engine, by name: an update replaces only it.
+        if !crate::engine::is_local() {
+            return Stopped::Failed("updates run only in a window on this Mac's engine".into());
+        }
+        let mut client = match isocast_client::Engine::Local.connect() {
             Ok(Some(client)) => client,
             Ok(None) => return Stopped::Done,
             Err(error) => return Stopped::Failed(format!("{error:#}")),
@@ -688,7 +696,7 @@ mod mac {
         }
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
-            match Client::connect() {
+            match isocast_client::Engine::Local.connect() {
                 Ok(None) => return Stopped::Done,
                 Ok(Some(_)) | Err(_) => std::thread::sleep(Duration::from_millis(50)),
             }

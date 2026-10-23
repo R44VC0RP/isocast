@@ -6982,6 +6982,43 @@
         ],
         "type": "object"
       },
+      "FileEntry": {
+        "description": "One entry of a folder.",
+        "properties": {
+          "folder": {
+            "type": "boolean"
+          },
+          "modified": {
+            "description": "When it last changed (seconds since 1970).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "description": "A file's size in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
+        "type": "object"
+      },
       "FileReport": {
         "properties": {
           "audio": {
@@ -7057,6 +7094,87 @@
           "repeated_frames",
           "dropped_frames",
           "audio_dropouts"
+        ],
+        "type": "object"
+      },
+      "FilesList": {
+        "description": "What `files_list` returns: a folder's entries (never their contents).",
+        "properties": {
+          "entries": {
+            "description": "Folders first, then files, each by name; hidden entries are left\nout.",
+            "items": {
+              "$ref": "#/components/schemas/FileEntry"
+            },
+            "type": "array"
+          },
+          "parent": {
+            "description": "The folder above it, if the caller may list that too (none at a\nroot, for a client on another computer).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "The folder listed, symlinks resolved.",
+            "type": "string"
+          },
+          "truncated": {
+            "description": "More entries than a listing returns ([`FILES_LIST_MAX`]) were there.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "entries"
+        ],
+        "type": "object"
+      },
+      "FilesListParams": {
+        "additionalProperties": false,
+        "description": "What `files_list` takes.",
+        "properties": {
+          "extensions": {
+            "description": "Only files with these extensions (without the dot, any case);\nfolders are always listed. Every file if absent.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "folders_only": {
+            "description": "Only folders.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "The folder to list (absolute or `~/...`). For a client on another\ncomputer it must be inside a folder other computers can use.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "FilesRoots": {
+        "description": "What `files_roots` returns: where an engine file picker starts.",
+        "properties": {
+          "home": {
+            "description": "The engine user's home folder, for showing paths as `~/...`.",
+            "type": "string"
+          },
+          "roots": {
+            "description": "The folders that can be browsed (for a caller on the engine's own\nmachine too: the same list other computers get), only those that\nexist.",
+            "items": {
+              "$ref": "#/components/schemas/FolderRoot"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "roots",
+          "home"
         ],
         "type": "object"
       },
@@ -14777,6 +14895,20 @@
             ],
             "description": "The grid, for `view = multiview`."
           },
+          "owner": {
+            "description": "The paired client (its id) whose app shows it, when another\ncomputer opened it; none for this machine's.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner_name": {
+            "description": "That client's name (\"basebook\"), for people.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "placement": {
             "allOf": [
               {
@@ -15507,6 +15639,15 @@
             "description": "Client-side only: the last explicitly paired engine address.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "connections": {
+            "description": "In `remote_clients` only (never stored): how many connections the\nclient has open now; 0 when it isn't connected.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -29146,6 +29287,67 @@
       "summary": "Choose the folders other computers can use (kept across restarts), or go back to the defaults.",
       "x-isocast-params": {
         "$ref": "#/components/schemas/FolderRootsSetParams"
+      }
+    },
+    {
+      "description": "Where an engine file picker starts: the folders other computers can\nuse that exist, and the engine user's home folder. Returns\n[`FilesRoots`](crate::roots::FilesRoots).",
+      "name": "files_roots",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "FilesRoots",
+        "schema": {
+          "$ref": "#/components/schemas/FilesRoots"
+        }
+      },
+      "summary": "Where an engine file picker starts: the folders other computers can use that exist, and the engine user's home folder."
+    },
+    {
+      "description": "A folder's entries on the engine's disk (names, sizes, dates; never\ncontents), hidden ones left out. A client on another computer may\nlist only inside the folders other computers can use. Returns\n[`FilesList`](crate::roots::FilesList).",
+      "name": "files_list",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "Only files with these extensions (without the dot, any case);\nfolders are always listed. Every file if absent.",
+          "name": "extensions",
+          "schema": {
+            "description": "Only files with these extensions (without the dot, any case);\nfolders are always listed. Every file if absent.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "Only folders.",
+          "name": "folders_only",
+          "schema": {
+            "description": "Only folders.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "The folder to list (absolute or `~/...`). For a client on another\ncomputer it must be inside a folder other computers can use.",
+          "name": "path",
+          "required": true,
+          "schema": {
+            "description": "The folder to list (absolute or `~/...`). For a client on another\ncomputer it must be inside a folder other computers can use.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "FilesList",
+        "schema": {
+          "$ref": "#/components/schemas/FilesList"
+        }
+      },
+      "summary": "A folder's entries on the engine's disk (names, sizes, dates; never contents), hidden ones left out.",
+      "x-isocast-params": {
+        "$ref": "#/components/schemas/FilesListParams"
       }
     },
     {

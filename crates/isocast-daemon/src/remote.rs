@@ -13,6 +13,8 @@ use std::io;
 pub(super) struct Runtime {
     inner: Mutex<Inner>,
     pairing: Arc<Pairing>,
+    /// Open connections by client id (presence: `remote_clients`).
+    open: Arc<Mutex<std::collections::HashMap<String, u32>>>,
 }
 
 #[derive(Default)]
@@ -138,6 +140,7 @@ impl Runtime {
             .map_err(failed)?;
         let publish = Arc::downgrade(daemon);
         let connected = Arc::downgrade(daemon);
+        let open = self.open.clone();
         let networks = Mutex::new((std::time::Instant::now(), prefixes()));
         let server = Server::bind(
             identity,
@@ -168,6 +171,7 @@ impl Runtime {
                         paired_at: store::now(),
                         last_seen: Some(store::now()),
                         address: None,
+                        connections: None,
                     };
                     settings.peers.retain(|peer| peer.id != client.id);
                     settings.peers.push(client.clone());
@@ -193,7 +197,9 @@ impl Runtime {
                             client.last_seen = Some(store::now());
                             let _ = store.save(&settings);
                         }
+                        *open.lock().entry(peer.client_id.clone()).or_default() += 1;
                         daemon.publish(Event::RemoteClientConnected { peer: peer.clone() });
+                        daemon.projector_owner_connected(&peer.client_id);
                         daemon.contain("remote API connection", || {
                             let caller = isocast_protocol::caller::Caller {
                                 origin: isocast_protocol::caller::Origin::Remote {
@@ -204,6 +210,16 @@ impl Runtime {
                             };
                             let _ = handle(UnixStream::Tls(stream), &daemon, None, caller);
                         });
+                        daemon.projector_owner_disconnected(&peer.client_id, &peer.name);
+                        {
+                            let mut open = open.lock();
+                            if let Some(count) = open.get_mut(&peer.client_id) {
+                                *count = count.saturating_sub(1);
+                                if *count == 0 {
+                                    open.remove(&peer.client_id);
+                                }
+                            }
+                        }
                         daemon.publish(Event::RemoteClientDisconnected { peer });
                     }
                 }),
@@ -282,7 +298,12 @@ impl Runtime {
         })
     }
     pub fn clients(&self) -> Result<Vec<RemotePeer>, RpcError> {
-        Ok(store::read(&path()).map_err(failed)?.peers)
+        let mut peers = store::read(&path()).map_err(failed)?.peers;
+        let open = self.open.lock();
+        for peer in &mut peers {
+            peer.connections = Some(open.get(&peer.id).copied().unwrap_or(0));
+        }
+        Ok(peers)
     }
     pub fn revoke(&self, daemon: &Daemon, id: &str) -> Result<Vec<RemotePeer>, RpcError> {
         let inner = self.inner.lock();

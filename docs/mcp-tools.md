@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-123 tools. Arguments marked required must be given; ids, not names,
+125 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -235,6 +235,20 @@ Write a timeline (the current one unless `timeline` is given) as a project anoth
 | `path` | string (optional) | Write exactly this file (an absolute path ending in the format's extension: .fcpxml, .xml or .otio). A file already there is replaced only if it is an earlier Isocast timeline export, or with `replace`. Not with `folder`. |
 | `replace` | boolean | With `path`: replace whatever file is there. |
 | `timeline` | string (optional) | The timeline's id; the current one if absent. |
+
+## files_list
+
+List a folder on the engine's disk: names, sizes and dates (never file contents), folders first, hidden entries left out, optionally only some extensions or only folders. From another computer only inside the folders other computers can use (see files_roots).
+
+| Argument | Type | Description |
+|---|---|---|
+| `extensions` | array (optional) | Only files with these extensions (without the dot, any case); folders are always listed. Every file if absent. |
+| `folders_only` | boolean | Only folders. |
+| `path` (required) | string | The folder to list (absolute or `~/...`). For a client on another computer it must be inside a folder other computers can use. |
+
+## files_roots
+
+Where an engine file picker starts: the folders other computers can use that exist on the engine, and its user's home folder.
 
 ## folder_roots
 

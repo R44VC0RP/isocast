@@ -1031,6 +1031,9 @@ pub enum FormEvent {
     Remove,
     Add,
     Browse,
+    /// What a Browse chose on another computer's engine (area J's engine
+    /// file browser answers later).
+    Chosen(Vec<String>),
     RemoveFile(usize),
     Refresh,
 }
@@ -1195,7 +1198,7 @@ pub fn change(app: &Rc<App>, t: &Target, key: &str, event: FormEvent) -> Outcome
             }
             one(key, Value::Array(list))
         }
-        FormEvent::Browse => {
+        FormEvent::Browse | FormEvent::Chosen(_) => {
             if app.mode.offscreen {
                 return Outcome::Nothing;
             }
@@ -1203,8 +1206,31 @@ pub fn change(app: &Rc<App>, t: &Target, key: &str, event: FormEvent) -> Outcome
                 return Outcome::Nothing;
             };
             let types = files::file_types(kind, &f.name);
-            if f.ty == FieldType::Strings {
-                let paths = files::choose(types, true, "Add");
+            let multiple = f.ty == FieldType::Strings;
+            let prompt = if multiple { "Add" } else { "Choose" };
+            let paths = match event {
+                FormEvent::Chosen(paths) => paths,
+                // Another computer's engine: its disk, through the engine
+                // file browser (area J), then this again with the paths.
+                _ if crate::areas::remote::is_remote(app) => {
+                    let (form, key) = (FORM.with(|f| f.borrow().clone()), key.to_string());
+                    let options = crate::platform::Choose {
+                        folders: false,
+                        multiple,
+                        prompt,
+                        types,
+                    };
+                    crate::areas::remote::choose(app, options, move |app, chosen| {
+                        let paths = chosen.unwrap_or_default();
+                        if let (false, Some(window)) = (paths.is_empty(), app.window()) {
+                            dispatch(app, &window, &form, &key, FormEvent::Chosen(paths));
+                        }
+                    });
+                    return Outcome::Nothing;
+                }
+                _ => files::choose(types, multiple, prompt),
+            };
+            if multiple {
                 if paths.is_empty() {
                     return Outcome::Nothing;
                 }
@@ -1216,7 +1242,7 @@ pub fn change(app: &Rc<App>, t: &Target, key: &str, event: FormEvent) -> Outcome
                 list.extend(paths.into_iter().map(Value::String));
                 one(key, Value::Array(list))
             } else {
-                let Some(path) = files::choose(types, false, "Choose").into_iter().next() else {
+                let Some(path) = paths.into_iter().next() else {
                     return Outcome::Nothing;
                 };
                 set(fields, value, key, json!(path))
@@ -1287,6 +1313,7 @@ pub fn object_patch(from: &Value, to: &Value) -> Map<String, Value> {
 /// Properties ("transition"), else Properties ("props") or Filters
 /// ("filter").
 pub fn dispatch(app: &Rc<App>, window: &AppWindow, form: &str, key: &str, event: FormEvent) {
+    FORM.with(|f| *f.borrow_mut() = form.to_string());
     match form {
         "transition" => app.controls.form_event(app, key, event),
         _ => app
@@ -1294,6 +1321,12 @@ pub fn dispatch(app: &Rc<App>, window: &AppWindow, form: &str, key: &str, event:
             .dialogs
             .form_event(app, window, form, key, event),
     }
+}
+
+thread_local! {
+    /// The form the event being dispatched is for (a Browse on another
+    /// computer's engine answers later, to the same form).
+    static FORM: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 /// Send every form control's report to [`dispatch`].

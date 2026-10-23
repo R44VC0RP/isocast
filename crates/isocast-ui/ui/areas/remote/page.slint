@@ -1,0 +1,289 @@
+// Settings → Remote (docs/remote-engines.md, decisions 1, 2, 4 and 25):
+// the two switches, both off out of the box; then, with "Let other
+// computers control this one", this engine's name and identity, "Pair a
+// Computer" (its code and the time left, on an LCD), the paired computers
+// (connected now or last seen, Revoke) and the folders they can use; with
+// "Control other computers", the engines this app is paired with. They
+// apply at once (no Apply). A window on another computer's engine shows
+// only where to change them: remote settings change on the machine itself.
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import {
+    Button, Callout, CalloutKind, ControlSize, GroupHint, GroupRow, IconButton, Lcd, LcdCell, LcdTime, RowPlace,
+} from "../../kit.slint";
+import { Centred, SetGroup, SetPage } from "../settings/parts.slint";
+import { Rows, SwitchRow } from "../settings/pages.slint";
+import { RemoteArea } from "state.slint";
+
+// A row's words on the right: 12px `text-2`, or Martian Mono for a path,
+// an address or a fingerprint.
+component Value inherits Text {
+    in property <bool> mono;
+    color: Theme.text-2;
+    font-family: root.mono ? Theme.font-mono : Theme.font-ui;
+    font-weight: root.mono ? Theme.weight-light : Theme.weight-regular;
+    font-size: root.mono ? Theme.fs-xs : Theme.fs-sm;
+    letter-spacing: root.mono ? Theme.tracking-mono : Theme.tracking-sm;
+    horizontal-alignment: right;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+// A small button on a control row.
+component RowButton inherits Button {
+    size: ControlSize.small;
+    on-control: true;
+}
+
+export component RemotePage inherits SetPage {
+    if RemoteArea.remote-window: SetGroup {
+        title: "Remote Control";
+        hint: "Who may control " + RemoteArea.engine-name + ", the folders other computers can use and its pairing code change only on " + RemoteArea.engine-name + " itself, in its Settings → Remote.";
+        GroupRow {
+            label: "Change remote settings on " + RemoteArea.engine-name;
+            place: RowPlace.only;
+        }
+    }
+
+    if !RemoteArea.remote-window: SetGroup {
+        title: "Remote Control";
+        hint: "With both off, Isocast works on this " + RemoteArea.this-machine-word + " alone. Remote control is for the local network; not recommended over the internet (for now).";
+        SwitchRow {
+            label: "Control Other Computers";
+            place: RowPlace.first;
+            enabled: !RemoteArea.busy;
+            on <=> RemoteArea.control-others;
+            toggled(on) => { RemoteArea.set-control-others(on); }
+        }
+        SwitchRow {
+            label: "Let Other Computers Control This One";
+            place: RowPlace.last;
+            enabled: !RemoteArea.busy;
+            on <=> RemoteArea.allow-control;
+            toggled(on) => { RemoteArea.set-allow-control(on); }
+        }
+    }
+
+    // ---- Let other computers control this one
+    if !RemoteArea.remote-window && RemoteArea.allow-control && RemoteArea.listen-problem != "": Callout {
+        kind: CalloutKind.error;
+        title: "Other computers may not reach this " + RemoteArea.this-machine-word;
+        message: RemoteArea.listen-problem;
+    }
+    if !RemoteArea.remote-window && RemoteArea.allow-control && RemoteArea.address-public: Callout {
+        kind: CalloutKind.info;
+        title: "Not recommended over the internet (for now)";
+        message: "This " + RemoteArea.this-machine-word + " listens on an address outside the local network. Pair only computers on your own network or Tailscale.";
+    }
+    if !RemoteArea.remote-window && RemoteArea.allow-control: SetGroup {
+        title: RemoteArea.this-machine;
+        hint: "Other computers find this " + RemoteArea.this-machine-word + " on the network by its name and check its identity each time they connect. If the identity ever changes (Isocast reinstalled), they have to pair again.";
+        GroupRow {
+            label: "Name";
+            place: RowPlace.first;
+            trailing-pad: Theme.space-3;
+            Value {
+                width: Theme.field-l;
+                text: RemoteArea.identity-name;
+            }
+        }
+        GroupRow {
+            label: "Address";
+            trailing-pad: Theme.space-3;
+            Value {
+                width: Theme.field-l;
+                mono: true;
+                text: RemoteArea.address != "" ? RemoteArea.address : "Starting…";
+            }
+        }
+        GroupRow {
+            label: "Identity";
+            place: RowPlace.last;
+            trailing-pad: Theme.space-1;
+            HorizontalLayout {
+                spacing: Theme.space-1;
+                alignment: end;
+                Value {
+                    width: Theme.field-wide;
+                    mono: true;
+                    text: RemoteArea.fingerprint;
+                }
+                Centred {
+                    IconButton {
+                        compact: true;
+                        icon: Icons.copy;
+                        label: "Copy the identity";
+                        enabled: RemoteArea.fingerprint != "";
+                        clicked => { RemoteArea.copy-fingerprint(); }
+                    }
+                }
+            }
+        }
+    }
+    if !RemoteArea.remote-window && RemoteArea.allow-control: SetGroup {
+        title: "Pair a Computer";
+        hint: RemoteArea.pair-problem != "" ? RemoteArea.pair-problem
+            : RemoteArea.pair-code != ""
+            ? "On the other computer, choose " + RemoteArea.identity-name + " in its engine menu (or Add Engine… with the address above) and type this code. It works once."
+            : "Shows a code to type on the other computer. It works once, for 2 minutes, and only someone at this " + RemoteArea.this-machine-word + " can show it.";
+        if RemoteArea.pair-code == "": GroupRow {
+            label: "Pairing Code";
+            place: RowPlace.only;
+            trailing-pad: Theme.space-2;
+            Centred {
+                RowButton {
+                    text: "Pair a Computer…";
+                    clicked => { RemoteArea.pair-begin(); }
+                }
+            }
+        }
+        if RemoteArea.pair-code != "": GroupRow {
+            label: "Pairing Code";
+            place: RowPlace.only;
+            tall: true;
+            trailing-pad: Theme.space-2;
+            HorizontalLayout {
+                padding-top: Theme.space-2;
+                padding-bottom: Theme.space-2;
+                spacing: Theme.space-3;
+                alignment: end;
+                Lcd {
+                    accessible-label: "Pairing code";
+                    LcdCell {
+                        value: RemoteArea.pair-code;
+                        label: "CODE";
+                        template: "000 000";
+                    }
+                    LcdTime {
+                        seconds: RemoteArea.pair-seconds;
+                        label: "LEFT";
+                        template: "0:00";
+                        last: true;
+                    }
+                }
+                Centred {
+                    RowButton {
+                        text: "Hide";
+                        tooltip: "Hide the code; it still works until it runs out";
+                        clicked => { RemoteArea.pair-cancel(); }
+                    }
+                }
+            }
+        }
+    }
+    if !RemoteArea.remote-window && RemoteArea.allow-control: SetGroup {
+        title: "Paired Computers";
+        hint: "Each can record, stream and change the setup at the same time as you, and sees who else is connected. Revoke cuts it off at once.";
+        if RemoteArea.clients.length == 0: GroupRow {
+            label: "None yet";
+            place: RowPlace.only;
+            enabled: false;
+        }
+        for client[i] in RemoteArea.clients: GroupRow {
+            label: client.name;
+            place: Rows.place(i, RemoteArea.clients.length);
+            trailing-pad: Theme.space-2;
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                alignment: end;
+                Value {
+                    text: client.detail;
+                    color: client.connected ? Theme.onair-text : Theme.text-2;
+                }
+                Centred {
+                    RowButton {
+                        text: "Revoke";
+                        clicked => { RemoteArea.revoke(client.id); }
+                    }
+                }
+            }
+        }
+    }
+    if !RemoteArea.remote-window && RemoteArea.allow-control: SetGroup {
+        title: "Folders Other Computers Can Use";
+        hint: "Recordings, images, media and exports chosen from another computer must be in one of these (fonts only to read). This " + RemoteArea.this-machine-word + "'s recordings folders are always included." + (RemoteArea.folders-custom ? "" : " These are the defaults.");
+        for folder[i] in RemoteArea.folders: GroupRow {
+            label: folder.why;
+            place: i == 0 ? RowPlace.first : RowPlace.middle;
+            trailing-pad: Theme.space-1;
+            HorizontalLayout {
+                spacing: Theme.space-1;
+                alignment: end;
+                Value {
+                    width: Theme.field-wide;
+                    mono: true;
+                    text: folder.path;
+                }
+                Centred {
+                    IconButton {
+                        compact: true;
+                        icon: Icons.x;
+                        label: "Remove " + folder.path;
+                        enabled: folder.removable;
+                        opacity: folder.removable ? 1 : 0;
+                        clicked => { RemoteArea.remove-folder(folder.path); }
+                    }
+                }
+            }
+        }
+        GroupRow {
+            label: "";
+            place: RemoteArea.folders.length == 0 ? RowPlace.only : RowPlace.last;
+            trailing-pad: Theme.space-2;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: end;
+                Centred {
+                    RowButton {
+                        text: "Use Defaults";
+                        enabled: RemoteArea.folders-custom;
+                        clicked => { RemoteArea.default-folders(); }
+                    }
+                }
+                Centred {
+                    RowButton {
+                        text: "Add Folder…";
+                        clicked => { RemoteArea.add-folder(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Control other computers
+    if !RemoteArea.remote-window && RemoteArea.control-others: SetGroup {
+        title: "Engines This App Controls";
+        hint: "Choose one in the engine menu (bottom left) to open it in a window of its own. Forget unpairs it on this " + RemoteArea.this-machine-word + "; revoke it on the engine too.";
+        for engine[i] in RemoteArea.paired: GroupRow {
+            label: engine.name;
+            place: i == 0 ? RowPlace.first : RowPlace.middle;
+            trailing-pad: Theme.space-2;
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                alignment: end;
+                Value {
+                    mono: true;
+                    text: engine.detail;
+                }
+                Centred {
+                    RowButton {
+                        text: "Forget";
+                        clicked => { RemoteArea.forget(engine.id); }
+                    }
+                }
+            }
+        }
+        GroupRow {
+            label: RemoteArea.paired.length == 0 ? "None yet" : "";
+            place: RemoteArea.paired.length == 0 ? RowPlace.only : RowPlace.last;
+            trailing-pad: Theme.space-2;
+            Centred {
+                RowButton {
+                    text: "Add Engine…";
+                    clicked => { RemoteArea.add-engine(); }
+                }
+            }
+        }
+    }
+}

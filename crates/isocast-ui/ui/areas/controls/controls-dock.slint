@@ -52,11 +52,11 @@ component VirtualCameraDetails inherits VerticalLayout {
     padding: Theme.space-2;
     spacing: 0;
 
-    if PlatformText.windows && (ControlsArea.vcam-approval || ControlsArea.vcam-missing): GroupHint {
+    if PlatformText.engine-windows && (ControlsArea.vcam-approval || ControlsArea.vcam-missing): GroupHint {
         text: "Windows virtual camera installation is not available in this build.";
     }
 
-    if ControlsArea.vcam-approval && !PlatformText.windows: VerticalLayout {
+    if ControlsArea.vcam-approval && !PlatformText.engine-windows: VerticalLayout {
         spacing: 0;
         GroupHeading { title: "Allow in System Settings"; }
         Rectangle {
@@ -87,7 +87,7 @@ component VirtualCameraDetails inherits VerticalLayout {
         }
     }
 
-    if ControlsArea.vcam-missing && !PlatformText.windows: VerticalLayout {
+    if ControlsArea.vcam-missing && !PlatformText.engine-windows: VerticalLayout {
         spacing: 0;
         GroupHeading { title: "Not installed"; }
         // Wrapped to the popover's width (a layout sizes a wrapped Text's
@@ -216,7 +216,7 @@ component VirtualCameraDetails inherits VerticalLayout {
     }
 
     // Deleting Isocast leaves its camera in macOS: take it out first (#69).
-    if ControlsArea.vcam-removable && !PlatformText.windows: VerticalLayout {
+    if ControlsArea.vcam-removable && !PlatformText.engine-windows: VerticalLayout {
         spacing: 0;
         GroupHeading { title: "Remove"; }
         Rectangle {
@@ -412,7 +412,7 @@ export component ControlsDock inherits Dock {
                 // OBS's words don't fit beside the gear in a 172px dock, so
                 // it is a toggle named as Studio Mode is (lit while on);
                 // screen readers and the tooltip get OBS's words.
-                tooltip: PlatformText.windows && (ControlsArea.vcam-missing || ControlsArea.vcam-approval) ? "Windows virtual camera installation is not available in this build" : ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed: see how to install it" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings, then it starts" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
+                tooltip: PlatformText.engine-windows && (ControlsArea.vcam-missing || ControlsArea.vcam-approval) ? "Windows virtual camera installation is not available in this build" : ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed: see how to install it" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings, then it starts" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
                 accessible-name: ControlsArea.vcam-missing ? "Virtual Camera (not installed)" : ControlsArea.vcam-approval ? "Virtual Camera (waiting for approval)" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
                 text: ControlsArea.vcam-state == "starting" ? "Starting…" : ControlsArea.vcam-state == "stopping" ? "Stopping…" : root.short-words ? "Virtual Cam" : "Virtual Camera";
                 // The short words take the end padding too (172px dock).
@@ -434,7 +434,7 @@ export component ControlsDock inherits Dock {
                 inset: 0px;
                 icon: ControlsArea.vcam-missing || ControlsArea.vcam-approval ? Icons.warning : Icons.settings;
                 accessible-name: "Virtual Camera Settings";
-                tooltip: PlatformText.windows && (ControlsArea.vcam-missing || ControlsArea.vcam-approval) ? "Windows virtual camera installation is not available in this build" : ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings" : "What the virtual camera shows, and its size";
+                tooltip: PlatformText.engine-windows && (ControlsArea.vcam-missing || ControlsArea.vcam-approval) ? "Windows virtual camera installation is not available in this build" : ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings" : "What the virtual camera shows, and its size";
                 menu-open: vcam-details.open;
                 enabled: Ui.has-setup;
                 clicked => { vcam-details.show(); }

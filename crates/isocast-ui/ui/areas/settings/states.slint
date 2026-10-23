@@ -36,7 +36,10 @@ component Lead inherits Text {
 
 // The connecting and failed states: the whole area, the stage's colour.
 export component ConnectingState inherits Rectangle {
-    property <bool> failed: Ui.connection == ConnectionState.failed;
+    // A remote engine (R2) that can't be controlled until it's updated or
+    // paired again: said as such, with no spinner or retry button.
+    property <bool> blocked: Ui.connection == ConnectionState.mismatch || Ui.connection == ConnectionState.identity-changed;
+    property <bool> failed: Ui.connection == ConnectionState.failed || root.blocked;
     background: Theme.surface-stage;
     TouchArea { }
 
@@ -57,7 +60,12 @@ export component ConnectingState inherits Rectangle {
                     }
                 }
                 Display {
-                    text: root.failed ? "Isocast can’t reach its engine"
+                    text: Ui.connection == ConnectionState.mismatch ? "Version mismatch"
+                        : Ui.connection == ConnectionState.identity-changed ? "This engine’s identity changed: pair again"
+                        : Ui.engine-remote ? (root.failed ? "Engine unavailable"
+                            : Ui.connection == ConnectionState.disconnected ? "Reconnecting to " + Ui.engine-name + "…"
+                            : "Connecting to " + Ui.engine-name + "…")
+                        : root.failed ? "Isocast can’t reach its engine"
                         : Ui.connection == ConnectionState.disconnected ? "Reconnecting to the engine…"
                         : "Starting the engine…";
                 }
@@ -67,7 +75,21 @@ export component ConnectingState inherits Rectangle {
                     Spinner { }
                 }
                 if root.failed: Lead {
-                    text: "The app talks to isocastd, which does the capturing and recording. It didn’t start or answer.";
+                    text: Ui.connection == ConnectionState.mismatch
+                        ? Ui.engine-name + " runs another version of Isocast. The app and the engine must be the same version: update the older one, then this window connects by itself. Recording and streaming on " + Ui.engine-name + " aren’t affected."
+                        : Ui.connection == ConnectionState.identity-changed
+                        ? Ui.engine-name + " answered with a different identity than the one this computer paired with, so Isocast won’t control it. If it was reinstalled, forget it and pair again with a code shown on " + Ui.engine-name + "."
+                        : Ui.engine-remote
+                        ? "This window controls " + Ui.engine-name + "’s engine over the network, and it didn’t answer. Check that " + Ui.engine-name + " is on and on the same network. Recording and streaming there aren’t affected."
+                        : "The app talks to isocastd, which does the capturing and recording. It didn’t start or answer.";
+                }
+                if Ui.connection == ConnectionState.mismatch && Ui.engine-versions != "": Text {
+                    text: Ui.engine-versions;
+                    color: Theme.text;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    horizontal-alignment: center;
                 }
                 if root.failed && Ui.connection-error != "": HorizontalLayout {
                     alignment: center;
@@ -93,7 +115,7 @@ export component ConnectingState inherits Rectangle {
                         }
                     }
                 }
-                if root.failed: HorizontalLayout {
+                if root.failed && !root.blocked: HorizontalLayout {
                     alignment: center;
                     padding-top: Theme.space-3;
                     Button {
@@ -104,12 +126,49 @@ export component ConnectingState inherits Rectangle {
                     }
                 }
                 if root.failed: Text {
-                    text: "It keeps trying on its own, too.";
+                    text: root.blocked ? "It checks again every few seconds." : "It keeps trying on its own, too.";
                     color: Theme.text-3;
                     font-size: Theme.fs-sm;
                     letter-spacing: Theme.tracking-sm;
                     horizontal-alignment: center;
                 }
+            }
+        }
+    }
+}
+
+// A window on another computer's engine whose link dropped (R2): the
+// last state stays in view, the controls take no input until the link is
+// back and the window has read the engine afresh.
+export component RemoteLinkOverlay inherits Rectangle {
+    background: Theme.surface-stage.with-alpha(0.55);
+    TouchArea { }
+    accessible-role: AccessibleRole.text;
+    accessible-label: "Reconnecting to " + Ui.engine-name;
+
+    Rectangle {
+        width: line.preferred-width;
+        height: line.preferred-height;
+        background: Theme.surface-panel;
+        border-width: 1px;
+        border-color: Theme.line;
+        border-radius: Theme.r;
+        line := HorizontalLayout {
+            padding-left: Theme.space-4;
+            padding-right: Theme.space-4;
+            padding-top: Theme.space-3;
+            padding-bottom: Theme.space-3;
+            spacing: Theme.space-2;
+            VerticalLayout {
+                alignment: center;
+                Spinner { }
+            }
+            Text {
+                vertical-alignment: center;
+                text: "Reconnecting to " + Ui.engine-name + "… The engine keeps recording and streaming meanwhile.";
+                color: Theme.text;
+                font-size: Theme.fs;
+                letter-spacing: Theme.tracking;
             }
         }
     }

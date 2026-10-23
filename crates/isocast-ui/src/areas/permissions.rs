@@ -136,7 +136,7 @@ impl Area for PermissionsStep {
             // Windows' first run shows a blocked camera or microphone as
             // its own first step (nothing else there needs allowing), so
             // no sheet before Welcome.
-            if missing && !(cfg!(windows) && first) {
+            if missing && !(crate::engine::windows() && first) {
                 app.permissions.open(app, first);
             }
         });
@@ -192,7 +192,7 @@ impl PermissionsStep {
     /// switch blocks the camera or microphone (screen and output audio need
     /// no permission there).
     pub fn access_needed(&self) -> bool {
-        !cfg!(windows)
+        !crate::engine::windows()
             || self.report.borrow().as_ref().is_some_and(|report| {
                 report.details.iter().any(|d| {
                     matches!(
@@ -276,10 +276,7 @@ impl PermissionsStep {
                 Err(error) => {
                     app.toast(
                         ToastKind::Error,
-                        isocast_protocol::platform_text::select(
-                            "Couldn’t ask macOS",
-                            "Couldn’t check Windows access",
-                        ),
+                        crate::engine::pick("Couldn’t ask macOS", "Couldn’t check Windows access"),
                         error,
                     );
                 }
@@ -352,6 +349,23 @@ impl PermissionsStep {
         if self.busy.get().is_some() || self.sample.get() {
             return;
         }
+        // Another computer's permissions are granted on it, by someone
+        // there: no prompts or settings open on this one (R2).
+        if !crate::engine::is_local() {
+            let engine = crate::engine::name().unwrap_or_default();
+            let words = crate::engine::words();
+            app.toast(
+                ToastKind::Info,
+                &format!("Grant on {engine}"),
+                format!(
+                    "Permissions belong to the computer that records. On {engine}, open \
+                     Isocast and allow it there ({} on that {}); this window updates by \
+                     itself.",
+                    words.settings, words.machine
+                ),
+            );
+            return;
+        }
         match action {
             "ask" => self.ask(app, kind),
             "open" => self.open_settings(app, kind),
@@ -401,7 +415,7 @@ impl PermissionsStep {
                 step.busy.set(None);
                 if let Err(error) = result {
                     app.failed(
-                        isocast_protocol::platform_text::select(
+                        crate::engine::pick(
                             "Couldn’t open System Settings",
                             "Couldn’t open Windows Settings",
                         ),
@@ -415,7 +429,7 @@ impl PermissionsStep {
                     .borrow()
                     .as_ref()
                     .and_then(|r| r.details.iter().find(|d| d.permission == kind).cloned());
-                if !cfg!(windows)
+                if !crate::engine::windows()
                     && let Some(path) = detail.as_ref().and_then(|d| d.app_path.clone())
                 {
                     let detail = detail.expect("checked above");
@@ -539,7 +553,7 @@ impl PermissionsStep {
             return;
         };
         area.set_app_name(
-            if cfg!(windows) || report.app == "isocastd" {
+            if crate::engine::windows() || report.app == "isocastd" {
                 "Isocast"
             } else {
                 report.app.as_str()
@@ -556,7 +570,7 @@ impl PermissionsStep {
         // Windows can only block the camera and microphone: the rows are
         // those two.
         let shown = |d: &&PermissionDetail| {
-            !cfg!(windows)
+            !crate::engine::windows()
                 || matches!(
                     d.permission,
                     PermissionKind::Camera | PermissionKind::Microphone
@@ -572,10 +586,28 @@ impl PermissionsStep {
     }
 }
 
-/// One permission's row: its status in words, what happened in plain
-/// words, and the one action.
-#[cfg(not(windows))]
+/// One permission's row, in the engine machine's words (decision 22). In
+/// a window on another computer's engine its action is "Grant on …": the
+/// grant happens there, never through a prompt on this computer.
 fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem {
+    let mut item = if crate::engine::windows() {
+        row_windows(d, needed, busy)
+    } else {
+        row_mac(d, needed, busy)
+    };
+    if !crate::engine::is_local() && !item.action.is_empty() {
+        item.action = "remote".into();
+        item.action_label =
+            format!("Grant on {}", crate::engine::name().unwrap_or_default()).into();
+        item.alt_action = "".into();
+        item.alt_label = "".into();
+    }
+    item
+}
+
+/// One permission's row on macOS: its status in words, what happened in
+/// plain words, and the one action.
+fn row_mac(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem {
     let (icon, title, purpose, pane) = match d.permission {
         PermissionKind::ScreenRecording => (
             "display",
@@ -704,8 +736,8 @@ fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem
     }
 }
 
-#[cfg(windows)]
-fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem {
+/// One permission's row on Windows.
+fn row_windows(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem {
     let (icon, title, purpose) = match d.permission {
         PermissionKind::ScreenRecording => (
             "display",
@@ -775,8 +807,8 @@ fn helper_line(app: &str, drag: bool) -> String {
 /// bare isocastd (a development build), whose name means nothing to a
 /// person.
 fn shown_name(d: &PermissionDetail) -> &str {
-    if cfg!(windows) {
-        isocast_protocol::platform_text::ENGINE
+    if crate::engine::windows() {
+        crate::engine::words().engine
     } else if d.app_path.is_none() && d.app == "isocastd" {
         "Isocast"
     } else {
