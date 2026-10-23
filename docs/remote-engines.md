@@ -201,11 +201,18 @@ itself, a window per engine, and agents allowed. He can overrule the rest.
     - DNS-SD `_isocast._tcp` goes through the OS's own responder:
       Bonjour `DNSServiceRegister`/`DNSServiceBrowse` on macOS, the Windows
       `DnsServiceRegister`/`DnsServiceBrowse` APIs (no firewall rule for
-      5353), Avahi later on Linux. The engine never parses multicast
-      itself.
+      5353), and Avahi over the system D-Bus on Linux (zbus, no linked
+      libavahi-client). The engine never parses multicast itself.
     - The TXT record holds only `id`, `proto` and `name`. The version and
       OS are given in `hello`, after authentication.
     - The macOS bundles declare `NSBonjourServices` (`_isocast._tcp`).
+    - Linux requires a running system bus and avahi-daemon. Missing either
+      leaves the remote listener available by address with actionable advice;
+      discovery does not silently return an empty successful browse. Active
+      advertisements also survive a responder absent at engine boot: registration
+      remains owned, remote status exposes its current error, and the error clears
+      once Avahi confirms it. Watches reconnect after Avahi restarts. `supported()`
+      means a backend was compiled in, not that its system service is running.
 12. **Bounded before authentication.**
     - TLS handshakes run in a small pool (8 at a time, 2 s deadline).
     - A rate limit applies per source IP.

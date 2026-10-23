@@ -3626,9 +3626,12 @@ name = "isocast-discovery"
 version = "0.0.8"
 dependencies = [
  "anyhow",
+ "futures-util",
  "isocast-diagnostics",
  "libc",
+ "tokio",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
@@ -7290,8 +7293,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
 dependencies = [
  "bytes",
+ "libc",
+ "mio",
  "pin-project-lite",
+ "signal-hook-registry",
+ "socket2",
  "tokio-macros",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9048,6 +9057,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

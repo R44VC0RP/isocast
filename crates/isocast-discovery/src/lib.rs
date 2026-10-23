@@ -2,10 +2,11 @@
 //!
 //! Everything goes through the operating system's own responder: Bonjour
 //! (`dns_sd.h` in libSystem) on macOS and the `DnsService*` API of
-//! Windows 10 1809+. Isocast never opens UDP 5353 or parses a multicast
+//! Windows 10 1809+, and Avahi over the system D-Bus on Linux. Isocast never opens UDP 5353 or parses a multicast
 //! packet itself, so nothing on the network reaches a DNS parser in our
-//! process (docs/remote-engines.md, decision 11). Other systems (Linux:
-//! Avahi, later) answer [`supported`] `false` and fail every call.
+//! process (docs/remote-engines.md, decision 11). Other systems answer
+//! [`supported`] `false` and fail every call. Linux requires a running system
+//! bus and avahi-daemon; otherwise calls fail with connect-by-address advice.
 //!
 //! What is found is untrusted: anyone on the network can advertise any
 //! name, id or address. It only says where to try connecting; who an
@@ -32,9 +33,14 @@ mod windows;
 #[cfg(windows)]
 use windows as sys;
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as sys;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod unsupported;
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 use unsupported as sys;
 
 /// The DNS-SD service type every Isocast engine advertises.
@@ -75,7 +81,7 @@ impl Txt {
 
     /// Keep a received key's value if it is one of ours (bounded), and
     /// drop anything else.
-    #[cfg(any(target_os = "macos", windows, test))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
     pub(crate) fn set(&mut self, key: &str, value: &str) {
         let slot = match key.to_ascii_lowercase().as_str() {
             "id" => &mut self.id,
@@ -145,6 +151,20 @@ impl Registration {
     pub fn name(&self) -> String {
         self.inner.name()
     }
+
+    /// Current Linux advertisement failure/pending state. The worker retries
+    /// until dropped and clears this once Avahi confirms the advertisement.
+    /// Other backends report initial registration failures synchronously.
+    pub fn error(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.error()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
 }
 
 impl std::fmt::Debug for Registration {
@@ -174,6 +194,8 @@ pub fn supported() -> bool {
 /// to [`MAX_NAME_BYTES`]). Returns once the OS has accepted it, or an
 /// error (an empty name, port 0, an oversized TXT value, or the OS
 /// refusing it, e.g. macOS Local Network access turned off).
+/// On Linux, an unavailable responder instead keeps retrying in the background;
+/// [`Registration::error`] reports the pending/failure state until established.
 pub fn register(name: &str, port: u16, txt: &Txt) -> Result<Registration> {
     let clean_name = instance_name(name);
     if clean_name.is_empty() {
@@ -208,7 +230,10 @@ pub fn watch(on_event: OnEvent) -> Result<Watch> {
 /// calls promptly. An error if browsing itself failed.
 // Unsupported backends never return a watch; explicit drops below release
 // native DNS-SD guards on the supported platforms.
-#[cfg_attr(not(any(target_os = "macos", windows)), allow(clippy::drop_non_drop))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", windows)),
+    allow(clippy::drop_non_drop)
+)]
 pub fn browse(timeout: Duration) -> Result<Vec<Found>> {
     let (send, receive) = mpsc::channel();
     let watching = watch(Box::new(move |event| {
@@ -255,7 +280,7 @@ fn instance_name(name: &str) -> String {
 
 /// Untrusted text from the network: control characters dropped, cut to
 /// `max` bytes on a character boundary.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
 pub(crate) fn clean(text: &str, max: usize) -> String {
     let text: String = text.chars().filter(|c| !c.is_control()).collect();
     truncate(&text, max).to_owned()
@@ -273,14 +298,14 @@ fn truncate(text: &str, max: usize) -> &str {
 }
 
 /// Sort and dedupe addresses: IPv4 first, then IPv6.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
 pub(crate) fn sort_addrs(addrs: &mut Vec<SocketAddr>) {
     addrs.sort_by_key(|addr| (addr.is_ipv6(), *addr));
     addrs.dedup();
 }
 
 /// A host name without its trailing dot, bounded.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
 pub(crate) fn clean_host(host: &str) -> String {
     clean(host.trim_end_matches('.'), 255)
 }
@@ -318,5 +343,92 @@ mod tests {
         assert!(txt.validate().is_ok());
         txt.proto = "1\n".into();
         assert!(txt.validate().is_err());
+    }
+
+    /// Real system integration, enabled explicitly by the Linux VM/CI job.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a running system D-Bus and avahi-daemon"]
+    fn avahi_advertise_browse_collision_and_withdraw() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("Isocast-test-{}-{stamp}", std::process::id());
+        let (send, receive) = mpsc::channel();
+        let watching = watch(Box::new(move |event| {
+            let _ = send.send(event);
+        }))
+        .unwrap();
+        let txt = Txt {
+            id: format!("first-{stamp}"),
+            proto: "1".into(),
+            name: "First engine".into(),
+        };
+        let first = register(&name, 47479, &txt).unwrap();
+        let wait_for = |wanted: &str| {
+            let deadline = Instant::now() + Duration::from_secs(12);
+            loop {
+                let event = receive
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("Avahi did not resolve the advertisement");
+                match event {
+                    Event::Found(found) if found.txt.id == wanted => break found,
+                    Event::Error(error) => panic!("Avahi watch failed: {error}"),
+                    _ => {}
+                }
+            }
+        };
+        let found = wait_for(&txt.id);
+        assert_eq!(found.name, first.name());
+        assert_eq!(found.txt, txt);
+        assert_eq!(found.port, 47479);
+        assert!(!found.addrs.is_empty());
+        assert!(
+            found
+                .addrs
+                .iter()
+                .all(|address| address.port() == found.port)
+        );
+
+        let other_txt = Txt {
+            id: format!("second-{stamp}"),
+            name: "Second engine".into(),
+            ..txt
+        };
+        let second = register(&name, 47480, &other_txt).unwrap();
+        assert_ne!(
+            first.name(),
+            second.name(),
+            "Avahi name collision was not resolved"
+        );
+        let found = wait_for(&other_txt.id);
+        assert_eq!(found.name, second.name());
+        assert_eq!(found.txt, other_txt);
+        assert_eq!(found.port, 47480);
+
+        let withdrawn = first.name();
+        drop(first);
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            let event = receive
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("Avahi did not withdraw the advertisement");
+            match event {
+                Event::Lost { name } if name == withdrawn => break,
+                Event::Error(error) => panic!("Avahi watch failed: {error}"),
+                _ => {}
+            }
+        }
+        drop(watching);
+        for _ in receive.try_iter() {}
+        assert!(
+            matches!(
+                receive.recv_timeout(Duration::from_secs(1)),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            ),
+            "watch drop retained its callback"
+        );
+        drop(second);
     }
 }

@@ -3634,6 +3634,29 @@ def scenario_linux_record(e, cfg, evidence):
     require(all(r > 180 and g < 70 and b < 70 for r, g, b in zip(colors[::3], colors[1::3], colors[2::3])),
             "color layer: program did not render the red source")
     evidence["color_frames"] = len(colors) // 3
+    evidence["discovery_without_bus"] = discovery_without_bus(e)
+
+
+def discovery_without_bus(e):
+    """`isocast engines --discover` with no reachable system bus fails at
+    once with the connect-by-address hint, well before its 5 s listen."""
+    cli = os.environ.get("ISOCAST_E2E_CLI")
+    require(cli and Path(cli).is_file(), "Linux discovery check requires the built isocast CLI (--cli)")
+    env = dict(e.env, DBUS_SYSTEM_BUS_ADDRESS="unix:path=/nonexistent",
+               ISOCAST_REMOTE_CLIENT=str(e.root / "discovery-client.json"))
+    started = time.monotonic()
+    try:
+        out = subprocess.run([cli, "engines", "--discover", "--timeout", "5"], env=env, cwd=str(e.root),
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2.5)
+    except subprocess.TimeoutExpired as exc:
+        raise Failure("discovery without a system bus hung past 2.5 s") from exc
+    seconds = round(time.monotonic() - started, 3)
+    require(out.returncode != 0, f"discovery without a system bus exited 0: {out.stdout.strip()[-400:]}")
+    require("connect by address" in out.stderr,
+            f"discovery without a system bus: no connect-by-address hint: {out.stderr.strip()[-400:]}")
+    require("panicked" not in out.stderr, f"discovery without a system bus panicked: {out.stderr.strip()[-400:]}")
+    require(seconds <= 2.5, f"discovery without a system bus took {seconds}s, expected about 2s at most")
+    return {"exit": out.returncode, "seconds": seconds}
 
 
 def scenario_linux_recovery(e, cfg, evidence):

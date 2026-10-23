@@ -1,4 +1,4 @@
-//! Systems without a DNS-SD backend yet (Linux: Avahi, later).
+//! Systems without an operating-system DNS-SD backend.
 
 use anyhow::Result;
 
