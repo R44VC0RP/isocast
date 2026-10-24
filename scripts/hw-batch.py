@@ -91,6 +91,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -305,18 +306,39 @@ def pick_mac(want):
     return reachable[0] if reachable else None
 
 
+# The remote builds on a host (scripts/remote-build.sh's run.pgid files):
+# `count` prints how many, `kill` also stops them. A pgid counts only while
+# its group still runs that lane's remote-build command (a stale file and a
+# reused pid never do); stale files are deleted.
+BUILDS_SH = r"""
+n=0
+for f in "$HOME"/isocast-builds/*/run.pgid; do
+    [ -f "$f" ] || continue
+    lane="$(basename "$(dirname "$f")")"
+    g="$(cat "$f")"
+    case "$g" in '' | *[!0-9]*) rm -f "$f"; continue ;; esac
+    if ps -ax -o pgid=,command= | awk -v g="$g" -v w="__run $lane" '$1 == g && index($0, ".remote-build") && index($0 " ", " " w " ") { f = 1 } END { exit !f }'; then
+        [ "$1" = kill ] && kill -TERM -- "-$g" 2>/dev/null
+        n=$((n + 1))
+    else
+        rm -f "$f"
+    fi
+done
+echo "$n"
+"""
+
+
 def reserve_builds(hosts, job_id, minutes, logf):
     """Keep scripts/remote-build.sh off the job's test Macs: mark them
     (~/isocast-builds/.hw-job, honored until it expires), then wait up to 20
     min for builds already running there and stop any still going."""
     expiry = int(time.time()) + (minutes + 60) * 60
-    live = ('n=0; for f in "$HOME"/isocast-builds/*/run.pgid; do [ -f "$f" ] && '
-            'kill -0 "-$(cat "$f")" 2>/dev/null && n=$((n+1)); done; echo $n')
+    live = "sh -c " + shlex.quote(BUILDS_SH) + " builds count"
     for host in hosts:
         ssh(host, f'mkdir -p isocast-builds && echo "{job_id} {expiry}" >isocast-builds/.hw-job')
     for host in hosts:
         for _ in range(40):
-            r = ssh(host, f"sh -c '{live}'")
+            r = ssh(host, live)
             if r.returncode != 0 or r.stdout.strip() in ("", "0"):
                 break
             log(f"{job_id}: {r.stdout.strip()} remote build(s) running on {host}; waiting")
@@ -324,8 +346,7 @@ def reserve_builds(hosts, job_id, minutes, logf):
         else:
             log(f"{job_id}: stopping remote builds still running on {host}")
             print(f"stopped remote builds on {host}", file=logf, flush=True)
-            ssh(host, "sh -c 'for f in \"$HOME\"/isocast-builds/*/run.pgid; do "
-                      "[ -f \"$f\" ] && kill -TERM \"-$(cat \"$f\")\" 2>/dev/null; done; true'")
+            ssh(host, "sh -c " + shlex.quote(BUILDS_SH) + " builds kill")
 
 
 def release_builds(hosts, job_id):

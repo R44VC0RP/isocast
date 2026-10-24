@@ -24,7 +24,9 @@
 #   scripts/remote-build.sh [--host H] hosts   what auto sees on each host
 #   scripts/remote-build.sh [--host H] status  free space, lanes, sizes, last
 #                                              use, which lanes are building
-#                                              (every host unless --host)
+#                                              or queued, the queue, the
+#                                              compiler cache (every host
+#                                              unless --host)
 #   scripts/remote-build.sh [--host H] prune [--days N | LANE…]
 #                                              delete lanes unused for N days
 #                                              (default 3), or the named ones
@@ -32,26 +34,37 @@
 #                                              free space (every host unless
 #                                              --host): lane targets unused
 #                                              for N days (default 2; never
-#                                              main's or a building lane's),
-#                                              and in ~/isocast-scratch cargo
-#                                              target/ folders unused for 3
-#                                              days and recordings/traces
-#                                              (*.mov *.mp4 *.flv *.mkv *.h264
-#                                              *.trace) over 20 MB older than
-#                                              7 days; logs, JSON and reports
-#                                              stay. Nothing is tidied while
-#                                              a hardware job or benchmark
-#                                              holds the host.
+#                                              main's or a building lane's);
+#                                              incremental caches (dev ones
+#                                              of any idle lane, others
+#                                              unused for a day); in
+#                                              ~/isocast-scratch and the
+#                                              test-Mac checkouts
+#                                              ~/dev/isocast-worktrees/*
+#                                              cargo target/ folders unused
+#                                              for 3 days; in scratch
+#                                              recordings/traces (*.mov *.mp4
+#                                              *.flv *.mkv *.h264 *.trace)
+#                                              over 20 MB older than 7 days
+#                                              (logs, JSON and reports stay);
+#                                              this script's versions unused
+#                                              for 7 days; and last, if still
+#                                              below the minimum with nothing
+#                                              building or queued, the
+#                                              compiler cache. Nothing is
+#                                              tidied while a hardware job or
+#                                              benchmark holds the host.
 #                                              Never ~/.lima. --dry-run lists
 #                                              what and how much.
 #
 # Hosts (--host, or $ISOCAST_BUILD_HOST): exonbook (M4 Max, 14 cores),
 # m2-a and m2-b (isocast-m2-a/-b, the AWS M2 test Macs, 8 cores), or auto
-# (the default). Auto is sticky per lane: a lane stays on the host it last
-# built on in the last 12 h (its warm target is there) while that host is
-# free, however loaded; otherwise it
-# takes the free host with the lowest load (1-minute load per core plus
-# builds running there, ties in the order of $ISOCAST_BUILD_HOSTS). A host
+# (the default). Auto takes the free host where the build would wait least
+# in the host's queue (below), counting lanes picked in the last 3 min that
+# haven't reached it yet. The lane's own host (the one it last built on in
+# the last 12 h: its warm target is there) wins ties and keeps the lane
+# unless its queue is 2 or more places longer; then the lowest load per
+# core. A host
 # is not free while it's unreachable, below the disk minimum, running a
 # hardware-queue job or its receiver (hw-batch: /Volumes/IsocastBuild/
 # .bench.lock held, its running/*.json; on the host ~/isocast-builds/.hw-job
@@ -67,7 +80,8 @@
 # (uncommitted edits included, never target/ or .git), keeps their mtimes
 # so cargo stays incremental, and deletes files that are gone here. A new
 # lane's target on a host starts as an APFS clone of the most recently used
-# lane's there (third-party crates stay warm).
+# lane's there, without its incremental caches (third-party crates stay
+# warm).
 #
 # Fetched binaries go to DIR, default ${CARGO_TARGET_DIR:-target}/release.
 # They are the same arch (arm64) and macOS target as local builds on any
@@ -78,33 +92,325 @@
 # e2e.py and bench.py do it themselves).
 #
 # Build hosts stay usable: builds run at nice 15, one at a time per lane (a
-# second call waits up to 30 min for the lane's lock), and nothing starts
+# second call waits up to 60 min for the lane's lock), and nothing starts
 # below $ISOCAST_BUILD_MIN_FREE_GB (default 40) GB free there (a build
-# refused for space tidies the host once, as above, and retries). Ctrl-C or
-# SIGTERM stops the remote build too. The exit status is cargo's (255: host
-# unreachable; 3: disk guard; 75: lane lock timeout; 76: the host is
-# reserved by a hardware job; 69: auto found no free host).
+# refused for space tidies the host once, as above, and retries). Each host
+# runs at most a few commands at once (~/isocast-builds/.slots there, else 3
+# on exonbook's 14 cores and 2 on the M2s' 8); the rest wait in arrival
+# order and print their place ("queued 2nd on m2-a"); a `run` that compiles
+# nothing can skip the queue with ISOCAST_BUILD_QUEUE=0. A queued command whose
+# client is gone (killed, Ctrl-C, SIGTERM) leaves the queue, and a running
+# one whose client is gone is stopped. A hardware job that reserves the host
+# meanwhile turns queued commands away (76). Every rustc call goes through
+# the host's shared compiler cache (sccache from Homebrew, in
+# ~/isocast-builds/.sccache, capped at ~/isocast-builds/.sccache-size, else
+# 60G; ISOCAST_BUILD_SCCACHE=0 builds without it, as does a call whose
+# daemon neither answers nor starts), and dev and test builds
+# aren't incremental (CARGO_PROFILE_DEV_INCREMENTAL=true in the command
+# opts back in; never CARGO_INCREMENTAL=1, which sccache refuses). The exit
+# status is cargo's (255: host unreachable; 3: disk guard; 75: lane lock
+# timeout; 76: the host is reserved by a hardware job; 69: auto found no
+# free host).
 set -eu
 
 host_arg="${ISOCAST_BUILD_HOST:-auto}"
 min_free_gb="${ISOCAST_BUILD_MIN_FREE_GB:-40}"
-remote_script='isocast-builds/.remote-build.sh'
+# The builds' folder on every host, relative to the home folder
+# ($ISOCAST_BUILD_ROOT only for testing this script in isolation).
+root_name="${ISOCAST_BUILD_ROOT:-isocast-builds}"
 
-# ---- the remote half (runs on the build host as `sh .remote-build.sh __<op>`) ----
+# ---- the remote half (runs on the build host as `sh .remote-build-<hash>.sh __<op>`) ----
 # hw-batch writes "JOB_ID EXPIRY_EPOCH" to ~/isocast-builds/.hw-job on the
 # test Macs a job uses; prints the job id while it holds.
 hw_reserved() {
-    f="$HOME/isocast-builds/.hw-job"
+    f="$root/.hw-job"
     [ -f "$f" ] || return 1
     read -r id exp <"$f" || true
     [ "$(date +%s)" -lt "${exp:-0}" ] 2>/dev/null || return 1
     echo "$id"
 }
 
+# lane_group PGID LANE [CALL]: the process group PGID is still a
+# remote-build command of LANE (of its call CALL if given). A pgid file can
+# outlive its group, and a pid can be reused, so nothing is signalled or
+# counted unless this holds.
+lane_group() {
+    case "$1" in '' | *[!0-9]*) return 1 ;; esac
+    ps -ax -o pgid=,command= | awk -v g="$1" -v want="__run $2${3:+ $3}" '
+        $1 == g && index($0, ".remote-build") && index($0 " ", " " want " ") { f = 1 }
+        END { exit !f }'
+}
+
+# How many cargo jobs run at once on this host: ~/isocast-builds/.slots,
+# else 3 on 12 or more cores (exonbook), 2 below (the M2s).
+host_slots() {
+    s="${ISOCAST_BUILD_SLOTS:-$(cat "$root/.slots" 2>/dev/null || true)}"
+    case "$s" in '' | *[!0-9]* | 0) [ "$(sysctl -n hw.ncpu)" -ge 12 ] && s=3 || s=2 ;; esac
+    echo "$s"
+}
+
+# The shared compiler cache (sccache, Homebrew): every lane's rustc calls go
+# through it unless the lane sets its own RUSTC_WRAPPER or
+# ISOCAST_BUILD_SCCACHE=0. Keys hold the compile's folder (cwd and
+# CARGO_MANIFEST_DIR), so a lane's own crates are only ever reused by that
+# lane; registry crates are shared by all. Incremental compiles (ui-dev) are
+# passed through uncached. Client-side mode: rustc runs in the build's own
+# process (nice 15, the build's environment); the daemon only stores.
+# One cache and daemon per host, in ~/isocast-builds whatever the root, on
+# its own socket: a daemon keeps the settings it started with, so another
+# sccache user's (the default port 4226) must never be ours.
+# sccache keys hold every CARGO_* variable rustc gets, so rustc goes
+# through a wrapper without the lane's CARGO_TARGET_DIR (cargo's, never
+# rustc's; build scripts and the lane's commands still have it): with it,
+# no lane would ever share a crate. It is named sccache so the cc crate
+# also caches build scripts' C through it.
+sccache_env() {
+    [ "${ISOCAST_BUILD_SCCACHE:-1}" != 0 ] && [ -z "${RUSTC_WRAPPER:-}" ] || return 0
+    real="$(command -v sccache 2>/dev/null)" || return 0
+    # Its folder: ~/isocast-builds ($ISOCAST_BUILD_SCCACHE_HOME only to test
+    # this script without the host's daemon).
+    base="${ISOCAST_BUILD_SCCACHE_HOME:-$HOME/isocast-builds}"
+    wrapper="$base/.sccache-bin/sccache"
+    if ! grep -qs "exec $real " "$wrapper"; then
+        mkdir -p "${wrapper%/*}" &&
+            printf '#!/bin/sh\nunset CARGO_TARGET_DIR\nexec %s "$@"\n' "$real" >"$wrapper.$$" &&
+            chmod +x "$wrapper.$$" && mv "$wrapper.$$" "$wrapper"
+    fi
+    export RUSTC_WRAPPER="$wrapper" SCCACHE_DIR="$base/.sccache" SCCACHE_IDLE_TIMEOUT=0 \
+        SCCACHE_CLIENT_SIDE=1 SCCACHE_SERVER_UDS="$base/.sccache.sock"
+    SCCACHE_CACHE_SIZE="$(cat "$base/.sccache-size" 2>/dev/null || echo 60G)"
+    export SCCACHE_CACHE_SIZE
+}
+
+# The daemon listens on its socket. (sccache 0.18's --show-stats is no test:
+# with no daemon it exits 0 with stats computed locally, and starts none.)
+sccache_up() {
+    /usr/bin/python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' \
+        "$SCCACHE_SERVER_UDS" 2>/dev/null
+}
+
+# The per-host build queue: at most host_slots cargo jobs, the rest wait in
+# FIFO order. A ticket is a file in $root/.queue named by its arrival time,
+# held (flock) by the waiting or building process for its whole life, so a
+# ticket nobody holds is a dead client's and is dropped. A waiter whose ssh
+# client is gone (its stderr's reader closed) gives up its place; a build
+# whose client is gone is stopped. A build that starts beside others gets
+# CARGO_BUILD_JOBS = cores / slots (alone: all cores) unless it sets its own.
+#   python3 -c "$queue_py" wait LANE CALL HOST SLOTS MIN_FREE_GB CMD  (in the lane's src)
+#   python3 -c "$queue_py" list SLOTS        prints "SLOTS LIVE LANE,LANE…" then tickets
+queue_py=$(
+    cat <<'PY'
+import fcntl, json, os, select, shutil, signal, subprocess, sys, time
+
+root = os.environ["ISOCAST_ROOT"]
+qdir = os.path.join(root, ".queue")
+
+
+def tickets():
+    """Live tickets, oldest first: (name, info). Unheld ones are deleted."""
+    live = []
+    try:
+        names = sorted(n for n in os.listdir(qdir) if not n.startswith("."))
+    except OSError:
+        return live
+    for name in names:
+        path = os.path.join(qdir, name)
+        if name in own:
+            live.append((name, own[name]))
+            continue
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                info = json.loads(os.read(fd, 4096) or b"{}")
+            except ValueError:
+                info = {}
+            live.append((name, info))
+        else:
+            # Nobody holds it: its client died. Delete it while holding it.
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
+    return live
+
+
+def nth(n):
+    return f"{n}{'tsnrhtdd'[(n // 10 % 10 != 1) * (n % 10 < 4) * n % 10::4]}"
+
+
+def hw_job():
+    try:
+        job, exp = open(os.path.join(root, ".hw-job")).read().split()[:2]
+        return job if time.time() < float(exp) else None
+    except (OSError, ValueError):
+        return None
+
+
+own = {}
+if sys.argv[1] == "list":
+    slots = int(sys.argv[2])
+    live = tickets()
+    lanes = ",".join(i.get("lane", "?") for _, i in live) or "-"
+    print(slots, len(live), lanes)
+    for k, (name, i) in enumerate(live):
+        if i.get("state") == "building":
+            state = "building"
+        else:
+            state = f"queued {nth(k - slots + 1)}" if k >= slots else "starting"
+        since = time.time() - i.get("since", time.time())
+        print(f"  {i.get('lane', '?'):<28} {state:<12} {int(since // 60)} min")
+    sys.exit(0)
+
+_, lane, call, host, slots, min_free, cmd = sys.argv[1:8]
+slots, min_free = int(slots), int(min_free)
+# Slots 0: a command that compiles nothing (ISOCAST_BUILD_QUEUE=0) runs at
+# once, without a ticket.
+queued = slots > 0
+os.makedirs(qdir, exist_ok=True)
+name = f"{time.time_ns():020d}-{lane}"
+info = {"lane": lane, "state": "queued", "since": time.time(), "pid": os.getpid()}
+fd = None
+
+
+def write_info():
+    if fd is not None:
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, json.dumps(info).encode(), 0)
+
+
+if queued:
+    # Create, lock, then rename into place: a ticket is never seen unheld.
+    tmp = os.path.join(qdir, "." + name)
+    fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    write_info()
+    os.rename(tmp, os.path.join(qdir, name))
+    own[name] = info
+child = None
+lanedir = os.path.join(root, lane)
+
+
+def cleanup():
+    for f in ("run.pgid", f"call-{call}.pgid"):
+        try:
+            os.unlink(os.path.join(lanedir, f))
+        except OSError:
+            pass
+    try:
+        os.unlink(os.path.join(qdir, name))
+    except OSError:
+        pass
+
+
+def on_term(signum, frame):
+    if child and child.poll() is None:
+        child.terminate()
+    cleanup()
+    os._exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, on_term)
+signal.signal(signal.SIGHUP, on_term)
+kq = select.kqueue()
+watch = [select.kevent(f, filter=select.KQ_FILTER_WRITE, flags=select.KQ_EV_ADD) for f in (1, 2)]
+
+
+def client_gone():
+    try:
+        return any(e.flags & select.KQ_EV_EOF for e in kq.control(watch, 2, 0))
+    except OSError:
+        return True
+
+
+def say(msg):
+    try:
+        print(f"remote-build: {msg}", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
+start, last = time.time(), None
+while queued:
+    live = tickets()
+    pos = next((k for k, (n, _) in enumerate(live) if n == name), None)
+    if pos is None:
+        say(f"lost its place in the queue on {host} (its ticket is gone); retry")
+        cleanup()
+        sys.exit(1)
+    if pos < slots:
+        break
+    job = hw_job()
+    if job:
+        say(f"refusing: {host} is now reserved by hardware job {job}; use another host (--host auto).")
+        cleanup()
+        sys.exit(76)
+    if client_gone():
+        cleanup()
+        sys.exit(130)
+    ahead = [i.get("lane", "?") for _, i in live[:pos]]
+    building = [i.get("lane", "?") for _, i in live if i.get("state") == "building"]
+    msg = (f"queued {nth(pos - slots + 1)} on {host} ({slots} at a time; building: "
+           f"{', '.join(building) or '-'}; waiting ahead: {', '.join(ahead[len(building):]) or '-'})")
+    if msg != last:
+        say(msg)
+        last = msg
+    time.sleep(1)
+
+# Admitted: what was true when it queued may not be any more. run.pgid
+# first, then the reservation: hw-batch writes .hw-job, then waits for the
+# builds run.pgid names, so one of the two always sees the other.
+pgid = str(os.getpgrp())
+open(os.path.join(lanedir, "run.pgid"), "w").write(pgid + "\n")
+job = hw_job()
+if job:
+    say(f"refusing: {host} is reserved by hardware job {job}; use another host (--host auto).")
+    cleanup()
+    sys.exit(76)
+free_gb = shutil.disk_usage(os.path.expanduser("~")).free // 2**30
+if free_gb < min_free:
+    say(f"refusing: {free_gb} GB free on {host}, below {min_free} GB.")
+    cleanup()
+    sys.exit(3)
+waited = time.time() - start
+if waited >= 2:
+    say(f"building on {host} after {int(waited // 60)} min {int(waited % 60)} s in the queue")
+info["state"], info["since"] = "building", time.time()
+write_info()
+env = dict(os.environ)
+if queued and "CARGO_BUILD_JOBS" not in env:
+    # Cargo's jobs per build: all cores for a build that starts alone,
+    # cores / slots beside others (two -j8 builds on an M2 peaked at 14
+    # rustc and load 83; with this, 11 and 67, in the same time, 2026-10-24).
+    others = sum(1 for n, i in tickets() if n != name and i.get("state") == "building")
+    cores = os.cpu_count() or 8
+    env["CARGO_BUILD_JOBS"] = str(cores if not others else max(1, cores // slots))
+child = subprocess.Popen(["nice", "-n", "15", "sh", "-c", cmd], stdin=subprocess.DEVNULL, env=env)
+while True:
+    try:
+        status = child.wait(timeout=2)
+        break
+    except subprocess.TimeoutExpired:
+        pass
+    if client_gone():
+        # Nobody will read the result: stop the build, free the slot.
+        os.killpg(os.getpgrp(), signal.SIGTERM)
+cleanup()
+sys.exit(status if status >= 0 else 128 - status)
+PY
+)
+
 remote_main() {
     op="$1"
     shift
-    root="$HOME/isocast-builds"
+    root="$HOME/$root_name"
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     case "$op" in
     __prepare)
@@ -115,10 +421,14 @@ remote_main() {
             seed="$(ls -t "$root"/*/last-used 2>/dev/null | while read -r f; do
                 d="$(dirname "$f")"
                 [ "$d" != "$root/$lane" ] && [ -d "$d/target" ] && { echo "$d/target"; break; }
-            done)"
+            done || true)"
             if [ -n "$seed" ]; then
                 echo "remote-build: seeding $lane's target from $seed" >&2
-                cp -c -R "$seed" "$root/$lane/target.tmp" && mv "$root/$lane/target.tmp" "$root/$lane/target"
+                # Not the seed's incremental caches (dev and ui-dev builds):
+                # only that lane's sources match them.
+                cp -c -R "$seed" "$root/$lane/target.tmp" &&
+                    rm -rf "$root/$lane/target.tmp"/*/incremental &&
+                    mv "$root/$lane/target.tmp" "$root/$lane/target"
             fi
         fi
         touch "$root/$lane/last-used"
@@ -141,13 +451,16 @@ for d, dirs, files in os.walk(root, topdown=False):
 ' "$root/$lane/src"
         ;;
     __run)
-        # __run LANE CMD: disk guard, lane lock, nice, then CMD (a shell
-        # string) in the lane's source folder.
+        # __run LANE CALL CMD: disk guard, lane lock, the host's queue, nice,
+        # then CMD (a shell string) in the lane's source folder. CALL names
+        # this invocation (its client's __kill stops only it).
         lane="$1"
-        shift
+        call="$2"
+        shift 2
+        case "$call" in '' | *[!A-Za-z0-9-]*) echo "remote-build: bad call id '$call'" >&2; exit 2 ;; esac
         # A host a hardware job holds is neither built on nor tidied.
         if hw="$(hw_reserved)"; then
-            echo "remote-build: refusing: $(hostname -s) is reserved by hardware job $hw; use another host (--host auto)." >&2
+            echo "remote-build: refusing: ${ISOCAST_BUILD_HOSTNAME:-$(hostname -s)} is reserved by hardware job $hw; use another host (--host auto)." >&2
             exit 76
         fi
         avail_gb=$(($(df -k "$HOME" | awk 'NR == 2 { print $4 }') / 1048576))
@@ -165,46 +478,81 @@ for d, dirs, files in os.walk(root, topdown=False):
             echo "remote-build: free space with scripts/remote-build.sh tidy or prune (status lists lanes)." >&2
             exit 3
         fi
+        # The compiler cache's daemon starts here, outside every lock and
+        # with no terminal, so it never holds a lock or the ssh session.
+        # Only when none answers, one caller at a time: on a socket a second
+        # daemon would take the socket over and orphan the first.
+        # If it can't be reached, this call builds without it.
+        if ! (
+            sccache_env
+            [ -n "${SCCACHE_DIR:-}" ] || exit 0
+            mkdir -p "$SCCACHE_DIR"
+            lockf -k -t 60 "$SCCACHE_DIR.lock" sh -c \
+                "/usr/bin/python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' \"\$SCCACHE_SERVER_UDS\" 2>/dev/null ||
+                    sccache --start-server" </dev/null >/dev/null 2>&1
+            sccache_up
+        ); then
+            echo "remote-build: the compiler cache isn't answering on $(hostname -s); building without it" >&2
+            export ISOCAST_BUILD_SCCACHE=0
+        fi
+        # The lane lock first, then the queue: a lane's second call waits
+        # for its first without taking one of the host's slots.
+        # This call's process group (sshd starts a new session for it),
+        # from here on: waiting for the lane lock, queued or building.
+        callf="$root/$lane/call-$call.pgid"
+        ps -o pgid= -p $$ | tr -d ' ' >"$callf"
         lock="$root/$lane/lock"
         set +e
-        lockf -s -k -t 0 "$lock" sh "$root/.remote-build.sh" __locked "$lane" "$@"
+        lockf -s -k -t 0 "$lock" sh "$self" __locked "$lane" "$call" "$@"
         status=$?
         if [ "$status" = 75 ]; then
-            echo "remote-build: lane $lane is busy (another build); waiting up to 30 min" >&2
-            lockf -k -t 1800 "$lock" sh "$root/.remote-build.sh" __locked "$lane" "$@"
+            echo "remote-build: lane $lane is busy (another build); waiting up to 60 min" >&2
+            lockf -k -t 3600 "$lock" sh "$self" __locked "$lane" "$call" "$@"
             status=$?
         fi
+        rm -f "$callf"
         exit "$status"
         ;;
     __locked)
         lane="$1"
-        shift
-        # The whole remote command is one process group (sshd starts a new
-        # session); __kill signals it.
-        ps -o pgid= -p $$ | tr -d ' ' >"$root/$lane/run.pgid"
+        call="$2"
+        shift 2
+        # Building, the group is also in run.pgid (hw-batch reads it).
         touch "$root/$lane/last-used"
         export CARGO_TARGET_DIR="$root/$lane/target" CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
+        # Dev and test builds aren't incremental here: incremental caches
+        # were most of a lane's disk (13-15 GB) and can't be shared, while
+        # non-incremental compiles go through the shared cache. The lane's
+        # own command can still set CARGO_PROFILE_DEV_INCREMENTAL=true.
+        export CARGO_PROFILE_DEV_INCREMENTAL="${CARGO_PROFILE_DEV_INCREMENTAL:-false}"
+        sccache_env
         cd "$root/$lane/src"
-        set +e
-        nice -n 15 sh -c "$*"
-        status=$?
-        rm -f "$root/$lane/run.pgid"
-        exit "$status"
+        slots="$(host_slots)"
+        [ "${ISOCAST_BUILD_QUEUE:-1}" != 0 ] || slots=0
+        ISOCAST_ROOT="$root" exec /usr/bin/python3 -c "$queue_py" wait "$lane" "$call" \
+            "${ISOCAST_BUILD_HOSTNAME:-$(hostname -s)}" "$slots" "$min_free_gb" "$*"
         ;;
     __kill)
+        # __kill LANE CALL: stop that call only (waiting for the lane lock,
+        # queued or building), if its group is still that call's.
         lane="$1"
-        pgid="$(cat "$root/$lane/run.pgid" 2>/dev/null || true)"
-        [ -n "$pgid" ] && kill -TERM -- "-$pgid" 2>/dev/null && echo "remote-build: stopped $lane's build" >&2
-        rm -f "$root/$lane/run.pgid"
+        f="$root/$lane/call-$2.pgid"
+        pgid="$(cat "$f" 2>/dev/null || true)"
+        if lane_group "$pgid" "$lane" "$2"; then
+            kill -TERM -- "-$pgid" 2>/dev/null && echo "remote-build: stopped $lane's command" >&2
+        fi
+        rm -f "$f"
         ;;
     __probe)
-        # One line for auto: cores load1 free_gb builds hw_job bench_lock.
+        # One line for auto: cores load1 free_gb builds hw_job bench_lock
+        # slots tickets lanes (tickets: building and queued; lanes: theirs,
+        # oldest first, comma-separated, or -).
         cores="$(sysctl -n hw.ncpu)"
         load="$(sysctl -n vm.loadavg | awk '{ print $2 }')"
         free=$(($(df -k "$HOME" | awk 'NR == 2 { print $4 }') / 1048576))
         builds=0
         for f in "$root"/*/run.pgid; do
-            [ -f "$f" ] && kill -0 "-$(cat "$f")" 2>/dev/null && builds=$((builds + 1))
+            [ -f "$f" ] && lane_group "$(cat "$f")" "$(basename "$(dirname "$f")")" && builds=$((builds + 1))
         done
         hw="$(hw_reserved || echo -)"
         bench=free
@@ -212,7 +560,8 @@ for d, dirs, files in os.walk(root, topdown=False):
             ! lockf -s -k -t 0 "$HOME/isocast-scratch/.bench.lock" true 2>/dev/null; then
             bench=held
         fi
-        echo "$cores $load $free $builds $hw $bench"
+        queue="$(ISOCAST_ROOT="$root" /usr/bin/python3 -c "$queue_py" list "$(host_slots)" | head -1)"
+        echo "$cores $load $free $builds $hw $bench $queue"
         ;;
     __status)
         df -h "$HOME" | awk 'NR == 2 { print "free: " $4 " of " $2 }'
@@ -224,9 +573,30 @@ for d, dirs, files in os.walk(root, topdown=False):
             size="$(du -sh "$d" 2>/dev/null | cut -f1)"
             used="$(stat -f %Sm -t '%Y-%m-%d %H:%M' "$d/last-used")"
             busy=idle
-            [ -f "$d/run.pgid" ] && kill -0 "-$(cat "$d/run.pgid")" 2>/dev/null && busy=building
+            for f in "$d"call-*.pgid; do
+                [ -f "$f" ] || continue
+                c="${f##*/call-}"
+                lane_group "$(cat "$f")" "$lane" "${c%.pgid}" && busy=waiting
+            done
+            [ -f "$d/run.pgid" ] && lane_group "$(cat "$d/run.pgid")" "$lane" && busy=building
             printf '%-28s %6s  last used %s  %s\n' "$lane" "$size" "$used" "$busy"
         done
+        ISOCAST_ROOT="$root" /usr/bin/python3 -c "$queue_py" list "$(host_slots)" |
+            awk 'NR == 1 { slots = $1 } NR > 1 { line[NR] = $0; if ($2 == "building") b++; else w++ }
+                END { printf "queue: %d at a time; %d building, %d waiting\n", slots, b, w; for (k = 2; k <= NR; k++) print line[k] }'
+        (
+            sccache_env
+            [ -n "${SCCACHE_DIR:-}" ] && [ -d "$SCCACHE_DIR" ] || exit 0
+            printf 'compiler cache: %s' "$(du -sh "$SCCACHE_DIR" 2>/dev/null | cut -f1)"
+            # The daemon's cap and counters since it started (it runs until
+            # stopped and keeps the cap it started with).
+            if sccache_up; then sccache --show-stats 2>/dev/null; fi | awk '
+                /^Compile requests  / { req = $NF } /^Cache hits  / { hit = $NF } /^Cache misses  / { miss = $NF }
+                /^Max cache size/ { cap = $(NF - 1) " " $NF }
+                END { if (cap != "") printf " of %s (the daemon cap)", cap; else printf " (daemon not running)"
+                      if (req != "") printf ", %s hits and %s misses since it started", hit, miss }'
+            echo
+        )
         ;;
     __prune)
         # __prune DAYS [LANE…]: named lanes, or every lane unused for DAYS.
@@ -269,10 +639,11 @@ for d, dirs, files in os.walk(root, topdown=False):
             # its disk check (exit would end the build as a false success).
             return 0
         fi
-        /usr/bin/python3 - "$root" "$HOME/isocast-scratch" "$days" "$dry" <<'PY'
-import os, shutil, subprocess, sys, time
+        /usr/bin/python3 - "$root" "$HOME/isocast-scratch" "$days" "$dry" "$min_free_gb" <<'PY'
+import fcntl, os, shutil, subprocess, sys, time
 
 root, scratch, days, dry = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1"
+min_free = int(sys.argv[5])
 now = time.time()
 DAY = 86400
 MEDIA = (".mov", ".mp4", ".flv", ".mkv", ".h264", ".trace")
@@ -347,6 +718,48 @@ def remove(path, inside, why, n, lock=None):
     return max(0, n - left)
 
 
+def cargo_held(target):
+    """Lock a cargo target's build locks (target/<profile>/.cargo-lock,
+    flock like cargo's own) without waiting: the open, locked fds while
+    they're free, so a build starting meanwhile waits for the deletion,
+    or None while a build holds one."""
+    fds = []
+    try:
+        names = os.listdir(target)
+    except OSError:
+        return fds
+    for name in names:
+        lock = os.path.join(target, name, ".cargo-lock")
+        if os.path.islink(lock) or not os.path.isfile(lock):
+            continue
+        try:
+            fd = os.open(lock, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            for f in fds:
+                os.close(f)
+            return None
+        fds.append(fd)
+    return fds
+
+
+def remove_target(p, inside, why, n):
+    """remove() a cargo target unless a build holds it (then 0)."""
+    fds = cargo_held(p)
+    if fds is None:
+        print(f"remote-build: {p} kept: a cargo build holds it")
+        return 0
+    try:
+        return remove(p, inside, why, n)
+    finally:
+        for f in fds:
+            os.close(f)
+
+
 def held(lock):
     """A build holds the lane's lock. A dry run creates no lock file: with
     none, nothing can hold it."""
@@ -356,6 +769,7 @@ def held(lock):
 
 
 freed = 0
+gone = set()
 # 1. Lane targets unused for DAYS (main's always stays: every new lane is
 #    seeded from the most recent target, and main's is the usual one).
 for lane in sorted(os.listdir(root)) if os.path.isdir(root) else []:
@@ -374,6 +788,39 @@ for lane in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         print(f"remote-build: {lane} is building; kept")
         continue
     freed += remove(target, root, f"lane {lane} unused for {age:.1f} days", stats(target)[0], lock)
+    gone.add(lane)
+
+# 1b. Incremental caches (target/<profile>/incremental/<crate>), in every
+#     lane, main's too, while it isn't building: dev and test builds here
+#     aren't incremental (a lane that opts back in loses only a cache), and
+#     other profiles' (ui-dev) when unused for a day. Each is only ever its
+#     lane's; seeded targets used to carry clones of them.
+for lane in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+    target = os.path.join(root, lane, "target")
+    if lane in gone or lane.startswith(".") or not os.path.isdir(target) or os.path.islink(target):
+        continue
+    lock = os.path.join(root, lane, "lock")
+    for profile in sorted(os.listdir(target)):
+        inc = os.path.join(target, profile, "incremental")
+        if not os.path.isdir(inc) or os.path.islink(inc):
+            continue
+        for crate in sorted(os.listdir(inc)):
+            p = os.path.join(inc, crate)
+            n, newest = stats(p)
+            age = (now - newest) / DAY
+            if (age <= 1 and profile != "debug") or not n:
+                continue
+            if held(lock):
+                print(f"remote-build: {lane} is building; its incremental caches kept")
+                break
+            why = "dev builds aren't incremental" if profile == "debug" else f"unused for {age:.1f} days"
+            freed += remove(p, root, f"{lane}'s incremental cache: {why}", n, lock)
+
+# 1c. This script's old versions (each client installs its own).
+for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+    p = os.path.join(root, name)
+    if name.startswith(".remote-build-") and name.endswith(".sh") and now - os.path.getmtime(p) > 7 * DAY:
+        freed += remove(p, root, "an old version of remote-build.sh", os.lstat(p).st_blocks * 512)
 
 # 2. ~/isocast-scratch: stale cargo targets and old recordings and traces
 #    (Instruments' .trace is a folder, other tools' a file).
@@ -393,7 +840,7 @@ for d, dirs, files in os.walk(scratch) if os.path.isdir(scratch) else []:
         n, newest = stats(p)
         age = (now - newest) / DAY
         if cargo and age > 3:
-            freed += remove(p, scratch, f"cargo target unused for {age:.1f} days", n)
+            freed += remove_target(p, scratch, f"cargo target unused for {age:.1f} days", n)
         elif trace and n > BIG and age > 7:
             freed += remove(p, scratch, f"{n / 2**20:.0f} MB trace, {age:.0f} days old", n)
     for name in files:
@@ -408,6 +855,43 @@ for d, dirs, files in os.walk(scratch) if os.path.isdir(scratch) else []:
         if os.path.islink(p) or st.st_size <= BIG or age <= 7:
             continue
         freed += remove(p, scratch, f"{st.st_size / 2**20:.0f} MB, {age:.0f} days old", st.st_blocks * 512)
+# 2b. Test-Mac checkouts (scripts/testmac.sh, ~/dev/isocast-worktrees/<name>):
+#     their cargo target/ when unused for 3 days, as in scratch.
+worktrees = os.path.join(home, "dev", "isocast-worktrees")
+for name in sorted(os.listdir(worktrees)) if os.path.isdir(worktrees) else []:
+    p = os.path.join(worktrees, name, "target")
+    if os.path.islink(os.path.join(worktrees, name)) or os.path.islink(p) or not os.path.isfile(os.path.join(p, "CACHEDIR.TAG")):
+        continue
+    n, newest = stats(p)
+    age = (now - newest) / DAY
+    if age > 3:
+        freed += remove_target(p, worktrees, f"test-Mac checkout {name}'s target unused for {age:.1f} days", n)
+
+# 3. Last: still below the build minimum, empty the compiler cache (it is
+#    capped and refills) if no build is running or queued.
+cache = os.path.join(home, "isocast-builds", ".sccache")
+if os.path.isdir(cache) and (shutil.disk_usage(home).free - (freed if dry else 0)) // 2**30 < min_free:
+    live = []
+    qdir = os.path.join(root, ".queue")
+    for name in os.listdir(qdir) if os.path.isdir(qdir) else []:
+        try:
+            fd = os.open(os.path.join(qdir, name), os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            live.append(name)
+        finally:
+            os.close(fd)
+    if live:
+        print(f"remote-build: compiler cache kept: {len(live)} build(s) running or queued")
+    else:
+        if not dry:
+            env = dict(os.environ, SCCACHE_SERVER_UDS=cache + ".sock")
+            subprocess.run(["sccache", "--stop-server"], capture_output=True, env=env)
+        freed += remove(cache, os.path.join(home, "isocast-builds"), f"still below {min_free} GB free; the compiler cache refills", stats(cache)[0])
+
 free = shutil.disk_usage(home).free
 print(f"remote-build: {'would free' if dry else 'freed'} about {gb(freed)} "
       f"(clones shared between lanes count once each); {gb(free)} free now")
@@ -453,13 +937,25 @@ ssh_remote() {
     ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 "$host" "$@"
 }
 
-# Install this script there (atomically: lanes call it concurrently).
+# This script there, named by its content: lanes on other versions of it
+# each run their own (installed atomically: lanes call it concurrently).
+remote_script="$root_name/.remote-build-$(shasum -a 256 "$0" | cut -c1-12).sh"
 install_remote() {
-    ssh_remote "mkdir -p isocast-builds && cat >$remote_script.\$\$ && mv $remote_script.\$\$ $remote_script" <"$0"
+    ssh_remote "mkdir -p $root_name && { [ -f $remote_script ] || { cat >$remote_script.\$\$ && mv $remote_script.\$\$ $remote_script; }; } && touch $remote_script" <"$0"
+}
+
+# The settings the remote half reads (each one word).
+remote_env() {
+    printf 'ISOCAST_BUILD_MIN_FREE_GB=%s ISOCAST_BUILD_ROOT=%s ISOCAST_BUILD_HOSTNAME=%s' \
+        "$min_free_gb" "$root_name" "${host#isocast-}"
+    [ -z "${ISOCAST_BUILD_SCCACHE:-}" ] || printf ' ISOCAST_BUILD_SCCACHE=%s' "$ISOCAST_BUILD_SCCACHE"
+    [ -z "${ISOCAST_BUILD_SLOTS:-}" ] || printf ' ISOCAST_BUILD_SLOTS=%s' "$ISOCAST_BUILD_SLOTS"
+    [ -z "${ISOCAST_BUILD_QUEUE:-}" ] || printf ' ISOCAST_BUILD_QUEUE=%s' "$ISOCAST_BUILD_QUEUE"
+    [ -z "${ISOCAST_BUILD_SCCACHE_HOME:-}" ] || printf ' ISOCAST_BUILD_SCCACHE_HOME=%s' "$ISOCAST_BUILD_SCCACHE_HOME"
 }
 
 remote() { # op args… (each arg one word; no shell metacharacters)
-    ssh_remote "ISOCAST_BUILD_MIN_FREE_GB=$min_free_gb sh $remote_script $*"
+    ssh_remote "$(remote_env) sh $remote_script $*"
 }
 
 # The test Macs a hardware job holds (isocast-m2-a/-b, one per line): the
@@ -532,15 +1028,25 @@ pick_host() {
             i=$((i + 1))
             printf '%s %s %s\n' "$i" "$h" "$(cat "$probes/$h" 2>/dev/null || echo unreachable)"
         done | awk -v min="$min_free_gb" -v sticky="$sticky" -v recent="$recent" '
-            BEGIN { n = split(recent, r, " "); for (k = 1; k <= n; k++) picked[r[k]]++ }
-            NF == 8 && $7 == "-" && $8 == "free" && $5 >= min {
-                score = $4 / $3 + $6 + picked[$2]
-                if ($2 == sticky) { pick = $2; found = 1 }
-                if (!found && (best == "" || score < best)) { best = score; pick = $2 }
-                printf "remote-build: %s load %s/%s cores, %s GB free, %s building, %d just picked\n", $2, $4, $3, $5, $6, picked[$2] > "/dev/stderr"
+            # recent: "host:lane" picks in the last 3 min, which may not
+            # have reached the queue on their host yet.
+            BEGIN { n = split(recent, r, " "); for (k = 1; k <= n; k++) { split(r[k], hl, ":"); rh[k] = hl[1]; rl[k] = hl[2] } }
+            NF == 11 && $7 == "-" && $8 == "free" && $5 >= min {
+                q = $10; lanes = "," $11 ","; just = 0
+                for (k = 1; k <= n; k++) if (rh[k] == $2 && index(lanes, "," rl[k] ",") == 0) just++
+                q += just
+                wait = q + 1 - $9; if (wait < 0) wait = 0
+                # The shortest queue, where moving off the lane sticky host
+                # (its warm target; a cold one costs about a build) counts as
+                # one place more; then that host; then the lowest load per
+                # core and slot.
+                eff = wait - ($2 == sticky ? 1 : 0); if (eff < 0) eff = 0
+                score = eff * 1000 + ($2 == sticky ? 0 : 100) + $4 / $3 + q / $9
+                if (best == "" || score < best) { best = score; pick = $2 }
+                printf "remote-build: %s %d of %d slots taken (%s%s), %s GB free, load %s/%s cores%s\n", $2, q, $9, $11, (just ? ", " just " just picked" : ""), $5, $4, $3, (wait ? ", would queue " wait : "") > "/dev/stderr"
                 next
             }
-            NF == 8 { printf "remote-build: %s not free (%s GB free, hw job %s, bench lock %s)\n", $2, $5, $7, $8 > "/dev/stderr"; next }
+            NF == 11 { printf "remote-build: %s not free (%s GB free, hw job %s, bench lock %s)\n", $2, $5, $7, $8 > "/dev/stderr"; next }
             { printf "remote-build: %s not free (%s)\n", $2, $3 > "/dev/stderr" }
             END { print pick }'
     )"
@@ -564,7 +1070,8 @@ choose_host() {
             sleep 0.5
         done
         trap 'rmdir "$state_dir/.pick" 2>/dev/null' EXIT
-        recent="$(find "$state_dir" -maxdepth 1 -type f -mmin -3 ! -name "$lane" ! -name '*.*' -exec cat {} + 2>/dev/null | tr '\n' ' ')"
+        recent="$(find "$state_dir" -maxdepth 1 -type f -mmin -3 ! -name "$lane" ! -name '*.*' 2>/dev/null |
+            while read -r f; do printf '%s:%s ' "$(cat "$f")" "$(basename "$f")"; done)"
         # A lane idle for 12 h has finished its task: pick afresh.
         [ -n "$(find "$state_dir/$lane" -mmin -720 2>/dev/null)" ] || sticky=
         busy="$(hw_busy | sort -u | tr '\n' ' ')"
@@ -576,7 +1083,7 @@ choose_host() {
             low="$(for h in $build_hosts; do
                 # shellcheck disable=SC2046 # split the probe line into words
                 set -- $(cat "$probes/$h" 2>/dev/null || echo unreachable)
-                [ $# = 6 ] && [ "$5" = - ] && [ "$6" = free ] && [ "$3" -lt "$min_free_gb" ] && echo "$h"
+                [ $# = 9 ] && [ "$5" = - ] && [ "$6" = free ] && [ "$3" -lt "$min_free_gb" ] && echo "$h"
             done || true)"
             if [ -n "${dry_run:-}" ]; then
                 # `hosts` is a query: say what a build would do.
@@ -631,15 +1138,18 @@ sync() {
     # -t): a lane's target may be seeded from another lane's newer build,
     # and cargo trusts mtimes, so a copied-over older source mtime could
     # leave a changed crate uncompiled (seen 2026-10-16).
-    files | rsync -rlpc --from0 --files-from=- -e "ssh -o ConnectTimeout=10" "$here/" "$host:isocast-builds/$lane/src/"
+    files | rsync -rlpc --from0 --files-from=- -e "ssh -o ConnectTimeout=10" "$here/" "$host:$root_name/$lane/src/"
     files | ssh_remote "sh $remote_script __clean $lane"
 }
 
 # Run a shell string under the lane lock there; Ctrl-C/TERM stop it there.
 run_remote() {
     quoted="$(printf '%s' "$*" | sed "s/'/'\\\\''/g")"
-    trap 'kill "$pid" 2>/dev/null; remote __kill "$lane" || true; exit 130' INT TERM
-    ssh_remote "ISOCAST_BUILD_MIN_FREE_GB=$min_free_gb sh $remote_script __run $lane '$quoted'" &
+    # This call's id: Ctrl-C stops this call there, never the lane's other.
+    call="$$-$(date +%s)-${call_n:=0}"
+    call_n=$((call_n + 1))
+    trap 'kill "$pid" 2>/dev/null; remote __kill "$lane" "$call" || true; exit 130' INT TERM
+    ssh_remote "$(remote_env) sh $remote_script __run $lane $call '$quoted'" &
     pid=$!
     set +e
     wait "$pid"
@@ -649,13 +1159,32 @@ run_remote() {
     return "$status"
 }
 
+# Sync, then run a shell string there; under auto, once more elsewhere if
+# a hardware job reserved the host meanwhile (76).
+sync_run() {
+    sync
+    set +e
+    run_remote "$1"
+    status=$?
+    if [ "$status" = 76 ] && [ "$host_arg" = auto ]; then
+        echo "remote-build: a hardware job took $host; picking another host" >&2
+        set -e
+        sync
+        set +e
+        run_remote "$1"
+        status=$?
+    fi
+    set -e
+    return "$status"
+}
+
 fetch() { # dir bin…
     dir="$1"
     shift
     mkdir -p "$dir"
     for bin in "$@"; do
         case "$bin" in */* | '') echo "remote-build: bad binary name '$bin'" >&2; exit 2 ;; esac
-        set -- "$@" "$host:isocast-builds/$lane/target/release/$bin"
+        set -- "$@" "$host:$root_name/$lane/target/release/$bin"
         shift
     done
     rsync -a -e "ssh -o ConnectTimeout=10" "$@" "$dir/"
@@ -668,10 +1197,9 @@ case "${1:-}" in
 cargo)
     shift
     [ $# -ge 1 ] || { echo "usage: scripts/remote-build.sh cargo <args>…" >&2; exit 2; }
-    sync
     args=""
     for a in "$@"; do args="$args '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"; done
-    run_remote "cargo$args"
+    sync_run "cargo$args"
     ;;
 build)
     shift
@@ -680,13 +1208,11 @@ build)
     [ $# -ge 1 ] || set -- isocastd isocast isocast-ui
     bins=""
     for b in "$@"; do bins="$bins --bin $b"; done
-    sync
-    run_remote "cargo build --release$bins"
+    sync_run "cargo build --release$bins"
     fetch "$dir" "$@"
     ;;
 gates)
-    sync
-    run_remote 'cargo fmt --check && cargo clippy --release --locked --all-targets -- -D warnings && cargo test --release --locked'
+    sync_run 'cargo fmt --check && cargo clippy --release --locked --all-targets -- -D warnings && cargo test --release --locked'
     ;;
 fetch)
     shift
@@ -699,8 +1225,7 @@ fetch)
 run)
     shift
     [ $# -ge 1 ] || { echo "usage: scripts/remote-build.sh run '<command>'" >&2; exit 2; }
-    sync
-    run_remote "$*"
+    sync_run "$*"
     ;;
 hosts)
     dry_run=1
@@ -744,7 +1269,7 @@ tidy)
     done
     ;;
 *)
-    sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,113p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

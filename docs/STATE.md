@@ -158,8 +158,12 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 
 **Build hosts** (`scripts/remote-build.sh`): exonbook (M4 Max, 14 cores), isocast-m2-a and isocast-m2-b (8 cores).
 - Build hosts need CMake for bundled libopus and aws-lc-sys (Homebrew on Macs; VS-bundled on exon-desk); no lane-private venv is needed. (2026-10-23)
-- Auto keeps a lane on its host and skips hosts running a hardware job. Lanes live in `~/isocast-builds/<lane>`; nice 15.
-- Nothing starts below 40 GB free; a refused or low host is tidied once (`remote-build.sh tidy [--dry-run]`: lane targets idle 2 days except main, scratch `target/` idle 3 days, recordings/traces over 20 MB older than 7 days; never `~/.lima`, a building lane or a held hardware job). (2026-10-24)
+- Lanes live in `~/isocast-builds/<lane>`; nice 15. Each host has a FIFO build queue (2026-10-24): at most 2 commands at once on the M2s, 3 on exonbook (`~/isocast-builds/.slots` overrides); waiters print their place, `status` lists it, `ISOCAST_BUILD_QUEUE=0` lets a `run` that compiles nothing skip it. A build beside others gets `CARGO_BUILD_JOBS` = cores / slots.
+- Auto picks the shortest queue; a lane stays on its host (warm target) unless that queue is 2+ places longer. It skips hosts running a hardware job, and a hardware job reserving a host turns its queued commands away (76; auto then retries once elsewhere).
+- Lanes on an older `remote-build.sh` bypass the queue until they merge main (each version installs its own `.remote-build-<hash>.sh`).
+- Shared compiler cache: sccache (Homebrew) in `~/isocast-builds/.sccache`, 60G cap, its own socket. Keys include the lane's paths, so lanes share only registry crates that neither have nor depend on build-script output: it saves some CPU, little wall time (measured 2026-10-24: a cold seeded lane takes the same ~9-10 min either way). Dev/test builds there aren't incremental (they were 13-15 GB of every lane).
+- Nothing starts below 40 GB free; a refused or low host is tidied once (`remote-build.sh tidy [--dry-run]`: lane targets idle 2 days except main, dev incremental caches of idle lanes, scratch and test-Mac checkout (`~/dev/isocast-worktrees/*`) `target/` idle 3 days, recordings/traces over 20 MB older than 7 days, last the compiler cache; never `~/.lima`, a building lane or a held hardware job). (2026-10-24)
+- sshd on isocast-m2-a/-b: `/etc/ssh/sshd_config.d/040-isocast-clientalive.conf` sets `ClientAliveInterval 30`, `ClientAliveCountMax 3`, so sessions of vanished clients end (2026-10-24). Not on exonbook (Ryan's MacBook; its sshd is his).
 - Exit codes: 255 unreachable, 3 disk guard, 75 lane lock, 76 hardware job, 69 no free host.
 - Same Rust 1.99, SDK 27.0 and arm64 everywhere: binaries from any host run on every Mac here.
 - Linux lane (2026-10-23): Lima/vz VM `isocast-linux` on m2-b, Ubuntu 24.04 arm64, currently capped at
