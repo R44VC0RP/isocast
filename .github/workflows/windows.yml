@@ -148,6 +148,8 @@ jobs:
         run: |
           cargo clippy --release --locked --all-targets -p isocast-platform-linux -p isocast-platform-credentials -p isocast-daemon -- -D warnings
           cargo test --release --locked -p isocast-platform-linux -p isocast-platform-credentials
+          # The client's own tests on Linux too (the daemon's local and remote transports).
+          cargo test --release --locked -p isocast-client
           cargo test --release --locked -p isocast-discovery
           cargo test --release --locked -p isocast-discovery avahi_advertise_browse_collision_and_withdraw -- --ignored --test-threads=1
 
@@ -172,6 +174,110 @@ jobs:
           path: |
             linux-e2e.json
             ${{ runner.temp }}/linux-e2e
+          retention-days: 7
+
+  linux-capture:
+    # The real Linux capture paths, on a headless desktop with no prompts
+    # (scripts/linux-capture-fixture.sh): the screen through the ScreenCast
+    # portal (sway, xdg-desktop-portal-wlr) over PipeWire, desktop audio from
+    # PipeWire's default sink, a virtual microphone and, where the runner's
+    # kernel takes v4l2loopback, a V4L2 camera. e2e.py linux_capture records
+    # them at 480x270p30 for 15 s and checks every file decodes, each track
+    # carries its own tone (440 Hz desktop, 880 Hz mic) and not the other, the
+    # pictures are the clips' moving frame codes, and no file dropped a frame
+    # or audio (zero, also under --hosted).
+    name: Linux capture (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      XDG_RUNTIME_DIR: /tmp/isocast-runtime
+      CFLAGS: -O2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Build and fixture dependencies
+        timeout-minutes: 20
+        run: |
+          echo "FIXTURE=$RUNNER_TEMP/linux-capture-fixture" >> "$GITHUB_ENV"
+          echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev
+          scripts/linux-capture-fixture.sh deps
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # The patched portal backend, built once per fixture script version.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/linux-capture-fixture/portal
+          # The portal binary links the image's libpipewire and libwayland.
+          key: linux-capture-portal-${{ matrix.arch }}-${{ env.IMAGE_VERSION }}-${{ hashFiles('scripts/linux-capture-fixture.sh') }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: linux-capture-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build daemon and CLI
+        timeout-minutes: 30
+        run: cargo build --release --locked -p isocast-daemon -p isocast-cli
+
+      - name: Start the headless desktop (portal, PipeWire, virtual devices)
+        timeout-minutes: 10
+        run: scripts/linux-capture-fixture.sh start "$FIXTURE" 640x360
+
+      - name: Record screen, desktop audio, microphone and camera (hosted rules)
+        timeout-minutes: 20
+        run: |
+          . "$FIXTURE/session.env"
+          python3 scripts/e2e.py --hosted --only linux_capture --linux-profile 360p30 --codec h264 \
+            --work "$RUNNER_TEMP/linux-capture" --keep-failures --report linux-capture.json
+          # A skipped scenario would pass silently: it must have run.
+          python3 - <<'PY'
+          import json
+          r = {s["name"]: s for s in json.load(open("linux-capture.json"))["scenarios"]}
+          s = r.get("linux_capture")
+          assert s and s["status"] == "PASS", f"linux_capture did not pass: {s and (s['status'], s.get('reason'))}"
+          ev = s["evidence"]
+          print("camera:", ev.get("camera"))
+          if "skip" in str(ev.get("camera")).lower():
+              print(f"::warning::linux_capture: camera skipped: {ev.get('camera')}")
+          print("app audio:", ev.get("app_audio"))
+          print("writer drops:", ev.get("writer_drops"))
+          PY
+
+      - name: E2E summary
+        if: always()
+        run: |
+          if test -f linux-capture.json; then
+            python3 scripts/e2e.py --summary linux-capture.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Stop the desktop
+        if: always()
+        timeout-minutes: 2
+        run: scripts/linux-capture-fixture.sh stop "$FIXTURE" || true
+
+      - name: Capture evidence and fixture logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-capture-${{ matrix.arch }}
+          path: |
+            linux-capture.json
+            ${{ runner.temp }}/linux-capture
+            ${{ runner.temp }}/linux-capture-fixture/logs
+            ${{ runner.temp }}/linux-capture-fixture/session.env
           retention-days: 7
 
   linux-app:
