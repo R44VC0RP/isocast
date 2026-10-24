@@ -5,8 +5,8 @@ use anyhow::{Result, bail};
 use isocast_engine::gpu::Gpu;
 use isocast_engine::{
     AudioRender, AudioSink, BrowserControl, BrowserPage, CameraRequest, CaptureFormat,
-    EncoderFrameFormat, LiveAudioSpec, LiveVideoSpec, MediaInfo, MediaPart, MediaReader, Platform,
-    Probe, ScreenTarget, Time, VideoSink, Volume, WriterSpec,
+    EncoderFrameFormat, LiveAudioSpec, LiveVideoSpec, MediaInfo, MediaPart, Platform, Probe,
+    ScreenTarget, Time, VideoSink, Volume, WriterSpec,
 };
 use isocast_protocol::api::Machine;
 use isocast_protocol::devices::{
@@ -23,8 +23,6 @@ use crate::{camera, pipewire_audio, portal};
 #[derive(Clone, Copy, Default)]
 pub struct LinuxPlatform;
 
-pub enum Unsupported {}
-
 // Each native backend owns its shutdown; no capture thread is detached.
 pub enum Capture {
     Screen(portal::Capture),
@@ -36,23 +34,13 @@ fn unsupported(what: &str) -> anyhow::Error {
     anyhow::anyhow!("{what}: not supported by the Linux backend")
 }
 
-impl MediaReader for Unsupported {
-    type Frame = Frame;
-    fn next_video(&mut self) -> Result<Option<(Frame, std::time::Duration)>> {
-        match *self {}
-    }
-    fn next_audio(&mut self) -> Result<Option<(Vec<f32>, std::time::Duration)>> {
-        match *self {}
-    }
-}
-
 impl Platform for LinuxPlatform {
     type Frame = Frame;
     type FramePool = FramePool;
     type Writer = Writer;
     type Capture = Capture;
     type Importer = Importer;
-    type Media = Unsupported;
+    type Media = crate::media::Reader;
     type Playback = crate::playback::Playback;
     type VideoEncoder = Encoder;
     type AudioEncoder = crate::audio::StreamEncoder;
@@ -130,11 +118,14 @@ impl Platform for LinuxPlatform {
     fn open_permission_settings(&self, _permission: PermissionKind) -> Result<String> {
         Err(unsupported("opening capture permission settings"))
     }
-    fn media_info(&self, _path: &Path) -> Result<MediaInfo> {
-        Err(unsupported("media file decoding"))
+    fn media_info(&self, path: &Path) -> Result<MediaInfo> {
+        crate::media::media_info(path)
     }
-    fn open_media(&self, _path: &Path, _part: MediaPart) -> Result<Unsupported> {
-        Err(unsupported("media file decoding"))
+    fn open_media(&self, path: &Path, part: MediaPart) -> Result<crate::media::Reader> {
+        crate::media::open_media(path, part)
+    }
+    fn doctor_checks(&self) -> Vec<isocast_protocol::api::Check> {
+        vec![crate::media::decoders_check()]
     }
     fn probe(&self, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
         match source {
@@ -194,7 +185,8 @@ impl Platform for LinuxPlatform {
             | SourceKind::Color(_)
             | SourceKind::Image(_)
             | SourceKind::Slideshow(_)
-            | SourceKind::Text(_) => Ok(None),
+            | SourceKind::Text(_)
+            | SourceKind::Media(_) => Ok(None),
             other => Err(unsupported(other.label())),
         }
     }

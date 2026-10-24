@@ -167,6 +167,8 @@ pub fn doctor_writing<P: Platform>(
         None,
     ));
 
+    checks.extend(platform.doctor_checks());
+
     let Some(setup) = setup else {
         checks.push(check(
             "setup",

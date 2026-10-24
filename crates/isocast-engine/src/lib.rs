@@ -282,6 +282,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
         None
     }
 
+    /// `doctor` checks only this platform can make, such as which media
+    /// decoders the system provides (Linux's GStreamer plugins).
+    fn doctor_checks(&self) -> Vec<isocast_protocol::api::Check> {
+        Vec::new()
+    }
+
     /// Ask the OS to run the calling thread ahead of background work: it
     /// paces frames or audio in real time (the program, a file's frame
     /// clock, an audio reader, the mix, a file writer).

@@ -46,6 +46,8 @@ Linux bootstrap: --only linux_record runs synthetic bars, tone and color at
 capture hardware or media-file decoder is required. For hosted software Vulkan,
 --hosted --linux-profile 360p30 uses the existing hosted loss/oracle policy;
 strict 720p30 qualification remains a separate run without --hosted.
+--only linux_media plays a looping H.264/AAC MP4 through GStreamer (needs
+gstreamer1.0-libav) beside a test pattern: 60 s strict, 15 s with --hosted.
 
 Linux capture: --only linux_capture records the real capture paths (the
 ScreenCast portal over PipeWire, PipeWire desktop audio, a microphone and a
@@ -95,7 +97,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern (Windows has no media files yet).
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery", "linux_capture") if sys.platform.startswith("linux") else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery", "linux_media", "linux_capture") if sys.platform.startswith("linux") else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -2561,16 +2563,17 @@ def oracle_cells(tag, frame):
     return cells
 
 
-def oracle_fixture(folder, tag, fps, seconds=ORACLE_SECONDS):
+def oracle_fixture(folder, tag, fps, seconds=ORACLE_SECONDS, mp4=False):
     """A clip of `seconds` whose frame n carries (tag, n), with a marker
-    burst at each whole second. Made once per run and folder."""
+    burst at each whole second. Made once per run and folder. `mp4`: an
+    H.264/AAC MP4 instead of a MOV with PCM sound."""
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"oracle-v2-{tag}-{fps}-{seconds}.mov"
+    path = folder / f"oracle-v2-{tag}-{fps}-{seconds}.{'mp4' if mp4 else 'mov'}"
     if path.exists():
         return path
     cols, rows = ORACLE_GRID
     stem = folder / f".oracle-v2-{tag}-{fps}-{seconds}"
-    raw, sound, partial = (Path(f"{stem}.gray"), Path(f"{stem}.wav"), Path(f"{stem}.partial.mov"))
+    raw, sound, partial = (Path(f"{stem}.gray"), Path(f"{stem}.wav"), Path(f"{stem}.partial{path.suffix}"))
     lo, hi = ORACLE_LEVELS
     with open(raw, "wb") as out:
         for n in range(seconds * fps):
@@ -2590,7 +2593,8 @@ def oracle_fixture(folder, tag, fps, seconds=ORACLE_SECONDS):
                   ["-c:v", "prores_ks", "-profile:v", "0", "-pix_fmt", "yuv422p10le"]):
         out = ffmpeg("-f", "rawvideo", "-pixel_format", "gray", "-video_size", f"{cols}x{rows}",
                      "-framerate", fps, "-i", raw, "-i", sound, "-vf", f"scale={width}:{height}:flags=neighbor",
-                     *codec, "-g", fps, "-c:a", "pcm_s16le", "-y", partial, timeout=900, check=False)
+                     *codec, "-g", fps, *(["-c:a", "aac", "-b:a", "192k"] if mp4 else ["-c:a", "pcm_s16le"]),
+                     "-y", partial, timeout=900, check=False)
         if out.returncode == 0:
             break
     else:
@@ -4047,6 +4051,34 @@ def discovery_without_bus(e):
     require("panicked" not in out.stderr, f"discovery without a system bus panicked: {out.stderr.strip()[-400:]}")
     require(seconds <= 2.5, f"discovery without a system bus took {seconds}s, expected about 2s at most")
     return {"exit": out.returncode, "seconds": seconds}
+
+
+def scenario_linux_media(e, cfg, evidence):
+    """A looping H.264/AAC MP4 (the frame oracle's block-code clip, 4 s, a
+    marker burst each second) decoded by GStreamer beside a synthetic test
+    pattern and tone: the program and the media ISO, every picture against
+    the oracle across the loops (the file's own rate, clean wraps), each
+    burst within a frame of its picture, under the run's loss policy.
+    60 s strict; 15 s with --hosted."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    seconds, clip_seconds = (15 if evidence["capabilities"].get("hosted") else 60), 4
+    clip = oracle_fixture(e.root.parent / "fixtures", ORACLE_TAGS["a"], fps, clip_seconds, mp4=True)
+    count = clip_seconds * fps
+    cfg["developer"] = {"enabled": True}
+    cfg["sources"] = [s for s in cfg["sources"] if s["id"] in ("bars", "tone")]
+    cfg["sources"].append({"id": "a", "name": "Clip", "kind": "media", "files": [str(clip)], "loop": True})
+    layout = [("a", (0, 0, 0.75, 0.75))]
+    cfg["scenes"] = [{"id": "main", "name": "Main",
+                      "items": [item("a", layout[0][1], (w, h)), item("bars", (0.75, 0.75, 0.25, 0.25), (w, h))]}]
+    cfg["recording"]["program"]["audio"] = ["a"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["a"], audio=["a"])
+    e.apply(cfg)
+    path, manifest = take(e, seconds)
+    evidence["files"] = check_take(path, manifest, seconds, evidence=evidence)
+    require(sorted(f["source"] for f in manifest["files"]) == ["a", "program"],
+            f"files: {[f['source'] for f in manifest['files']]}")
+    evidence["clip"] = {"frames": count, "loops": round(seconds / clip_seconds, 2)}
+    evidence["t0"] = check_record_take(e, path, manifest, cfg, layout, count, evidence, isos=("a",))
 
 
 LINUX_CAPTURE_SECONDS = 15

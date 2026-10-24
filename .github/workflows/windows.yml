@@ -130,7 +130,7 @@ jobs:
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
           # Ubuntu 24.04's PipeWire 1.0.5 supplies pw_buffer.time; this also installs libspa-0.2-dev.
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev avahi-daemon dbus libpipewire-0.3-dev
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev avahi-daemon dbus libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
           sudo systemctl start avahi-daemon
           mkdir -m 700 "$XDG_RUNTIME_DIR"
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
@@ -151,13 +151,14 @@ jobs:
           # The client's own tests on Linux too (the daemon's local and remote transports).
           cargo test --release --locked -p isocast-client
           cargo test --release --locked -p isocast-discovery
+          GST_PLUGIN_FEATURE_RANK=avdec_h264:NONE,openh264dec:NONE,v4l2h264dec:NONE,vah264dec:NONE cargo test --release --locked -p isocast-platform-linux missing_h264_decoder -- --ignored
           cargo test --release --locked -p isocast-discovery avahi_advertise_browse_collision_and_withdraw -- --ignored --test-threads=1
 
       # Four hosted vCPUs saturate on three 720p software encodes plus
       # lavapipe. Use the existing hosted policy for this integrity smoke;
       # the six-vCPU arm64 VM separately qualifies strict 720p30 zero drops.
-      - name: Synthetic program, ISOs and a stream (hosted 360p30)
-        run: python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
+      - name: Synthetic program, ISOs, a media file and a stream (hosted 360p30)
+        run: python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only linux_media --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
 
       - name: E2E summary
         if: always()
@@ -211,7 +212,7 @@ jobs:
           echo "FIXTURE=$RUNNER_TEMP/linux-capture-fixture" >> "$GITHUB_ENV"
           echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base
           scripts/linux-capture-fixture.sh deps
           rustup toolchain install stable --profile minimal
           rustup default stable
@@ -307,7 +308,7 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
           mkdir -m 700 "$XDG_RUNTIME_DIR"
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable

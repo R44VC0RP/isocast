@@ -141,6 +141,18 @@ WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
+System libraries
+================
+
+The Linux build links dynamically to libraries of the system it runs on;
+they are not distributed with Isocast:
+- GStreamer 1.x (https://gstreamer.freedesktop.org), LGPL-2.1-or-later, decodes
+  media file sources. Isocast uses the distribution's own copy and the codec
+  plugins (such as gstreamer1.0-libav) it loads; their source is available
+  from the distribution or https://gitlab.freedesktop.org/gstreamer/gstreamer.
+- PipeWire (https://pipewire.org), MIT, for screen, camera and audio capture
+  and audio monitoring.
+
 Opus encoder
 ============
 
@@ -444,7 +456,7 @@ License 2.0. libxaac's NOTICE and its copy of the licence follow.
    See the License for the specific language governing permissions and
    limitations under the License.
 
-Rust crates (765)
+Rust crates (788)
 =================
 
 Crate, version, licence, link.
@@ -593,6 +605,9 @@ async-trait 0.1.92
 atomic-waker 1.1.2
   Apache-2.0 OR MIT
   https://github.com/smol-rs/atomic-waker
+atomic_refcell 0.1.14
+  Apache-2.0 OR MIT
+  https://github.com/mozilla/atomic_refcell
 atspi 0.29.0
   Apache-2.0 OR MIT
   https://github.com/odilia-app/atspi
@@ -1196,9 +1211,21 @@ gif 0.14.2
 gimli 0.33.0
   MIT OR Apache-2.0
   https://github.com/gimli-rs/gimli
+gio-sys 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
 gl_generator 0.14.0
   Apache-2.0
   https://github.com/brendanzab/gl-rs/
+glib 0.22.10
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
+glib-macros 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
+glib-sys 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
 glob 0.3.4
   MIT OR Apache-2.0
   https://github.com/rust-lang/glob
@@ -1223,6 +1250,9 @@ glutin_glx_sys 0.6.1
 glutin_wgl_sys 0.6.1
   Apache-2.0
   https://github.com/rust-windowing/glutin
+gobject-sys 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
 gpu-allocator 0.28.0
   MIT OR Apache-2.0
   https://github.com/Traverse-Research/gpu-allocator
@@ -1232,6 +1262,42 @@ grid 1.0.1
 group 0.13.0
   MIT/Apache-2.0
   https://github.com/zkcrypto/group
+gstreamer 0.25.4
+  MIT OR Apache-2.0
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-app 0.25.2
+  MIT OR Apache-2.0
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-app-sys 0.25.4
+  MIT
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-audio 0.25.4
+  MIT OR Apache-2.0
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-audio-sys 0.25.4
+  MIT
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-base 0.25.4
+  MIT OR Apache-2.0
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-base-sys 0.25.4
+  MIT
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-pbutils 0.25.4
+  MIT OR Apache-2.0
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-pbutils-sys 0.25.4
+  MIT
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-sys 0.25.4
+  MIT
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-video 0.25.4
+  MIT OR Apache-2.0
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gstreamer-video-sys 0.25.4
+  MIT
+  https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
 half 2.7.1
   MIT OR Apache-2.0
   https://github.com/VoidStarKat/half-rs
@@ -1427,6 +1493,9 @@ khronos-egl 6.0.0
 khronos_api 3.1.0
   Apache-2.0
   https://github.com/brendanzab/gl-rs/
+kstring 2.0.5
+  MIT OR Apache-2.0
+  https://github.com/cobalt-org/kstring
 kurbo 0.13.1
   Apache-2.0 OR MIT
   https://github.com/linebender/kurbo
@@ -1538,6 +1607,9 @@ moxcms 0.8.1
 muda 0.19.3
   Apache-2.0 OR MIT
   https://github.com/tauri-apps/muda
+muldiv 1.0.1
+  MIT
+  https://github.com/sdroege/rust-muldiv
 multiversion_no_op 1.0.0
   Apache-2.0 OR MIT
   https://github.com/hsivonen/multiversion_no_op
@@ -1580,6 +1652,9 @@ num-conv 0.2.2
 num-integer 0.1.47
   MIT OR Apache-2.0
   https://github.com/rust-num/num-integer
+num-rational 0.4.2
+  MIT OR Apache-2.0
+  https://github.com/rust-num/num-rational
 num-traits 0.2.19
   MIT OR Apache-2.0
   https://github.com/rust-num/num-traits
@@ -1712,6 +1787,9 @@ openssl-probe 0.2.1
 openssl-sys 0.9.117
   MIT
   https://github.com/rust-openssl/rust-openssl
+option-operations 0.6.1
+  MIT/Apache-2.0
+  https://github.com/fengalin/option-operations
 opus2 0.4.0
   MIT/Apache-2.0
   https://github.com/cijiugechu/opus2
@@ -2241,6 +2319,9 @@ sys-locale 0.3.2
   MIT OR Apache-2.0
   https://github.com/1Password/sys-locale
 system-deps 7.0.8
+  MIT OR Apache-2.0
+  https://github.com/gdesmott/system-deps
+system-deps 9.0.1
   MIT OR Apache-2.0
   https://github.com/gdesmott/system-deps
 taffy 0.10.1
