@@ -2,6 +2,7 @@
 #![cfg(target_os = "linux")]
 
 mod audio;
+mod browser;
 mod camera;
 mod encoder;
 pub mod frames;

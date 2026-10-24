@@ -226,7 +226,9 @@ jobs:
           echo "FIXTURE=$RUNNER_TEMP/linux-capture-fixture" >> "$GITHUB_ENV"
           echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base
+          # WebKitGTK 6 and GTK 4 build the browser helper; libgtk-4-bin has
+          # gtk4-broadwayd, its private display.
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev libwebkitgtk-6.0-dev libgtk-4-dev libgtk-4-bin libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base
           scripts/linux-capture-fixture.sh deps
           rustup toolchain install stable --profile minimal
           rustup default stable
@@ -243,9 +245,9 @@ jobs:
           key: linux-capture-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build daemon and CLI
+      - name: Build daemon, CLI and browser helper
         timeout-minutes: 30
-        run: cargo build --release --locked -p isocast-daemon -p isocast-cli
+        run: cargo build --release --locked -p isocast-daemon -p isocast-cli -p isocast-browser
 
       # Cisco's OpenH264 (the recordings encode H.264 with it).
       - name: Cache Cisco's OpenH264
@@ -267,16 +269,19 @@ jobs:
           . "$FIXTURE/session.env"
           cargo test --release --locked -p isocast-platform-linux stream_callbacks_run_on_the_worker_thread -- --ignored
 
-      - name: Record screen, desktop audio, microphone and camera (hosted rules)
+      - name: Record screen, desktop audio, microphone, camera and a browser source (hosted rules)
         timeout-minutes: 20
         run: |
           . "$FIXTURE/session.env"
-          python3 scripts/e2e.py --hosted --only linux_capture --linux-profile 360p30 --codec h264 \
+          python3 scripts/e2e.py --hosted --only linux_capture --only linux_browser --linux-profile 360p30 --codec h264 \
             --work "$RUNNER_TEMP/linux-capture" --keep-failures --report linux-capture.json
-          # A skipped scenario would pass silently: it must have run.
+          # A skipped scenario would pass silently: both must have run.
           python3 - <<'PY'
           import json
           r = {s["name"]: s for s in json.load(open("linux-capture.json"))["scenarios"]}
+          b = r.get("linux_browser")
+          assert b and b["status"] == "PASS", f"linux_browser did not pass: {b and (b['status'], b.get('reason'))}"
+          print("browser:", {k: b["evidence"].get(k) for k in ("web_codes", "program_codes", "alpha", "tones", "writer_drops")})
           s = r.get("linux_capture")
           assert s and s["status"] == "PASS", f"linux_capture did not pass: {s and (s['status'], s.get('reason'))}"
           ev = s["evidence"]
@@ -340,7 +345,7 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev libwebkitgtk-6.0-dev libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
           mkdir -m 700 "$XDG_RUNTIME_DIR"
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
@@ -362,13 +367,13 @@ jobs:
       - name: Cisco's OpenH264
         run: packaging/linux/install.sh --openh264
 
-      - name: Build app, engine and CLI
-        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
+      - name: Build app, engine, CLI and browser helper
+        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser
 
       - name: App checks
         run: |
-          cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -- -D warnings
-          cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics
+          cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -p isocast-browser -- -D warnings
+          cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics -p isocast-browser
 
       - name: Offscreen snapshot against a local engine
         run: |
@@ -465,7 +470,7 @@ jobs:
           echo "ISOCAST_WINDOWS_BUILD_VERSION=$ISOCAST_WINDOWS_BUILD_VERSION" >> "$GITHUB_ENV"
 
       - name: Build native services and test binaries (do not run)
-        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts
+        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts -p isocast-browser -p isocast-browser-protocol
 
       # Synchronous MF AAC transactions: serial, after the native build so
       # the test binary is cached. Package-only features can still rebuild
@@ -473,6 +478,16 @@ jobs:
       - name: Check Media Foundation AAC transactions
         timeout-minutes: 30
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
+
+      # Browser sources: the isocastd side against fake helpers (Python
+      # scripts speaking the helper protocol: crash, hang, restart, sizes,
+      # the job that ends WebView2's processes), and the helper's own checks.
+      - name: Check browser sources
+        timeout-minutes: 20
+        run: |
+          cargo clippy --locked --all-targets -p isocast-browser -p isocast-browser-protocol -- -D warnings
+          cargo test --locked -p isocast-browser -p isocast-browser-protocol
+          cargo test --locked -p isocast-platform-windows --lib browser:: -- --test-threads=1
 
       - name: Install recording recovery decoder
         timeout-minutes: 10
@@ -503,11 +518,38 @@ jobs:
       # Host-specific recording qualification uses optimized services, not the debug
       # binaries used for recovery/contract checks above.
       - name: Build recording qualification services
-        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli --bins
+        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli -p isocast-browser --bins
 
       - name: Qualify headless profiles and protect recording by pausing previews
         timeout-minutes: 9
         run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
+
+      # A page through isocast-browser.exe (WebView2 on this runner's
+      # console session, software rendering): frame codes advance in the ISO
+      # and program, alpha blends over the layer beneath, the page's tone is
+      # in both files, zero writer drops.
+      - name: Record a browser source
+        timeout-minutes: 10
+        run: |
+          python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_browser --windows-profile 180p30 --codec h264 --timeout 300 --work "$RUNNER_TEMP/windows-browser" --keep-failures --report windows-browser.json
+          # A skipped scenario would pass silently: it must have run.
+          python - <<'PY'
+          import json
+          b = {s["name"]: s for s in json.load(open("windows-browser.json"))["scenarios"]}.get("win_browser")
+          assert b and b["status"] == "PASS", f"win_browser did not pass: {b and (b['status'], b.get('reason'))}"
+          print("browser:", {k: b["evidence"].get(k) for k in ("first_picture_s", "web_codes", "program_codes", "alpha", "tones", "writer_drops")})
+          PY
+
+      - name: Keep browser source evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-browser
+          path: |
+            windows-browser.json
+            ${{ runner.temp }}/windows-browser
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Keep preview recording evidence
         if: ${{ !cancelled() }}
@@ -714,7 +756,7 @@ jobs:
         run: |
           $folder = "$env:RUNNER_TEMP/windows-build-diagnostics"
           New-Item -ItemType Directory -Force $folder | Out-Null
-          Copy-Item target/debug/isocast.exe, target/debug/isocastd.exe, target/debug/isocast-ui.exe, target/debug/isocast-capture.exe $folder
+          Copy-Item target/debug/isocast.exe, target/debug/isocastd.exe, target/debug/isocast-ui.exe, target/debug/isocast-capture.exe, target/debug/isocast-browser.exe $folder
           if ($env:ISOCAST_WINDOWS_CRT) { Copy-Item "$env:ISOCAST_WINDOWS_CRT\*.dll" $folder }
           Get-ChildItem $folder -File | ForEach-Object { Get-FileHash $_.FullName -Algorithm SHA256 } | ConvertTo-Json | Set-Content "$folder/hashes.json"
 

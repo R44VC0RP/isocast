@@ -48,6 +48,8 @@ pub enum Capture {
     /// Owns only this process's reader. A shared Frame Server attachment
     /// never stops or reconfigures the app that controls the camera.
     Camera(CameraCapture),
+    /// A page in its own isocast-browser.exe helper (and job).
+    Browser(crate::browser::BrowserCapture),
 }
 
 impl WindowsPlatform {
@@ -488,7 +490,8 @@ impl Platform for WindowsPlatform {
             | SourceKind::Color(_)
             | SourceKind::Image(_)
             | SourceKind::Slideshow(_)
-            | SourceKind::Text(_) => Ok(None),
+            | SourceKind::Text(_)
+            | SourceKind::Browser(_) => Ok(None),
             other => Err(unsupported(&format!("probing {} sources", other.label()))),
         }
     }
@@ -810,7 +813,7 @@ impl Platform for WindowsPlatform {
     fn camera_metadata(&self, capture: &Capture) -> Option<CameraMetadataReader> {
         match capture {
             Capture::Camera(camera) => Some(camera.metadata_reader()),
-            Capture::Screen(_) | Capture::Audio(_) => None,
+            Capture::Screen(_) | Capture::Audio(_) | Capture::Browser(_) => None,
         }
     }
 
@@ -840,11 +843,19 @@ impl Platform for WindowsPlatform {
 
     fn capture_browser(
         &self,
-        _page: &BrowserPage<'_>,
-        _video: VideoSink<Frame>,
-        _audio: Option<AudioSink>,
+        page: &BrowserPage<'_>,
+        video: VideoSink<Frame>,
+        audio: Option<AudioSink>,
     ) -> Result<(Capture, CaptureFormat, Arc<dyn BrowserControl>)> {
-        Err(unsupported("browser sources"))
+        let pool = self.frame_pool(page.width, page.height)?;
+        crate::browser::start(
+            crate::browser::Helper::installed()?,
+            page,
+            pool,
+            video,
+            audio,
+        )
+        .map(|(capture, format, control)| (Capture::Browser(capture), format, control))
     }
 
     fn capture_application_audio(&self, _app: &str, _sink: AudioSink) -> Result<(Capture, u32)> {

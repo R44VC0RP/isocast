@@ -1,8 +1,9 @@
 #!/bin/sh
 # Package a Linux build: dist/isocast-linux-<arch>.tar.gz holding isocast,
-# isocastd, isocast-ui (from BIN_DIR, default target/release), the desktop
-# entry, icon, install.sh and README.txt (packaging/linux). No OpenH264:
-# install.sh downloads Cisco's binary on the user's computer.
+# isocastd, isocast-browser (its browser sources' helper), isocast-ui (from
+# BIN_DIR, default target/release), the desktop entry, icon, install.sh and
+# README.txt (packaging/linux). No OpenH264: install.sh downloads Cisco's
+# binary on the user's computer.
 #
 #   scripts/package-linux.sh [BIN_DIR]
 set -eu
@@ -15,7 +16,7 @@ name=isocast-linux-$arch
 out=dist/$name
 rm -rf "$out" "dist/$name.tar.gz"
 mkdir -p "$out"
-for exe in isocast isocastd isocast-ui; do
+for exe in isocast isocastd isocast-browser isocast-ui; do
   test -x "$bin/$exe" || { echo "package-linux: no $bin/$exe" >&2; exit 1; }
   # No OpenH264 compiled in: Cisco's licence covers only its own binary,
   # which install.sh downloads (crates/isocast-openh264 loads it).

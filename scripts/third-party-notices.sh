@@ -161,6 +161,43 @@ they are not distributed with Isocast:
 - PipeWire (https://pipewire.org), MIT, for screen, camera and audio capture
   and audio monitoring.""")
 
+section("WebView2 loader")
+print("""Windows browser sources (isocast-browser.exe) link Microsoft's static
+WebView2 loader, WebView2LoaderStatic.lib from the Microsoft.Web.WebView2 SDK
+1.0.3800.47 (https://www.nuget.org/packages/Microsoft.Web.WebView2), as
+bundled by webview2-com-sys. Pages run in the Microsoft Edge WebView2 Runtime
+installed with Windows, which is not redistributed with Isocast. The SDK's
+licence follows.
+
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * The name of Microsoft Corporation, or the names of its contributors
+may not be used to endorse or promote products derived from this
+software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+""")
+
 section("Opus encoder")
 print("Program WebRTC audio uses libopus (https://opus-codec.org), bundled by libopus_sys.")
 opus = next(p for p in packages.values() if p["name"] == "libopus_sys")
