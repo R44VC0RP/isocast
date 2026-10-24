@@ -313,10 +313,12 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   320×180@30 (2026-10-24), advisory rather than local capacity. The preview CI gate
   uses this fixed reference, not the highest single 10s passing profile: five hosted
   baseline samples lost frames at 270p twice and 240p once, while 180p headless passed
-  all five. Five fresh hosted samples (AMD EPYC and Intel Xeon) each passed 300/300
-  headless and 600/600 preview-take frames at 180p with zero loss. The earlier main
-  failure lost one of 600 preview-take frames at 240p. This is a bounded qualification,
-  not proof of a zero long-run flake rate.
+  all five. Matched-duration qualification on five fresh hosted AMD EPYC/Intel Xeon
+  runners passed 20s headless and 20s with two paused shared previews: 600/600 frames
+  per take at 180p30, then 720/720 at 180p36, with zero loss across all 13,200 frames.
+  That measures 20% additional frame-rate reserve, not resolution or machine capacity;
+  the reference stays 320×180@30. The earlier main failure lost one of 600 preview-take
+  frames at 240p. This is bounded qualification, not proof of a zero long-run flake rate.
   Zero drops/repeats/audio loss and pause/resume checks remain strict. Evidence:
   windows-preview-flake scratch/REPORT.md; earlier history: windows-perf scratch/issue128/REPORT.md.
 
