@@ -16,3 +16,5 @@ mod system;
 mod writer;
 
 pub use platform::LinuxPlatform;
+
+// CI budget measurement (never merged).
