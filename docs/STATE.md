@@ -285,6 +285,14 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 6. Gotchas that still bite
 
+- 2026-10-24 (#116): Windows record workspaces carry a locked daemon PID/creation-time
+  marker. Startup reclaims only dead, day-old marked workspaces after #118 recovery;
+  incomplete recovery, media inside the workspace, unknown files and unmarked legacy
+  workspaces are retained. Normal successful CLI close already removes its workspace.
+- 2026-10-24 (#117): Isolated record daemons read the parent's validated machine
+  profile through `ISOCAST_MACHINE_PROFILE`, without calibrating or writing beside it.
+  Exact JSON float round-trips preserve fractional Windows RAM in the machine identity.
+  Setup, tune memory and Windows NVENC preset-budget files remain private.
 - 2026-10-24: A Linux PipeWire worker's main loop must stay entered on its own thread
   (`isocast-platform-linux/src/pw_loop.rs` `WorkerLoop`). pipewire-rs `Loop::iterate` enters and
   leaves per call; PipeWire 1.0.5 then runs cross-thread invokes inline (`loop.c` `loop_invoke`,

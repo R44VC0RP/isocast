@@ -149,10 +149,28 @@ pub fn memory_path(setup_file: &Path) -> PathBuf {
     setup_file.with_extension("tune.json")
 }
 
-/// The machine calibration beside a tune-memory file. Named recording
-/// profiles share it; isolated setup files do not.
+/// A machine calibration another engine owns, which this one only reads:
+/// `$ISOCAST_MACHINE_PROFILE`. A parent-owned `isocast record` daemon is
+/// given its main engine's, so its estimates use the same measurements
+/// while its setup and tune memory stay private.
+pub const INHERITED_PROFILE: &str = "ISOCAST_MACHINE_PROFILE";
+
+/// The machine calibration this engine reads, if it is another engine's.
+pub fn inherited_profile() -> Option<PathBuf> {
+    std::env::var_os(INHERITED_PROFILE)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The machine calibration this engine reads: an inherited one (read-only),
+/// else the one beside its tune-memory file. Named recording profiles
+/// share it; isolated setup files keep their own unless given one.
 pub fn profile_path(memory: &Path) -> PathBuf {
-    memory.with_extension("").with_extension("machine.json")
+    profile_path_with(memory, inherited_profile())
+}
+
+fn profile_path_with(memory: &Path, inherited: Option<PathBuf>) -> PathBuf {
+    inherited.unwrap_or_else(|| memory.with_extension("").with_extension("machine.json"))
 }
 
 pub fn load_profile(
@@ -292,4 +310,72 @@ pub fn start_warning(memory: &Path, machine: &str, workload: &Workload) -> Optio
         None => text.push_str("; run `isocast tune` for the closest change that fits"),
     }
     Some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isocast_protocol::machine::{MEASUREMENT_VERSION, MachineProfile, PROFILE_SCHEMA};
+    use serde_json::json;
+
+    fn machine() -> Machine {
+        Machine {
+            chip: "Apple M2".into(),
+            // Windows reports physical RAM minus reservations, not an integer
+            // GiB count. It must survive JSON persistence bit for bit.
+            memory_gb: 127.89286804199219,
+            cores: 8,
+            os: "macOS 26.7".into(),
+            hardware_encoders: Vec::new(),
+        }
+    }
+
+    fn profile(measured_at: &str) -> MachineProfile {
+        serde_json::from_value(json!({
+            "schema_version": PROFILE_SCHEMA, "measurement_version": MEASUREMENT_VERSION,
+            "app_version": env!("CARGO_PKG_VERSION"), "app_build": "117",
+            "measured_at": measured_at, "machine": machine(), "seconds": 3.0,
+            "graphics": [], "skipped": [], "complete": true, "notes": [],
+            "memory_copy_bytes_per_second": null, "disk_write_bytes_per_second": null,
+            "encoders": [{"codec":"prores422","bit_depth":8,"width":1920,"height":1080,
+                "fps":60,"sessions":2,"frames":300,"seconds":1.0,"frames_per_second":300.0,
+                "resource":"recording_writer","backend":"videotoolbox","evidence":"prores_resource",
+                "rate_control":"constant_quality","quality":70,"hardware_accelerated":true,
+                "process_cpu_seconds_per_frame":0.0001}]
+        }))
+        .unwrap()
+    }
+
+    /// An isolated engine given its main engine's calibration loads that
+    /// one (still checked against build and machine), not one beside its
+    /// own setup file; without one it keeps its own, as before.
+    #[test]
+    fn an_inherited_machine_profile_replaces_the_private_one() {
+        let root = std::env::temp_dir().join(format!("isocast-capacity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("isolated")).unwrap();
+        let main = profile_path_with(&memory_path(&root.join("setup.toml")), None);
+        assert_eq!(main, root.join("setup.machine.json"));
+        let private = memory_path(&root.join("isolated/setup.toml"));
+        assert_eq!(
+            profile_path_with(&private, None),
+            root.join("isolated/setup.machine.json")
+        );
+        std::fs::write(&main, serde_json::to_vec(&profile("main")).unwrap()).unwrap();
+        std::fs::write(
+            profile_path_with(&private, None),
+            serde_json::to_vec(&profile("private")).unwrap(),
+        )
+        .unwrap();
+
+        let inherited = profile_path_with(&private, Some(main.clone()));
+        assert_eq!(inherited, main);
+        let loaded = load_profile(&inherited, &machine(), "117").expect("main profile");
+        assert_eq!(loaded.measured_at, "main");
+        let own = load_profile(&profile_path_with(&private, None), &machine(), "117");
+        assert_eq!(own.unwrap().measured_at, "private");
+        // Inheriting never bypasses validation: another build's is ignored.
+        assert!(load_profile(&inherited, &machine(), "118").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -97,6 +97,8 @@ mod debug;
 mod diagnostics;
 mod governor;
 mod hotkeys;
+#[cfg(windows)]
+mod isolated;
 mod library;
 mod machine;
 mod nle;
@@ -180,6 +182,14 @@ fn main() -> ExitCode {
             isocast_diagnostics::ready();
             isocast_diagnostics::diagnostic!("isocastd listening on {}", socket.display());
             let daemon = Arc::new(Daemon::default());
+            #[cfg(windows)]
+            let _workspace_owner = match isolated::register() {
+                Ok(owner) => owner,
+                Err(error) => {
+                    isocast_diagnostics::diagnostic!("error"; "could not register isolated workspace: {error:#}");
+                    return ExitCode::FAILURE;
+                }
+            };
             if std::env::args_os().any(|arg| arg == "--exit-on-stdin-close") {
                 let owned = daemon.clone();
                 // stdin is a lifetime pipe, not a second control protocol.
@@ -214,6 +224,10 @@ fn main() -> ExitCode {
             daemon.load_setup();
             daemon.load_machine();
             daemon.recover_recordings();
+            #[cfg(windows)]
+            if _workspace_owner.is_none() {
+                isolated::sweep(&daemon);
+            }
             daemon.load_data();
             daemon.load_projectors();
             diagnostics::start(&daemon);

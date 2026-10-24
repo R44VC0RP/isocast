@@ -55,4 +55,5 @@ pub use nvenc::{
 };
 pub use output::OutputPool;
 pub use platform::{Capture, Unsupported, WindowsPlatform};
+pub use system::process_started;
 pub use writer::VideoWriter;

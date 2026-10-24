@@ -488,6 +488,25 @@ jobs:
         timeout-minutes: 10
         run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json
 
+      - name: Verify isolated workspace cleanup and inherited machine profile
+        timeout-minutes: 17
+        shell: pwsh
+        run: ./scripts/windows-isolated-ci.ps1
+
+      - name: Delete isolated test task even after cancellation
+        if: ${{ always() }}
+        shell: pwsh
+        run: ./scripts/windows-isolated-ci.ps1 -CleanupOnly
+
+      - name: Keep isolated task evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-isolated-task
+          path: ${{ runner.temp }}/windows-isolated-task
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Keep recording recovery evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
