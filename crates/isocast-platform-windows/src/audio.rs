@@ -160,7 +160,7 @@ pub fn audio_devices() -> Result<Vec<AudioDevice>> {
                 let enumerator = enumerator()?;
                 let mut devices = Vec::new();
                 for flow in [eCapture, eRender] {
-                    let identities = match endpoint_identities(&enumerator, flow) {
+                    let identities = match endpoint_identities(&enumerator, flow, true) {
                         Ok(identities) => identities,
                         Err(error) => {
                             eprintln!("Windows audio devices: omitting flow {}: {error:#}", flow.0);
@@ -372,7 +372,7 @@ impl<T> Drop for ComAllocation<T> {
     }
 }
 
-fn enumerator() -> Result<IMMDeviceEnumerator> {
+pub(crate) fn enumerator() -> Result<IMMDeviceEnumerator> {
     Ok(unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?)
 }
 
@@ -384,7 +384,10 @@ fn device_id(device: &IMMDevice) -> Result<String> {
     Ok(unsafe { PWSTR(id.0).to_string() }?)
 }
 
-fn default_id(enumerator: &IMMDeviceEnumerator, flow: EDataFlow) -> Result<Option<String>> {
+pub(crate) fn default_id(
+    enumerator: &IMMDeviceEnumerator,
+    flow: EDataFlow,
+) -> Result<Option<String>> {
     match unsafe { enumerator.GetDefaultAudioEndpoint(flow, eConsole) } {
         Ok(device) => Ok(Some(device_id(&device)?)),
         Err(error) if error.code() == HRESULT::from_win32(ERROR_NOT_FOUND.0) => Ok(None),
@@ -407,10 +410,10 @@ fn reported_default_id(enumerator: &IMMDeviceEnumerator, flow: EDataFlow) -> Opt
     }
 }
 
-struct EndpointIdentity {
+pub(crate) struct EndpointIdentity {
     raw: IMMDevice,
-    id: String,
-    name: String,
+    pub(crate) id: String,
+    pub(crate) name: String,
 }
 
 impl EndpointIdentity {
@@ -444,9 +447,10 @@ impl EndpointIdentity {
 
 /// Identity discovery never activates an audio client. An unrelated endpoint
 /// that disappears or has unreadable properties is diagnosed and skipped.
-fn endpoint_identities(
+pub(crate) fn endpoint_identities(
     enumerator: &IMMDeviceEnumerator,
     flow: EDataFlow,
+    report_errors: bool,
 ) -> Result<Vec<EndpointIdentity>> {
     let collection = unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }?;
     let mut endpoints = Vec::new();
@@ -455,10 +459,11 @@ fn endpoint_identities(
             (|| -> Result<_> { EndpointIdentity::new(unsafe { collection.Item(index) }?, flow) })();
         match identity {
             Ok(identity) => endpoints.push(identity),
-            Err(error) => eprintln!(
+            Err(error) if report_errors => eprintln!(
                 "Windows audio devices: skipping flow {} endpoint {index}: {error:#}",
                 flow.0
             ),
+            Err(_) => {}
         }
     }
     Ok(endpoints)
@@ -500,7 +505,7 @@ fn resolve(
     }
     // Only a name query needs enumeration. Resolve it before any mix query;
     // once selected, failures propagate without trying a different endpoint.
-    let mut endpoints = endpoint_identities(enumerator, flow)?;
+    let mut endpoints = endpoint_identities(enumerator, flow, true)?;
     let lower = query.to_lowercase();
     let exact_name = endpoints
         .iter()
@@ -536,14 +541,14 @@ fn resolve(
     );
 }
 
-struct Endpoint {
+pub(crate) struct Endpoint {
     raw: IMMDevice,
-    client: IAudioClient,
-    device: AudioDevice,
-    mask: u32,
+    pub(crate) client: IAudioClient,
+    pub(crate) device: AudioDevice,
+    pub(crate) mask: u32,
 }
 
-fn selected_endpoint(
+pub(crate) fn selected_endpoint(
     enumerator: &IMMDeviceEnumerator,
     flow: EDataFlow,
     query: &str,

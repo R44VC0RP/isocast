@@ -26,6 +26,7 @@ mod output;
 mod p010;
 mod permissions;
 mod platform;
+mod playback;
 mod system;
 mod writer;
 

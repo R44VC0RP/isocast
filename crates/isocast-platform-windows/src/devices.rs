@@ -14,7 +14,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use isocast_engine::{CaptureFormat, Probe, ScreenTarget};
 use isocast_protocol::devices::{
-    Camera, CameraKind, Devices, Display, FrameRateRange, Microphone, VideoFormat, Window,
+    AudioOutput, Camera, CameraKind, Devices, Display, FrameRateRange, Microphone, VideoFormat,
+    Window,
 };
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
@@ -123,8 +124,6 @@ pub(crate) fn devices() -> Result<Devices> {
          check for this unpackaged desktop app. Unknown means neither denied nor not asked yet. \
          Windows Camera / Microphone privacy settings can block desktop apps."
             .to_string(),
-        "Audio outputs are not listed: monitoring playback is not supported on Windows yet."
-            .to_string(),
     ];
     let displays = displays(&mut notes).unwrap_or_else(|error| {
         notes.push(format!("Displays could not be listed: {error:#}"));
@@ -199,29 +198,38 @@ pub(crate) fn devices() -> Result<Devices> {
          it or be left out. kind is not reported (other)."
             .into(),
     );
-    let microphones = match crate::audio_devices() {
-        Ok(devices) => devices
-            .into_iter()
-            .filter(|device| device.input)
-            .map(|device| Microphone {
-                id: device.id,
-                name: device.name,
-                model: String::new(),
-                manufacturer: String::new(),
-                default: device.default,
-                sample_rates: (device.sample_rate > 0)
-                    .then(|| f64::from(device.sample_rate))
-                    .into_iter()
-                    .collect(),
-                channels: device.channels,
-                channel_names: Vec::new(),
-            })
-            .collect(),
-        Err(error) => {
-            notes.push(format!("Microphones could not be listed: {error:#}"));
-            Vec::new()
-        }
-    };
+    let audio = crate::audio_devices().unwrap_or_else(|error| {
+        notes.push(format!("Audio devices could not be listed: {error:#}"));
+        Vec::new()
+    });
+    let audio_outputs = audio
+        .iter()
+        .filter(|device| !device.input)
+        .map(|device| AudioOutput {
+            id: device.id.clone(),
+            name: device.name.clone(),
+            default: device.default,
+            sample_rate: f64::from(device.sample_rate),
+            channels: device.channels,
+        })
+        .collect();
+    let microphones = audio
+        .into_iter()
+        .filter(|device| device.input)
+        .map(|device| Microphone {
+            id: device.id,
+            name: device.name,
+            model: String::new(),
+            manufacturer: String::new(),
+            default: device.default,
+            sample_rates: (device.sample_rate > 0)
+                .then(|| f64::from(device.sample_rate))
+                .into_iter()
+                .collect(),
+            channels: device.channels,
+            channel_names: Vec::new(),
+        })
+        .collect();
     notes.push(
         "Microphone sample_rates is each endpoint's current shared-mode mix rate; captures are \
          always delivered at 48000 Hz, resampled by Windows from other rates. Model and \
@@ -233,7 +241,7 @@ pub(crate) fn devices() -> Result<Devices> {
         windows,
         cameras,
         microphones,
-        audio_outputs: Vec::new(),
+        audio_outputs,
         audio_apps: Vec::new(),
         permissions: crate::permissions::states(),
         notes,

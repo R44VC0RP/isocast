@@ -474,6 +474,11 @@ jobs:
         timeout-minutes: 30
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
 
+      - name: Check monitoring channel mapping and conversion
+        run: |
+          cargo clippy --locked --all-targets -j 1 -p isocast-platform-windows -- -D warnings
+          cargo test --locked -j 1 -p isocast-platform-windows --lib playback::tests
+
       - name: Install recording recovery decoder
         timeout-minutes: 10
         shell: pwsh
@@ -503,11 +508,35 @@ jobs:
       # Host-specific recording qualification uses optimized services, not the debug
       # binaries used for recovery/contract checks above.
       - name: Build recording qualification services
-        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli --bins
+        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli -p isocast-platform-windows --bins --example monitor-loopback
 
       - name: Qualify headless profiles and protect recording by pausing previews
         timeout-minutes: 9
         run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
+
+      - name: Monitoring startup preserves recording audio (no-device skip on hosted Windows)
+        timeout-minutes: 5
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_monitor --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-monitor" --keep --report windows-monitor.json
+
+      - name: Keep monitoring hardware qualification binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-monitor-binaries
+          path: |
+            target/release/isocastd.exe
+            target/release/isocast.exe
+            target/release/examples/monitor-loopback.exe
+          retention-days: 7
+
+      - name: Keep monitoring evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-monitoring
+          path: |
+            windows-monitor.json
+            ${{ runner.temp }}/windows-monitor
+          retention-days: 14
 
       - name: Keep preview recording evidence
         if: ${{ !cancelled() }}

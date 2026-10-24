@@ -16,6 +16,21 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Windows gaps:** CPU and resident RAM are still above OBS. Ryan's targets: at most half OBS's CPU, RAM below OBS,
   faster first preview, stop under 20 ms, zero drops. Missing: scaled streaming, replay buffer, media files, NLE XML
   export (refused; OTIO works). Windows work is tracked in #105 and its follow-up issues.
+- **Windows monitoring (2026-10-24):** WASAPI shared/event-driven output on a dedicated MMCSS Audio worker
+  (the same class as capture; monitoring must not outrank recording);
+  cached endpoint discovery keeps device startup off recording audio ingress. `devices.audio_outputs` lists outputs;
+  id/name selection and default following are supported. Exon-desk proof: 130 seconds of gap-free loopback,
+  mid-take enable and a second-output switch; 160-second program + two ISOs each retained 4,800 frames and
+  160 beeps with zero audio dropouts. Both outputs used 30 ms buffers. Hosted Windows verifies the explicit
+  no-output error before skipping playback. Physical unplug/default-change recovery is implemented but unqualified;
+  recovery diagnostics name the current endpoint, while monitor status retains the initially resolved name.
+  **System-audio caveat:** starting Windows endpoint-loopback capture while any source monitors is refused:
+  the error mentions `exclude_own=false`, but that is an internal argument, not a user setting. Turn off
+  source monitoring before starting system-audio capture and leave it off for the take. Enabling monitoring
+  mid-take does not reopen the existing loopback capture; monitoring on the captured default output is then
+  recorded too (duplicate audio/echo, potentially feedback). Today, use source monitoring without system-audio
+  capture, or capture system audio with monitoring off. Selecting another monitoring output does not bypass
+  the startup refusal. The earlier 130-second hardware proof predates the Audio-class/startup review fixes.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
