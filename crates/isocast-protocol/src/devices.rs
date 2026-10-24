@@ -57,9 +57,17 @@ pub struct Window {
 /// An app (or a command-line tool) that has opened audio.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AudioApp {
+    /// Stable application selector for `application_audio.app`, when available.
+    /// Linux uses the PipeWire application id, executable or application name,
+    /// never the transient stream node id or process id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_id: Option<String>,
+    /// The playback client's executable name, when reported by the backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
     /// Valid only while the app runs. Setups match apps by name or bundle
     /// id instead.
     pub pid: u32,
@@ -315,4 +323,24 @@ pub enum PermissionAction {
     /// It is granted in System Settings but takes effect only once
     /// isocastd restarts (`isocast restart`, `shutdown_if_idle`).
     Restart,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_app_metadata_remains_optional() {
+        let old = serde_json::json!({"name": "Player", "pid": 42, "playing": true});
+        let mut app: AudioApp = serde_json::from_value(old.clone()).unwrap();
+        assert!(app.id.is_empty());
+        assert_eq!(app.binary, None);
+        assert_eq!(serde_json::to_value(&app).unwrap(), old);
+        app.id = "pipewire:binary:player".into();
+        app.binary = Some("player".into());
+        assert_eq!(
+            serde_json::from_value::<AudioApp>(serde_json::to_value(&app).unwrap()).unwrap(),
+            app
+        );
+    }
 }

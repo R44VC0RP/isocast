@@ -437,10 +437,16 @@ pub fn audio_apps() -> Vec<AudioApp> {
         match apps.iter_mut().find(|a| a.pid == process.app.pid as u32) {
             Some(app) => app.playing |= process.playing,
             None => apps.push(AudioApp {
+                id: if process.app.bundle_id.is_empty() {
+                    process.app.name.clone()
+                } else {
+                    process.app.bundle_id.clone()
+                },
                 name: process.app.name.clone(),
                 bundle_id: (!process.app.bundle_id.is_empty())
                     .then(|| process.app.bundle_id.clone()),
                 pid: process.app.pid as u32,
+                binary: None,
                 playing: process.playing,
             }),
         }

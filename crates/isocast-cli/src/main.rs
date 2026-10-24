@@ -4911,8 +4911,16 @@ fn devices(json: bool) -> Result<ExitCode> {
         println!("Apps with audio (for app-audio and system-audio's exclude)");
         for a in &devices.audio_apps {
             let playing = if a.playing { " (playing)" } else { "" };
-            let bundle = a.bundle_id.as_deref().unwrap_or("-");
-            println!("  {}{playing}  {bundle}  pid {}", a.name, a.pid);
+            let id = if a.id.is_empty() {
+                a.bundle_id.as_deref().unwrap_or("-")
+            } else {
+                &a.id
+            };
+            print!("  {}{playing}  {id}  pid {}", a.name, a.pid);
+            if let Some(binary) = &a.binary {
+                print!("  binary {binary}");
+            }
+            println!();
         }
     }
     let p = &devices.permissions;

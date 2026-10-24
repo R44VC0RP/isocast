@@ -77,6 +77,17 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   (software Vulkan compositing in the VM). Held screen pictures come from the source (compositor cadence and
   frames never handed to PipeWire), not Isocast. Not covered: graph reconfiguration mid-take (driver, link or
   quantum changes), real speakers and scanout. Evidence: `/Volumes/IsocastBuild/linux-sync/scratch/REPORT.md`.
+- **Linux application audio (2026-10-24, ISO-35), experimental:** devices lists apps with playback streams (stable
+  ids, pid, binary); a chosen app is captured through owned passive PipeWire links (its own playback untouched), new
+  streams are followed, surround or unmappable stereo is refused at start and skipped with one warning mid-take.
+  Proven in a VM: the chosen app's tones in its ISO with others >100 dB down; restarts followed; 6-channel streams
+  skipped without ending the source. **Not loss-qualified:** partial stream removal can lose 1024 samples
+  (21.33 ms), counted and never hidden. Same-build strict 30 s comparison: PipeWire 1.0.5 had one app dropout
+  in each of three takes; 1.2.7 passed 3/3; 1.4.7 passed 2/3 (one app dropout in the third). No fixed-version
+  boundary is established; 1.0.5 remains supported. Failed 1.4.7 RT traces show continuous producer samples
+  but a capture dependency left pending for one graph cycle during remote-node unprepare; capture/adapter
+  processing never runs that cycle. Native C RT capture also reproduces gaps, including without Isocast.
+  No production correction yet. Evidence: `/Volumes/IsocastBuild/linux-app-audio/versions/REPORT.md`.
 - **Desktop client on a remote server (R2) is on main (2026-10-23):** pairing in the app, engine picker, one window
   per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA), verified basebook <-> exon-desk both
   ways (`/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).
