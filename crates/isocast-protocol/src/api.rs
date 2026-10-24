@@ -148,7 +148,7 @@ pub enum Method {
     /// Turn this connection into a live video stream of the program,
     /// studio mode's preview or a source, for monitors: low-latency H.264
     /// from the hardware encoder, shared by everyone watching the same
-    /// target at the same size, at the highest rate any of them wants,
+    /// target at the same size and H.264 profile, at the highest rate any of them wants,
     /// running only while someone watches. Returns [`FrameStream`] first;
     /// after that line the connection carries binary [`frames`] records
     /// until either side closes it, and the client may send [`FrameRate`]
@@ -2352,6 +2352,23 @@ pub struct FramesParams {
     /// it while watching by sending [`FrameRate`] lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    /// The H.264 profile of the records: `high` if absent (as before), or
+    /// `constrained_baseline` for decoders that take nothing else, like
+    /// WebRTC peers that only offer `42e01f`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<H264Profile>,
+}
+
+/// The H.264 profile a `frames` stream is encoded in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum H264Profile {
+    /// High profile, the default.
+    #[default]
+    High,
+    /// Constrained Baseline profile (`42e0..`): no B-frames or CABAC, for
+    /// decoders that take nothing else.
+    ConstrainedBaseline,
 }
 
 /// A line a `frames` client may send while watching, `{"fps": 60}`: the
@@ -3691,6 +3708,41 @@ mod tests {
         assert_eq!(
             Request::located_error(status).unwrap().message,
             "`status` takes no params"
+        );
+    }
+
+    #[test]
+    fn frames_profile_is_optional_and_named() {
+        let parse = |line: &str| serde_json::from_str::<Request>(line).map(|r| r.method);
+        let Method::Frames(params) =
+            parse(r#"{"jsonrpc":"2.0","id":1,"method":"frames","params":{}}"#).unwrap()
+        else {
+            panic!("not frames");
+        };
+        assert_eq!(params.profile, None);
+        assert_eq!(params.profile.unwrap_or_default(), H264Profile::High);
+        // Absent stays absent on the wire, so older daemons still parse it.
+        let json = serde_json::to_value(&params).unwrap();
+        assert!(json.get("profile").is_none(), "{json}");
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"frames","params":
+            {"target":"program","profile":"constrained_baseline"}}"#;
+        let Method::Frames(params) = parse(&line.replace('\n', "")).unwrap() else {
+            panic!("not frames");
+        };
+        assert_eq!(params.profile, Some(H264Profile::ConstrainedBaseline));
+        assert_eq!(
+            serde_json::to_value(&params).unwrap()["profile"],
+            "constrained_baseline"
+        );
+        // A wrong profile names its place and the profiles there are.
+        let wrong = r#"{"jsonrpc":"2.0","id":1,"method":"frames","params":{"profile":"main"}}"#;
+        assert!(parse(wrong).is_err());
+        let located = Request::located_error(wrong).unwrap();
+        assert_eq!(located.path, "params.profile", "{located}");
+        assert!(located.message.contains("`high`"), "{located}");
+        assert!(
+            located.message.contains("`constrained_baseline`"),
+            "{located}"
         );
     }
 

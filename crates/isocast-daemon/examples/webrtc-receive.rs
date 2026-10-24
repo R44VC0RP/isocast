@@ -9,6 +9,14 @@
 //! Together they enable SR-mapped capture-to-first-packet and complete-media
 //! delivery ages, not network-only transit or playout latency. No cross-host Instant subtraction.
 //! ISOCAST_WEBRTC_FFMPEG can select an ffmpeg executable (including on Windows).
+//! ISOCAST_WEBRTC_H264_PROFILE selects the H.264 offer (all packetization-mode=1)
+//! and checks the answer and received SPS; unset keeps the default offer.
+//! constrained_baseline (42e01f) and constrained_high_and_baseline (640c1f,
+//! 42e01f) require a Constrained Baseline answer and SPS (profile_idc 66,
+//! constraint_set1). constrained_baseline_and_high (42e01f, 64001f) requires
+//! High. plain_baseline (42001f) requires the answer to echo 42001f, and
+//! baseline_no_profile (no profile-level-id) an answer without one; both
+//! require a Constrained Baseline SPS.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, ErrorKind, Read, Write};
@@ -21,8 +29,8 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, ensure};
 use isocast_protocol::api::{Method, WhepAnswer, WhepOfferParams};
 use str0m::change::SdpAnswer;
-use str0m::format::{Codec, CodecExtra};
-use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind};
+use str0m::format::{Codec, CodecExtra, FormatParams};
+use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaData, MediaKind};
 use str0m::net::{Protocol, Receive};
 use str0m::rtp::rtcp::SenderInfo;
 use str0m::{Candidate, Event, Input, Output, RtcConfig};
@@ -458,6 +466,205 @@ impl AvSync {
     }
 }
 
+/// The H.264 offer this receiver makes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum H264Offer {
+    /// str0m's default set plus High 640c34.
+    Default,
+    /// Only 42e01f with packetization-mode=1.
+    ConstrainedBaseline,
+    /// Constrained High 640c1f then 42e01f, without plain High (6400xx).
+    ConstrainedHighAndBaseline,
+    /// 42e01f then High 64001f: plain High must still win.
+    ConstrainedBaselineAndHigh,
+    /// Only plain Baseline 42001f (no constraint flags).
+    PlainBaseline,
+    /// packetization-mode=1 without profile-level-id (str0m's Baseline 3.1 fallback).
+    BaselineNoProfile,
+}
+
+impl H264Offer {
+    const ALL: [(&'static str, Self); 5] = [
+        ("constrained_baseline", Self::ConstrainedBaseline),
+        (
+            "constrained_high_and_baseline",
+            Self::ConstrainedHighAndBaseline,
+        ),
+        (
+            "constrained_baseline_and_high",
+            Self::ConstrainedBaselineAndHigh,
+        ),
+        ("plain_baseline", Self::PlainBaseline),
+        ("baseline_no_profile", Self::BaselineNoProfile),
+    ];
+
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value {
+            None | Some("") => Ok(Self::Default),
+            Some(value) => Self::ALL
+                .iter()
+                .find(|(name, _)| *name == value)
+                .map(|&(_, offer)| offer)
+                .ok_or_else(|| {
+                    let valid: Vec<_> = Self::ALL.iter().map(|(name, _)| *name).collect();
+                    anyhow::anyhow!(
+                        "ISOCAST_WEBRTC_H264_PROFILE: unknown profile {value:?}; valid options: {} (or unset for the default offer)",
+                        valid.join(", ")
+                    )
+                }),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|&&(_, offer)| offer == self)
+            .map_or("default", |&(name, _)| name)
+    }
+
+    /// (payload type, RTX payload type, profile-level-id) offered in order,
+    /// each with packetization-mode=1. Empty for the default offer.
+    fn formats(self) -> &'static [(u8, u8, Option<u32>)] {
+        match self {
+            Self::Default => &[],
+            Self::ConstrainedBaseline => &[(108, 109, Some(0x42e01f))],
+            Self::ConstrainedHighAndBaseline => {
+                &[(102, 103, Some(0x640c1f)), (108, 109, Some(0x42e01f))]
+            }
+            Self::ConstrainedBaselineAndHigh => {
+                &[(108, 109, Some(0x42e01f)), (114, 115, Some(0x64001f))]
+            }
+            Self::PlainBaseline => &[(127, 121, Some(0x42001f))],
+            Self::BaselineNoProfile => &[(106, 107, None)],
+        }
+    }
+
+    /// Whether the answered H.264 formats fit this offer. The default offer
+    /// keeps its historical behaviour and is not checked here.
+    fn answer_ok(self, answered: &[(Option<u32>, Option<u8>)]) -> bool {
+        let accepts = |id: Option<u32>| match self {
+            Self::Default => true,
+            Self::ConstrainedBaseline | Self::ConstrainedHighAndBaseline => {
+                id.is_some_and(is_constrained_baseline)
+            }
+            Self::ConstrainedBaselineAndHigh => id.is_some_and(|id| id >> 16 == 0x64),
+            Self::PlainBaseline => id == Some(0x42001f),
+            Self::BaselineNoProfile => id.is_none(),
+        };
+        self == Self::Default
+            || (!answered.is_empty()
+                && answered
+                    .iter()
+                    .all(|&(id, mode)| accepts(id) && mode == Some(1)))
+    }
+
+    /// Whether every received SPS fits this offer: High for the High offer,
+    /// otherwise Constrained Baseline (profile_idc 66 with constraint_set1),
+    /// which every baseline-family receiver decodes.
+    fn sps_ok(self, sps: &[(u8, u8, u8)]) -> bool {
+        let accepts = |&(profile_idc, flags, _): &(u8, u8, u8)| match self {
+            Self::Default => true,
+            Self::ConstrainedBaselineAndHigh => profile_idc == 100,
+            _ => profile_idc == 66 && flags & 0x40 != 0,
+        };
+        self == Self::Default || (!sps.is_empty() && sps.iter().all(accepts))
+    }
+}
+
+/// The receiver's codecs: Opus plus the H.264 formats of `h264_offer`.
+fn h264_rtc_config(h264_offer: H264Offer) -> RtcConfig {
+    let mut config = RtcConfig::new()
+        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+        .clear_codecs()
+        .enable_opus(true, false);
+    match h264_offer {
+        H264Offer::Default => {
+            config = config.enable_h264(true);
+            config
+                .codec_config()
+                .add_h264(102.into(), Some(103.into()), true, 0x640c34);
+        }
+        offer => {
+            for &(pt, rtx, profile_level_id) in offer.formats() {
+                config.codec_config().add_config(
+                    pt.into(),
+                    Some(rtx.into()),
+                    Codec::H264,
+                    Frequency::NINETY_KHZ,
+                    None,
+                    FormatParams {
+                        level_asymmetry_allowed: Some(true),
+                        packetization_mode: Some(1),
+                        profile_level_id,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+    config
+}
+
+/// RFC 6184 constrained baseline: profile_idc 66 with constraint_set1.
+fn is_constrained_baseline(profile_level_id: u32) -> bool {
+    profile_level_id >> 16 == 0x42 && (profile_level_id >> 8) & 0x40 != 0
+}
+
+/// (profile-level-id, packetization-mode) of every H.264 payload type in an SDP.
+fn sdp_h264_formats(sdp: &str) -> Vec<(Option<u32>, Option<u8>)> {
+    let lines: Vec<&str> = sdp.lines().map(str::trim).collect();
+    let mut formats = Vec::new();
+    for line in &lines {
+        let Some(rest) = line.strip_prefix("a=rtpmap:") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let (Some(pt), Some(encoding)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if !encoding.to_ascii_uppercase().starts_with("H264/") {
+            continue;
+        }
+        let prefix = format!("a=fmtp:{pt} ");
+        let params = lines
+            .iter()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .unwrap_or("");
+        let value = |key: &str| {
+            params
+                .split(';')
+                .filter_map(|pair| pair.trim().split_once('='))
+                .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                .map(|(_, value)| value.trim())
+        };
+        formats.push((
+            value("profile-level-id").and_then(|id| u32::from_str_radix(id, 16).ok()),
+            value("packetization-mode").and_then(|mode| mode.parse().ok()),
+        ));
+    }
+    formats
+}
+
+/// (profile_idc, constraint flags byte, level_idc) of each SPS in an Annex B unit.
+fn annexb_sps(data: &[u8]) -> Vec<(u8, u8, u8)> {
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index + 3 <= data.len() {
+        if data[index..index + 3] == [0, 0, 1] {
+            let nal = &data[index + 3..];
+            // The three bytes after the SPS header precede any possible
+            // emulation-prevention byte (profile_idc is never zero).
+            if nal.len() >= 4 && nal[0] & 0x1f == 7 {
+                found.push((nal[1], nal[2], nal[3]));
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    found
+}
+
 #[cfg(target_os = "macos")]
 fn packet_age_ms(time: str0m::media::MediaTime) -> f64 {
     use isocast_engine::Platform;
@@ -489,6 +696,8 @@ fn main() -> Result<()> {
     let clock_uncertainty = std::env::var("ISOCAST_WEBRTC_CLOCK_UNCERTAINTY_MS").ok();
     let calibration =
         ClockCalibration::parse(clock_offset.as_deref(), clock_uncertainty.as_deref())?;
+    let h264_offer =
+        H264Offer::parse(std::env::var("ISOCAST_WEBRTC_H264_PROFILE").ok().as_deref())?;
     let video_path = args.next();
     ensure!(
         !av_sync_test || video_path.is_some(),
@@ -508,15 +717,7 @@ fn main() -> Result<()> {
     let bind = std::env::var("ISOCAST_WEBRTC_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
     let socket = UdpSocket::bind(bind)?;
     let local = socket.local_addr()?;
-    let mut config = RtcConfig::new()
-        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
-        .clear_codecs()
-        .enable_opus(true, false)
-        .enable_h264(true);
-    config
-        .codec_config()
-        .add_h264(102.into(), Some(103.into()), true, 0x640c34);
-    let mut rtc = config.build(Instant::now());
+    let mut rtc = h264_rtc_config(h264_offer).build(Instant::now());
     rtc.add_local_candidate(Candidate::host(local, "udp")?);
     let mut change = rtc.sdp_api();
     let video_mid = change.add_media(
@@ -538,6 +739,25 @@ fn main() -> Result<()> {
     let answer: WhepAnswer = client.call(Method::WhepOffer(WhepOfferParams {
         sdp: offer.to_sdp_string(),
     }))?;
+    let offered_h264 = sdp_h264_formats(&offer.to_sdp_string());
+    let answered_h264 = sdp_h264_formats(&answer.sdp);
+    if h264_offer != H264Offer::Default {
+        let expected: Vec<_> = h264_offer
+            .formats()
+            .iter()
+            .map(|&(_, _, id)| (id, Some(1)))
+            .collect();
+        ensure!(
+            offered_h264 == expected,
+            "{} offer must contain exactly {expected:?}: {offered_h264:?}",
+            h264_offer.name()
+        );
+        ensure!(
+            h264_offer.answer_ok(&answered_h264),
+            "{} answer selected an unexpected H.264 format: {answered_h264:?}",
+            h264_offer.name()
+        );
+    }
     rtc.sdp_api()
         .accept_answer(pending, SdpAnswer::from_sdp_string(&answer.sdp)?)?;
     let mut decoder = opus2::Decoder::new(48_000, opus2::Channels::Stereo)?;
@@ -550,6 +770,7 @@ fn main() -> Result<()> {
     let feedback = std::env::var_os("ISOCAST_WEBRTC_FEEDBACK_TEST").is_some();
     let mut feedback_sent = 0;
     let mut keyframes = 0;
+    let mut sps_seen = Vec::<(u8, u8, u8)>::new();
     let mut video_age_ms = Vec::<f64>::new();
     let mut audio_age_ms = Vec::<f64>::new();
     let mut video_observations = TrackObservations::default();
@@ -582,6 +803,11 @@ fn main() -> Result<()> {
                             sync.video_times.push(data.time.numer() as u32);
                         }
                         video_frames += 1;
+                        for sps in annexb_sps(&data.data) {
+                            if !sps_seen.contains(&sps) {
+                                sps_seen.push(sps);
+                            }
+                        }
                         if matches!(data.codec_extra, CodecExtra::H264(extra) if extra.is_keyframe)
                         {
                             keyframes += 1;
@@ -704,9 +930,25 @@ fn main() -> Result<()> {
         "cadence_scope": "positive RTP capture intervals; source/governor cadence is not RTP loss",
         "video": video_observations.summary(), "audio": audio_observations.summary()
     });
+    let format_json = |formats: &[(Option<u32>, Option<u8>)]| {
+        formats
+            .iter()
+            .map(|(id, mode)| serde_json::json!({"profile_level_id": id.map(|id| format!("{id:06x}")), "packetization_mode": mode}))
+            .collect::<Vec<_>>()
+    };
+    let h264 = serde_json::json!({
+        "offer_profile": h264_offer.name(),
+        "offered": format_json(&offered_h264),
+        "answered": format_json(&answered_h264),
+        "sps": sps_seen.iter().map(|&(profile_idc, flags, level_idc)| serde_json::json!({
+            "profile_idc": profile_idc,
+            "constraint_set0": (flags >> 7) & 1, "constraint_set1": (flags >> 6) & 1,
+            "constraint_set2": (flags >> 5) & 1, "level_idc": level_idc
+        })).collect::<Vec<_>>()
+    });
     println!(
         "{}",
-        serde_json::json!({"video_frames":video_frames,"keyframes":keyframes,"feedback_sent":feedback_sent,"audio_packets":audio_packets,"decoded_audio_frames":audio_frames,"audio_peak":peak,"closed":closed,"packet_age_ms_p50":age(&video_age_ms,0.5),"packet_age_ms_p95":age(&video_age_ms,0.95),"audio_age_ms_p50":age(&audio_age_ms,0.5),"audio_age_ms_p95":age(&audio_age_ms,0.95),"receiver_observations":observations})
+        serde_json::json!({"h264":h264,"video_frames":video_frames,"keyframes":keyframes,"feedback_sent":feedback_sent,"audio_packets":audio_packets,"decoded_audio_frames":audio_frames,"audio_peak":peak,"closed":closed,"packet_age_ms_p50":age(&video_age_ms,0.5),"packet_age_ms_p95":age(&video_age_ms,0.95),"audio_age_ms_p50":age(&audio_age_ms,0.5),"audio_age_ms_p95":age(&audio_age_ms,0.95),"receiver_observations":observations})
     );
     ensure!(
         video_frames > 0 && audio_frames > 0,
@@ -716,6 +958,11 @@ fn main() -> Result<()> {
         calibration.is_none()
             || (!video_observations.age_ms.is_empty() && !audio_observations.age_ms.is_empty()),
         "calibrated latency requires RTCP SRs and retained UDP arrivals for both tracks"
+    );
+    ensure!(
+        h264_offer.sps_ok(&sps_seen),
+        "{} received SPS does not fit the offer: {sps_seen:?}",
+        h264_offer.name()
     );
     ensure!(
         !feedback || (feedback_sent == 2 && keyframes >= 3),
@@ -734,6 +981,84 @@ fn main() -> Result<()> {
 mod timing_tests {
     use super::*;
     use str0m::media::{Frequency, MediaTime};
+
+    #[test]
+    fn h264_profile_offer_answer_and_sps_parsing() {
+        assert_eq!(H264Offer::parse(None).unwrap(), H264Offer::Default);
+        assert_eq!(
+            H264Offer::parse(Some("constrained_baseline")).unwrap(),
+            H264Offer::ConstrainedBaseline
+        );
+        assert!(H264Offer::parse(Some("high")).is_err());
+        assert!(is_constrained_baseline(0x42e01f) && is_constrained_baseline(0x42c01f));
+        assert!(!is_constrained_baseline(0x42001f) && !is_constrained_baseline(0x640c34));
+        let sdp = "v=0\r\na=rtpmap:108 H264/90000\r\na=rtpmap:109 rtx/90000\r\n\
+            a=fmtp:109 apt=108\r\n\
+            a=fmtp:108 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n\
+            a=rtpmap:111 opus/48000/2\r\n";
+        assert_eq!(sdp_h264_formats(sdp), [(Some(0x42e01f), Some(1))]);
+        let unit = [
+            0, 0, 0, 1, 0x67, 66, 0xc0, 31, 0xda, 0, 0, 1, 0x68, 0xce, 0, 0, 1, 0x65, 0x88,
+        ];
+        assert_eq!(annexb_sps(&unit), [(66, 0xc0, 31)]);
+        assert!(annexb_sps(&[0, 0, 1, 0x65, 0x88]).is_empty());
+    }
+
+    #[test]
+    fn h264_profile_modes_offer_exact_formats_and_check_answers_and_sps() {
+        for (name, offer) in H264Offer::ALL {
+            assert_eq!(H264Offer::parse(Some(name)).unwrap(), offer);
+            assert_eq!(offer.name(), name);
+            let mut rtc = h264_rtc_config(offer).build(Instant::now());
+            let mut change = rtc.sdp_api();
+            change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+            let (sdp, _) = change.apply().unwrap();
+            let sdp = sdp.to_sdp_string();
+            let expected: Vec<_> = offer
+                .formats()
+                .iter()
+                .map(|&(_, _, id)| (id, Some(1)))
+                .collect();
+            assert_eq!(sdp_h264_formats(&sdp), expected, "{name}: {sdp}");
+            if offer == H264Offer::BaselineNoProfile {
+                assert!(!sdp.contains("profile-level-id"), "{sdp}");
+            }
+        }
+        assert_eq!(H264Offer::Default.name(), "default");
+        assert!(
+            H264Offer::parse(Some("high"))
+                .unwrap_err()
+                .to_string()
+                .contains("plain_baseline")
+        );
+        // Neither offer contains plain High, so it must never be answered.
+        let high = [(Some(0x64001f), Some(1))];
+        let cb = [(Some(0x42e01f), Some(1))];
+        for offer in [
+            H264Offer::ConstrainedBaseline,
+            H264Offer::ConstrainedHighAndBaseline,
+        ] {
+            assert!(offer.answer_ok(&cb) && offer.answer_ok(&[(Some(0x42c01f), Some(1))]));
+            assert!(!offer.answer_ok(&high) && !offer.answer_ok(&[(Some(0x640c1f), Some(1))]));
+            assert!(!offer.answer_ok(&[]) && !offer.answer_ok(&[(Some(0x42e01f), Some(0))]));
+        }
+        assert!(H264Offer::ConstrainedBaselineAndHigh.answer_ok(&high));
+        assert!(!H264Offer::ConstrainedBaselineAndHigh.answer_ok(&cb));
+        assert!(H264Offer::PlainBaseline.answer_ok(&[(Some(0x42001f), Some(1))]));
+        assert!(!H264Offer::PlainBaseline.answer_ok(&cb));
+        assert!(H264Offer::BaselineNoProfile.answer_ok(&[(None, Some(1))]));
+        assert!(!H264Offer::BaselineNoProfile.answer_ok(&[(Some(0x42000a), Some(1))]));
+        assert!(H264Offer::Default.answer_ok(&[]) && H264Offer::Default.sps_ok(&[]));
+        let cb_sps = [(66, 0xc0, 31)];
+        let baseline_sps = [(66, 0x80, 31)];
+        let high_sps = [(100, 0x00, 31)];
+        for (_, offer) in H264Offer::ALL {
+            let high = offer == H264Offer::ConstrainedBaselineAndHigh;
+            assert_eq!(offer.sps_ok(&cb_sps), !high);
+            assert_eq!(offer.sps_ok(&high_sps), high);
+            assert!(!offer.sps_ok(&baseline_sps) && !offer.sps_ok(&[]));
+        }
+    }
 
     #[test]
     fn calibration_requires_a_finite_offset_and_nonnegative_uncertainty() {

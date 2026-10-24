@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use isocast_engine::{EncodedVideo, LiveVideoSpec, ParameterSets, Time, VideoEncoder};
+use isocast_protocol::api::H264Profile;
 use openh264::encoder::{
     BitRate, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, Profile, QpRange,
     RateControlMode, VuiConfig,
@@ -87,6 +88,7 @@ impl Encoder {
         let qp = 38 - (u32::from(quality) * 22 / 100) as u8;
         Self::configured(
             &LiveVideoSpec {
+                profile: H264Profile::High,
                 width,
                 height,
                 fps,
@@ -121,7 +123,12 @@ impl Encoder {
             .bitrate(BitRate::from_bps(spec.bitrate_kbps * 1000))
             .max_frame_rate(FrameRate::from_hz(spec.fps as f32))
             .intra_frame_period(IntraFramePeriod::from_num_frames(spec.keyframe_interval))
-            .profile(Profile::High)
+            // OpenH264's Baseline is CAVLC with constraint_set0/1 set
+            // (au_set.cpp): Constrained Baseline.
+            .profile(match spec.profile {
+                H264Profile::High => Profile::High,
+                H264Profile::ConstrainedBaseline => Profile::Baseline,
+            })
             .vui(VuiConfig::bt709())
             .skip_frames(false)
             // Program plus ISOs must not each spawn one thread per CPU.
@@ -146,6 +153,18 @@ impl Encoder {
         let parameters = packet
             .parameter_sets
             .context("OpenH264 did not provide SPS/PPS at initialization")?;
+        // What it made, not what it was asked for (later SPS changes are
+        // refused in `encode`).
+        if spec.profile == H264Profile::ConstrainedBaseline
+            && !parameters
+                .sps
+                .iter()
+                .all(|sps| sps.get(1) == Some(&66) && sps.get(2).is_some_and(|f| f & 0x40 != 0))
+        {
+            bail!(
+                "video.profile: OpenH264 did not make Constrained Baseline (profile 66 with constraint_set1)"
+            );
+        }
         avcc(&parameters)?;
         Ok(Self {
             native,
@@ -400,6 +419,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let spec = LiveVideoSpec {
+            profile: H264Profile::High,
             width: 32,
             height: 32,
             fps: 30,
@@ -454,6 +474,57 @@ mod tests {
         assert!(encoder.receive().unwrap().unwrap().keyframe);
     }
 
+    #[test]
+    fn constrained_baseline_says_so_in_its_sps_and_decodes() {
+        let mut pool = crate::frames::FramePool::new(64, 64).unwrap();
+        let frame = pool
+            .draw(&mut |pixels, _| pixels.fill(255))
+            .unwrap()
+            .unwrap();
+        let spec = |profile| LiveVideoSpec {
+            profile,
+            width: 64,
+            height: 64,
+            fps: 30,
+            bitrate_kbps: 1000,
+            constant_bitrate: false,
+            keyframe_interval: 60,
+            low_latency: true,
+        };
+        let mut encoder = Encoder::new(&spec(H264Profile::ConstrainedBaseline)).unwrap();
+        encoder
+            .encode(&frame, Time::from_nanos(1_000_000_000), false)
+            .unwrap();
+        let packet = encoder.receive().unwrap().unwrap();
+        let parameters = packet.parameter_sets.unwrap();
+        // profile_idc 66 with constraint_set0 and constraint_set1: 42 c0.
+        assert_eq!(parameters.sps[0][1], 66);
+        assert_eq!(parameters.sps[0][2] & 0xc0, 0xc0);
+        // CAVLC: pps_id 0 and sps_id 0 ("1", "1"), then entropy_coding_mode_flag 0.
+        assert_eq!(parameters.pps[0][1] & 0b1110_0000, 0b1100_0000);
+        let config = encoder.decoder_config().unwrap();
+        assert_eq!(config[1], 66);
+        assert_eq!(config[2] & 0x40, 0x40);
+        let mut annex_b = Vec::new();
+        for nal in parameters.sps.iter().chain(&parameters.pps) {
+            annex_b.extend_from_slice(&[0, 0, 0, 1]);
+            annex_b.extend_from_slice(nal);
+        }
+        let mut data = packet.data.as_slice();
+        while !data.is_empty() {
+            let size = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+            annex_b.extend_from_slice(&[0, 0, 0, 1]);
+            annex_b.extend_from_slice(&data[4..4 + size]);
+            data = &data[4 + size..];
+        }
+        let mut decoder = openh264::decoder::Decoder::new().unwrap();
+        let decoded = decoder.decode(&annex_b).unwrap().unwrap();
+        assert_eq!(decoded.dimensions(), (64, 64));
+        // The default is still High, as before.
+        let high = Encoder::new(&spec(H264Profile::High)).unwrap();
+        assert_eq!(high.parameters.sps[0][1], 100);
+    }
+
     /// kb/s of a still picture over seconds 1 to 3 at 30 fps, with the rate
     /// changed to `then_kbps` after second 3 (measured over 4 to 6).
     fn still_kbps(constant_bitrate: bool, then_kbps: u32) -> (f64, f64) {
@@ -463,6 +534,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut encoder = Encoder::new(&LiveVideoSpec {
+            profile: H264Profile::High,
             width: 320,
             height: 240,
             fps: 30,

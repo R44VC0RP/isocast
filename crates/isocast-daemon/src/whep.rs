@@ -11,7 +11,7 @@ use isocast_engine::record::OpusFeed;
 use isocast_protocol::api::{WhepAnswer, WhepOfferParams, frames};
 use isocast_protocol::caller::Origin;
 use str0m::change::{SdpAnswer, SdpOffer};
-use str0m::format::Codec;
+use str0m::format::{Codec, CodecConfig, FormatParams, PayloadParams};
 use str0m::media::{Direction, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event as RtcEvent, Input, Output, Rtc, RtcConfig};
@@ -138,6 +138,114 @@ fn validate_offer(sdp: &str) -> Result<SdpOffer, RpcError> {
     Ok(offer)
 }
 
+fn h264_offers(offer: &SdpOffer) -> Vec<PayloadParams> {
+    offer
+        .media_lines
+        .iter()
+        // MediaType is not exported by str0m; this converts to MediaType::Video.
+        .filter(|line| !line.disabled && line.typ == MediaKind::Video.into())
+        .flat_map(|line| {
+            line.rtp_params()
+                .into_iter()
+                .filter(|p| line.pts.contains(&p.pt()) && p.spec().codec == Codec::H264)
+        })
+        .collect()
+}
+
+fn h264_codec(profile: u32) -> CodecConfig {
+    let mut codecs = CodecConfig::empty();
+    add_h264(&mut codecs, Some(profile));
+    codecs
+}
+
+fn add_h264(codecs: &mut CodecConfig, profile: Option<u32>) {
+    codecs.add_config(
+        96.into(),
+        Some(97.into()),
+        Codec::H264,
+        str0m::media::Frequency::NINETY_KHZ,
+        None,
+        FormatParams {
+            level_asymmetry_allowed: Some(true),
+            packetization_mode: Some(1),
+            profile_level_id: profile,
+            ..Default::default()
+        },
+    );
+}
+
+fn incompatible_h264(detail: &str) -> RpcError {
+    RpcError {
+        code: RpcError::UNSUPPORTED,
+        message: format!(
+            "params.sdp: no compatible H.264 ({detail}); engine can send constrained_baseline (42e0xx, also compatible with Baseline 4200xx/4280xx) or high (6400xx), packetization-mode=1; constrained high (640cxx) requires a platform guarantee; offer a sufficient level for the program monitor"
+        ),
+    }
+}
+
+/// Decide before opening an encoder. Use str0m's RFC 6184 profile matching,
+/// including equivalent Constrained Baseline constraint-bit patterns and the
+/// default packetization mode (0, which our fragmented NAL sender cannot use).
+fn monitor_profile(offer: &SdpOffer, constrained_high: bool) -> Result<H264Profile, RpcError> {
+    let offered = h264_offers(offer);
+    for (profile, ids) in [
+        (
+            H264Profile::High,
+            if constrained_high {
+                &[0x64001f, 0x640c1f][..]
+            } else {
+                &[0x64001f][..]
+            },
+        ),
+        // Constrained Baseline is also a subset of plain Baseline, including
+        // an omitted profile-level-id (str0m's Baseline fallback).
+        (H264Profile::ConstrainedBaseline, &[0x42e01f, 0x42001f][..]),
+    ] {
+        if ids.iter().any(|id| {
+            offered
+                .iter()
+                .any(|p| h264_codec(*id).match_params(*p).is_some())
+        }) {
+            return Ok(profile);
+        }
+    }
+    Err(incompatible_h264(
+        "no offered profile/packetization-mode is supported",
+    ))
+}
+
+fn level_rank(profile: u32) -> u32 {
+    // RFC 6184 §8.2.2: 1b is between 1 and 1.1, whether signaled as
+    // level_idc=11 + constraint_set3 (Baseline/Main/Extended), or 9 (others).
+    let legacy = matches!(profile >> 16, 66 | 77 | 88);
+    if (legacy && profile & 0x10ff == 0x100b) || (!legacy && profile & 0xff == 9) {
+        21 // between levels 1 and 1.1
+    } else {
+        (profile & 0xff) * 2
+    }
+}
+
+/// Never let str0m's level-tolerant matching advertise a codec the viewer did
+/// not offer, or send an SPS above its receive level. The answer retains an
+/// offered profile-level-id; the actual SPS may use a lower level or a subset.
+fn answer_profile(offer: &SdpOffer, encoded: u32) -> Result<Option<u32>, RpcError> {
+    let codecs = h264_codec(encoded);
+    h264_offers(offer).into_iter().find_map(|p| {
+        let format = p.spec().format;
+        // Match str0m's documented libWebRTC compatibility default: Baseline
+        // Level 3.1. Keep omission in the answer, never invent a profile id.
+        let offered = format.profile_level_id.unwrap_or(0x42001f);
+        // Constrained High contains fewer tools than High. A High receiver can
+        // decode it, but never do the reverse for a Constrained High offer.
+        let high_subset = encoded >> 8 == 0x640c && offered >> 8 == 0x6400
+            && h264_codec(0x64001f).match_params(p).is_some();
+        let baseline_subset = codecs.match_params(h264_codec(0x42e01f).params()[0]).is_some()
+            && h264_codec(0x42001f).match_params(p).is_some();
+        ((codecs.match_params(p).is_some() || high_subset || baseline_subset)
+            && level_rank(encoded) <= level_rank(offered)).then_some(format.profile_level_id)
+    }).ok_or_else(|| incompatible_h264(&format!("encoder SPS profile-level-id={encoded:06x} exceeds or differs from the offered receive capabilities")))
+}
+
 fn prepare_offer(
     daemon: &Arc<Daemon>,
     offer: SdpOffer,
@@ -160,6 +268,8 @@ fn prepare_offer(
             "whep_offer: media is limited to loopback or LAN peers",
         ));
     }
+    let engine = daemon.ensure_engine()?;
+    let requested_profile = monitor_profile(&offer, engine.monitor_h264_constrained_high())?;
     let admission =
         RemoteViewer::acquire().map_err(|reason| unavailable(&format!("whep_offer: {reason}")))?;
     // UDP connect chooses the route without sending a packet. Bind the actual
@@ -180,43 +290,24 @@ fn prepare_offer(
         target: PROGRAM.into(),
         max_width: Some(960),
         fps: Some(30),
+        profile: Some(requested_profile),
     })?;
-    let engine = daemon.ensure_engine()?;
+    // Check the actual SPS before answering, never label a High stream Baseline.
+    let config = video_config(&video.records)?;
+    let parameter_sets = avcc_config(&config).map_err(failed)?;
+    let encoded = u32::from_be_bytes([0, config[1], config[2], config[3]]);
+    let profile = answer_profile(&offer, encoded)?;
     let audio = engine.opus().map_err(|message| RpcError {
         code: RpcError::FAILED,
         message,
     })?;
-    // Negotiate the actual encoder profile/level, never label a High stream Baseline.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let config = loop {
-        let bytes = video.records.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| invalid("whep_offer: program encoder did not provide H.264 configuration within 3 seconds"))?;
-        let record = frames::Record::read(&mut bytes.as_ref())
-            .map_err(failed)?
-            .ok_or_else(|| invalid("whep_offer: program encoder ended"))?;
-        if record.kind == frames::END {
-            return Err(invalid("whep_offer: program encoder ended"));
-        }
-        if record.kind == frames::CONFIG {
-            break record.payload;
-        }
-        if Instant::now() >= deadline {
-            return Err(invalid(
-                "whep_offer: program encoder configuration timed out",
-            ));
-        }
-    };
-    let parameter_sets = avcc_config(&config).map_err(failed)?;
-    let profile = u32::from_be_bytes([0, config[1], config[2], config[3]]);
     let mut settings = RtcConfig::new()
         .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
         .set_send_buffer_audio(20)
         .set_send_buffer_video(256)
         .clear_codecs()
         .enable_opus(true, false);
-    settings
-        .codec_config()
-        .add_h264(96.into(), Some(97.into()), true, profile);
+    add_h264(settings.codec_config(), profile);
     let mut rtc = settings.build(Instant::now());
     rtc.add_local_candidate(Candidate::host(local, "udp").map_err(failed)?);
     let answer = rtc.sdp_api().accept_offer(offer).map_err(|_| {
@@ -245,7 +336,33 @@ fn prepare_offer(
     })
 }
 
-fn tracks(rtc: &mut Rtc, answer: &SdpAnswer, profile: u32) -> Result<(Track, Track), RpcError> {
+fn video_config(records: &std::sync::mpsc::Receiver<Arc<[u8]>>) -> Result<Vec<u8>, RpcError> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let bytes = records.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| invalid("whep_offer: program encoder did not provide H.264 configuration within 3 seconds"))?;
+        let record = frames::Record::read(&mut bytes.as_ref())
+            .map_err(failed)?
+            .ok_or_else(|| invalid("whep_offer: program encoder ended"))?;
+        if record.kind == frames::END {
+            return Err(failed(String::from_utf8_lossy(&record.payload)));
+        }
+        if record.kind == frames::CONFIG {
+            return Ok(record.payload);
+        }
+        if Instant::now() >= deadline {
+            return Err(invalid(
+                "whep_offer: program encoder configuration timed out",
+            ));
+        }
+    }
+}
+
+fn tracks(
+    rtc: &mut Rtc,
+    answer: &SdpAnswer,
+    profile: Option<u32>,
+) -> Result<(Track, Track), RpcError> {
     let mut video = None;
     let mut audio = None;
     for line in &answer.media_lines {
@@ -278,7 +395,7 @@ fn tracks(rtc: &mut Rtc, answer: &SdpAnswer, profile: u32) -> Result<(Track, Tra
     match (video, audio) {
         (Some(video), Some(audio)) => Ok((video, audio)),
         _ => Err(invalid(&format!(
-            "params.sdp: offer and engine H.264 profile_level_id={profile:06x} must negotiate video and Opus audio"
+            "params.sdp: offer and engine H.264 profile_level_id={profile:06x?} must negotiate video and Opus audio"
         ))),
     }
 }
@@ -586,6 +703,182 @@ fn avcc_frame(mut bytes: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    fn profile_offer(profiles: &[u32], packetization: bool) -> SdpOffer {
+        let mut config = RtcConfig::new()
+            .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+            .clear_codecs()
+            .enable_opus(true, false)
+            .enable_vp8(true);
+        for (index, profile) in profiles.iter().enumerate() {
+            config.codec_config().add_h264(
+                (100 + index as u8 * 2).into(),
+                None,
+                packetization,
+                *profile,
+            );
+        }
+        let mut rtc = config.build(Instant::now());
+        rtc.add_local_candidate(
+            Candidate::host("127.0.0.1:50000".parse().unwrap(), "udp").unwrap(),
+        );
+        let mut change = rtc.sdp_api();
+        change.add_media(
+            MediaKind::Video,
+            Direction::RecvOnly,
+            Some("program".into()),
+            None,
+            None,
+        );
+        change.add_media(
+            MediaKind::Audio,
+            Direction::RecvOnly,
+            Some("program".into()),
+            None,
+            None,
+        );
+        let (offer, _) = change.apply().unwrap();
+        validate_offer(&offer.to_sdp_string()).unwrap()
+    }
+
+    #[test]
+    fn h264_profile_negotiates_baseline_high_or_prefers_high_when_both_offered() {
+        for (offered, requested, encoded) in [
+            (vec![0x42e01f], H264Profile::ConstrainedBaseline, 0x42c01f),
+            (vec![0x42e029], H264Profile::ConstrainedBaseline, 0x42e01f),
+            (vec![0x64001f], H264Profile::High, 0x64001f),
+            (vec![0x64001f], H264Profile::High, 0x640c1f),
+            (vec![0x640c34], H264Profile::High, 0x640c1f),
+            (vec![0x42e01f, 0x64001f], H264Profile::High, 0x64001f),
+        ] {
+            let offer = profile_offer(&offered, true);
+            assert_eq!(
+                monitor_profile(&offer, offered == [0x640c34]).unwrap(),
+                requested
+            );
+            let profile = answer_profile(&offer, encoded).unwrap();
+            assert!(offered.contains(&profile.unwrap()));
+            let mut config = RtcConfig::new()
+                .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+                .clear_codecs()
+                .enable_opus(true, false);
+            add_h264(config.codec_config(), profile);
+            let mut sender = config.build(Instant::now());
+            let answer = sender.sdp_api().accept_offer(offer).unwrap();
+            assert!(tracks(&mut sender, &answer, profile).is_ok());
+            let video: Vec<_> = answer
+                .media_lines
+                .iter()
+                .flat_map(|line| line.rtp_params())
+                .filter(|p| p.spec().codec == Codec::H264)
+                .collect();
+            assert_eq!(video.len(), 1);
+            assert_eq!(video[0].spec().format.profile_level_id, profile);
+            assert_eq!(video[0].spec().format.packetization_mode, Some(1));
+        }
+    }
+
+    #[test]
+    fn constrained_high_and_baseline_choose_once_without_an_encoder_retry() {
+        let offer = profile_offer(&[0x640c1f, 0x42e01f], true);
+        assert_eq!(
+            monitor_profile(&offer, false).unwrap(),
+            H264Profile::ConstrainedBaseline
+        );
+        assert_eq!(monitor_profile(&offer, true).unwrap(), H264Profile::High);
+        assert!(answer_profile(&offer, 0x64001f).is_err());
+        assert_eq!(answer_profile(&offer, 0x42c01f).unwrap(), Some(0x42e01f));
+        assert!(answer_profile(&profile_offer(&[0x640c1f], true), 0x42c01f).is_err());
+        assert!(monitor_profile(&profile_offer(&[0x640c1f], true), false).is_err());
+        for ids in [[0x64001f, 0x42e01f], [0x42e01f, 0x64001f]] {
+            assert_eq!(
+                monitor_profile(&profile_offer(&ids, true), false).unwrap(),
+                H264Profile::High
+            );
+        }
+    }
+
+    #[test]
+    fn plain_and_implicit_baseline_offers_receive_the_constrained_subset() {
+        for offered in [Some(0x42001f), Some(0x428029), None] {
+            let offer = profile_offer(&[offered.unwrap_or(0x42001f)], true);
+            let offer = if offered.is_none() {
+                validate_offer(
+                    &offer
+                        .to_sdp_string()
+                        .replace(";profile-level-id=42001f", "")
+                        .replace("profile-level-id=42001f;", "")
+                        .replace("profile-level-id=42001f", ""),
+                )
+                .unwrap()
+            } else {
+                offer
+            };
+            assert_eq!(
+                monitor_profile(&offer, false).unwrap(),
+                H264Profile::ConstrainedBaseline
+            );
+            let profile = answer_profile(&offer, 0x42c01f).unwrap();
+            assert_eq!(profile, offered);
+            let mut config = RtcConfig::new()
+                .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+                .clear_codecs()
+                .enable_opus(true, false);
+            add_h264(config.codec_config(), profile);
+            let mut sender = config.build(Instant::now());
+            let answer = sender.sdp_api().accept_offer(offer).unwrap();
+            assert!(tracks(&mut sender, &answer, profile).is_ok());
+            let params: Vec<_> = answer
+                .media_lines
+                .iter()
+                .flat_map(|line| line.rtp_params())
+                .filter(|p| p.spec().codec == Codec::H264)
+                .collect();
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].spec().format.profile_level_id, offered);
+            assert_eq!(params[0].spec().format.packetization_mode, Some(1));
+        }
+        assert!(answer_profile(&profile_offer(&[0x42000a], true), 0x42c01f).is_err());
+        assert!(answer_profile(&profile_offer(&[0x42001f], true), 0x64001f).is_err());
+        assert!(monitor_profile(&profile_offer(&[0x42001f], false), false).is_err());
+    }
+
+    #[test]
+    fn encoder_refusal_reason_reaches_the_whep_client() {
+        let (send, records) = std::sync::mpsc::channel();
+        let reason = b"video.profile: this Mac's H.264 encoder refused constrained_baseline";
+        send.send(frames::encode(frames::END, 0, 0, 0, reason).into())
+            .unwrap();
+        let error = video_config(&records).unwrap_err();
+        assert_eq!(error.code, RpcError::FAILED);
+        assert_eq!(
+            error.message,
+            format!("WebRTC: {}", String::from_utf8_lossy(reason))
+        );
+    }
+
+    #[test]
+    fn h264_incompatible_offers_and_encoder_profiles_fail_explicitly() {
+        for offer in [
+            profile_offer(&[], true),
+            profile_offer(&[0x4d001f], true),
+            profile_offer(&[0x42e01f], false),
+        ] {
+            let error = monitor_profile(&offer, false).unwrap_err();
+            assert_eq!(error.code, RpcError::UNSUPPORTED);
+            assert!(error.message.contains("no compatible H.264"));
+            assert!(error.message.contains("42e0xx"));
+            assert!(error.message.contains("packetization-mode=1"));
+        }
+        assert!(answer_profile(&profile_offer(&[0x42e01f], true), 0x64001f).is_err());
+        assert!(answer_profile(&profile_offer(&[0x640c1f], true), 0x64001f).is_err());
+        assert!(answer_profile(&profile_offer(&[0x42e00a], true), 0x42e01f).is_err());
+        assert!(level_rank(0x42f00b) > level_rank(0x42e00a));
+        assert!(level_rank(0x42f00b) < level_rank(0x42e00b));
+        assert_eq!(level_rank(0x640009), level_rank(0x42f00b));
+        assert!(level_rank(0x640009) > level_rank(0x64000a));
+        assert!(level_rank(0x640009) < level_rank(0x64000b));
+    }
+
     #[test]
     fn other_viewer_methods_receive_a_json_rpc_error() {
         let reply = serde_json::to_value(viewer_reply(&Request::new(42, Method::Status))).unwrap();
@@ -652,7 +945,7 @@ mod tests {
                 .unwrap();
             assert!(!sender.is_connected());
             assert!(
-                tracks(&mut sender, &answer, profile).is_ok(),
+                tracks(&mut sender, &answer, Some(profile)).is_ok(),
                 "both encoder profiles must negotiate before DTLS"
             );
         }

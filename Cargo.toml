@@ -13,6 +13,7 @@ default-members = [
     "crates/isocast-engine",
     "crates/isocast-obsws",
     "crates/isocast-platform-macos",
+    "crates/isocast-platform-stub",
     "crates/isocast-protocol",
     "crates/isocast-surfaces",
     "crates/isocast-ui",

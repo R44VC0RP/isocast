@@ -306,6 +306,16 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   each required filter's lookahead (not a shared larger allowance for unfiltered inputs).
   Audio graph changes retap with bounded retries without replacing viewers. Desktop playout must align
   the session's program MIDs through actual RTCP SRs.
+- 2026-10-24: WHEP chooses an offered H.264 profile before opening the monitor encoder; a Baseline-only
+  `42e01f`, packetization-mode 1 offer requests Constrained Baseline. `frames` has optional
+  `profile: "constrained_baseline"` (omitted remains High). Monitor sharing includes profile;
+  recordings, replay and outgoing streams retain their previous profiles. Actual SPS/level validation
+  prevents answering with an unoffered profile. Mac VT, Windows NVENC/MF software and Linux OpenH264
+  output were decoded with OpenH264 0.9.9; see `docs/server-protocol.md` for negotiation details.
+- 2026-10-24: a Constrained Baseline viewer alongside a High viewer consumes another NVENC
+  monitor session. On a loaded GPU this can make admission refuse a recording **start**;
+  it does not cancel or change a take already in progress. WHEP selects the profile before
+  opening an encoder, without a speculative High-to-Baseline retry.
 
 - 2026-10-11: macOS ties privacy grants to the bundle id plus the signing identity. Re-sign isocastd after every build, or grants and Keychain reads break.
 - 2026-10-15: A grant made in System Settings while isocastd runs reaches only processes started later. Restart the engine; "Quit & Reopen" doesn't restart it.

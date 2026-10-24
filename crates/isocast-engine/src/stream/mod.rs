@@ -96,6 +96,7 @@ impl StreamSpec {
         let settings = &self.settings;
         EncoderSpec {
             video: LiveVideoSpec {
+                profile: isocast_protocol::api::H264Profile::High,
                 width: self.width,
                 height: self.height,
                 fps: self.fps,

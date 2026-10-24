@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use isocast_engine::{
     EncodedVideo, LiveVideoSpec, ParameterSets, Time, VideoEncoder, VideoTrackSpec,
 };
+use isocast_protocol::api::H264Profile;
 use isocast_protocol::{Codec, EncoderQuality, QualityPreset};
 
 use crate::nvenc::{NvencAccounted, NvencAdmission, NvencClosing, NvencReservation};
@@ -36,14 +37,24 @@ impl VideoEncoding {
 }
 
 pub(crate) enum Parameters {
-    H264(ParameterSets),
-    Hevc { depth: u8, sets: hevc::Parameters },
+    /// Every SPS is checked against the requested profile as it arrives.
+    H264 {
+        sets: ParameterSets,
+        profile: H264Profile,
+    },
+    Hevc {
+        depth: u8,
+        sets: hevc::Parameters,
+    },
 }
 
 impl Parameters {
-    pub(crate) fn new(encoding: VideoEncoding) -> Self {
+    pub(crate) fn new(encoding: VideoEncoding, profile: H264Profile) -> Self {
         match encoding {
-            VideoEncoding::H264 => Self::H264(ParameterSets::default()),
+            VideoEncoding::H264 => Self::H264 {
+                sets: ParameterSets::default(),
+                profile,
+            },
             _ => Self::Hevc {
                 depth: encoding.bit_depth(),
                 sets: hevc::Parameters::default(),
@@ -54,7 +65,11 @@ impl Parameters {
     pub(crate) fn headers(&mut self, bytes: &[u8]) -> Result<()> {
         let nals = h264::annex_b(bytes)?;
         match self {
-            Self::H264(sets) => *sets = h264::parameters(&nals),
+            Self::H264 { sets, profile } => {
+                let next = h264::parameters(&nals);
+                h264::check_profile(&next, *profile)?;
+                *sets = next;
+            }
             Self::Hevc { sets, .. } => {
                 let next = hevc::parameters(&nals)?;
                 if !sets.vps.is_empty()
@@ -73,7 +88,7 @@ impl Parameters {
 
     pub(crate) fn config(&self) -> Result<Vec<u8>> {
         match self {
-            Self::H264(sets) => h264::config(sets),
+            Self::H264 { sets, .. } => h264::config(sets),
             Self::Hevc { depth, sets } => {
                 if sets.bit_depth()? != *depth {
                     bail!("encoder returned HEVC with a different bit depth than requested");
@@ -85,7 +100,11 @@ impl Parameters {
 
     pub(crate) fn packet(&mut self, bytes: &[u8], pts: Time) -> Result<Option<EncodedVideo>> {
         match self {
-            Self::H264(sets) => h264::packet(bytes, pts, sets),
+            Self::H264 { sets, profile } => {
+                let packet = h264::packet(bytes, pts, sets)?;
+                h264::check_profile(sets, *profile)?;
+                Ok(packet)
+            }
             Self::Hevc { sets, .. } => hevc::packet(bytes, pts, sets),
         }
     }
@@ -123,6 +142,7 @@ pub fn video_encoders(device: Option<&GraphicsDevice>) -> isocast_engine::VideoE
             }
             None => {
                 let spec = LiveVideoSpec {
+                    profile: H264Profile::High,
                     width: 1280,
                     height: 720,
                     fps: 30,
@@ -415,6 +435,7 @@ impl WindowsVideoEncoder {
         encoding.validate(input)?;
         let quality = RecordingQuality::new(spec.encoder.quality)?;
         let settings = LiveVideoSpec {
+            profile: H264Profile::High,
             width: spec.width,
             height: spec.height,
             fps: spec.fps,

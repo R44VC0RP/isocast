@@ -17,6 +17,7 @@ use isocast_engine::{
     AudioEncoder, EncodedVideo, LiveAudioSpec, LiveVideoSpec, ParameterSets, SAMPLE_RATE, Time,
     VideoEncoder,
 };
+use isocast_protocol::api::H264Profile;
 use objc2_audio_toolbox::{
     AudioConverterDispose, AudioConverterFillComplexBuffer, AudioConverterGetProperty,
     AudioConverterNew, AudioConverterPrimeInfo, AudioConverterRef, AudioConverterSetProperty,
@@ -52,7 +53,8 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
-    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTH264EntropyMode_CABAC,
+    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTH264EntropyMode_CABAC, kVTH264EntropyMode_CAVLC,
+    kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel,
     kVTProfileLevel_H264_ConstrainedHigh_AutoLevel, kVTProfileLevel_H264_High_AutoLevel,
     kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
@@ -75,7 +77,8 @@ const MAX_IN_FLIGHT: u64 = 8;
 /// The program tap absorbs the backlog; monitors still discard stale frames.
 const STALL_WAIT: Duration = Duration::from_millis(400);
 
-/// A live H.264 encoder: High profile, no B-frames (decode order is
+/// A live H.264 encoder: High profile (or Constrained Baseline when the
+/// spec asks), no B-frames (decode order is
 /// presentation order, so FLV needs no composition offsets), bitrate held
 /// to the target each second, keyframes when the engine asks.
 pub struct H264Encoder {
@@ -131,6 +134,8 @@ struct Output {
     latency_ns: AtomicU64,
     callbacks: AtomicU64,
     last_os_status: std::sync::atomic::AtomicI32,
+    /// Keyframes' parameter sets are checked against it as they come.
+    profile: H264Profile,
 }
 
 static ENCODERS: Mutex<Vec<Weak<Output>>> = Mutex::new(Vec::new());
@@ -165,6 +170,7 @@ impl H264Encoder {
             latency_ns: AtomicU64::new(0),
             callbacks: AtomicU64::new(0),
             last_os_status: std::sync::atomic::AtomicI32::new(0),
+            profile: spec.profile,
         });
         ENCODERS.lock().unwrap().push(Arc::downgrade(&output));
         // Monitors want each frame decoded as soon as it arrives: VideoToolbox's
@@ -226,7 +232,15 @@ impl H264Encoder {
         };
         let rate_control = unsafe {
             set(kVTCompressionPropertyKey_RealTime, CFBoolean::new(true))?;
-            if spec.low_latency {
+            if spec.profile == H264Profile::ConstrainedBaseline {
+                // Exactly this, never a High fallback: whoever asked can
+                // decode nothing else.
+                set(
+                    kVTCompressionPropertyKey_ProfileLevel,
+                    kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel,
+                )
+                .context("video.profile: this Mac's H.264 encoder refused constrained_baseline")?;
+            } else if spec.low_latency {
                 if let Err(error) = set(
                     kVTCompressionPropertyKey_ProfileLevel,
                     kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
@@ -251,10 +265,19 @@ impl H264Encoder {
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 CFBoolean::new(false),
             )?;
-            set(
-                kVTCompressionPropertyKey_H264EntropyMode,
-                kVTH264EntropyMode_CABAC,
-            )?;
+            if spec.profile == H264Profile::ConstrainedBaseline {
+                // Baseline is CAVLC anyway; the keyframes' PPS are checked
+                // for it, so an encoder refusing the explicit key is fine.
+                let _ = set(
+                    kVTCompressionPropertyKey_H264EntropyMode,
+                    kVTH264EntropyMode_CAVLC,
+                );
+            } else {
+                set(
+                    kVTCompressionPropertyKey_H264EntropyMode,
+                    kVTH264EntropyMode_CABAC,
+                )?;
+            }
             // Every frame in the base layer: with the low-latency mode's
             // default of half, every other frame came out ~35 ms late.
             if spec.low_latency {
@@ -689,7 +712,12 @@ unsafe extern "C-unwind" fn encoded(
             output.ready.notify_all();
             return;
         }
-        Some(sample) => unsafe { encoded_frame(sample) },
+        Some(sample) => unsafe { encoded_frame(sample) }.and_then(|frame| {
+            if let Some(sets) = &frame.parameter_sets {
+                check_profile(sets, output.profile)?;
+            }
+            Ok(frame)
+        }),
     };
     let mut frames = output.frames.lock().unwrap();
     frames.push_back(result);
@@ -730,6 +758,65 @@ unsafe fn encoded_frame(sample: &CMSampleBuffer) -> Result<EncodedVideo> {
         keyframe,
         parameter_sets,
     })
+}
+
+/// Fail unless the parameter sets really say the requested profile. High
+/// keeps whatever VideoToolbox made (as before); Constrained Baseline needs
+/// every SPS at profile_idc 66 with constraint_set1_flag and every PPS on
+/// CAVLC, never a stream merely asked for as baseline.
+fn check_profile(sets: &ParameterSets, profile: H264Profile) -> Result<()> {
+    if profile == H264Profile::High {
+        return Ok(());
+    }
+    for sps in &sets.sps {
+        match sps.get(1..3) {
+            Some(&[66, flags]) if flags & 0x40 != 0 => {}
+            Some(&[idc, flags]) => bail!(
+                "video.profile: constrained_baseline was requested, but VideoToolbox made \
+                 profile_idc {idc} with constraint flags {flags:#04x} (needs 66 with \
+                 constraint_set1); use high"
+            ),
+            _ => bail!("the encoder made an H.264 SPS that is too short"),
+        }
+    }
+    for pps in &sets.pps {
+        if pps_cabac(pps).context("the encoder made an H.264 PPS that is too short")? {
+            bail!(
+                "video.profile: constrained_baseline was requested, but VideoToolbox made a \
+                 CABAC picture parameter set; use high"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A PPS's entropy_coding_mode_flag: after pic_parameter_set_id and
+/// seq_parameter_set_id (both ue(v)), with emulation prevention removed.
+fn pps_cabac(pps: &[u8]) -> Option<bool> {
+    let mut bits = Vec::with_capacity(8);
+    let mut zeros = 0;
+    for &byte in pps.get(1..)?.iter().take(16) {
+        if zeros >= 2 && byte == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+        bits.push(byte);
+    }
+    let bit = |n: usize| bits.get(n / 8).map(|byte| (byte >> (7 - n % 8)) & 1);
+    let mut at = 0;
+    for _ in 0..2 {
+        let mut leading = 0;
+        while bit(at)? == 0 {
+            leading += 1;
+            at += 1;
+            if leading > 31 {
+                return None;
+            }
+        }
+        at += 1 + leading;
+    }
+    Some(bit(at)? == 1)
 }
 
 /// A sample is a keyframe unless its attachments say "not sync".
@@ -1052,6 +1139,7 @@ mod teardown_tests {
         let frame = pool.draw(&mut |pixels, _| pixels.fill(0)).unwrap().unwrap();
         for _ in 0..16 {
             let mut encoder = H264Encoder::new(&LiveVideoSpec {
+                profile: H264Profile::High,
                 width: 64,
                 height: 64,
                 fps: 30,
@@ -1071,5 +1159,66 @@ mod teardown_tests {
             assert_eq!(output.in_flight.load(Ordering::Relaxed), 0);
             assert_eq!(Arc::strong_count(&output), 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use isocast_engine::FramePool;
+
+    fn sets(sps: &[u8], pps: &[u8]) -> ParameterSets {
+        ParameterSets {
+            sps: vec![sps.to_vec()],
+            pps: vec![pps.to_vec()],
+        }
+    }
+
+    #[test]
+    fn constrained_baseline_is_checked_in_the_parameter_sets() {
+        let profile = H264Profile::ConstrainedBaseline;
+        // 42 e0 1f with pps_id 0, sps_id 0 ("1", "1") and CAVLC.
+        let cavlc = [0x68, 0b1100_0000];
+        check_profile(&sets(&[0x67, 66, 0xe0, 31], &cavlc), profile).unwrap();
+        // Plain Baseline (no constraint_set1), or High: refused.
+        let error = check_profile(&sets(&[0x67, 66, 0x80, 31], &cavlc), profile).unwrap_err();
+        assert!(error.to_string().contains("video.profile"), "{error}");
+        assert!(check_profile(&sets(&[0x67, 100, 0, 31], &cavlc), profile).is_err());
+        // A CABAC PPS: refused.
+        let cabac = [0x68, 0b1110_0000];
+        assert!(check_profile(&sets(&[0x67, 66, 0xe0, 31], &cabac), profile).is_err());
+        // pps_id 1 ("010"), sps_id 2 ("011"), then the flag.
+        assert_eq!(pps_cabac(&[0x68, 0b0100_1110, 0]), Some(true));
+        assert_eq!(pps_cabac(&[0x68, 0b0100_1100, 0]), Some(false));
+        assert_eq!(pps_cabac(&[0x68]), None);
+        // High keeps whatever was made, as before.
+        check_profile(&sets(&[0x67, 100, 0, 31], &cabac), H264Profile::High).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a hardware H.264 encoder; run on an idle test Mac"]
+    fn constrained_baseline_monitor_makes_42_with_constraint_set1() {
+        let mut pool = crate::frames::FramePool::new(64, 64).unwrap();
+        let frame = pool.draw(&mut |pixels, _| pixels.fill(0)).unwrap().unwrap();
+        let mut encoder = H264Encoder::new(&LiveVideoSpec {
+            profile: H264Profile::ConstrainedBaseline,
+            width: 64,
+            height: 64,
+            fps: 30,
+            bitrate_kbps: 1000,
+            constant_bitrate: false,
+            keyframe_interval: 30,
+            low_latency: true,
+        })
+        .unwrap();
+        encoder.encode(&frame, Time::from_nanos(0), true).unwrap();
+        let packet = encoder
+            .receive_timeout(Duration::from_secs(2))
+            .unwrap()
+            .expect("a keyframe");
+        let sets = packet.parameter_sets.expect("parameter sets");
+        assert_eq!(sets.sps[0][1], 66);
+        assert_ne!(sets.sps[0][2] & 0x40, 0);
+        assert_eq!(pps_cabac(&sets.pps[0]), Some(false));
     }
 }

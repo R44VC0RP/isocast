@@ -747,6 +747,9 @@ enum Command {
         /// The most frames a second (30 if absent, at most 60).
         #[arg(long)]
         fps: Option<u32>,
+        /// The H.264 profile: high (the default) or constrained_baseline.
+        #[arg(long, value_parser = parse_h264_profile, conflicts_with = "shared")]
+        profile: Option<isocast_protocol::api::H264Profile>,
         /// Stop after this long (5 s if absent).
         #[arg(long, default_value_t = 5.0)]
         seconds: f64,
@@ -1880,6 +1883,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             width,
             height,
             fps,
+            profile,
             seconds,
             shared,
             slots,
@@ -1903,7 +1907,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 touch,
                 json,
             }),
-            (false, target) => frames(target, output, width, fps, seconds, json),
+            (false, target) => frames(target, output, width, fps, profile, seconds, json),
         },
         Command::Engine { command, json } => engine(command, json),
         Command::Vcam { command } => virtual_camera::run(command),
@@ -4004,6 +4008,7 @@ fn frames(
     output: Option<PathBuf>,
     width: Option<u32>,
     fps: Option<u32>,
+    profile: Option<isocast_protocol::api::H264Profile>,
     seconds: f64,
     json: bool,
 ) -> Result<ExitCode> {
@@ -4013,6 +4018,7 @@ fn frames(
         target: target.clone(),
         max_width: width,
         fps,
+        profile,
     };
     let (reply, mut reader) = Client::connect_or_launch()?.frames(params)?;
     let started = std::time::Instant::now();
@@ -4960,6 +4966,12 @@ fn print_monitor(monitor: &isocast_protocol::api::MonitorStatus) {
 fn parse_monitoring(value: &str) -> Result<isocast_protocol::Monitoring, String> {
     serde_json::from_value(serde_json::Value::String(value.into())).map_err(|_| {
         format!("{value:?} is not a monitoring type; valid: off, monitor_only, monitor_and_output")
+    })
+}
+
+fn parse_h264_profile(value: &str) -> Result<isocast_protocol::api::H264Profile, String> {
+    serde_json::from_value(serde_json::Value::String(value.into())).map_err(|_| {
+        format!("{value:?} is not an H.264 profile; valid: high, constrained_baseline")
     })
 }
 

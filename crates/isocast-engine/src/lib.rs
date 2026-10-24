@@ -250,6 +250,18 @@ pub trait Platform: Clone + Send + Sync + 'static {
         EncoderFrameFormat::Ycbcr
     }
 
+    /// Whether a monitor encoder asked for High profile is guaranteed to make
+    /// Constrained High (no B-frames, `640c..`), so a WHEP answer may offer
+    /// a client that takes only Constrained High the High stream. A promise,
+    /// not a preference: a backend whose encoder may fall back to plain High
+    /// (VideoToolbox), or always makes it (NVENC, OpenH264 at High), says
+    /// `false`, and such clients get Constrained Baseline instead. Not a
+    /// probe of the native encoder; a backend says `true` only when its
+    /// session cannot make anything else.
+    fn monitor_h264_constrained_high(&self) -> bool {
+        false
+    }
+
     /// Finish a fresh program picture before choosing a recording's epoch.
     /// Software GPU drivers may compile their first draw lazily; preparing
     /// that work must not consume the first slots of an already armed take.
@@ -514,10 +526,11 @@ pub enum EncoderFrameFormat {
     Ycbcr,
 }
 
-/// What a live H.264 encoder makes: constant-ish bitrate, High profile,
+/// What a live H.264 encoder makes: constant-ish bitrate, the requested profile,
 /// no B-frames, Rec. 709 tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveVideoSpec {
+    pub profile: isocast_protocol::api::H264Profile,
     pub width: u32,
     pub height: u32,
     pub fps: u32,

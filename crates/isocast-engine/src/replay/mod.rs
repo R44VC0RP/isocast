@@ -100,6 +100,7 @@ pub fn canvas_encoder_spec<P: Platform>(
 fn own_spec(settings: &ReplaySettings, width: u32, height: u32, fps: u32) -> EncoderSpec {
     EncoderSpec {
         video: LiveVideoSpec {
+            profile: isocast_protocol::api::H264Profile::High,
             width,
             height,
             fps,

@@ -1620,7 +1620,7 @@ impl<P: Platform> Engine<P> {
     /// `target`'s picture (see [`Engine::frame`]) as low-latency H.264 at
     /// most `max_width` wide and `fps` frames a second (changed later with
     /// [`FrameFeed::rate`]), for a monitor: the records of a stream shared
-    /// with everyone watching the same at that width, which runs while
+    /// with everyone watching the same at that width and profile, which runs while
     /// anyone does, at the highest rate any of them wants. An error lists
     /// the valid targets.
     pub fn frames(
@@ -1628,12 +1628,14 @@ impl<P: Platform> Engine<P> {
         target: &str,
         max_width: Option<u32>,
         fps: u32,
+        profile: isocast_protocol::api::H264Profile,
     ) -> Result<FrameFeed, String> {
         let fps = fps.clamp(1, 60);
         slot_of_sized(&self.inner, target, fps, (max_width, None))?;
         let key = frame_stream::Key {
             target: target.to_string(),
             max_width,
+            profile,
         };
         let inner = self.inner.clone();
         let target = target.to_string();
@@ -1696,6 +1698,13 @@ impl<P: Platform> Engine<P> {
     /// drawn faster than this for monitors alone.
     pub fn monitor_fps(&self) -> Option<u32> {
         frame_stream::highest_rate(&self.inner.frame_streams)
+    }
+
+    /// Whether a High profile monitor stream ([`Engine::frames`]) is
+    /// guaranteed to be Constrained High on this platform (see
+    /// [`Platform::monitor_h264_constrained_high`]).
+    pub fn monitor_h264_constrained_high(&self) -> bool {
+        self.inner.platform.monitor_h264_constrained_high()
     }
 
     /// An independent camera output; no change to recording routes or clocks.

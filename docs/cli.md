@@ -2588,6 +2588,7 @@ Options:
       --width <WIDTH>      Scale it down to at most this many pixels wide
       --height <HEIGHT>    With --shared, scale it down to at most this many pixels high
       --fps <FPS>          The most frames a second (30 if absent, at most 60)
+      --profile <PROFILE>  The H.264 profile: high (the default) or constrained_baseline
       --seconds <SECONDS>  Stop after this long (5 s if absent) [default: 5]
       --shared             Watch through GPU surfaces shared with the daemon (zero-copy, as the native app does) instead of saving H.264: reports the rate, how late frames arrive and the setup revisions they show
       --slots <SLOTS>      With --shared: surfaces in the ring (4 if absent, 2 to 8)

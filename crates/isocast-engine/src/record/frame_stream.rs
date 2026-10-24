@@ -1,6 +1,6 @@
 //! Monitors' video (`frames`): a target's picture (the program, studio
 //! mode's preview or a source) as low-latency H.264 from the platform
-//! encoder. Everyone watching the same target at the same size shares one
+//! encoder. Everyone watching the same target at the same size and profile shares one
 //! encoder thread, which runs only while someone watches, at the highest
 //! rate any of them asks for (a viewer can change its rate at any time, as
 //! the app does while the user drags on the canvas). Each record is encoded
@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use isocast_protocol::ScaleFilter;
-use isocast_protocol::api::frames;
+use isocast_protocol::api::{H264Profile, frames};
 
 use crate::gpu::Gpu;
 use crate::source::FrameSlot;
@@ -56,6 +56,7 @@ pub const MAX_FPS: u32 = 60;
 pub(crate) struct Key {
     pub(crate) target: String,
     pub(crate) max_width: Option<u32>,
+    pub(crate) profile: H264Profile,
 }
 
 /// The running streams.
@@ -544,6 +545,7 @@ fn start_encoder<P: Platform>(
 ) -> Result<Encoding<P::VideoEncoder>> {
     let output = scaled(input, key.max_width);
     let encoder = platform.create_video_encoder(&LiveVideoSpec {
+        profile: key.profile,
         width: output.0,
         height: output.1,
         fps,
