@@ -103,6 +103,12 @@ HOSTED_HOLD_CAP = 3
 # file that misses half a second still fails.
 HOSTED_LATE_START_CAP = 12
 HOSTED_SUITE_LOSS_LIMIT = 0.03
+# Hosted only: the vertical scenario's stream may drop this many frames, or
+# this share of the frames it sent if more, counted in the suite's budget.
+# The VM's GPU and CPU stalls cost it 1 and 4 frames of ~300 on 2026-10-23
+# (runs 39949752801, 39955241917; 10-18 d3ca9bbd), while a test Mac drops none.
+HOSTED_STREAM_DROP_FRAMES = 3
+HOSTED_STREAM_DROP_RATIO = 0.02
 # The longest run folder whose scenarios' sockets all fit in sun_path.
 SHORT_ROOT = 44
 
@@ -660,6 +666,40 @@ def check_loss(row, limit):
             f"{row['output']}: unexpected repeated_frames={row['repeated']}")
 
 
+def vertical_stream_loss(final, fps, evidence):
+    """The vertical stream's losses as a drops row (counted in the suite's
+    budget), checked: no audio dropouts ever, and no dropped frames unless
+    hosted, where up to max(HOSTED_STREAM_DROP_FRAMES, HOSTED_STREAM_DROP_RATIO
+    of the frames sent) are accounted loss."""
+    sent, dropped = final["frames_sent"], final["dropped_frames"]
+    require(sent > 0, "vertical stream sent no video")
+    allowed = (max(HOSTED_STREAM_DROP_FRAMES, math.floor(HOSTED_STREAM_DROP_RATIO * sent))
+               if loss_limit(evidence) else 0)
+    require(final["audio_dropouts"] == 0 and dropped <= allowed,
+            f"vertical stream lost protected media ({dropped} frame(s) dropped, {allowed} allowed): {final}")
+    slots = sent + dropped
+    return {"output": "vertical stream", "frames": sent, "dropped": dropped, "slots": slots,
+            "ratio": dropped / slots, "repeated": 0, "audio_dropouts": final["audio_dropouts"],
+            "target_fps": fps, "delivered_fps": sent / final["elapsed_seconds"] if final.get("elapsed_seconds") else None}
+
+
+def packets_unbroken(times, gap):
+    """Packet times that are in order with no gap over `gap` (seconds)."""
+    return len(times) > 2 and all(0 < b - a <= gap for a, b in zip(times, times[1:]))
+
+
+def video_packets_accounted(times, fps, accounted):
+    """Video packet times in order whose gaps miss at most `accounted` frames
+    in all: a frame the engine dropped (and counted) leaves a gap in the
+    received stream; any other gap is lost media and fails, hosted or not."""
+    if len(times) <= 2 or not all(b > a for a, b in zip(times, times[1:])):
+        return False
+    # Each gap over a frame (and its 2 ms slack) misses at least one frame.
+    missing = sum(max(1, round((b - a) * fps) - 1) for a, b in zip(times, times[1:])
+                  if b - a > 1 / fps + 0.002)
+    return missing <= accounted
+
+
 def check_take(path, manifest, duration=None, sync=False, expected_sources=None, evidence=None):
     losses = drop_metrics(manifest)
     if evidence is not None:
@@ -1118,7 +1158,9 @@ def scenario_vertical(e, cfg, evidence):
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (vertical H.264 streaming)")
     # Two HD programs and one HD stream, at a rate the base M2 can protect.
-    # Keep this scenario strict even when the hosted suite allows ISO loss.
+    # Strict on test Macs; hosted, the stream and recordings may lose what
+    # the VM's stalls cost (vertical_stream_loss, check_take), never a gap in
+    # the received stream.
     cfg["canvas"]["fps"] = min(cfg["canvas"]["fps"], 30)
     fps = cfg["canvas"]["fps"]
     width, height = cfg["canvas"]["height"], cfg["canvas"]["width"]
@@ -1159,9 +1201,7 @@ def scenario_vertical(e, cfg, evidence):
             time.sleep(2)
             final = e.rpc("stream_stop", {"canvas": "vertical"})
             listener.wait(timeout=10)
-            require(final["frames_sent"] > 0, "vertical stream sent no video")
-            require(final["dropped_frames"] == 0 and final["audio_dropouts"] == 0,
-                    f"vertical stream lost protected media: {final}")
+            evidence.setdefault("drops", {})["vertical stream"] = vertical_stream_loss(final, fps, evidence)
             # A stale Stop action must be harmless after a failure or normal end.
             e.rpc("stream_stop", {"canvas": "vertical"})
             evidence["stream"] = final
@@ -1175,8 +1215,10 @@ def scenario_vertical(e, cfg, evidence):
     for index, started in enumerate(takes):
         path = Path(started["manifest"])
         manifest = until(lambda: finished(path), description="dual-canvas split finalization")
-        require(all(f["dropped_frames"] == 0 and f["audio_dropouts"] == 0
-                    for f in manifest["files"]), "dual-canvas recording lost protected media")
+        # Hosted, check_take below holds them to the suite's recording rule.
+        require(loss_limit(evidence) or all(f["dropped_frames"] == 0 and f["audio_dropouts"] == 0
+                                            for f in manifest["files"]),
+                "dual-canvas recording lost protected media")
         require({s["scene"] for s in manifest["scenes"]} == {"main"},
                 "independent vertical switch changed the main scene timeline")
         require(manifest["vertical_scenes"][0]["scene"] == ("second" if index == 1 else "main"),
@@ -1192,10 +1234,14 @@ def scenario_vertical(e, cfg, evidence):
     video = next(s for s in info["streams"] if s["codec_type"] == "video")
     require((video["width"], video["height"]) == (width, height), "vertical stream size is wrong")
     packets = json.loads(command(["ffprobe", "-v", "error", "-show_packets", "-of", "json", output]).stdout)["packets"]
-    for kind, gap in (("video", 1 / fps + 0.002), ("audio", 0.023)):
-        times = [float(p["pts_time"]) for p in packets if p["codec_type"] == kind]
-        require(len(times) > 2 and all(0 < b - a <= gap for a, b in zip(times, times[1:])),
-                f"vertical stream has missing or non-monotonic {kind} packets")
+    # A frame the engine dropped (hosted: accounted) leaves a gap; any other
+    # gap, and any audio gap, is media lost on the way and fails.
+    accounted = evidence["drops"]["vertical stream"]["dropped"]
+    times = [float(p["pts_time"]) for p in packets if p["codec_type"] == "video"]
+    require(video_packets_accounted(times, fps, accounted),
+            f"vertical stream has missing or non-monotonic video packets beyond its {accounted} dropped frame(s)")
+    times = [float(p["pts_time"]) for p in packets if p["codec_type"] == "audio"]
+    require(packets_unbroken(times, 0.023), "vertical stream has missing or non-monotonic audio packets")
     ffmpeg("-xerror", "-i", output, "-map", "0", "-f", "null", "-")
 
 
@@ -3454,6 +3500,34 @@ def oracle_rules_selftest(work):
             cases[label] = ("pass", "fail")
         except Failure:
             cases[label] = ("fail", "fail")
+    # The vertical stream (hosted: max(3, 2%) accounted; strict: none), and
+    # its received packets (a gap over one frame fails either way).
+    def stream(dropped, sent=300, evidence=None):
+        final = {"frames_sent": sent, "dropped_frames": dropped, "audio_dropouts": 0, "elapsed_seconds": 10.0}
+        try:
+            vertical_stream_loss(final, 30, {} if evidence is None else evidence)
+            return "pass"
+        except Failure:
+            return "fail"
+    every = [k / 30 for k in range(300)]
+    one_lost = [t for k, t in enumerate(every) if k != 150]
+    cases.update({
+        "hosted: vertical stream drops 1 of 294": (stream(1, 294, hosted()), "pass"),
+        "hosted: vertical stream drops 4 of 291": (stream(4, 291, hosted()), "pass"),
+        "hosted: vertical stream drops 10%": (stream(30, 300, hosted()), "fail"),
+        "strict: vertical stream drops 1": (stream(1, 300), "fail"),
+        "strict: vertical stream drops none": (stream(0, 300), "pass"),
+        "received stream, every frame": ("pass" if video_packets_accounted(every, 30, 0) else "fail", "pass"),
+        "hosted: a 2-frame gap the engine didn't count": (
+            "pass" if video_packets_accounted(one_lost, 30, 0) else "fail", "fail"),
+        "hosted: a 2-frame gap for 1 counted drop": (
+            "pass" if video_packets_accounted(one_lost, 30, 1) else "fail", "pass"),
+        "hosted: a 3-frame gap for 1 counted drop": (
+            "pass" if video_packets_accounted([t for k, t in enumerate(every) if k not in (150, 151)], 30, 1)
+            else "fail", "fail"),
+        "received audio with a gap": (
+            "pass" if packets_unbroken([k * 0.021333 for k in range(400) if k != 200], 0.023) else "fail", "fail"),
+    })
     wrong = {k: v for k, v in cases.items() if v[0] != v[1]}
     require(not wrong, f"oracle rules: {wrong}")
     return {k: v[0] for k, v in cases.items()}
