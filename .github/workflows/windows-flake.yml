@@ -1,0 +1,81 @@
+name: Windows Flake
+
+on:
+  push:
+    branches: ['ci/windows-flake-measure']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-flake-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: '0'
+
+jobs:
+  measure:
+    name: matched controls and reserve ${{ matrix.sample }}
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3, 4, 5]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: windows-engine
+          save-if: false
+      - name: Decoder
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --version=9.0.2 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install FFmpeg' }
+          }
+          ffmpeg -version
+          ffprobe -version
+      - name: Build once per host from the same commit
+        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli --bins
+      - name: Reference 30 fps matched 20-second controls
+        timeout-minutes: 9
+        run: |
+          cp scripts/e2e.py "$RUNNER_TEMP/e2e-reference.py"
+          python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-reference" --keep --report windows-reference.json
+      - name: Reserve 36 fps matched 20-second controls with fresh daemon
+        if: ${{ !cancelled() }}
+        timeout-minutes: 9
+        run: |
+          git apply scripts/e2e-preview-reserve.patch
+          cp scripts/e2e.py "$RUNNER_TEMP/e2e-reserve.py"
+          python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-reserve" --keep --report windows-reserve.json
+      - name: Preserve every result and the mechanical probe
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: headroom-sample-${{ matrix.sample }}
+          path: |
+            windows-reference.json
+            windows-reserve.json
+            scripts/e2e-preview-reserve.patch
+            ${{ runner.temp }}/e2e-reference.py
+            ${{ runner.temp }}/e2e-reserve.py
+            ${{ runner.temp }}/windows-reference
+            ${{ runner.temp }}/windows-reserve
+          if-no-files-found: warn
+          retention-days: 14

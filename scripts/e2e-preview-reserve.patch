@@ -1,0 +1,35 @@
+--- a/scripts/e2e.py
++++ b/scripts/e2e.py
+@@ -4307,8 +4307,8 @@
+     reference = (320, 180)
+     selected = None
+     reference_warning_seen = False
+-    for width, height in ((1280, 720), (960, 540), (640, 360), (480, 270), (426, 240), (320, 180)):
+-        cfg = setup(e.root, "h264", width=width, height=height, fps=30)
++    for width, height in ((320, 180),):
++        cfg = setup(e.root, "h264", width=width, height=height, fps=36)
+         # The gated reference has matched-duration headless/preview controls.
+         seconds = 20 if (width, height) == reference else 10
+         cfg["scenes"].append({"id": "standby", "name": "Standby", "items": [
+@@ -4317,8 +4317,8 @@
+         case = {"profile": cfg["canvas"].copy(), "seconds": seconds, "status": "RUNNING", "samples": []}
+         profiles.append(case)
+         within_reference = "not a capacity guarantee" in e.rpc("estimate_capacity", {})["summary"]
+-        require(within_reference == ((width, height) == reference),
+-                "estimate reference disagrees with the gated profile")
++        require(not within_reference,
++                "36 fps reserve must be classified above the 30 fps reference")
+         watch = Watch(e, ["warning", "started"], stop_after="started")
+         try:
+             baseline_start = e.rpc("start", {"seconds": seconds})
+@@ -4383,8 +4383,8 @@
+             require(process.poll() is None, f"{target} preview consumer exited before recording")
+         evidence["before_preview_take"] = e.rpc("status")
+         started = e.rpc("start", {"seconds": 20})
+-        require(not any("software graphics adapter" in note for note in started["notes"]),
+-                "within-reference warning repeated on the preview take")
++        require(any("software graphics adapter" in note for note in started["notes"]),
++                "above-reference warning missing on the reserve take")
+         began = time.monotonic()
+         for checkpoint in (2, 8, 16):
+             while time.monotonic() - began < checkpoint:

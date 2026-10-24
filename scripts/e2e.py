@@ -4295,7 +4295,7 @@ def scenario_win_preview_recording(e, cfg, evidence):
         # Retain all counters before strict media validation can fail; never
         # turn an overloaded headless take into a pass.
         file, facts = manifest_file(path, manifest, "program")
-        result["files"] = [check_file(file, duration=seconds, fps=30,
+        result["files"] = [check_file(file, duration=seconds, fps=profile["fps"],
                                      dimensions=(profile["width"], profile["height"]))]
         require(facts["frames"] == result["files"][0]["frames"], "program manifest/decoded frame mismatch")
         check_loss(result["loss"][0], 0)
@@ -4309,17 +4309,19 @@ def scenario_win_preview_recording(e, cfg, evidence):
     reference_warning_seen = False
     for width, height in ((1280, 720), (960, 540), (640, 360), (480, 270), (426, 240), (320, 180)):
         cfg = setup(e.root, "h264", width=width, height=height, fps=30)
+        # The gated reference has matched-duration headless/preview controls.
+        seconds = 20 if (width, height) == reference else 10
         cfg["scenes"].append({"id": "standby", "name": "Standby", "items": [
             {"source": "bars2", "rect": {"x": 0, "y": 0, "width": width, "height": height}}]})
         e.apply(cfg)
-        case = {"profile": cfg["canvas"].copy(), "status": "RUNNING", "samples": []}
+        case = {"profile": cfg["canvas"].copy(), "seconds": seconds, "status": "RUNNING", "samples": []}
         profiles.append(case)
         within_reference = "not a capacity guarantee" in e.rpc("estimate_capacity", {})["summary"]
         require(within_reference == ((width, height) == reference),
                 "estimate reference disagrees with the gated profile")
         watch = Watch(e, ["warning", "started"], stop_after="started")
         try:
-            baseline_start = e.rpc("start", {"seconds": 10})
+            baseline_start = e.rpc("start", {"seconds": seconds})
             until(lambda: watch.of("started"), 10, "start event after capacity warning")
             events = list(watch.events)
             case["start_events"] = events
@@ -4351,7 +4353,7 @@ def scenario_win_preview_recording(e, cfg, evidence):
 
         baseline = until(baseline_finished, 45, "headless qualification take", interval=.25)
         try:
-            check_program(baseline_path, baseline, 10, case["profile"], case)
+            check_program(baseline_path, baseline, seconds, case["profile"], case)
         except Failure as exc:
             case.update(status="FAIL", reason=str(exc))
         else:

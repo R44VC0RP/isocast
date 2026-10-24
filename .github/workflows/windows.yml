@@ -6,7 +6,7 @@ on:
     # main: catches a break that merged anyway, and saves the Rust caches
     # every lane restores (GitHub scopes caches to a branch, and only the
     # default branch's are readable from every other one).
-    branches: [main, 'ci/**']
+    branches: [main, 'ci/**', '!ci/windows-flake-measure']
 
 permissions:
   contents: read
