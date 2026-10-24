@@ -60,10 +60,18 @@ impl Report {
     }
 }
 
-/// One stream's recent transits (arrival here minus sender time).
+/// How long a stream's slowest recent arrival counts: longer than the
+/// gaps between a Windows client's sound bursts (one every ~10 s on
+/// exon-desk), so the delay keeps covering them in between.
+const JITTER_WINDOW: f64 = 15.0;
+
+/// One stream's recent transits (arrival here minus sender time): the
+/// smallest over [`WINDOW`] and the largest over [`JITTER_WINDOW`] (not
+/// counting stalls beyond [`MAX_RISE`]).
 #[derive(Debug, Default)]
 struct Transit {
     samples: VecDeque<(f64, f64)>,
+    highs: VecDeque<(f64, f64)>,
 }
 
 impl Transit {
@@ -80,6 +88,29 @@ impl Transit {
         {
             self.samples.pop_front();
         }
+        // ...and a running maximum, without stalls.
+        let floor = self.samples.front().map_or(transit, |(_, t)| *t);
+        if transit <= floor + MAX_RISE {
+            while self.highs.back().is_some_and(|(_, t)| *t <= transit) {
+                self.highs.pop_back();
+            }
+            self.highs.push_back((arrival, transit));
+        }
+        while self
+            .highs
+            .front()
+            .is_some_and(|(at, _)| arrival - at > JITTER_WINDOW)
+        {
+            self.highs.pop_front();
+        }
+    }
+
+    /// The largest recent transit (stalls aside), unless gone quiet.
+    fn maximum(&self, now: f64, last: Option<f64>) -> Option<f64> {
+        if last.is_none_or(|last| now - last > STALE) {
+            return None;
+        }
+        self.highs.front().map(|(_, t)| *t)
     }
 
     /// The smallest recent transit, unless the stream has gone quiet.
@@ -174,7 +205,14 @@ impl Playout {
                 Kind::Audio => self.extra,
                 Kind::Video => 0.0,
             };
-        let base = slowest + MARGIN + self.extra;
+        // Sound must also cover its own slowest recent arrivals (with the
+        // output's read-ahead), or the output runs short when a burst is
+        // late: on a Windows client sound comes in bursts up to ~60 ms.
+        let sound_late = self
+            .audio
+            .maximum(arrival, self.audio_last)
+            .map_or(f64::MIN, |high| high + ON_TIME);
+        let base = (slowest + MARGIN).max(sound_late) + self.extra;
         if needed > base + MAX_RISE {
             return None;
         }
@@ -193,6 +231,14 @@ impl Playout {
         self.delay = Some(delay);
         self.updated = arrival;
         Some(sender + delay)
+    }
+
+    /// How far the sound's slowest recent arrival is behind its fastest,
+    /// in seconds (its jitter), if sound flows.
+    pub fn sound_jitter(&self) -> Option<f64> {
+        let high = self.audio.maximum(self.updated, self.audio_last)?;
+        let low = self.audio.minimum(self.updated, self.audio_last)?;
+        Some(high - low)
     }
 
     /// The sound stopped playing here: only the picture's transit counts
@@ -355,6 +401,34 @@ mod tests {
         assert!(at - s < 0.02 + MARGIN + MAX_RISE + 1e-9, "delay {}", at - s);
         let at = playout.schedule(Kind::Video, 4.1, 4.12).unwrap();
         assert!(at - 4.1 <= 0.02 + MARGIN + MAX_RISE);
+    }
+
+    /// Windows-client sound: 10 ms packets 20 ms in transit, with a burst
+    /// 60 ms late every 10 s. After the first, every packet's time leaves
+    /// at least the read-ahead between its arrival and its playing (no
+    /// short buffers); the jitter is held between bursts.
+    #[test]
+    fn sound_bursts_are_covered_after_the_first() {
+        let mut playout = Playout::new(Instant::now());
+        let lead = 0.050;
+        playout.set_extra(lead);
+        let mut short_after_first = 0;
+        for i in 0..6000 {
+            let s = f64::from(i) * 0.010;
+            let late = if i % 1000 >= 990 {
+                0.060 - 0.006 * f64::from(i % 1000 - 990)
+            } else {
+                0.0
+            };
+            let arrival = s + 0.020 + late;
+            let at = playout.schedule(Kind::Audio, s, arrival).unwrap();
+            if i > 1000 && at - arrival < lead {
+                short_after_first += 1;
+            }
+        }
+        assert_eq!(short_after_first, 0);
+        let jitter = playout.sound_jitter().unwrap();
+        assert!((jitter - 0.060).abs() < 1e-6, "jitter {jitter}");
     }
 
     #[test]

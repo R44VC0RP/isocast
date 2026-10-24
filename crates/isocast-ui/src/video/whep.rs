@@ -67,12 +67,18 @@ impl WhepSource {
             .context("WebRTC video is for another computer's engine")?;
         let socket = UdpSocket::bind(SocketAddr::new(route_to(engine.ip())?, 0))
             .context("could not open a UDP port for the engine's video")?;
+        receive_buffer(&socket);
         let local = socket.local_addr()?;
         let mut config = RtcConfig::new()
             .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
             .clear_codecs()
             .enable_opus(true, false)
-            .enable_h264(true);
+            .enable_h264(true)
+            // Don't hold sound back waiting for a lost packet's
+            // retransmission (str0m's default waits up to 15 packets, 150 ms:
+            // the output then runs short). Opus conceals the gap instead
+            // (`Viewer::sound`).
+            .set_reordering_size_audio(SOUND_HOLD_BACK);
         // Constrained High level 5.2 as well as str0m's defaults: the
         // engine's Macs send it (the SPS agrees with the answer's profile).
         config
@@ -148,6 +154,13 @@ impl WhepSource {
                     opus: None,
                     pcm: vec![0f32; 5760 * CHANNELS],
                     pictures: 0,
+                    arrivals: Vec::new(),
+                    gaps: 0,
+                    sound_gaps: 0,
+                    last_sound_rtp: None,
+                    sound_spacing_ms: 0.0,
+                    sound_packet: 480,
+                    concealed: 0,
                 };
                 let result = receiver.run(&stop);
                 ended.store(true, Ordering::SeqCst);
@@ -239,6 +252,59 @@ impl Source for WhepSource {
     }
 }
 
+/// Sound packets str0m may hold back for reordering: 30 ms at the engine's
+/// 10 ms packets.
+const SOUND_HOLD_BACK: usize = 3;
+/// The most lost sound packets concealed at once (longer gaps start the
+/// queue again).
+const MAX_CONCEALED: u32 = 5;
+
+/// How many sound packets of `packet` RTP ticks were lost between RTP
+/// times `last` and `now` (wrapping): none for the next one in line, a
+/// late or repeated one, or a jump too big to be a gap.
+pub(crate) fn lost_between(last: u32, now: u32, packet: u32) -> u32 {
+    if packet == 0 {
+        return 0;
+    }
+    let ticks = now.wrapping_sub(last) as i32;
+    if ticks <= packet as i32 {
+        return 0;
+    }
+    // To the nearest packet: RTP times can be a tick or two off.
+    let lost = (ticks as u32 + packet / 2) / packet - 1;
+    if lost > MAX_CONCEALED { 0 } else { lost }
+}
+
+/// Room for a burst of the engine's packets while this thread is busy.
+/// Windows gives a UDP socket 64 KB, and a lost packet makes str0m wait
+/// for its retransmission (the sound stalls ~70 ms and the output runs
+/// short): on exon-desk one sound packet in ~1000 was lost that way.
+const RECEIVE_BUFFER: i32 = 4 << 20;
+
+#[cfg(windows)]
+fn receive_buffer(socket: &UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{SO_RCVBUF, SOCKET, SOL_SOCKET, setsockopt};
+    let size = RECEIVE_BUFFER.to_ne_bytes();
+    let result = unsafe {
+        setsockopt(
+            SOCKET(socket.as_raw_socket() as usize),
+            SOL_SOCKET,
+            SO_RCVBUF,
+            Some(&size),
+        )
+    };
+    if result != 0 {
+        isocast_diagnostics::diagnostic!("warn"; "video: could not enlarge the UDP receive buffer");
+    }
+}
+
+#[cfg(not(windows))]
+fn receive_buffer(_socket: &UdpSocket) {
+    // macOS's default (786 KB) already holds the bursts.
+    let _ = RECEIVE_BUFFER;
+}
+
 /// The local address that reaches `engine`: the R1 viewer's UDP address
 /// must be the one its TCP connection comes from.
 fn route_to(engine: IpAddr) -> Result<IpAddr> {
@@ -273,6 +339,20 @@ struct Viewer {
     opus: Option<opus2::Decoder>,
     pcm: Vec<f32>,
     pictures: u64,
+    /// Pictures' arrival after they were drawn, in ms by the system clocks,
+    /// since the last log line.
+    arrivals: Vec<f64>,
+    /// Pictures after lost packets (RTP sequence gaps), in all.
+    gaps: u64,
+    /// Sound packets after lost ones, the last sound packet's RTP time, and
+    /// the widest spacing between two since the last log line, in ms.
+    sound_gaps: u64,
+    last_sound_rtp: Option<u32>,
+    sound_spacing_ms: f64,
+    /// Frames in a sound packet (the last one decoded), and lost packets
+    /// concealed.
+    sound_packet: usize,
+    concealed: u64,
 }
 
 impl Viewer {
@@ -355,6 +435,17 @@ impl Viewer {
         }
         let sender = report.as_ref()?.wallclock_of(data.time.numer(), rate);
         let arrival = self.playout.seconds(data.network_time);
+        if kind == Kind::Video {
+            // How long after the engine drew it a picture arrived, by the
+            // two machines' system clocks (as good as their sync): the log's
+            // latency figure, nothing schedules by it.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            let since_receipt = data.network_time.elapsed().as_secs_f64();
+            self.arrivals.push((now - since_receipt - sender) * 1e3);
+        }
         self.playout.schedule(kind, sender, arrival)
     }
 
@@ -380,12 +471,21 @@ impl Viewer {
             _ => Instant::now(),
         };
         self.pictures += 1;
-        if self.pictures % 150 == 1
-            && let Some((wait, skew)) = self.playout.waits()
-        {
-            isocast_diagnostics::diagnostic!("debug"; "remote video: sound arrives {:.0} ms after the picture; pictures wait {:.0} ms to play with it{}", skew * 1e3, wait * 1e3, self.sound.as_ref().map(|s| format!("; {}", s.report())).unwrap_or_default());
+        if self.pictures % 150 == 1 {
+            let mut arrivals = std::mem::take(&mut self.arrivals);
+            arrivals.sort_by(f64::total_cmp);
+            let pick = |q: f64| arrivals.get(((arrivals.len().max(1) - 1) as f64 * q) as usize);
+            if let (Some(median), Some(p95)) = (pick(0.5), pick(0.95)) {
+                isocast_diagnostics::diagnostic!("debug"; "remote video: pictures arrive {median:.1} ms after drawn (median; 95% within {p95:.1} ms; by the system clocks); {} pictures, {} after lost packets", self.pictures, self.gaps);
+            }
+            if let Some((wait, skew)) = self.playout.waits() {
+                isocast_diagnostics::diagnostic!("debug"; "remote video: sound arrives {:.0} ms after the picture (jitter {:.0} ms; {} sound packets after lost ones, {} concealed, widest spacing {:.0} ms); pictures wait {:.0} ms to play with it{}", skew * 1e3, self.playout.sound_jitter().unwrap_or_default() * 1e3, self.sound_gaps, self.concealed, std::mem::take(&mut self.sound_spacing_ms), wait * 1e3, self.sound.as_ref().map(|s| format!("; {}", s.report())).unwrap_or_default());
+            }
         }
         let (sets, unit) = from_annex_b(&data.data, data.time.as_micros() * 1000);
+        if !data.contiguous {
+            self.gaps += 1;
+        }
         if !data.contiguous && !unit.keyframe {
             // Packets were lost: the pictures until the next keyframe
             // won't decode; ask for one now (PLI).
@@ -457,6 +557,19 @@ impl Viewer {
 
     fn sound(&mut self, data: MediaData) {
         self.follow_speaker();
+        // Sound packets lost on the way (RTP sequence gaps), and the
+        // longest time between two in sender time (for the log).
+        if !data.contiguous {
+            self.sound_gaps += 1;
+        }
+        let rtp = data.time.numer() as u32;
+        let mut lost = 0;
+        if let Some(last) = self.last_sound_rtp {
+            let ms = f64::from(rtp.wrapping_sub(last) as i32) / 48.0;
+            self.sound_spacing_ms = self.sound_spacing_ms.max(ms);
+            lost = lost_between(last, rtp, self.sound_packet as u32);
+        }
+        self.last_sound_rtp = Some(rtp);
         let Some(lead) = self.sound.as_ref().map(Sound::lead) else {
             return;
         };
@@ -475,8 +588,22 @@ impl Viewer {
                 }
             },
         };
+        // Lost packets (not waited for): Opus's concealment fills their
+        // time, just before this one.
+        let packet = self.sound_packet;
+        for k in (1..=lost).rev() {
+            let samples = &mut self.pcm[..packet * CHANNELS];
+            if let Ok(frames) = decoder.decode_float(&[], samples, false)
+                && let (Some(sound), Some(at)) = (&self.sound, at)
+            {
+                let back = f64::from(k) * packet as f64 / f64::from(RATE);
+                sound.push(at - back, &self.pcm[..frames * CHANNELS]);
+                self.concealed += 1;
+            }
+        }
         match decoder.decode_float(&data.data, &mut self.pcm, false) {
             Ok(frames) => {
+                self.sound_packet = frames;
                 if let (Some(sound), Some(at)) = (&self.sound, at) {
                     sound.push(at, &self.pcm[..frames * CHANNELS]);
                 }
@@ -485,5 +612,24 @@ impl Viewer {
                 isocast_diagnostics::diagnostic!("debug"; "video: skipped a sound packet: {error}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lost_sound_packets_are_counted_from_rtp_times() {
+        // 10 ms packets: 480 ticks at 48 kHz.
+        assert_eq!(lost_between(1000, 1480, 480), 0);
+        assert_eq!(lost_between(1000, 1960, 480), 1);
+        assert_eq!(lost_between(1000, 1000 + 480 * 4, 480), 3);
+        // Across the 32-bit wrap.
+        assert_eq!(lost_between(u32::MAX - 100, 860, 480), 1);
+        // Late, repeated, or a jump too long to conceal.
+        assert_eq!(lost_between(1960, 1480, 480), 0);
+        assert_eq!(lost_between(1000, 1000, 480), 0);
+        assert_eq!(lost_between(1000, 1000 + 480 * 20, 480), 0);
     }
 }

@@ -79,6 +79,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Media_MediaFoundation", "Win32_System_Com",
     # Its sound (src/video/sound.rs): WASAPI shared mode.
     "Win32_Media_Audio", "Win32_Devices_FunctionDiscovery", "Win32_System_Com_StructuredStorage",
+    # A bigger UDP receive buffer for its packets (src/video/whep.rs).
+    "Win32_Networking_WinSock",
 ] }
 windows-numerics = "0.3.1"
 # Real process counters: Windows UI measurements must not report stub zeroes.

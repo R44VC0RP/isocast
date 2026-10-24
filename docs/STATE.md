@@ -342,6 +342,9 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   program intact, bottleneck "encoder"): VM encoder capacity beyond the 25% allowance, still a failure.
   `/Volumes/IsocastBuild/ci-flakes/scratch/replay.py E2E_PY [--strict]` replays every kept hosted failure offline
   (logged RPCs, real files) against a version of e2e.py's rules.
+- 2026-10-24: The desktop client on a remote server via WebRTC is qualified Mac ↔ Windows (ISO-27): 960-wide picture,
+  ~47–51 ms drawn→arrived both ways, 0 lost packets in 5-minute soaks, scene and canvas changes survive, engine
+  recordings 0 dropped. Open: Windows sound runs short about once per 10 s (WASAPI partial buffers).
 - 2026-10-23: A Windows engine's `whep_offer` ends with "program encoder ended": the 960-wide WebRTC rung needs scaling,
   which Windows' encoders can't do yet (the server-protocol lane is adding a portable GPU scaler). The desktop client
   falls back to `frames` at full size.

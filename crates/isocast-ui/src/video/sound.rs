@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -39,11 +39,48 @@ struct Queue {
     slipped: u64,
     /// The output has played from this queue since it (re)started.
     aligned: bool,
+    /// Times a push started the queue again (a gap or overlap beyond
+    /// [`TOLERANCE`]), and by how much the last one was off, in ms.
+    restarts: u64,
+    last_restart: Option<f64>,
+    /// The last buffer that ran short (for the log).
+    last_short: Option<Short>,
+    /// When sound was last queued.
+    pushed: Option<Instant>,
     /// Buffers that ran out of sound part way (the output's own misses,
     /// asked for while the queue was busy, are counted in [`Sound`]).
     underruns: u64,
     /// The loudest sample queued since the last report.
     peak: f32,
+}
+
+/// A buffer that ran short: frames asked for and queued, and how late the
+/// queue was against the buffer's time.
+#[derive(Debug, Clone, Copy)]
+struct Short {
+    asked: usize,
+    had: usize,
+    late_ms: f64,
+    aligned_now: bool,
+    since_push_ms: f64,
+}
+
+impl std::fmt::Display for Short {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "asked {} frames, had {}, {:.1} ms late, {:.0} ms since sound came{}",
+            self.asked,
+            self.had,
+            self.late_ms,
+            self.since_push_ms,
+            if self.aligned_now {
+                ", just restarted"
+            } else {
+                ""
+            }
+        )
+    }
 }
 
 impl Queue {
@@ -66,6 +103,10 @@ impl Queue {
     fn push(&mut self, at: f64, samples: &[f32]) {
         if self.samples.is_empty() || (at - self.end()).abs() > TOLERANCE {
             // A gap, an overlap or the first sound: start again from here.
+            if !self.samples.is_empty() {
+                self.restarts += 1;
+                self.last_restart = Some((at - self.end()) * 1e3);
+            }
             self.samples.clear();
             self.start = at;
             self.aligned = false;
@@ -89,6 +130,7 @@ impl Queue {
         let frame = 1.0 / f64::from(RATE);
         let mut written = 0;
         let late = at - self.start;
+        let was_aligned = self.aligned;
         if !self.aligned {
             // The first buffer after a (re)start lines up exactly: what
             // drift correction would take minutes to recover.
@@ -132,6 +174,13 @@ impl Queue {
         if take < out.len() - written {
             // Ran out mid-buffer: the rest is silence.
             self.underruns += 1;
+            self.last_short = Some(Short {
+                asked: (out.len() - written) / CHANNELS,
+                had: self.samples.len() / CHANNELS,
+                late_ms: late * 1e3,
+                aligned_now: written > 0 && !was_aligned,
+                since_push_ms: 0.0,
+            });
         }
         for (slot, sample) in out[written..written + take]
             .iter_mut()
@@ -140,6 +189,33 @@ impl Queue {
             *slot = sample;
         }
         self.start += (take / CHANNELS) as f64 * frame;
+    }
+}
+
+/// How long a read-ahead peak is held: longer than the gaps between the
+/// output's biggest requests (WASAPI's ~40 ms ones came about every 10 s on
+/// exon-desk), so the estimate never sags below them in between.
+const PEAK_HOLD: Duration = Duration::from_secs(15);
+
+/// The largest value seen over the last [`PEAK_HOLD`] (to twice that):
+/// two buckets, the current one and the one before.
+#[derive(Debug, Default)]
+struct PeakHold {
+    started: Option<Instant>,
+    current: f64,
+    previous: f64,
+}
+
+impl PeakHold {
+    fn update(&mut self, now: Instant, value: f64) -> f64 {
+        let started = *self.started.get_or_insert(now);
+        if now.saturating_duration_since(started) >= PEAK_HOLD {
+            self.previous = self.current;
+            self.current = 0.0;
+            self.started = Some(now);
+        }
+        self.current = self.current.max(value);
+        self.current.max(self.previous)
     }
 }
 
@@ -162,20 +238,32 @@ impl Sound {
         let misses: Arc<std::sync::atomic::AtomicU64> = Arc::default();
         let render = {
             let (queue, lead, misses) = (queue.clone(), lead.clone(), misses.clone());
+            let mut peak = PeakHold::default();
             move |out: &mut [f32], plays: Instant| {
-                // The buffer's end, ahead of now: held at its largest,
-                // falling slowly.
-                let ahead = plays
-                    .saturating_duration_since(Instant::now())
-                    .as_secs_f64()
+                // The buffer's end, ahead of now, held at its peak over the
+                // last few seconds (WASAPI asks 10 ms ahead most of the time
+                // and 40 ms now and then: the queue must cover the 40).
+                let now = Instant::now();
+                let ahead = plays.saturating_duration_since(now).as_secs_f64()
                     + (out.len() / CHANNELS) as f64 / f64::from(RATE);
-                let held = lead.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6;
-                let next = ahead.max(held * 0.999);
-                lead.store((next * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
+                let held = peak.update(now, ahead);
+                lead.store((held * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
                 let at = plays.saturating_duration_since(clock).as_secs_f64();
                 // Never wait on the audio thread: silence if busy.
                 match queue.try_lock() {
-                    Ok(mut queue) => queue.render(out, at),
+                    Ok(mut queue) => {
+                        let short = queue.underruns;
+                        queue.render(out, at);
+                        // A short buffer: how long since sound last came
+                        // (for the log: a stalled sender or a late output).
+                        if queue.underruns != short
+                            && let (Some(pushed), Some(last)) =
+                                (queue.pushed, queue.last_short.as_mut())
+                        {
+                            last.since_push_ms =
+                                now.saturating_duration_since(pushed).as_secs_f64() * 1e3;
+                        }
+                    }
                     Err(std::sync::TryLockError::Poisoned(poisoned)) => {
                         poisoned.into_inner().render(out, at)
                     }
@@ -211,12 +299,19 @@ impl Sound {
         let mut queue = self.lock();
         let peak = std::mem::take(&mut queue.peak);
         format!(
-            "sound: {} buffers on time (within {:.0} ms), {} resynced, {} frames slipped for drift, {} ran short, {} missed while busy, {:.0} ms queued, peak {:.0} dBFS",
+            "sound: {} buffers on time (within {:.0} ms), {} resynced, {} frames slipped for drift, {} ran short (last: {}), {} restarts (last {} ms off), {} missed while busy, {:.0} ms queued, peak {:.0} dBFS",
             queue.on_time,
             TOLERANCE * 1e3,
             queue.resyncs,
             queue.slipped,
             queue.underruns,
+            queue
+                .last_short
+                .map_or_else(|| "none".to_string(), |short| short.to_string()),
+            queue.restarts,
+            queue
+                .last_restart
+                .map_or_else(|| "none".to_string(), |ms| format!("{ms:.1}")),
             self.misses.load(std::sync::atomic::Ordering::Relaxed),
             (queue.samples.len() / CHANNELS) as f64 / f64::from(RATE) * 1e3,
             20.0 * peak.max(1e-6).log10()
@@ -226,7 +321,9 @@ impl Sound {
     /// Play `samples` (interleaved stereo at [`RATE`]) from `at` seconds on
     /// the playout clock.
     pub fn push(&self, at: f64, samples: &[f32]) {
-        self.lock().push(at, samples);
+        let mut queue = self.lock();
+        queue.push(at, samples);
+        queue.pushed = Some(Instant::now());
     }
 
     /// The queue, even after a panic elsewhere held it.
@@ -704,6 +801,32 @@ mod tests {
             assert_eq!(queue.underruns, 0, "{ppm} ppm");
             assert!(queue.slipped > 0, "{ppm} ppm");
         }
+    }
+
+    /// The read-ahead estimate keeps a peak for at least [`PEAK_HOLD`] (a
+    /// 40 ms WASAPI request every 10 s keeps it at 40 ms throughout), then
+    /// lets it go within twice that.
+    #[test]
+    fn the_read_ahead_estimate_holds_its_peak() {
+        let start = Instant::now();
+        let at = |s: f64| start + Duration::from_secs_f64(s);
+        let mut peak = PeakHold::default();
+        let mut lowest_between = f64::MAX;
+        for i in 0..6000 {
+            let t = f64::from(i) * 0.010;
+            let ahead = if i % 1000 == 999 { 0.050 } else { 0.020 };
+            let held = peak.update(at(t), ahead);
+            if t > 10.0 {
+                lowest_between = lowest_between.min(held);
+            }
+        }
+        assert_eq!(lowest_between, 0.050);
+        // No more big requests: gone within two hold periods.
+        let mut held = 0.0;
+        for i in 0..4000 {
+            held = peak.update(at(60.0 + f64::from(i) * 0.010), 0.020);
+        }
+        assert_eq!(held, 0.020);
     }
 
     #[test]
