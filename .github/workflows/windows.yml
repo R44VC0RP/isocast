@@ -154,8 +154,8 @@ jobs:
       # Four hosted vCPUs saturate on three 720p software encodes plus
       # lavapipe. Use the existing hosted policy for this integrity smoke;
       # the six-vCPU arm64 VM separately qualifies strict 720p30 zero drops.
-      - name: Synthetic program and ISOs (hosted 360p30)
-        run: python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
+      - name: Synthetic program, ISOs and a stream (hosted 360p30)
+        run: python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
 
       - name: E2E summary
         if: always()

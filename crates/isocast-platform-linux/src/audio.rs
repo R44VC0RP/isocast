@@ -34,32 +34,110 @@ pub(crate) struct AudioTrack {
     output_frames: u64,
 }
 
-impl AudioTrack {
-    pub fn new(channels: u32) -> Result<Self> {
-        if !matches!(channels, 1 | 2) {
-            bail!("audio.channels: valid values are 1, 2");
-        }
-        let encoder = xaac_rs::Encoder::new(EncoderConfig {
-            profile: Profile::AacLc,
-            sample_rate: RATE,
-            channels: channels as u16,
-            bitrate: if channels == 1 { 128_000 } else { 192_000 },
-            frame_length: Some(BLOCK as u16),
-            output_format: OutputFormat::Raw,
-            use_delay_adjustment: false,
-            ..EncoderConfig::default()
-        })?;
-        let asc = ((2u16 << 11) | (3u16 << 7) | ((channels as u16) << 3)).to_be_bytes();
-        if encoder.input_frame_bytes() != BLOCK as usize * channels as usize * 2
-            || encoder.input_samples_per_channel() != BLOCK as usize
-            || encoder.audio_specific_config() != asc
-        {
+/// An AAC-LC encoder at 48 kHz with 1024-sample hops and raw access units
+/// (no ADTS), checked to have the AudioSpecificConfig MP4 and FLV assume.
+fn native(channels: u32, bitrate: u32) -> Result<NativeEncoder> {
+    if !matches!(channels, 1 | 2) {
+        bail!("audio.channels: valid values are 1, 2");
+    }
+    let encoder = xaac_rs::Encoder::new(EncoderConfig {
+        profile: Profile::AacLc,
+        sample_rate: RATE,
+        channels: channels as u16,
+        bitrate,
+        frame_length: Some(BLOCK as u16),
+        output_format: OutputFormat::Raw,
+        use_delay_adjustment: false,
+        ..EncoderConfig::default()
+    })?;
+    let asc = ((2u16 << 11) | (3u16 << 7) | ((channels as u16) << 3)).to_be_bytes();
+    if encoder.input_frame_bytes() != BLOCK as usize * channels as usize * 2
+        || encoder.input_samples_per_channel() != BLOCK as usize
+        || encoder.audio_specific_config() != asc
+    {
+        bail!(
+            "audio.decoder_config: expected AAC-LC 48000 Hz with 1024-sample hops and the requested channels"
+        );
+    }
+    Ok(NativeEncoder(encoder))
+}
+
+/// Interleaved float samples as 16-bit PCM, non-finite ones as silence.
+fn pcm(sample: f32) -> i16 {
+    if !sample.is_finite() {
+        return 0;
+    }
+    (sample.clamp(-1.0, 1.0) * 32768.0)
+        .round()
+        .clamp(-32768.0, 32767.0) as i16
+}
+
+/// The live stream's AAC encoder (RTMP): raw AAC-LC access units at the
+/// stream's bitrate. Only a partial 1024-sample hop is kept between calls.
+pub struct StreamEncoder {
+    encoder: NativeEncoder,
+    channels: usize,
+    pending: Vec<i16>,
+}
+
+/// AAC-LC bitrates the stream settings may ask for, in kb/s.
+const STREAM_KBPS: std::ops::RangeInclusive<u32> = 32..=320;
+
+impl StreamEncoder {
+    pub fn new(spec: &isocast_engine::LiveAudioSpec) -> Result<Self> {
+        if !STREAM_KBPS.contains(&spec.bitrate_kbps) {
             bail!(
-                "audio.decoder_config: expected AAC-LC 48000 Hz with 1024-sample hops and the requested channels"
+                "stream.audio_bitrate_kbps: {} is outside AAC-LC's {}-{} kb/s",
+                spec.bitrate_kbps,
+                STREAM_KBPS.start(),
+                STREAM_KBPS.end()
             );
         }
+        let encoder = native(spec.channels, spec.bitrate_kbps * 1000)?;
+        let channels = spec.channels as usize;
         Ok(Self {
-            encoder: NativeEncoder(encoder),
+            encoder,
+            channels,
+            pending: Vec::with_capacity(BLOCK as usize * channels),
+        })
+    }
+}
+
+impl isocast_engine::AudioEncoder for StreamEncoder {
+    fn encode(&mut self, samples: &[f32]) -> Result<Vec<Vec<u8>>> {
+        if !samples.len().is_multiple_of(self.channels) {
+            bail!("audio.samples: interleaved input must contain whole channel frames");
+        }
+        let hop = BLOCK as usize * self.channels;
+        let mut packets = Vec::with_capacity((self.pending.len() + samples.len()) / hop);
+        let mut rest = samples;
+        while !rest.is_empty() {
+            let take = (hop - self.pending.len()).min(rest.len());
+            self.pending.extend(rest[..take].iter().copied().map(pcm));
+            rest = &rest[take..];
+            if self.pending.len() == hop {
+                let packet = self.encoder.0.encode_i16_interleaved(&self.pending)?;
+                self.pending.clear();
+                if packet.data.is_empty() || packet.data.len() > 8192 {
+                    bail!("audio.packet: libxaac did not produce one bounded raw AAC access unit");
+                }
+                packets.push(packet.data);
+            }
+        }
+        Ok(packets)
+    }
+
+    fn delay(&self) -> u32 {
+        PRIMING
+    }
+}
+
+impl AudioTrack {
+    pub fn new(channels: u32) -> Result<Self> {
+        let bitrate = if channels == 1 { 128_000 } else { 192_000 };
+        let encoder = native(channels, bitrate)?;
+        Ok(Self {
+            encoder,
             config: AudioConfig {
                 channels: channels as u16,
                 priming: PRIMING,
@@ -106,11 +184,7 @@ impl AudioTrack {
         let hop = BLOCK as usize * channels;
         let mut packets = Vec::new();
         for chunk in samples.chunks(channels) {
-            self.pending.extend(chunk.iter().map(|sample| {
-                (sample.clamp(-1.0, 1.0) * 32768.0)
-                    .round()
-                    .clamp(-32768.0, 32767.0) as i16
-            }));
+            self.pending.extend(chunk.iter().copied().map(pcm));
             self.input_frames += 1;
             if self.pending.len() == hop {
                 let packet = self.encoder.0.encode_i16_interleaved(&self.pending)?;
@@ -191,6 +265,62 @@ mod tests {
         assert_eq!((packets[0].time, packets[0].samples), (1024, 1024));
         assert_eq!((packets[1].time, packets[1].samples), (2048, 732));
         assert_eq!(track.output_frames, track.input_frames + u64::from(PRIMING));
+    }
+
+    #[test]
+    fn stream_encoder_keeps_its_bitrate_and_partial_hops() {
+        use isocast_engine::{AudioEncoder, LiveAudioSpec};
+        let mut encoder = StreamEncoder::new(&LiveAudioSpec {
+            channels: 2,
+            bitrate_kbps: 160,
+        })
+        .unwrap();
+        assert_eq!(encoder.delay(), PRIMING);
+        // Ten seconds of a 440 Hz tone, in uneven batches as the mixer
+        // delivers them.
+        let tone: Vec<f32> = (0..RATE as usize * 10)
+            .flat_map(|n| {
+                let v = (n as f32 * 440.0 * std::f32::consts::TAU / RATE as f32).sin() * 0.5;
+                [v, v]
+            })
+            .collect();
+        let mut packets = Vec::new();
+        for batch in tone.chunks(2 * 480) {
+            packets.extend(encoder.encode(batch).unwrap());
+        }
+        // Whole hops only: 480000 frames make 468 hops, 768 frames kept.
+        assert_eq!(packets.len(), 468);
+        assert_eq!(encoder.pending.len(), 768 * 2);
+        let bytes: usize = packets.iter().map(Vec::len).sum();
+        let kbps = bytes as f64 * 8.0 / (468.0 * 1024.0 / f64::from(RATE)) / 1000.0;
+        assert!((100.0..=176.0).contains(&kbps), "{kbps:.0} kb/s for 160");
+        // No ADTS headers: raw access units, as FLV carries them.
+        assert!(
+            packets
+                .iter()
+                .all(|p| !(p[0] == 0xff && p[1] & 0xf6 == 0xf0))
+        );
+    }
+
+    #[test]
+    fn stream_encoder_refuses_bad_settings_and_conceals_bad_samples() {
+        use isocast_engine::{AudioEncoder, LiveAudioSpec};
+        let spec = |channels, bitrate_kbps| LiveAudioSpec {
+            channels,
+            bitrate_kbps,
+        };
+        let error = StreamEncoder::new(&spec(2, 8)).err().unwrap();
+        assert!(
+            error.to_string().contains("stream.audio_bitrate_kbps"),
+            "{error}"
+        );
+        assert!(StreamEncoder::new(&spec(6, 160)).is_err());
+        let mut encoder = StreamEncoder::new(&spec(2, 128)).unwrap();
+        assert!(encoder.encode(&[0.0]).is_err());
+        let mut bad = vec![0.0f32; 2048];
+        bad[10] = f32::NAN;
+        bad[11] = f32::INFINITY;
+        assert_eq!(encoder.encode(&bad).unwrap().len(), 1);
     }
 
     #[test]

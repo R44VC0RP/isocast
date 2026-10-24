@@ -310,6 +310,18 @@ pub struct Preview {
     pub stats: Stats,
 }
 
+/// `size` scaled down to at most `max` wide, keeping its aspect (the height
+/// rounded down, at least the smallest frame the engine sends, 16).
+fn fit_width(size: (u32, u32), max: Option<u32>) -> (u32, u32) {
+    match max {
+        Some(max) if size.0 > max => (
+            max,
+            (u64::from(size.1) * u64::from(max) / u64::from(size.0)).max(16) as u32,
+        ),
+        _ => size,
+    }
+}
+
 /// How the preview is put on screen.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -692,13 +704,7 @@ impl Preview {
     /// asked at most every `RESIZE_EVERY` and once the size settles; the
     /// layers (or the image) scale the frames meanwhile.
     fn ask_size(&mut self, size: (u32, u32)) {
-        let size = match self.max_width {
-            Some(max) if size.0 > max => (
-                max,
-                (u64::from(size.1) * u64::from(max) / u64::from(size.0)).max(16) as u32,
-            ),
-            _ => size,
-        };
+        let size = fit_width(size, self.max_width);
         let due = self
             .size_asked_at
             .get()
@@ -1081,4 +1087,22 @@ fn read_surface(frame: &SharedFrame, probes: &[(f32, f32)]) -> Option<Read> {
 #[cfg(not(target_os = "macos"))]
 fn read_surface(_: &SharedFrame, _: &[(f32, f32)]) -> Option<Read> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_width;
+
+    #[test]
+    fn fit_width_scales_wide_pictures_down_only() {
+        assert_eq!(fit_width((1920, 1080), Some(640)), (640, 360));
+        // A monitor's odd size, rounded down.
+        assert_eq!(fit_width((926, 521), Some(640)), (640, 360));
+        // At or under the limit, or no limit: unchanged.
+        assert_eq!(fit_width((640, 360), Some(640)), (640, 360));
+        assert_eq!(fit_width((320, 180), Some(640)), (320, 180));
+        assert_eq!(fit_width((1920, 1080), None), (1920, 1080));
+        // A very wide strip keeps the engine's smallest height.
+        assert_eq!(fit_width((4000, 40), Some(640)), (640, 16));
+    }
 }

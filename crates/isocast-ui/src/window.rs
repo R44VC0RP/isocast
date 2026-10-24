@@ -66,16 +66,53 @@ pub fn cpu_window() -> bool {
     CPU_WINDOW.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Whether the window draws with Skia on the CPU: when the adapter is a
-/// CPU one (llvmpipe), or `ISOCAST_UI_RENDERER` says `software` (`gpu`
-/// forces the GPU path).
+/// Whether the window draws with Skia on the CPU (Linux), and why not
+/// as asked: `setting` is `ISOCAST_UI_RENDERER` (`software` or `gpu`;
+/// unset, the CPU when the adapter is a CPU one, llvmpipe). Measurement
+/// runs (`--bench`, `--drag-test`) count the frames drawn through a
+/// rendering notifier, which Skia on the CPU never calls: they keep the
+/// GPU path.
 #[cfg(target_os = "linux")]
-fn software_renderer(gpu: &Gpu) -> bool {
-    match std::env::var("ISOCAST_UI_RENDERER").as_deref() {
-        Ok("software") => true,
-        Ok("gpu") => false,
-        _ => gpu.adapter.get_info().device_type == slint::wgpu_30::wgpu::DeviceType::Cpu,
+fn renderer_choice(
+    setting: Option<&str>,
+    cpu_adapter: bool,
+    measuring: bool,
+) -> (bool, Option<String>) {
+    let (software, mut warning) = match setting {
+        None => (cpu_adapter, None),
+        Some("software") => (true, None),
+        Some("gpu") => (false, None),
+        Some(other) => (
+            cpu_adapter,
+            Some(format!(
+                "ISOCAST_UI_RENDERER={other:?} is not a renderer; valid values are software, gpu (left to the adapter)"
+            )),
+        ),
+    };
+    if software && measuring {
+        warning = Some(
+            "--bench and --drag-test count frames through a rendering notifier, which Skia on the CPU \
+             never calls: this run draws with the GPU renderer (Mesa's software Vulkan without a GPU)"
+                .into(),
+        );
+        return (false, warning);
     }
+    (software, warning)
+}
+
+#[cfg(target_os = "linux")]
+fn software_renderer(gpu: &Gpu, options: &Options) -> bool {
+    let setting = std::env::var_os("ISOCAST_UI_RENDERER");
+    let setting = setting
+        .as_ref()
+        .map(|value| value.to_str().unwrap_or("(not UTF-8)"));
+    let cpu_adapter = gpu.adapter.get_info().device_type == slint::wgpu_30::wgpu::DeviceType::Cpu;
+    let measuring = options.bench.is_some() || options.drag_test.is_some();
+    let (software, warning) = renderer_choice(setting, cpu_adapter, measuring);
+    if let Some(warning) = warning {
+        isocast_diagnostics::diagnostic!("warn"; "window: {warning}");
+    }
+    software
 }
 
 pub fn run(options: &Options) -> Result<()> {
@@ -98,7 +135,7 @@ pub fn run(options: &Options) -> Result<()> {
     // software Vulkan (about four times the CPU, taken from the recording).
     // Linux previews are RGBA images (frames.rs), so nothing needs the GPU.
     #[cfg(target_os = "linux")]
-    let cpu_window = software_renderer(&gpu);
+    let cpu_window = software_renderer(&gpu, options);
     #[cfg(target_os = "linux")]
     CPU_WINDOW.store(cpu_window, std::sync::atomic::Ordering::Relaxed);
     #[cfg(target_os = "linux")]
@@ -751,4 +788,41 @@ fn start_drag_test(app: &AppWindow, seconds: f64, mode: DragMode) {
         },
     );
     std::mem::forget(backup);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::renderer_choice;
+
+    #[test]
+    fn renderer_follows_the_adapter_the_setting_and_measurement_runs() {
+        // (setting, CPU adapter, measuring) → software
+        let table = [
+            ((None, true, false), true),
+            ((None, false, false), false),
+            ((Some("software"), false, false), true),
+            ((Some("gpu"), true, false), false),
+            ((Some("vulkan"), true, false), true),
+            ((Some("vulkan"), false, false), false),
+            // Measurement runs keep the GPU path, even when asked otherwise.
+            ((None, true, true), false),
+            ((Some("software"), false, true), false),
+        ];
+        for ((setting, cpu, measuring), want) in table {
+            assert_eq!(
+                renderer_choice(setting, cpu, measuring).0,
+                want,
+                "{setting:?} {cpu} {measuring}"
+            );
+        }
+        let (_, warning) = renderer_choice(Some("vulkan"), true, false);
+        assert!(warning.unwrap().contains("valid values are software, gpu"));
+        assert!(renderer_choice(Some("software"), false, false).1.is_none());
+        assert!(
+            renderer_choice(None, true, true)
+                .1
+                .unwrap()
+                .contains("--bench")
+        );
+    }
 }

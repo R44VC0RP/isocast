@@ -9,6 +9,7 @@ pub mod network;
 mod pipewire_audio;
 mod pipewire_video;
 mod platform;
+mod playback;
 mod portal;
 mod system;
 mod writer;

@@ -21,8 +21,7 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
   sources, OpenH264 H.264 and Apache-2.0 libxaac AAC-LC through `isocast-mux`. Ubuntu 24.04 arm64 VM proof:
   program + two ISOs, 720p30, 310 frames each, zero drops, 1,240 frame-oracle checks, maximum A/V skew 0.021 ms.
-  No hardware encoding, media decoding, playback or shared previews; RTMP/AAC
-  streaming remains unsupported. Linux startup now finalizes retained mux fragments and persists verified
+  No hardware encoding, media decoding or shared previews. Linux startup now finalizes retained mux fragments and persists verified
   counts through one pinned-directory recovery lease (SIGKILL + restart proved on three files, 2026-10-23).
   Drop/repeat/audio-loss counts after a crash remain unknown; empty cancelled reservations are retained.
   Remote secrets are plaintext 0600 files in an owner-only `$XDG_CONFIG_HOME/isocast/credentials` directory
@@ -38,6 +37,16 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   vz network blocks multicast (the host Mac's 6-second browse did not see the VM).
   The four-vCPU hosted Linux job uses a 360p30 integrity profile and the shared `--hosted` policy;
   strict zero-drop 720p30 is qualified separately in the six-vCPU arm64 VM, not claimed for the runner.
+- **Linux streaming and monitoring (2026-10-24), experimental/unreleased:** RTMP streams use OpenH264 with
+  its own CBR padding (`ENCODER_PADDING_PADDING`: filler data holds the rate) and in-place `set_rate` through
+  `SetOption` (no IDR; never above the creation bitrate, which the wrapper pins as the layer maximum), plus libxaac AAC-LC (`audio::StreamEncoder`). Monitoring plays through a PipeWire
+  output stream (`playback.rs`, node `isocast.monitor`, own worker, no RT_PROCESS, 1024/48000); `play_audio`
+  returns once the stream is connecting ("default" needs no device list), never waiting for an output.
+  VM proof (3 vCPUs): 120 s 720p30 stream (3601 frames) while recording program + 2 ISOs, zero drops on all;
+  e2e `stream` passes on Linux and runs in the hosted Linux job. Without a GPU, llvmpipe compositing costs
+  far more than OpenH264 (720p30: ~105% vs ~25% for two encodes; 1080p30: ~235% vs ~50%).
+  Desktop-audio (sink-monitor) capture now hears Isocast's own monitoring: `exclude_own` is not
+  implemented on Linux (capture lane's `pipewire_audio.rs`).
 - **Linux capture lane (2026-10-23), experimental/unreleased:** portal/SHM screens, PipeWire default-sink
   desktop audio and microphones, and V4L2 MJPEG/YUYV cameras are implemented. PipeWire headers/runtime
   >=1.0.5 are required. Restore tokens are private engine-adjacent `*.linux-capture.json` files; devices
@@ -99,7 +108,7 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
   - `isocast-platform-macos`: ScreenCaptureKit, AVFoundation, VideoToolbox, AVAssetWriter, IOSurface frames.
   - `isocast-platform-windows`: WGC via the helper `isocast-capture.exe`, MF cameras, WASAPI, NVENC/MF, DX12 import.
   - `isocast-platform-linux`: portal/PipeWire screens and audio, V4L2 cameras, synthetic sources,
-    Vulkan upload/readback, OpenH264/libxaac software recording.
+    Vulkan upload/readback, OpenH264/libxaac software recording and RTMP streaming, PipeWire monitoring.
   - `-stub`: fail-closed, for other OSes. `-contracts`: dev-only contract workers (`scripts/platform-contracts.py`).
   - `-credentials`: Keychain / Credential Manager / Linux private XDG files without media dependencies.
 - Plumbing:
@@ -141,6 +150,9 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
   no host mounts; `limactl shell isocast-linux`, source in guest `~/isocast-linux/src`. Stop it when unused.
   Strict software-GPU timing needs host headroom: early tests during heavy host load dropped program frames;
   the qualified take with unchanged code had GPU completion p50 ~12 ms and no losses. Do not hide losses.
+- Linux app/stream lanes (2026-10-24): Lima/vz VM `isocast-linux-app` on m2-a (the shared build host), 3 CPUs,
+  8 GiB + 6 GiB swap, 40 GiB, headless sway for the app; PipeWire + WirePlumber as user services with a
+  null sink (`pactl load-module module-null-sink`) for monitoring tests. Builds there disturb its timing.
 
 **Test Macs** (`scripts/testmac.sh`, `ISOCAST_TESTMAC`). Prefer `push BIN_DIR` (~25 s) to `build`. `gui '<cmd>'` runs in
 the desktop session through an interactive launch-agent bridge (needed for windows, `open`, cua-driver).

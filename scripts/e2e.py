@@ -1124,7 +1124,8 @@ def scenario_webrtc(e, cfg, evidence):
 
 def scenario_stream(e, cfg, evidence):
     width, height, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
-    if not evidence["capabilities"]["h264"]:
+    # Linux streams with its software encoder (OpenH264, libxaac AAC).
+    if not evidence["capabilities"]["h264"] and not LINUX:
         raise Skip("no hardware encoder on this runner (H.264 streaming)")
     # A free loopback port; startup failure is a test failure, never a remote retry.
     with socket.socket() as reservation:
