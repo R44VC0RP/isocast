@@ -1,12 +1,15 @@
-//! Headless Linux server. Capture and hardware encoders are deliberately
-//! unsupported; synthetic sources use Vulkan and software encoding.
+//! Linux desktop capture, Vulkan compositing and software encoding.
 #![cfg(target_os = "linux")]
 
 mod audio;
+mod camera;
 mod encoder;
 pub mod frames;
 pub mod network;
+mod pipewire_audio;
+mod pipewire_video;
 mod platform;
+mod portal;
 mod system;
 mod writer;
 

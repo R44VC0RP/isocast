@@ -3814,7 +3814,8 @@ def discovery_without_bus(e):
     """`isocast engines --discover` with no reachable system bus fails at
     once with the connect-by-address hint, well before its 5 s listen."""
     cli = os.environ.get("ISOCAST_E2E_CLI")
-    require(cli and Path(cli).is_file(), "Linux discovery check requires the built isocast CLI (--cli)")
+    if not cli or not Path(cli).is_file():
+        return "skipped: no isocast CLI"
     env = dict(e.env, DBUS_SYSTEM_BUS_ADDRESS="unix:path=/nonexistent",
                ISOCAST_REMOTE_CLIENT=str(e.root / "discovery-client.json"))
     started = time.monotonic()

@@ -9,23 +9,31 @@ use isocast_engine::{
     Probe, ScreenTarget, Time, VideoSink, Volume, WriterSpec,
 };
 use isocast_protocol::api::Machine;
-use isocast_protocol::devices::{Devices, PermissionKind, PermissionsReport};
+use isocast_protocol::devices::{
+    Devices, Permission, PermissionKind, Permissions, PermissionsReport,
+};
 use isocast_protocol::{Canvas, SourceKind};
 
 use crate::encoder::Encoder;
 use crate::frames::{Frame, FramePool, Importer};
 use crate::system;
 use crate::writer::Writer;
+use crate::{camera, pipewire_audio, portal};
 
 #[derive(Clone, Copy, Default)]
 pub struct LinuxPlatform;
 
 pub enum Unsupported {}
 
+// Each native backend owns its shutdown; no capture thread is detached.
+pub enum Capture {
+    Screen(portal::Capture),
+    Audio(pipewire_audio::Capture),
+    Camera(camera::Capture),
+}
+
 fn unsupported(what: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{what}: not supported by the headless Linux bootstrap (synthetic sources and software H.264 recording only)"
-    )
+    anyhow::anyhow!("{what}: not supported by the Linux backend")
 }
 
 impl MediaReader for Unsupported {
@@ -42,7 +50,7 @@ impl Platform for LinuxPlatform {
     type Frame = Frame;
     type FramePool = FramePool;
     type Writer = Writer;
-    type Capture = Unsupported;
+    type Capture = Capture;
     type Importer = Importer;
     type Media = Unsupported;
     type Playback = Unsupported;
@@ -70,13 +78,51 @@ impl Platform for LinuxPlatform {
     }
 
     fn devices(&self) -> Result<Devices> {
-        Err(unsupported("listing capture devices"))
+        let mut devices = Devices {
+            displays: portal::displays()?,
+            cameras: camera::devices()?,
+            permissions: self.permissions()?.permissions,
+            ..Default::default()
+        };
+        match pipewire_audio::devices() {
+            Ok((microphones, outputs)) => {
+                devices.microphones = microphones;
+                devices.audio_outputs = outputs;
+            }
+            Err(error) => devices
+                .notes
+                .push(format!("PipeWire audio devices: {error:#}")),
+        }
+        devices.notes.push("Screen selection happens in the desktop portal when capture opens. Sizes are unknown until selected; saved sizes describe the last grant. Restore tokens avoid repeated prompts only on portals that support persistent grants. Desktop audio uses the default output's monitor through a system_audio source.".into());
+        Ok(devices)
     }
     fn permissions(&self) -> Result<PermissionsReport> {
-        Err(unsupported("capture permissions"))
+        Ok(PermissionsReport {
+            permissions: Permissions {
+                screen_recording: Permission::Unknown,
+                camera: Permission::Unknown,
+                microphone: Permission::Unknown,
+                system_audio: Permission::Unknown,
+            },
+            app: "Isocast".into(),
+            details: Vec::new(),
+        })
     }
-    fn request_permissions(&self, _only: Option<PermissionKind>) -> Result<PermissionsReport> {
-        Err(unsupported("requesting capture permissions"))
+    fn source_open_timeout(&self, source: &SourceKind) -> std::time::Duration {
+        std::time::Duration::from_secs(match source {
+            SourceKind::Display(_) => 120,
+            // PipeWire allows 5s enumeration then 5s for the first samples.
+            SourceKind::Microphone(_) | SourceKind::SystemAudio(_) => 12,
+            _ => 8,
+        })
+    }
+    fn request_permissions(&self, only: Option<PermissionKind>) -> Result<PermissionsReport> {
+        if only.is_none() || only == Some(PermissionKind::ScreenRecording) {
+            // Consent belongs to a selection, not a global permission bit.
+            // Permit a failed source's next retry to show the portal again.
+            portal::allow_prompt();
+        }
+        self.permissions()
     }
     fn open_permission_settings(&self, _permission: PermissionKind) -> Result<String> {
         Err(unsupported("opening capture permission settings"))
@@ -87,8 +133,54 @@ impl Platform for LinuxPlatform {
     fn open_media(&self, _path: &Path, _part: MediaPart) -> Result<Unsupported> {
         Err(unsupported("media file decoding"))
     }
-    fn probe(&self, source: &SourceKind, _canvas: &Canvas) -> Result<Option<Probe>> {
+    fn probe(&self, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
         match source {
+            SourceKind::Camera(source) => camera::probe_capture(
+                &source.device,
+                CameraRequest {
+                    size: source.width.zip(source.height),
+                    fps: source.fps,
+                },
+                canvas,
+            )
+            .map(Some),
+            SourceKind::Display(display) => {
+                let saved = portal::displays()?
+                    .into_iter()
+                    .find(|d| d.id == display.display);
+                Ok(Some(Probe {
+                    device: display.display.clone(),
+                    video: saved
+                        .filter(|d| d.width > 0 && d.height > 0)
+                        .map(|d| CaptureFormat {
+                            width: d.width,
+                            height: d.height,
+                            fps: canvas.fps,
+                        }),
+                    channels: None,
+                }))
+            }
+            SourceKind::Microphone(mic) => {
+                let (devices, _) = pipewire_audio::devices()?;
+                let device = devices.iter().find(|d| d.id == mic.device || d.name == mic.device)
+                    .or_else(|| (mic.device == "default" || mic.device == "main")
+                        .then(|| devices.iter().find(|device| device.default).or_else(|| devices.first())).flatten())
+                    .ok_or_else(|| anyhow::anyhow!("microphone.device {:?}: not found; run devices for available PipeWire inputs", mic.device))?;
+                Ok(Some(Probe {
+                    device: device.id.clone(),
+                    video: None,
+                    channels: Some(
+                        mic.channels
+                            .as_ref()
+                            .map_or(device.channels.min(2), |c| c.len() as u32),
+                    ),
+                }))
+            }
+            SourceKind::SystemAudio(_) => Ok(Some(Probe {
+                device: "default output monitor".into(),
+                video: None,
+                channels: Some(2),
+            })),
             SourceKind::TestPattern(_)
             | SourceKind::Tone(_)
             | SourceKind::Color(_)
@@ -181,44 +273,44 @@ impl Platform for LinuxPlatform {
 
     fn capture_screen(
         &self,
-        _target: ScreenTarget<'_>,
-        _fps: u32,
-        _ten_bit: bool,
-        _cursor: bool,
-        _sink: VideoSink<Frame>,
-    ) -> Result<(Unsupported, CaptureFormat)> {
-        Err(unsupported("screen capture (PipeWire portal)"))
+        target: ScreenTarget<'_>,
+        fps: u32,
+        ten_bit: bool,
+        cursor: bool,
+        sink: VideoSink<Frame>,
+    ) -> Result<(Capture, CaptureFormat)> {
+        let (capture, format) = portal::capture(target, fps, ten_bit, cursor, sink)?;
+        Ok((Capture::Screen(capture), format))
     }
     fn capture_camera(
         &self,
-        _device: &str,
-        _request: CameraRequest,
-        _canvas: &Canvas,
-        _sink: VideoSink<Frame>,
-    ) -> Result<(Unsupported, CaptureFormat)> {
-        Err(unsupported("camera capture (V4L2)"))
+        device: &str,
+        request: CameraRequest,
+        canvas: &Canvas,
+        sink: VideoSink<Frame>,
+    ) -> Result<(Capture, CaptureFormat)> {
+        let (capture, format) = camera::capture(device, request, canvas, sink)?;
+        Ok((Capture::Camera(capture), format))
     }
     fn capture_microphone(
         &self,
-        _device: &str,
-        _channels: Option<&[u32]>,
-        _sink: AudioSink,
-    ) -> Result<(Unsupported, u32)> {
-        Err(unsupported("microphone capture (PipeWire)"))
+        device: &str,
+        channels: Option<&[u32]>,
+        sink: AudioSink,
+    ) -> Result<(Capture, u32)> {
+        let (capture, channels) = pipewire_audio::microphone(device, channels, sink)?;
+        Ok((Capture::Audio(capture), channels))
     }
     fn capture_system_audio(
         &self,
-        _exclude: &[String],
-        _sink: AudioSink,
-        _exclude_own: bool,
-    ) -> Result<(Unsupported, u32)> {
-        Err(unsupported("system audio capture (PipeWire)"))
+        exclude: &[String],
+        sink: AudioSink,
+        exclude_own: bool,
+    ) -> Result<(Capture, u32)> {
+        let (capture, channels) = pipewire_audio::desktop(exclude, sink, exclude_own)?;
+        Ok((Capture::Audio(capture), channels))
     }
-    fn capture_application_audio(
-        &self,
-        _app: &str,
-        _sink: AudioSink,
-    ) -> Result<(Unsupported, u32)> {
+    fn capture_application_audio(&self, _app: &str, _sink: AudioSink) -> Result<(Capture, u32)> {
         Err(unsupported("application audio capture (PipeWire)"))
     }
     fn play_audio(&self, _device: &str, _render: AudioRender) -> Result<(Unsupported, String)> {
@@ -229,7 +321,7 @@ impl Platform for LinuxPlatform {
         _page: &BrowserPage<'_>,
         _video: VideoSink<Frame>,
         _audio: Option<AudioSink>,
-    ) -> Result<(Unsupported, CaptureFormat, Arc<dyn BrowserControl>)> {
+    ) -> Result<(Capture, CaptureFormat, Arc<dyn BrowserControl>)> {
         Err(unsupported("browser capture"))
     }
 

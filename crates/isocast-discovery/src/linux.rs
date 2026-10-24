@@ -33,6 +33,7 @@ const MAX_INSTANCES: usize = 256;
 const MAX_RESOLVING: usize = 4;
 const SIGNAL_QUEUE: usize = 256;
 const MAX_ADDRESSES: usize = 16;
+const ADVERTISING_WAIT: &str = "advertising waits for avahi-daemon (retrying)";
 
 async fn timed<T>(future: impl Future<Output = zbus::Result<T>>) -> Result<T> {
     tokio::time::timeout(RPC_TIMEOUT, future)
@@ -115,9 +116,7 @@ enum Operation {
 
 pub fn register(name: &str, port: u16, txt: &Txt) -> Result<Registration> {
     let name = Arc::new(Mutex::new(name.to_owned()));
-    let error = Arc::new(Mutex::new(Some(
-        unavailable("waiting for avahi-daemon; retrying in background").to_string(),
-    )));
+    let error = Arc::new(Mutex::new(Some(ADVERTISING_WAIT.to_owned())));
     let worker = start(Operation::Register {
         name: name.clone(),
         error: error.clone(),
@@ -143,10 +142,22 @@ pub fn watch(on_event: OnEvent) -> Result<Watch> {
 struct Ready {
     send: Option<mpsc::SyncSender<Result<()>>>,
     healthy_since: Option<Instant>,
+    last_error: Option<String>,
+}
+
+fn retry_changed(last_error: &mut Option<String>, error: Option<&str>) -> bool {
+    if last_error.as_deref() == error {
+        return false;
+    }
+    *last_error = error.map(str::to_owned);
+    true
 }
 
 fn ready(send: &mut Ready) {
     send.healthy_since.get_or_insert_with(Instant::now);
+    if retry_changed(&mut send.last_error, None) {
+        isocast_diagnostics::diagnostic!("info"; "discovery: Avahi advertising recovered");
+    }
     if let Some(send) = send.send.take() {
         let _ = send.send(Ok(()));
     }
@@ -159,7 +170,7 @@ fn start(mut operation: Operation) -> Result<Worker> {
     let thread = std::thread::Builder::new()
         .name("isocast-avahi".into())
         .spawn(move || {
-            let mut send = Ready { send: Some(send), healthy_since: None };
+            let mut send = Ready { send: Some(send), healthy_since: None, last_error: None };
             let mut failures = 0u32;
             loop {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -169,7 +180,7 @@ fn start(mut operation: Operation) -> Result<Worker> {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         if let Operation::Register { error: state, .. } = &operation {
-                            *state.lock().unwrap_or_else(|e| e.into_inner()) = Some(unavailable(&error).to_string());
+                            *state.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("advertising stopped: {error}"));
                         }
                         if let Some(send) = send.send.take() {
                             let _ = send.send(Err(unavailable(error)));
@@ -197,8 +208,9 @@ fn start(mut operation: Operation) -> Result<Worker> {
                 let error = result
                     .err()
                     .unwrap_or_else(|| anyhow!("Avahi connection ended"));
+                let reason = format!("{error:#}");
                 if let Operation::Register { error: state, .. } = &operation {
-                    *state.lock().unwrap_or_else(|e| e.into_inner()) = Some(unavailable(format!("{error:#}; retrying in background")).to_string());
+                    *state.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{ADVERTISING_WAIT}: {reason}"));
                     // Registration is persistent intent: a boot-time missing
                     // responder must not strand a running remote listener.
                     if let Some(send) = send.send.take() {
@@ -224,8 +236,8 @@ fn start(mut operation: Operation) -> Result<Worker> {
                         return;
                     }
                     on_event(Event::Error(unavailable(format!("{error:#}")).to_string()));
-                } else {
-                    isocast_diagnostics::diagnostic!("warn"; "discovery: {error:#}; retrying Avahi registration");
+                } else if retry_changed(&mut send.last_error, Some(&reason)) {
+                    isocast_diagnostics::diagnostic!("warn"; "discovery: {reason}; retrying Avahi registration");
                 }
             }
         })
@@ -891,6 +903,21 @@ async fn resolve_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_logging_reports_changes_and_recovery_once() {
+        let mut last = None;
+        assert!(!retry_changed(&mut last, None));
+        assert!(retry_changed(&mut last, Some("Avahi absent")));
+        for _ in 0..100 {
+            assert!(!retry_changed(&mut last, Some("Avahi absent")));
+        }
+        assert!(retry_changed(&mut last, Some("system bus absent")));
+        assert!(!retry_changed(&mut last, Some("system bus absent")));
+        assert!(retry_changed(&mut last, None));
+        assert!(!retry_changed(&mut last, None));
+        assert!(retry_changed(&mut last, Some("system bus absent")));
+    }
 
     #[test]
     fn healthy_session_resets_retry_delay() {

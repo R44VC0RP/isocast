@@ -21,7 +21,7 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
   sources, OpenH264 H.264 and Apache-2.0 libxaac AAC-LC through `isocast-mux`. Ubuntu 24.04 arm64 VM proof:
   program + two ISOs, 720p30, 310 frames each, zero drops, 1,240 frame-oracle checks, maximum A/V skew 0.021 ms.
-  No real capture, hardware encoding, media decoding, playback or shared previews; RTMP/AAC
+  No hardware encoding, media decoding, playback or shared previews; RTMP/AAC
   streaming remains unsupported. Linux startup now finalizes retained mux fragments and persists verified
   counts through one pinned-directory recovery lease (SIGKILL + restart proved on three files, 2026-10-23).
   Drop/repeat/audio-loss counts after a crash remain unknown; empty cancelled reservations are retained.
@@ -38,6 +38,35 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   vz network blocks multicast (the host Mac's 6-second browse did not see the VM).
   The four-vCPU hosted Linux job uses a 360p30 integrity profile and the shared `--hosted` policy;
   strict zero-drop 720p30 is qualified separately in the six-vCPU arm64 VM, not claimed for the runner.
+- **Linux capture lane (2026-10-23), experimental/unreleased:** portal/SHM screens, PipeWire default-sink
+  desktop audio and microphones, and V4L2 MJPEG/YUYV cameras are implemented. PipeWire headers/runtime
+  >=1.0.5 are required. Restore tokens are private engine-adjacent `*.linux-capture.json` files; devices
+  never prompts. Display opens allow 120 seconds for consent; declining/stopping sharing suppresses
+  automatic re-prompts for ten minutes (explicit screen permission requests clear the cooldown).
+  In the five-vCPU arm64 Lima fixture, a 30-second 1080p30 four-source take produced 900-frame screen
+  and camera ISOs with zero writer losses, with verified 440 Hz desktop / 880 Hz mic routing.
+  **Not qualified lossless:** program lost 19 frames and had two audio dropouts; screen oracle decoded
+  900 IDs but found 21 held pictures. Lavapipe GPU waits exceed the frame budget under load.
+  A five-minute take retained 9,000 frames per ISO; camera audio had one dropout, program lost
+  2,699 frames with 882 audio dropouts, and screen oracle found 370 holds. All files decode to 300 seconds.
+  MJPEG loopback capture also decoded 900/900 oracle IDs, with 104 held pictures. Three source
+  start/stop cycles returned to identical descriptor/thread counts and reused portal restore data.
+  Headless pixman needs a fixture-only portal-wlr SHM patch; stock desktop portals and real cameras
+  remain unqualified. ASK-20 approved strict 720p30 VM qualification; retain the 1080p30 numbers as
+  needing a GPU-backed Linux host. No loss rule is relaxed.
+  Review follow-up (2026-10-24): normal shutdown is distinguished from portal revocation; isolated
+  non-finite audio is concealed, corrupted chunks are skipped/count-reported, and microphones cannot
+  reconnect to a different input. Real mid-take virtual-mic removal gave a disconnected-source error
+  and silence, then reopened the same ID after take completion. Three stops returned to identical
+  FD/thread counts. Linux Clippy/release build and 37 platform tests pass; prior Mac gates passed316.
+  **Reserved quiet-window 720p30:** 30s and300s program plus two ISOs have900/9000 frames each and
+  zero writer drops/repeats/audio dropouts; routing and complete file durations pass. **Not qualified:**
+  captured flash/beep skew54.69ms/55.96ms exceeds one frame. Five-minute screen oracle decodes9000 IDs
+  but finds165 held pictures. Independent wf-recorder also sees variable~55ms skew; fixture playback
+  is not a calibrated presentation reference, and Isocast timing is not exonerated. Bounded probes
+  show valid video header PTS and zero reported audio delay/buffering; nonzero delay signs remain
+  unverified. No timestamp arithmetic changed. Keep the failed1080p evidence; use a calibrated native
+  desktop A/V fixture before claiming strict qualification. Hosted candidate CI remains pending.
 - **Desktop client on a remote server (R2) is on main (2026-10-23):** pairing in the app, engine picker, one window
   per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA), verified basebook <-> exon-desk both
   ways (`/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).
@@ -69,7 +98,8 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 - Platforms:
   - `isocast-platform-macos`: ScreenCaptureKit, AVFoundation, VideoToolbox, AVAssetWriter, IOSurface frames.
   - `isocast-platform-windows`: WGC via the helper `isocast-capture.exe`, MF cameras, WASAPI, NVENC/MF, DX12 import.
-  - `isocast-platform-linux`: headless synthetic sources, Vulkan upload/readback, OpenH264/libxaac software recording.
+  - `isocast-platform-linux`: portal/PipeWire screens and audio, V4L2 cameras, synthetic sources,
+    Vulkan upload/readback, OpenH264/libxaac software recording.
   - `-stub`: fail-closed, for other OSes. `-contracts`: dev-only contract workers (`scripts/platform-contracts.py`).
   - `-credentials`: Keychain / Credential Manager / Linux private XDG files without media dependencies.
 - Plumbing:
@@ -106,7 +136,8 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 - Nothing starts below 40 GB free (m2-a had 43 GB on 2026-10-22; use `remote-build.sh prune`).
 - Exit codes: 255 unreachable, 3 disk guard, 75 lane lock, 76 hardware job, 69 no free host.
 - Same Rust 1.99, SDK 27.0 and arm64 everywhere: binaries from any host run on every Mac here.
-- Linux lane (2026-10-22): Lima/vz VM `isocast-linux` on m2-b, Ubuntu 24.04 arm64, 6 CPUs/12 GiB/60 GiB,
+- Linux lane (2026-10-23): Lima/vz VM `isocast-linux` on m2-b, Ubuntu 24.04 arm64, currently capped at
+  5 CPUs/8 GiB/60 GiB for capture (bootstrap qualification used 6 CPUs/12 GiB),
   no host mounts; `limactl shell isocast-linux`, source in guest `~/isocast-linux/src`. Stop it when unused.
   Strict software-GPU timing needs host headroom: early tests during heavy host load dropped program frames;
   the qualified take with unchanged code had GPU completion p50 ~12 ms and no losses. Do not hide losses.

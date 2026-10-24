@@ -4018,6 +4018,11 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     if program.enabled || vertical_enabled {
         required.extend(program.audio.iter().map(String::as_str));
     }
+    let source_wait = required
+        .iter()
+        .filter_map(|id| setup.source(id))
+        .map(|source| platform.source_open_timeout(&source.kind) + Duration::from_secs(5))
+        .fold(SOURCE_WAIT, std::cmp::max);
     let waiting_since = platform.now();
     loop {
         let state = inner.state.read();
@@ -4033,7 +4038,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 ) || reopening(id, live)
             })
         });
-        if !pending || platform.now().saturating_since(waiting_since) >= SOURCE_WAIT {
+        if !pending || platform.now().saturating_since(waiting_since) >= source_wait {
             for id in &required {
                 // Which list makes the recording need it, for the way out.
                 let has = |list: &[String]| list.iter().any(|s| s == id);

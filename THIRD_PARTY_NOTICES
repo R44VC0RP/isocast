@@ -443,7 +443,7 @@ License 2.0. libxaac's NOTICE and its copy of the licence follow.
    See the License for the specific language governing permissions and
    limitations under the License.
 
-Rust crates (755)
+Rust crates (765)
 =================
 
 Crate, version, licence, link.
@@ -499,6 +499,9 @@ aho-corasick 1.1.5
 allocator-api2 0.2.21
   MIT OR Apache-2.0
   https://github.com/zakarumych/allocator-api2
+annotate-snippets 0.11.5
+  MIT OR Apache-2.0
+  https://github.com/rust-lang/annotate-snippets-rs
 annotate-snippets 0.12.16
   MIT OR Apache-2.0
   https://github.com/rust-lang/annotate-snippets-rs
@@ -544,6 +547,9 @@ as-raw-xcb-connection 1.0.1
 ash 0.38.0+1.3.281
   MIT OR Apache-2.0
   https://github.com/ash-rs/ash
+ashpd 0.13.13
+  MIT
+  https://github.com/bilelmoussaoui/ashpd
 asn1-rs 0.7.2
   MIT OR Apache-2.0
   https://github.com/rusticata/asn1-rs.git
@@ -691,6 +697,9 @@ ccm 0.5.0
 cexpr 0.6.0
   Apache-2.0/MIT
   https://github.com/jethrogb/rust-cexpr
+cfg-expr 0.20.10
+  MIT OR Apache-2.0
+  https://github.com/EmbarkStudios/cfg-expr
 cfg-if 1.0.5
   MIT OR Apache-2.0
   https://github.com/rust-lang/cfg-if
@@ -772,6 +781,9 @@ const-oid 0.9.6
 convert_case 0.10.0
   MIT
   https://github.com/rutrum/convert-case
+cookie-factory 0.3.3
+  MIT
+  https://github.com/rust-bakery/cookie-factory
 core-foundation 0.10.1
   MIT OR Apache-2.0
   https://github.com/servo/core-foundation-rs
@@ -1444,6 +1456,12 @@ libseat 0.2.4
 libseat-sys 0.2.0
   MIT
   https://github.com/PolyMeilex/libseat-rs
+libspa 0.10.1
+  MIT
+  https://gitlab.freedesktop.org/pipewire/pipewire-rs
+libspa-sys 0.10.1
+  MIT
+  https://gitlab.freedesktop.org/pipewire/pipewire-rs
 libudev-sys 0.1.4
   MIT
   https://github.com/dcuddeback/libudev-sys
@@ -1777,6 +1795,12 @@ pin-weak 1.1.0
 piper 0.2.5
   MIT OR Apache-2.0
   https://github.com/smol-rs/piper
+pipewire 0.10.1
+  MIT
+  https://gitlab.freedesktop.org/pipewire/pipewire-rs
+pipewire-sys 0.10.1
+  MIT
+  https://gitlab.freedesktop.org/pipewire/pipewire-rs
 pkcs8 0.10.2
   Apache-2.0 OR MIT
   https://github.com/RustCrypto/formats/tree/master/pkcs8
@@ -2215,6 +2239,9 @@ synstructure 0.14.0
 sys-locale 0.3.2
   MIT OR Apache-2.0
   https://github.com/1Password/sys-locale
+system-deps 7.0.8
+  MIT OR Apache-2.0
+  https://github.com/gdesmott/system-deps
 taffy 0.10.1
   MIT
   https://github.com/DioxusLabs/taffy
@@ -2386,6 +2413,9 @@ uuid 1.28.0
 vcpkg 0.2.15
   MIT/Apache-2.0
   https://github.com/mcgoo/vcpkg-rs
+version-compare 0.2.1
+  MIT
+  https://gitlab.com/timvisee/version-compare
 version_check 0.9.5
   MIT/Apache-2.0
   https://github.com/SergioBenitez/version_check
