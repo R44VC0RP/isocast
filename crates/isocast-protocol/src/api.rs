@@ -3404,6 +3404,11 @@ pub struct CapacityEstimate {
     pub workload_key: String,
 }
 
+/// [`ResourceEstimate::resource`] on a software graphics adapter (#128):
+/// compositing and frame conversion run on the CPU, and the estimate is
+/// judged against an advisory reference, never measured capacity.
+pub const SOFTWARE_RENDERER_RESOURCE: &str = "software_renderer";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceEstimate {
     pub resource: String,

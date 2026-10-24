@@ -314,7 +314,12 @@ pub(super) fn run<P: Platform>(
             }
             // On its own grid, skipping what was missed rather than
             // catching up.
-            let period = Duration::from_secs(1) / crate::governor::monitor_fps(*fps).max(1);
+            let fps = crate::governor::monitor_fps(*fps);
+            if fps == 0 {
+                *due = now + Duration::from_millis(50);
+                continue;
+            }
+            let period = Duration::from_secs(1) / fps;
             *due = (*due + period).max(now);
             if feeds.reused(id, tick) {
                 // A scene during a transition is NOT the mixed program.
@@ -326,7 +331,9 @@ pub(super) fn run<P: Platform>(
             }
             let size = sizes
                 .iter()
-                .map(|size| super::shared_frames::fitted(canvas, *size))
+                .map(|size| {
+                    super::shared_frames::fitted(canvas, crate::governor::monitor_size(*size))
+                })
                 .max_by_key(|(w, h)| u64::from(*w) * u64::from(*h))
                 .unwrap_or(canvas);
             if compositor

@@ -241,6 +241,14 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 6. Gotchas that still bite
 
+- #128: Software adapters (`wgpu::DeviceType::Cpu`: WARP, llvmpipe/lavapipe) pause
+  disposable previews during recordings (including paused takes) and live streams, not
+  replay alone; the reason names the protected output. Pins/off remain respected.
+  This supersedes Linux's CPU-window 15fps/640px caps during takes. Hardware GPUs keep
+  the 15fps floor and 2s/5s timers; on 30fps canvases Mac reaches15 one step earlier and
+  restores15→0 directly. Windows's 480×270@30 synthetic program-only hosted reference
+  is advisory, not local capacity. Measurement history: windows-perf scratch/issue128/REPORT.md.
+
 - 2026-10-23: The strict 60fps oracle's 1.5× media source has only a 2.78ms eligibility margin on alternate slots. ISO-21's initial ISO10 run had one one-picture-late program sample; a fixed three-pair merged-baseline/candidate comparison then passed all six runs. Baseline did not fail; the transient is retained, not a demonstrated settings regression or a cleared pacing defect (`iso-21-setting/REPORT.md` in mac-perf scratch).
 
 - 2026-10-23: ISO-21 base-M2 virtual-display cadence is missing pictures upstream of Isocast: the unchanged standalone SCK trace yields 55–56 Complete samples/s with skipped marker IDs and 33–50 ms PTS gaps; retained engine ingress is ~56/s. The base PTS interval is ~16.6656 ms, not 59.94/120 Hz. No ISO pacing fix; see mac-perf scratch `iso-21/REPORT.md` (cadence section; Idle/callback-arrival detail was not retained).

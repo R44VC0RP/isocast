@@ -706,6 +706,9 @@ struct CanvasOutput<P: Platform> {
     /// The highest rate the preview was asked for since the program last
     /// looked (0: nobody).
     preview_wanted: AtomicU32,
+    /// Recording preparation and virtual-camera outputs are not disposable monitors.
+    protected_program_wanted: AtomicU32,
+    camera_preview_wanted: AtomicU32,
     /// Resolves the setup's scenes into what the program draws whenever
     /// they change.
     scenes: SceneThread<P::Frame>,
@@ -843,6 +846,8 @@ impl<P: Platform> CanvasOutput<P> {
             preview: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
             preview_scene: Mutex::new(None),
             preview_wanted: AtomicU32::new(0),
+            protected_program_wanted: AtomicU32::new(0),
+            camera_preview_wanted: AtomicU32::new(0),
             scenes,
             program_video: Arc::default(),
             drawn: Arc::default(),
@@ -1742,6 +1747,16 @@ impl<P: Platform> Engine<P> {
                         super::virtual_camera::Input::Scene(scenes, settings.scene.clone().unwrap())
                     }));
                 }
+                if settings.target != Target::Source
+                    && let Some(output) = inner.output(extra.unwrap_or(CanvasId::Main))
+                {
+                    let wanted = if settings.target == Target::Preview {
+                        &output.camera_preview_wanted
+                    } else {
+                        &output.protected_program_wanted
+                    };
+                    wanted.fetch_max(fps, Ordering::Relaxed);
+                }
                 let slot = match (settings.target, extra) {
                     // A contained failure of the extra canvas fails the
                     // camera, saying why, rather than dropping every frame
@@ -1850,6 +1865,7 @@ impl<P: Platform> Engine<P> {
         if inner.recording.swap(true, Ordering::SeqCst) {
             bail!("already recording; stop the current recording first");
         }
+        let _preview_priority = crate::governor::Recording::new(&inner.state.read().setup.governor);
         *inner.audio_stops.lock() = Some(Vec::new());
         let result = isocast_diagnostics::contain("recording", || record(self, options))
             .map_err(anyhow::Error::msg)
@@ -3166,6 +3182,8 @@ fn run_program<P: Platform>(
     // The rates monitors show the program and the preview at.
     let mut program_rates = Rates::default();
     let mut preview_rates = Rates::default();
+    let mut protected_program_rates = Rates::default();
+    let mut camera_preview_rates = Rates::default();
     let first = platform.now().ticks_since(epoch, fps).max(0) as u64 + 1;
     // Where the frame rate is measured from: a time and the frames drawn
     // by then.
@@ -3262,10 +3280,21 @@ fn run_program<P: Platform>(
         let now = platform.now();
         program_rates.ask(output.control.take_program_wanted(), fps, now);
         preview_rates.ask(output.preview_wanted.swap(0, Ordering::SeqCst), fps, now);
+        protected_program_rates.ask(
+            output.protected_program_wanted.swap(0, Ordering::Relaxed),
+            fps,
+            now,
+        );
+        camera_preview_rates.ask(
+            output.camera_preview_wanted.swap(0, Ordering::Relaxed),
+            fps,
+            now,
+        );
         let outputs = !output.program_video.is_empty();
         compositor.protect_inputs(output.program_video.has_recording());
-        let monitored = program_rates.any(now);
-        let preview_wanted = preview_rates.any(now);
+        let monitored = program_rates.any(now) && !crate::governor::previews_paused();
+        let preview_wanted = (preview_rates.any(now) && !crate::governor::previews_paused())
+            || camera_preview_rates.any(now);
         let obsolete = if platform.prefers_deadline_timer() {
             now >= epoch.add_ticks(n + 1, fps) + frame
         } else {
@@ -3288,7 +3317,8 @@ fn run_program<P: Platform>(
                 .timeline
                 .set_on_air(canvas, on_air_sources.iter().map(|id| &**id), tick);
         }
-        if outputs || program_rates.draws(n, fps) {
+        let monitor_due = program_rates.draws_preview(n, fps);
+        if outputs || monitor_due || protected_program_rates.draws(n, fps) {
             let draw_started = std::time::Instant::now();
             match compositor.draw(
                 Feed::Program,
@@ -3360,7 +3390,7 @@ fn run_program<P: Platform>(
                 }
             }
             output.timings.lock().draw_wall(draw_started.elapsed());
-        } else if !monitored && !outputs {
+        } else if !monitored && !outputs && !protected_program_rates.any(now) {
             // Nothing wants the program: let its canvas go back to the pool.
             output.program.clear();
             output.program_rgb.clear();
@@ -3372,7 +3402,9 @@ fn run_program<P: Platform>(
             .then(|| output.preview_scene.lock().clone())
             .flatten();
         match scene {
-            Some(scene) if preview_rates.draws(n, fps) => {
+            Some(scene)
+                if preview_rates.draws_preview(n, fps) || camera_preview_rates.draws(n, fps) =>
+            {
                 compositor.protect_inputs(false);
                 let staged = OnAir { scene, from: None };
                 if let Ok(Some((image, _))) =
@@ -3475,6 +3507,14 @@ impl Rates {
         self.0
             .iter()
             .any(|(fps, _)| n.is_multiple_of(u64::from((canvas_fps / fps).max(1))))
+    }
+
+    /// Reapply the live ceiling to cached monitor demand, not camera outputs.
+    fn draws_preview(&self, n: u64, canvas_fps: u32) -> bool {
+        self.0.iter().any(|(fps, _)| {
+            let fps = crate::governor::monitor_fps(*fps);
+            fps > 0 && n.is_multiple_of(u64::from((canvas_fps / fps).max(1)))
+        })
     }
 }
 
@@ -4374,8 +4414,16 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         FIRST_FRAME_TIMEOUT.as_secs()
                     );
                 }
-                // Refresh the ordinary monitor demand while waiting. The
-                // slot publishes only after GPU completion, not submission.
+                // Required preparation must keep drawing even when disposable
+                // previews are paused. The slot publishes after GPU completion.
+                let output = if plan.source == PROGRAM {
+                    &inner.main
+                } else {
+                    extra_output(&plan.source).expect("recorded canvas output")
+                };
+                output
+                    .protected_program_wanted
+                    .fetch_max(plan.spec.video.fps, Ordering::Relaxed);
                 let slot = slot_of(inner, &plan.source, plan.spec.video.fps)
                     .map_err(anyhow::Error::msg)?;
                 if slot

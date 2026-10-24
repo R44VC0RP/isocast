@@ -55,7 +55,7 @@ import bisect
 import copy
 import datetime
 try:
-    import fcntl  # not on Windows, where only --selftest and --pattern-oracle run
+    import fcntl  # Unix scratch locking; Windows scenarios use isolated roots instead
 except ImportError:
     fcntl = None
 import hashlib
@@ -90,7 +90,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern (Windows has no media files yet).
-             "win_record", "win_takes", "win_scenes", "win_recovery") + (("linux_record", "linux_recovery") if sys.platform.startswith("linux") else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery") if sys.platform.startswith("linux") else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -150,13 +150,13 @@ def ffmpeg(*args, **kw):
     return command(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", *args], **kw)
 
 
-def until(fn, seconds=30, description="condition"):
+def until(fn, seconds=30, description="condition", interval=0.05):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         result = fn()
         if result:
             return result
-        time.sleep(0.05)
+        time.sleep(interval)
     raise Failure(f"timed out after {seconds}s waiting for {description}")
 
 
@@ -480,7 +480,13 @@ class Engine:
                 for path in folder.glob("*.session.json"):
                     if path.is_symlink():
                         continue  # plugin_files plants dangling links
-                    if {f["path"] for f in read_json(path)["files"]} == files:
+                    try:
+                        manifest = read_json(path)
+                    except (PermissionError, FileNotFoundError):
+                        # A Windows metadata transaction retains its DELETE
+                        # handle briefly after publishing the new name.
+                        continue
+                    if {f["path"] for f in manifest["files"]} == files:
                         return str(path)
                 return None
             result["manifest"] = until(locate, description="take manifest")
@@ -1720,9 +1726,10 @@ def scenario_shutdown(e, cfg, evidence):
 class Watch:
     """Collect `watch` events on a connection of their own, in a thread."""
 
-    def __init__(self, engine, kinds):
+    def __init__(self, engine, kinds, stop_after=None):
         import threading
         self.events = []
+        self.stop_after = stop_after
         self.sock = engine_connection(engine.sock)
         self.sock.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "watch",
                                        "params": {"kinds": kinds}}) + "\n").encode())
@@ -1736,6 +1743,8 @@ class Watch:
             message = json.loads(line)
             if message.get("method") == "event":
                 self.events.append(message["params"])
+                if message["params"]["type"] == self.stop_after:
+                    break
 
     def of(self, kind):
         return [event for event in self.events if event["type"] == kind]
@@ -3897,9 +3906,233 @@ def scenario_linux_recovery(e, cfg, evidence):
     fragment_recovery(e, cfg, evidence)
 
 
+def scenario_win_preview_recording(e, cfg, evidence):
+    """Qualify this host's headless profile, then protect it from previews.
+    Zero losses even under --hosted; paused consumers must survive and resume.
+    A passing lower profile is not a universal software-renderer capacity claim."""
+    if not WINDOWS:
+        raise Skip("Windows shared-preview recording qualification")
+    cli = os.environ.get("ISOCAST_E2E_CLI")
+    require(cli and Path(cli).is_file(), "preview qualification requires --cli")
+    profiles = evidence.setdefault("headless_profiles", [])
+    evidence["qualification_scope"] = "this host and run only; not universal software-GPU capacity"
+    evidence["preview_profile"] = None
+    oversized = setup(e.root, "h264", width=1920, height=1080, fps=30)
+    try:
+        estimate = e.rpc("estimate_capacity", {"setup": oversized})
+    except RpcError as exc:
+        if "only supported on macOS" in str(exc):
+            raise Skip("qualification requires a Windows software graphics adapter") from exc
+        raise
+    evidence["software_capacity"] = estimate
+    require(estimate["capacity"] == "no_margin" and estimate["basis"].startswith("assumed:")
+            and "expect dropped frames" in estimate["summary"] and estimate["suggestions"],
+            f"missing advisory software capacity warning: {estimate}")
+    require(any(r["resource"] == "software_renderer" and r.get("capacity") is None
+                and r.get("load") is None for r in estimate["resources"]),
+            "software adapter must not claim a measured local capacity")
+    doctor = e.rpc("doctor", {"setup": oversized})
+    evidence["software_doctor"] = doctor
+    require(any(c["name"] == "software graphics capacity" and c["status"] == "warning"
+                and c.get("fix") for c in doctor["checks"]), "doctor omitted the software capacity warning")
+    capacity_setup = e.root / "software-capacity.json"
+    write_json(capacity_setup, oversized)
+    capacity_cli = subprocess.run([cli, "capacity", str(capacity_setup)], env=e.env, cwd=e.root,
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    evidence["software_capacity_cli"] = capacity_cli.stdout
+    require(capacity_cli.returncode == 0 and "not qualified" in capacity_cli.stdout
+            and "local capacity is unmeasured" in capacity_cli.stdout
+            and "keeps up" not in capacity_cli.stdout and "%" not in capacity_cli.stdout,
+            f"capacity CLI misrepresented unmeasured software graphics: {capacity_cli.stdout} {capacity_cli.stderr}")
+
+    def check_program(path, manifest, seconds, profile, result):
+        result.update(manifest=str(path), loss=drop_metrics(manifest))
+        require(manifest["status"] == "complete" and not manifest.get("errors"),
+                f"qualification take did not complete: {manifest}")
+        require(len(manifest["files"]) == len(result["loss"]) == 1,
+                "qualification requires final counters for exactly one program file")
+        # Retain all counters before strict media validation can fail; never
+        # turn an overloaded headless take into a pass.
+        file, facts = manifest_file(path, manifest, "program")
+        result["files"] = [check_file(file, duration=seconds, fps=30,
+                                     dimensions=(profile["width"], profile["height"]))]
+        require(facts["frames"] == result["files"][0]["frames"], "program manifest/decoded frame mismatch")
+        check_loss(result["loss"][0], 0)
+
+    # Sweep in descending order and preserve every failed take. The first
+    # hosted WARP sweep lost frames even at 360p30; do not invent a passing
+    # reference or weaken the loss allowance instead of measuring below it.
+    # Selection is made only after strict counters AND real-media checks pass.
+    selected = None
+    reference_warning_seen = False
+    for width, height in ((1280, 720), (960, 540), (640, 360), (480, 270), (426, 240), (320, 180)):
+        cfg = setup(e.root, "h264", width=width, height=height, fps=30)
+        cfg["scenes"].append({"id": "standby", "name": "Standby", "items": [
+            {"source": "bars2", "rect": {"x": 0, "y": 0, "width": width, "height": height}}]})
+        e.apply(cfg)
+        case = {"profile": cfg["canvas"].copy(), "status": "RUNNING", "samples": []}
+        profiles.append(case)
+        within_reference = "not a capacity guarantee" in e.rpc("estimate_capacity", {})["summary"]
+        watch = Watch(e, ["warning", "started"], stop_after="started")
+        try:
+            baseline_start = e.rpc("start", {"seconds": 10})
+            until(lambda: watch.of("started"), 10, "start event after capacity warning")
+            events = list(watch.events)
+            case["start_events"] = events
+            warning = next((i for i, event in enumerate(events) if event["type"] == "warning"
+                            and "software graphics adapter" in event["message"]), None)
+            started_at = next(i for i, event in enumerate(events) if event["type"] == "started")
+            if within_reference and reference_warning_seen:
+                require(warning is None, "within-reference warning repeated in the same daemon run")
+                require(not any("software graphics adapter" in note for note in baseline_start["notes"]),
+                        "within-reference start notes repeated the one-time warning")
+            else:
+                require(warning is not None and warning < started_at,
+                        "software capacity warning was not published before recording started")
+                require(any("software graphics adapter" in note for note in baseline_start["notes"]),
+                        "start response lost the software capacity warning")
+                if within_reference:
+                    require("isocast capacity" in events[warning]["message"],
+                            "within-reference warning omitted capacity guidance")
+                    reference_warning_seen = True
+        finally:
+            watch.close()
+        baseline_path = Path(baseline_start["manifest"])
+        case["manifest"] = str(baseline_path)
+        began = time.monotonic()
+
+        def baseline_finished():
+            case["samples"].append({"at_s": time.monotonic() - began, "status": e.rpc("status")})
+            return finished(baseline_path)
+
+        baseline = until(baseline_finished, 45, "headless qualification take", interval=.25)
+        try:
+            check_program(baseline_path, baseline, 10, case["profile"], case)
+        except Failure as exc:
+            case.update(status="FAIL", reason=str(exc))
+        else:
+            case.update(status="PASS", reason="zero loss and strict media checks passed")
+            if selected is None:
+                selected = copy.deepcopy(cfg)
+                evidence["preview_profile"] = case["profile"].copy()
+    require(selected is not None, "no headless profile passed strict zero-loss qualification; see headless_profiles")
+    cfg = selected
+    e.apply(cfg)
+    width, height = (cfg["canvas"][k] for k in ("width", "height"))
+    consumers = []
+    outputs = {}
+    samples = evidence.setdefault("preview_samples", [])
+    revisions = evidence.setdefault("preview_revisions", [])
+    launched = {}
+    try:
+        for target in ("program", "scene:standby"):
+            launched[target] = time.monotonic()
+            process = subprocess.Popen([cli, "frames", target, "--shared", "--check",
+                "--width", str(width), "--height", str(height), "--fps", "60",
+                "--seconds", "45", "--json"], env=e.env, cwd=e.root,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+            consumers.append((target, process))
+        time.sleep(3)
+        for target, process in consumers:
+            require(process.poll() is None, f"{target} preview consumer exited before recording")
+        evidence["before_preview_take"] = e.rpc("status")
+        started = e.rpc("start", {"seconds": 20})
+        began = time.monotonic()
+        for checkpoint in (2, 8, 16):
+            while time.monotonic() - began < checkpoint:
+                status = e.rpc("status")
+                samples.append({"at_s": time.monotonic() - began, "status": status})
+                for target, process in consumers:
+                    require(process.poll() is None, f"{target} preview consumer ended during recording")
+                time.sleep(.25)
+            revision = e.rpc("get")["revision"]
+            require(e.rpc("status").get("live") is not None, "recording ended before preview checkpoint")
+            changed = e.rpc("apply", {"revision": revision,
+                                     "patch": {"name": f"preview checkpoint {checkpoint}"}, "live": True})
+            require(changed["revision"] > revision, "preview checkpoint did not advance the setup revision")
+            revisions.append(changed["revision"])
+            if checkpoint == 8:
+                e.rpc("preview", {"scene": "standby"})
+                try:
+                    e.rpc("frame", {"target": "preview", "timeout_ms": 100})
+                except RpcError as exc:
+                    evidence["paused_frame_hint"] = str(exc)
+                    require("previews paused to protect recording" in str(exc)
+                            and "program" in str(exc), f"preview Frame omitted paused hint: {exc}")
+                else:
+                    raise Failure("preview Frame returned a picture while previews were paused")
+        path = Path(started["manifest"])
+
+        def preview_finished():
+            samples.append({"at_s": time.monotonic() - began, "status": e.rpc("status")})
+            for target, process in consumers:
+                require(process.poll() is None, f"{target} preview consumer ended before take finalization")
+            return finished(path)
+
+        manifest = until(preview_finished, 45, "preview take finalization", interval=.25)
+        stopped = time.monotonic()
+        evidence["preview_take"] = {"manifest": str(path), "loss": drop_metrics(manifest)}
+        evidence["after_preview_take"] = e.rpc("status")
+        revision = e.rpc("get")["revision"]
+        resumed_revision = e.rpc("apply", {"revision": revision,
+                                           "patch": {"name": "preview resumed"}, "live": True})["revision"]
+        require(resumed_revision > revision, "resume check did not advance the setup revision")
+        evidence["resume_revision"] = resumed_revision
+        # Status is the user-visible explanation; the consumers' actual long
+        # inter-frame gap below proves that delivery paused, not just its label.
+        protected = [s for s in samples if 4 <= s["at_s"] <= 16]
+        require(protected and protected[-1]["at_s"] - protected[0]["at_s"] >= 10 and
+                all(s["status"].get("live") is not None and s["status"]["governor"].get("preview_fps") == 0
+                    and "previews paused to protect recording" in s["status"]["governor"]["reason"]
+                    for s in protected),
+                "protected recording did not visibly report paused previews for at least 10 seconds")
+        # Poll both together: one stalled subscriber must not gain an extra
+        # full timeout merely because the other was collected first.
+        deadline = max(launched.values()) + 60
+        while any(process.poll() is None for _, process in consumers):
+            require(time.monotonic() < deadline, "preview consumers exceeded their 60s wall-time budget")
+            evidence.setdefault("resume_samples", []).append(e.rpc("status"))
+            time.sleep(.25)
+        require(evidence.get("resume_samples") and
+                any(s.get("live") is None and s["governor"].get("preview_fps") != 0
+                    for s in evidence["resume_samples"]), "previews remained paused after recording")
+        for target, process in consumers:
+            outputs[target] = process.communicate(timeout=10)
+            stdout, stderr = outputs[target]
+            require(process.returncode == 0, f"{target} preview failed: {stderr}")
+            result = json.loads(stdout)
+            evidence.setdefault("previews", []).append(result)
+            require(result["ended"] is None and not result["problems"], f"{target} preview ended: {result}")
+            require(result["check"]["frames_read_back"] > 0, f"{target} did no GPU readbacks")
+            require(45 <= result["seconds"] <= 50, f"{target} preview did not survive its time budget: {result}")
+            require(result["frames"] > 1 and result["fps"] > 0 and
+                    15000 <= result["interval_ms"]["max"] <= 30000,
+                    f"{target} preview did not pause for the take and resume within 30s: {result}")
+            # CLI FPS is (count-1)/(last-first); the first ring is reported
+            # on its first frame. Bound trailing silence as well as gaps.
+            last = result["rings"][0]["at_s"] + (result["frames"] - 1) / result["fps"]
+            require(last >= result["seconds"] - 2, f"{target} preview stopped early: {result}")
+            require(launched[target] + last >= stopped + 2,
+                    f"{target} did not deliver frames after recording stopped: {result}")
+            if target == "program":  # scene feeds intentionally have no revision stamp
+                seen = {r["revision"] for r in result["revisions"]}
+                require(resumed_revision in seen, f"program did not show the post-stop revision: {result}")
+        check_program(path, manifest, 20, cfg["canvas"], evidence["preview_take"])
+    finally:
+        for target, process in consumers:
+            if process.poll() is None:
+                process.kill()
+            if target not in outputs:
+                outputs[target] = process.communicate(timeout=10)
+            name = target.replace(":", "-")
+            (e.root / f"{name}-preview.json").write_text(outputs[target][0])
+            (e.root / f"{name}-preview.log").write_text(outputs[target][1])
+
+
 def scenario_win_recovery(e, cfg, evidence):
     """Terminate the engine, then its whole tree, without orderly finalization.
     The tree case kills a harness parent and its actual recording-engine child.
+    It validates the harness tree path; both cases use TerminateProcess on the engine.
     This models process loss, not loss of the OS/disk's write cache."""
     if not WINDOWS:
         raise Skip("Windows process-tree crash recovery")
@@ -3933,6 +4166,7 @@ def fragment_recovery(e, cfg, evidence, kill_tree=False):
             f"@(Get-CimInstance Win32_Process -Filter 'ParentProcessId={e.process.pid}' | "
             "Select-Object ProcessId,Name)"]).stdout.decode("utf-8-sig"))
     require(e.process.poll() is None, "engine exited before crash injection")
+    daemon = e.process.pid
     if kill_tree:
         require(WINDOWS, "process-tree crash injection requires Windows")
         daemon = e.rpc("status")["daemon"]["pid"]
@@ -3966,7 +4200,7 @@ def fragment_recovery(e, cfg, evidence, kill_tree=False):
         # complete unpublished copy nor a torn JSON copy may replace the last
         # published manifest or masquerade as another take.
         for serial, data in enumerate((path.read_bytes(), b'{"status":"recording",')):
-            orphan = path.parent / f".isocast-{e.process.pid}-0-{serial:x}.partial"
+            orphan = path.parent / f".isocast-{daemon}-0-{serial:x}.partial"
             with orphan.open("xb") as file:
                 file.write(data)
             partials[orphan] = data
@@ -4176,16 +4410,27 @@ def worker(args):
         (root / "failure.txt").write_text(traceback.format_exc())
     finally:
         if engine:
-            engine.close()
+            try:
+                engine.close()
+            except Exception as exc:
+                status, reason = "FAIL", f"{reason}; engine cleanup failed: {exc}"
         # Preserve every output's counters even when an earlier assertion
-        # failed. A rejected take must not make the summary look drop-free.
-        for path in (root / "recordings").rglob("*.session.json"):
-            if path.is_symlink() or not path.is_file():
-                continue  # plugin_files plants dangling links
-            manifest = read_json(path)
-            if manifest["status"] != "recording":
-                evidence.setdefault("drops", {}).update({str(path.parent / row["output"]): row
-                                                        for row in drop_metrics(manifest)})
+        # failed, except the qualification sweep's deliberately rejected
+        # profiles: their counters stay in headless_profiles, not suite loss.
+        try:
+            rejected_profiles = {Path(case["manifest"]) for case in evidence.get("headless_profiles", [])
+                                 if case.get("status") == "FAIL" and case.get("manifest")}
+            for path in (root / "recordings").rglob("*.session.json"):
+                if path.is_symlink() or not path.is_file():
+                    continue  # plugin_files plants dangling links
+                if path in rejected_profiles:
+                    continue
+                manifest = read_json(path)
+                if manifest["status"] != "recording":
+                    evidence.setdefault("drops", {}).update({str(path.parent / row["output"]): row
+                                                            for row in drop_metrics(manifest)})
+        except Exception as exc:
+            status, reason = "FAIL", f"{reason}; recording evidence collection failed: {exc}"
         write_json(root / "result.json", {"name": args.worker, "status": status, "reason": reason,
                                           "seconds": round(time.monotonic() - started, 3),
                                           "evidence": evidence})
@@ -4248,7 +4493,9 @@ def run_case(args, root, name):
             result = {"name": name, "status": "FAIL", "reason": f"scenario timed out after {args.timeout}s"}
         finally:
             kill_group(process)
-    keep = args.keep or (args.keep_failures and result["status"] == "FAIL")
+    failed_profiles = any(p["status"] == "FAIL" for p in
+                          result.get("evidence", {}).get("headless_profiles", []))
+    keep = args.keep or failed_profiles or (args.keep_failures and result["status"] == "FAIL")
     result["artifacts"] = str(case) if keep else None
     losses = list(result.get("evidence", {}).get("drops", {}).values())
     detail = ""

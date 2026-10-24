@@ -72,6 +72,9 @@ impl Gpu {
             ..Default::default()
         }))
         .context("no GPU found")?;
+        let info = adapter.get_info();
+        crate::governor::software_renderer(info.device_type == wgpu::DeviceType::Cpu);
+        isocast_diagnostics::diagnostic!("info"; "graphics adapter: {} ({:?})", info.name, info.device_type);
         // 10-bit frames arrive as 16-bit planes; native Windows cameras use
         // genuine NV12 allocations with two aspect views of one texture.
         let required_features = adapter.features()

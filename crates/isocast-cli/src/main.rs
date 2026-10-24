@@ -3356,12 +3356,23 @@ fn capacity(
         println!("{}", serde_json::to_string_pretty(&estimate)?);
         return Ok(ExitCode::SUCCESS);
     }
-    println!(
-        "{}: {} H.264/HEVC engine(s), {:.0} Mpx/s each",
-        estimate.chip,
-        estimate.encode_engines,
-        estimate.engine_pixels_per_second / 1e6
-    );
+    let software = estimate
+        .resources
+        .iter()
+        .any(|r| r.resource == isocast_protocol::api::SOFTWARE_RENDERER_RESOURCE);
+    if software {
+        println!(
+            "{}: software graphics adapter; local capacity unmeasured",
+            estimate.chip
+        );
+    } else {
+        println!(
+            "{}: {} H.264/HEVC engine(s), {:.0} Mpx/s each",
+            estimate.chip,
+            estimate.encode_engines,
+            estimate.engine_pixels_per_second / 1e6
+        );
+    }
     println!("  ({})", estimate.basis);
     for o in &estimate.outputs {
         println!(
@@ -3402,7 +3413,10 @@ fn capacity(
             if estimate.resources.iter().any(|r| {
                 matches!(
                     r.resource.as_str(),
-                    "prores" | "recording_disk" | "startup_recovery"
+                    "prores"
+                        | "recording_disk"
+                        | "startup_recovery"
+                        | isocast_protocol::api::SOFTWARE_RENDERER_RESOURCE
                 ) && r.capacity.is_none()
             }) =>
         {
@@ -3411,20 +3425,24 @@ fn capacity(
         Capacity::NoMargin => "keeps up, no margin",
         Capacity::CannotKeepUp => "can't keep up",
     };
-    println!(
-        "Verdict: {verdict}, {} at {:.0}%{}",
-        if estimate.resources.is_empty() {
-            "busiest engine"
-        } else {
-            "largest modelled resource"
-        },
-        estimate.load * 100.0,
-        if estimate.streaming {
-            ", stream counted"
-        } else {
-            ""
-        }
-    );
+    if software {
+        println!("Verdict: {verdict}; local capacity is unmeasured");
+    } else {
+        println!(
+            "Verdict: {verdict}, {} at {:.0}%{}",
+            if estimate.resources.is_empty() {
+                "busiest engine"
+            } else {
+                "largest modelled resource"
+            },
+            estimate.load * 100.0,
+            if estimate.streaming {
+                ", stream counted"
+            } else {
+                ""
+            }
+        );
+    }
     let mut summary = estimate.summary.clone();
     if let Some(first) = summary.get(..1) {
         summary.replace_range(..1, &first.to_uppercase());
@@ -3434,6 +3452,18 @@ fn capacity(
         println!("note: {measured}");
     }
     for s in &estimate.suggestions {
+        if software {
+            println!(
+                "Suggestion: {}{}",
+                s.description,
+                if s.after_take {
+                    " (after this take)"
+                } else {
+                    ""
+                }
+            );
+            continue;
+        }
         let how = match (&s.change, &s.method) {
             (Some(change), _) => {
                 format!("isocast plan --patch '{}'", serde_json::to_string(change)?)
