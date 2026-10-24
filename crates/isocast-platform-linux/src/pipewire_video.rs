@@ -18,6 +18,8 @@ use spa::param::video::{VideoFormat, VideoInfoRaw};
 use spa::pod::{ChoiceValue, Object, Pod, Property, Value};
 use spa::utils::{Choice, ChoiceEnum, ChoiceFlags};
 
+use crate::pw_loop::WorkerLoop;
+
 use crate::frames::{Frame, FramePool};
 
 const START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -117,8 +119,8 @@ fn run(
     ready: mpsc::SyncSender<Result<CaptureFormat>>,
 ) -> Result<()> {
     pw::init();
-    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
-    let context = pw::context::ContextRc::new(&mainloop, None)?;
+    let mainloop = WorkerLoop::new()?;
+    let context = pw::context::ContextRc::new(mainloop.main_loop(), None)?;
     // PipeWire takes ownership and closes the fd on both connect failure and
     // disconnect. No raw-fd duplicate or second owner is retained here.
     let core = context.connect_fd_rc(remote, None)?;
@@ -134,7 +136,7 @@ fn run(
                 .get_or_insert_with(|| format!("remote error on object {id} ({code}): {message}"));
         })
         .register();
-    let stream = pw::stream::StreamBox::new(
+    let stream = mainloop.stream(pw::stream::StreamBox::new(
         &core,
         "Isocast screen capture",
         properties! {
@@ -143,7 +145,7 @@ fn run(
             *pw::keys::MEDIA_ROLE => "Screen",
             "node.name" => "isocast-screen-capture",
         },
-    )?;
+    )?);
     let state = State {
         format: None,
         pixels: VideoFormat::BGRA,
@@ -211,16 +213,10 @@ fn run(
         if let Some(reason) = failure.borrow_mut().take() {
             bail!(reason);
         }
-        let result = mainloop
-            .loop_()
-            .iterate(pw::loop_::Timeout::Finite(LOOP_WAIT));
-        ensure!(
-            result >= 0 || result == -libc::EINTR,
-            "PipeWire loop failed: {result}"
-        );
+        mainloop.iterate(LOOP_WAIT)?;
     }
-    // Locals drop in order: listener, stream, core listener, core, context,
-    // loop. No callbacks are dispatched during intentional teardown.
+    // Locals drop in order: listener, stream (disconnected and its queued
+    // callbacks flushed on this thread), core listener, core, context, loop.
     Ok(())
 }
 

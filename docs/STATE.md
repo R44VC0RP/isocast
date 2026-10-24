@@ -270,6 +270,12 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 6. Gotchas that still bite
 
+- 2026-10-24: A Linux PipeWire worker's main loop must stay entered on its own thread
+  (`isocast-platform-linux/src/pw_loop.rs` `WorkerLoop`). pipewire-rs `Loop::iterate` enters and
+  leaves per call; PipeWire 1.0.5 then runs cross-thread invokes inline (`loop.c` `loop_invoke`,
+  `thread == 0`), so non-RT stream callbacks ran on the data thread beside our `Rc`/`RefCell` state.
+  Own streams through `WorkerLoop::stream` (disconnect, then flush queued callbacks, before free).
+
 - #128: Software adapters (`wgpu::DeviceType::Cpu`: WARP, llvmpipe/lavapipe) pause
   disposable previews during recordings (including paused takes) and live streams, not
   replay alone; the reason names the protected output. Pins/off remain respected.
