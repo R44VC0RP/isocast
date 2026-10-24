@@ -170,3 +170,5 @@ impl DiskMeter {
         }
     }
 }
+
+// CI budget measurement (never merged).
