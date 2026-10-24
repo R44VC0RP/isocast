@@ -12,7 +12,6 @@ isocast-engine = { path = "../isocast-engine" }
 isocast-diagnostics = { path = "../isocast-diagnostics" }
 isocast-protocol = { path = "../isocast-protocol" }
 isocast-platform-credentials = { path = "../isocast-platform-credentials" }
-isocast-platform-stub = { path = "../isocast-platform-stub" }
 isocast-surfaces = { path = "../isocast-surfaces" }
 isocast-mux = { path = "../isocast-mux" }
 libc = "0.2"

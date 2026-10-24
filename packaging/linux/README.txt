@@ -18,8 +18,10 @@ engine.
 What it needs (install with your package manager)
 --------------------------------------------------
 - A Wayland session (GNOME, KDE Plasma, sway...), or X11 as a fallback.
-- Vulkan: your GPU's Vulkan driver (Mesa's radv/anv/nvk, or NVIDIA's). Without
-  one, Mesa's software Vulkan (lavapipe) works, more slowly.
+- Vulkan is required: your GPU's Vulkan driver (Mesa's radv/anv/nvk, or
+  NVIDIA's), or without one Mesa's software Vulkan (lavapipe, in
+  mesa-vulkan-drivers), with which the app draws on the CPU. With no Vulkan
+  driver at all, neither the app nor the engine starts.
     Debian/Ubuntu: libvulkan1 mesa-vulkan-drivers
     Fedora:        vulkan-loader mesa-vulkan-drivers
     Arch:          vulkan-icd-loader vulkan-radeon / vulkan-intel / nvidia-utils

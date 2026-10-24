@@ -53,9 +53,9 @@ impl Platform for LinuxPlatform {
     type Capture = Capture;
     type Importer = Importer;
     type Media = Unsupported;
-    type Playback = Unsupported;
+    type Playback = crate::playback::Playback;
     type VideoEncoder = Encoder;
-    type AudioEncoder = isocast_platform_stub::Unsupported;
+    type AudioEncoder = crate::audio::StreamEncoder;
     type SharedSurface = isocast_surfaces::Surface;
 
     fn now(&self) -> Time {
@@ -267,8 +267,8 @@ impl Platform for LinuxPlatform {
     fn create_video_encoder(&self, spec: &LiveVideoSpec) -> Result<Encoder> {
         Encoder::new(spec)
     }
-    fn create_audio_encoder(&self, _spec: &LiveAudioSpec) -> Result<Self::AudioEncoder> {
-        bail!("AAC streaming is not supported by the Linux bootstrap")
+    fn create_audio_encoder(&self, spec: &LiveAudioSpec) -> Result<Self::AudioEncoder> {
+        crate::audio::StreamEncoder::new(spec)
     }
 
     fn capture_screen(
@@ -313,8 +313,12 @@ impl Platform for LinuxPlatform {
     fn capture_application_audio(&self, _app: &str, _sink: AudioSink) -> Result<(Capture, u32)> {
         Err(unsupported("application audio capture (PipeWire)"))
     }
-    fn play_audio(&self, _device: &str, _render: AudioRender) -> Result<(Unsupported, String)> {
-        Err(unsupported("audio playback"))
+    fn play_audio(
+        &self,
+        device: &str,
+        render: AudioRender,
+    ) -> Result<(crate::playback::Playback, String)> {
+        crate::playback::play(device, render)
     }
     fn capture_browser(
         &self,

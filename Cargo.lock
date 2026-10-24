@@ -3777,7 +3777,6 @@ dependencies = [
  "isocast-engine",
  "isocast-mux",
  "isocast-platform-credentials",
- "isocast-platform-stub",
  "isocast-protocol",
  "isocast-surfaces",
  "libc",

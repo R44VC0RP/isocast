@@ -530,18 +530,15 @@ impl Canvas {
         } else {
             MAX_FPS
         };
-        let cpu_cap = match (self.cpu_window.get(), recording(&app.session.borrow())) {
-            (false, _) => MAX_FPS,
-            (true, false) => CPU_WINDOW_FPS,
-            (true, true) => CPU_WINDOW_RECORDING_FPS,
-        };
-        fps.min(canvas).min(self.max_fps.get()).min(cpu_cap).max(1)
+        let (cpu_cap, _) =
+            cpu_window_limits(self.cpu_window.get(), recording(&app.session.borrow()));
+        monitor_fps(fps, canvas, self.max_fps.get(), cpu_cap)
     }
 
     fn update_fps(&self, app: &Rc<App>) {
         let fps = self.wanted_fps(app);
-        let max_width = (self.cpu_window.get() && recording(&app.session.borrow()))
-            .then_some(CPU_WINDOW_RECORDING_WIDTH);
+        let (_, max_width) =
+            cpu_window_limits(self.cpu_window.get(), recording(&app.session.borrow()));
         for cell in [&self.preview, &self.program, &self.extra] {
             if let Ok(mut preview) = cell.try_borrow_mut()
                 && let Some(preview) = preview.as_mut()
@@ -2220,6 +2217,24 @@ pub(crate) fn stopped(s: &crate::session::Session, canvas: CanvasId) -> Option<&
         .and_then(|v| v.stopped.as_deref())
 }
 
+/// A window's limits on its monitors: the most frames a second, and the
+/// widest picture to ask for (none: the monitor's size). Only a window
+/// drawn on the CPU has any, more of them while recording.
+fn cpu_window_limits(cpu_window: bool, recording: bool) -> (u32, Option<u32>) {
+    match (cpu_window, recording) {
+        (false, _) => (MAX_FPS, None),
+        (true, false) => (CPU_WINDOW_FPS, None),
+        (true, true) => (CPU_WINDOW_RECORDING_FPS, Some(CPU_WINDOW_RECORDING_WIDTH)),
+    }
+}
+
+/// The frames a second a monitor asks for: the rate wanted (the canvas's
+/// working rate or the power-saving one) within the canvas's rate, the
+/// window's `--fps` and the CPU window's cap, at least 1.
+fn monitor_fps(wanted: u32, canvas: u32, max_fps: u32, cpu_cap: u32) -> u32 {
+    wanted.min(canvas).min(max_fps).min(cpu_cap).max(1)
+}
+
 /// Recording, or starting or stopping it.
 fn recording(s: &crate::session::Session) -> bool {
     s.record_busy()
@@ -2271,4 +2286,53 @@ fn layout(setup: &Setup, scene: &str) -> HashMap<String, BoxShape> {
         walk(&scene.items, "", (0.0, 0.0), &mut out);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_windows_ask_for_fewer_smaller_frames_while_recording() {
+        // (CPU window, recording) → (fps cap, widest picture)
+        let table = [
+            ((false, false), (MAX_FPS, None)),
+            ((false, true), (MAX_FPS, None)),
+            ((true, false), (30, None)),
+            ((true, true), (15, Some(640))),
+        ];
+        for ((cpu, recording), want) in table {
+            assert_eq!(
+                cpu_window_limits(cpu, recording),
+                want,
+                "cpu {cpu}, recording {recording}"
+            );
+        }
+    }
+
+    #[test]
+    fn monitor_fps_takes_the_lowest_limit() {
+        // (wanted, canvas, --fps, CPU cap) → fps
+        let table = [
+            ((MAX_FPS, 60, MAX_FPS, MAX_FPS), 60),
+            // A 30 fps canvas: 30, never the 60 wanted.
+            ((MAX_FPS, 30, MAX_FPS, MAX_FPS), 30),
+            ((POWER_SAVING_FPS, 60, MAX_FPS, MAX_FPS), 30),
+            // A CPU window at rest and recording.
+            ((MAX_FPS, 60, MAX_FPS, CPU_WINDOW_FPS), 30),
+            ((MAX_FPS, 30, MAX_FPS, CPU_WINDOW_RECORDING_FPS), 15),
+            // A lower canvas or --fps wins over the cap.
+            ((MAX_FPS, 10, MAX_FPS, CPU_WINDOW_RECORDING_FPS), 10),
+            ((MAX_FPS, 60, 5, CPU_WINDOW_FPS), 5),
+            // Never 0, whatever the setup says.
+            ((MAX_FPS, 0, MAX_FPS, MAX_FPS), 1),
+        ];
+        for ((wanted, canvas, max_fps, cap), want) in table {
+            assert_eq!(
+                monitor_fps(wanted, canvas, max_fps, cap),
+                want,
+                "{wanted} {canvas} {max_fps} {cap}"
+            );
+        }
+    }
 }

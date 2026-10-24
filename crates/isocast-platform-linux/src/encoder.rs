@@ -20,14 +20,61 @@ pub struct Encoder {
     ready: Option<EncodedVideo>,
     last: Option<Time>,
     dropped: u64,
+    /// The bitrate made with: the most `set_rate` may ask (the wrapper
+    /// pins the layer's maximum to it at initialization).
+    created_kbps: u32,
+}
+
+// OpenH264's SetOption ids and bitrate argument (codec_app_def.h); the
+// safe wrapper sets these only when it (re)initializes.
+const OPTION_FRAME_RATE: std::os::raw::c_int = 4;
+const OPTION_BITRATE: std::os::raw::c_int = 5;
+const OPTION_PADDING: std::os::raw::c_int = 10;
+const SPATIAL_LAYER_ALL: std::os::raw::c_int = 4;
+
+#[repr(C)]
+struct BitrateInfo {
+    layer: std::os::raw::c_int,
+    bitrate: std::os::raw::c_int,
 }
 
 impl Encoder {
     pub fn new(spec: &LiveVideoSpec) -> Result<Self> {
+        let mut encoder = Self::configured(spec, None)?;
         if spec.constant_bitrate {
-            bail!("video.constant_bitrate: Linux software H.264 supports average bitrate only");
+            // OpenH264's rate control then pads with filler data up to the
+            // target when pictures come out smaller: that holds the rate.
+            encoder.option(OPTION_PADDING, &mut 1i32)?;
         }
-        Self::configured(spec, None)
+        Ok(encoder)
+    }
+
+    /// Set one of OpenH264's options on the initialized encoder.
+    fn option<T>(&mut self, id: std::os::raw::c_int, value: &mut T) -> Result<()> {
+        // SAFETY: the encoder was initialized by the probe picture in
+        // `configured`; each id is given the type codec_app_def.h names
+        // for it (int, float or SBitrateInfo), alive for the call.
+        let result = unsafe {
+            self.native
+                .raw_api()
+                .set_option(id, std::ptr::from_mut(value).cast())
+        };
+        if result != 0 {
+            bail!("video: OpenH264 refused option {id} (error {result})");
+        }
+        Ok(())
+    }
+
+    /// The target bitrate, at most the one it was made with.
+    fn bitrate(&mut self, kbps: u32) -> Result<()> {
+        let bitrate = i32::try_from(kbps * 1000).context("video.bitrate_kbps: too large")?;
+        self.option(
+            OPTION_BITRATE,
+            &mut BitrateInfo {
+                layer: SPATIAL_LAYER_ALL,
+                bitrate,
+            },
+        )
     }
 
     pub(crate) fn recording(width: u32, height: u32, fps: u32, quality: u8) -> Result<Self> {
@@ -108,6 +155,7 @@ impl Encoder {
             ready: None,
             last: None,
             dropped: 0,
+            created_kbps: spec.bitrate_kbps,
         })
     }
 
@@ -169,14 +217,28 @@ impl VideoEncoder for Encoder {
     }
 
     fn set_rate(&mut self, fps: u32, bitrate_kbps: u32) -> Result<()> {
-        if fps == self.spec.fps && bitrate_kbps == self.spec.bitrate_kbps {
-            return Ok(());
+        if !(1..=60).contains(&fps) || !(1..=100_000).contains(&bitrate_kbps) {
+            bail!("video.rate: fps must be 1..=60 and bitrate_kbps 1..=100000");
         }
-        // The safe wrapper has no in-place rate API. Do not silently replace
-        // the session/insert an IDR in violation of VideoEncoder::set_rate.
-        bail!(
-            "video.rate: Linux software encoder cannot change rate in place; create a new encoder"
-        )
+        // The layer's maximum stays the bitrate it was made with: above it,
+        // OpenH264 would not follow. A stream only lowers its rate from
+        // there and comes back up to it.
+        if bitrate_kbps > self.created_kbps {
+            bail!(
+                "video.rate: bitrate_kbps {bitrate_kbps} is above the {} kb/s this encoder was made with; make a new encoder",
+                self.created_kbps
+            );
+        }
+        // In place, through OpenH264's options: no new session, no IDR.
+        if fps != self.spec.fps {
+            self.option(OPTION_FRAME_RATE, &mut (fps as f32))?;
+            self.spec.fps = fps;
+        }
+        if bitrate_kbps != self.spec.bitrate_kbps {
+            self.bitrate(bitrate_kbps)?;
+            self.spec.bitrate_kbps = bitrate_kbps;
+        }
+        Ok(())
     }
 }
 
@@ -374,11 +436,68 @@ mod tests {
         assert_eq!(decoded.dimensions(), (32, 32));
         assert!(decoded.y().iter().all(|value| (230..=240).contains(value)));
         assert!(encoder.receive().unwrap().is_none());
-        assert!(encoder.set_rate(15, 1000).is_err());
+        // A new rate in place: no keyframe of its own.
+        encoder.set_rate(15, 500).unwrap();
+        assert!(encoder.set_rate(0, 500).is_err());
+        // Back up to where it was made, never above.
+        encoder.set_rate(15, 1000).unwrap();
+        let above = encoder.set_rate(15, 1001).unwrap_err().to_string();
+        assert!(above.contains("above the 1000 kb/s"), "{above}");
+        encoder.set_rate(15, 500).unwrap();
         encoder
-            .encode(&frame, first.add_ticks(2, 30), true)
+            .encode(&frame, first.add_ticks(2, 30), false)
+            .unwrap();
+        assert!(!encoder.receive().unwrap().unwrap().keyframe);
+        encoder
+            .encode(&frame, first.add_ticks(3, 30), true)
             .unwrap();
         assert!(encoder.receive().unwrap().unwrap().keyframe);
+    }
+
+    /// kb/s of a still picture over seconds 1 to 3 at 30 fps, with the rate
+    /// changed to `then_kbps` after second 3 (measured over 4 to 6).
+    fn still_kbps(constant_bitrate: bool, then_kbps: u32) -> (f64, f64) {
+        let mut pool = crate::frames::FramePool::new(320, 240).unwrap();
+        let frame = pool
+            .draw(&mut |pixels, _| pixels.fill(128))
+            .unwrap()
+            .unwrap();
+        let mut encoder = Encoder::new(&LiveVideoSpec {
+            width: 320,
+            height: 240,
+            fps: 30,
+            bitrate_kbps: 1000,
+            constant_bitrate,
+            keyframe_interval: 60,
+            low_latency: false,
+        })
+        .unwrap();
+        let mut bytes = [0usize; 6];
+        for n in 0..180u32 {
+            if n == 90 {
+                encoder.set_rate(30, then_kbps).unwrap();
+            }
+            let pts = Time::from_nanos(1_000_000_000).add_ticks(u64::from(n), 30);
+            encoder.encode(&frame, pts, n % 60 == 0).unwrap();
+            bytes[(n / 30) as usize] += encoder.receive().unwrap().unwrap().data.len();
+        }
+        let kbps = |range: std::ops::Range<usize>| {
+            bytes[range.clone()].iter().sum::<usize>() as f64 * 8.0 / range.len() as f64 / 1000.0
+        };
+        (kbps(1..3), kbps(4..6))
+    }
+
+    #[test]
+    fn constant_bitrate_pads_still_pictures_and_follows_a_new_rate() {
+        let (cbr, lowered) = still_kbps(true, 500);
+        assert!((800.0..=1100.0).contains(&cbr), "{cbr:.0} kb/s for 1000");
+        assert!(
+            (400.0..=560.0).contains(&lowered),
+            "{lowered:.0} kb/s for 500"
+        );
+        // On average, a still picture costs almost nothing.
+        let (average, _) = still_kbps(false, 1000);
+        assert!(average < 300.0, "{average:.0} kb/s without padding");
     }
 
     #[test]
