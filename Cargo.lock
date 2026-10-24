@@ -3771,6 +3771,7 @@ version = "0.0.8"
 dependencies = [
  "anyhow",
  "ashpd",
+ "cc",
  "futures-util",
  "image",
  "isocast-diagnostics",

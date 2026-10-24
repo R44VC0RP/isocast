@@ -14,9 +14,9 @@ use isocast_protocol::devices::{
 };
 use isocast_protocol::{Canvas, SourceKind};
 
-use crate::encoder::Encoder;
 use crate::frames::{Frame, FramePool, Importer};
 use crate::system;
+use crate::video_encoder::Encoder;
 use crate::writer::Writer;
 use crate::{camera, pipewire_audio, portal};
 
@@ -66,7 +66,11 @@ impl Platform for LinuxPlatform {
     }
     fn video_encoders(&self) -> isocast_engine::VideoEncoders {
         isocast_engine::VideoEncoders {
-            hardware: Vec::new(),
+            hardware: if crate::nvenc::available() {
+                vec!["NVIDIA NVENC (H.264)".into()]
+            } else {
+                Vec::new()
+            },
             software: vec!["OpenH264 (software)".into()],
         }
     }

@@ -232,9 +232,14 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
     ensure!(
         matches!(
             raw.format(),
-            VideoFormat::BGRA | VideoFormat::BGRx | VideoFormat::RGBA | VideoFormat::RGBx
+            VideoFormat::BGRA
+                | VideoFormat::BGRx
+                | VideoFormat::RGBA
+                | VideoFormat::RGBx
+                | VideoFormat::RGB
+                | VideoFormat::BGR
         ),
-        "pixel format: expected BGRA, BGRx, RGBA or RGBx; got {:?}",
+        "pixel format: expected BGRA, BGRx, RGBA, RGBx, RGB or BGR; got {:?}",
         raw.format()
     );
     let size = raw.size();
@@ -377,6 +382,7 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
         chunk.stride,
         format.width,
         format.height,
+        state.pixels,
     ) else {
         return Ok(());
     };
@@ -414,6 +420,8 @@ struct Layout {
     offset: usize,
     stride: usize,
     row: usize,
+    output_row: usize,
+    pixel_bytes: usize,
     height: usize,
     bottom_up: bool,
     end: usize,
@@ -427,6 +435,7 @@ impl Layout {
         stride: i32,
         width: u32,
         height: u32,
+        format: VideoFormat,
     ) -> Option<Self> {
         if maxsize == 0
             || size == 0
@@ -436,7 +445,13 @@ impl Layout {
         {
             return None;
         }
-        let row = (width as usize).checked_mul(4)?;
+        let pixel_bytes = match format {
+            VideoFormat::RGB | VideoFormat::BGR => 3,
+            VideoFormat::BGRA | VideoFormat::BGRx | VideoFormat::RGBA | VideoFormat::RGBx => 4,
+            _ => return None,
+        };
+        let row = (width as usize).checked_mul(pixel_bytes)?;
+        let output_row = (width as usize).checked_mul(4)?;
         let step = stride.unsigned_abs() as usize;
         if step < row {
             return None;
@@ -453,6 +468,8 @@ impl Layout {
             offset,
             stride: step,
             row,
+            output_row,
+            pixel_bytes,
             height: height as usize,
             bottom_up: stride < 0,
             end,
@@ -462,7 +479,7 @@ impl Layout {
 
 fn copy_bgra(source: &[u8], target: &mut [u8], layout: &Layout, format: VideoFormat) {
     for (y, output) in target
-        .chunks_exact_mut(layout.row)
+        .chunks_exact_mut(layout.output_row)
         .take(layout.height)
         .enumerate()
     {
@@ -476,12 +493,16 @@ fn copy_bgra(source: &[u8], target: &mut [u8], layout: &Layout, format: VideoFor
         if format == VideoFormat::BGRA {
             output.copy_from_slice(input);
         } else {
-            let swap = format == VideoFormat::RGBA || format == VideoFormat::RGBx;
-            let opaque = format == VideoFormat::BGRx || format == VideoFormat::RGBx;
+            let swap = matches!(
+                format,
+                VideoFormat::RGBA | VideoFormat::RGBx | VideoFormat::RGB
+            );
+            let opaque = matches!(
+                format,
+                VideoFormat::BGRx | VideoFormat::RGBx | VideoFormat::RGB | VideoFormat::BGR
+            );
             for (src, dst) in input
-                .as_chunks::<4>()
-                .0
-                .iter()
+                .chunks_exact(layout.pixel_bytes)
                 .zip(output.as_chunks_mut::<4>().0)
             {
                 dst.copy_from_slice(&[
@@ -563,7 +584,11 @@ fn format_offer(fps: u32) -> Object {
             VideoFormat::BGRA,
             VideoFormat::BGRx,
             VideoFormat::RGBA,
-            VideoFormat::RGBx
+            VideoFormat::RGBx,
+            // NVIDIA's wlroots SHM readback can be packed RGB even when its
+            // DMA-BUF offer is BGRx. Keep a mapped-memory path for that format.
+            VideoFormat::RGB,
+            VideoFormat::BGR
         ),
         property!(
             F::VideoSize,
@@ -641,7 +666,7 @@ mod tests {
             (6, [1, 2, 3, 4, 5, 6, 7, 8]),
             (-6, [5, 6, 7, 8, 1, 2, 3, 4]),
         ] {
-            let layout = Layout::new(12, 2, 10, stride, 1, 2).unwrap();
+            let layout = Layout::new(12, 2, 10, stride, 1, 2, VideoFormat::BGRA).unwrap();
             let mut target = [0; 8];
             copy_bgra(&source, &mut target, &layout, VideoFormat::BGRA);
             assert_eq!(target, expected);
@@ -650,7 +675,7 @@ mod tests {
 
     #[test]
     fn converts_all_four_formats_and_fills_x_alpha() {
-        let layout = Layout::new(4, 0, 4, 4, 1, 1).unwrap();
+        let layout = Layout::new(4, 0, 4, 4, 1, 1, VideoFormat::BGRA).unwrap();
         for (format, expected) in [
             (VideoFormat::BGRA, [1, 2, 3, 4]),
             (VideoFormat::BGRx, [1, 2, 3, 255]),
@@ -660,6 +685,30 @@ mod tests {
             let mut target = [0; 4];
             copy_bgra(&[1, 2, 3, 4], &mut target, &layout, format);
             assert_eq!(target, expected);
+        }
+    }
+
+    #[test]
+    fn expands_packed_rgb_with_offsets_padding_and_bottom_up_rows() {
+        let source = [99, 99, 1, 2, 3, 4, 5, 6, 88, 88, 7, 8, 9, 10, 11, 12];
+        for format in [VideoFormat::RGB, VideoFormat::BGR] {
+            for stride in [8, -8] {
+                let layout = Layout::new(16, 2, 14, stride, 2, 2, format).unwrap();
+                let mut target = [0; 16];
+                copy_bgra(&source, &mut target, &layout, format);
+                let mut expected = if format == VideoFormat::RGB {
+                    [3, 2, 1, 255, 6, 5, 4, 255, 9, 8, 7, 255, 12, 11, 10, 255]
+                } else {
+                    [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]
+                };
+                if stride < 0 {
+                    expected.rotate_left(8);
+                }
+                assert_eq!(target, expected);
+                assert!(Layout::new(16, 2, 13, stride, 2, 2, format).is_none());
+                assert!(Layout::new(15, 2, 14, stride, 2, 2, format).is_none());
+                assert!(Layout::new(16, 2, 14, 5, 2, 2, format).is_none());
+            }
         }
     }
 
@@ -679,8 +728,20 @@ mod tests {
             (u32::MAX, 0, u32::MAX, i32::MAX, 8192, 8192),
             (u32::MAX, 0, u32::MAX, 4, u32::MAX, u32::MAX),
         ] {
-            assert!(Layout::new(args.0, args.1, args.2, args.3, args.4, args.5).is_none());
+            assert!(
+                Layout::new(
+                    args.0,
+                    args.1,
+                    args.2,
+                    args.3,
+                    args.4,
+                    args.5,
+                    VideoFormat::BGRA
+                )
+                .is_none()
+            );
         }
-        assert!(Layout::new(8, 8, 8, 4, 1, 2).is_some());
+        assert!(Layout::new(8, 8, 8, 4, 1, 2, VideoFormat::BGRA).is_some());
+        assert!(Layout::new(8, 0, 8, 4, 1, 2, VideoFormat::NV12).is_none());
     }
 }

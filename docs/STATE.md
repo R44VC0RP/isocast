@@ -170,6 +170,61 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 - Linux app/stream lanes (2026-10-24): Lima/vz VM `isocast-linux-app` on m2-a (the shared build host), 3 CPUs,
   8 GiB + 6 GiB swap, 40 GiB, headless sway for the app; PipeWire + WirePlumber as user services with a
   null sink (`pactl load-module module-null-sink`) for monitoring tests. Builds there disturb its timing.
+- Linux portal packed RGB (2026-10-24, ISO-39): accept RGB24/BGR24 in addition to four-byte formats;
+  expand to owned BGRA with opaque alpha, respecting offsets, stride and bottom-up rows. NVIDIA T4
+  with stock sway/portal-wlr negotiated RGB24; real RGB swatches and packed-layout regression pass.
+- Preview encoder lifetime (2026-10-24, ISO-39): live-preview shutdown exposed detached H.264 worker
+  teardown racing driver `.fini` at process exit (SIGSEGV in nvEncDestroyEncoder). Engine stop refuses
+  new frame-stream admissions and joins owned workers before tearing down sources; map removal alone
+  does not mean encoder destruction finished. Resource-destruction regression, Mac gates and five real
+  T4 app-preview shutdown cycles pass. Embedders must call stop; native-driver hangs remain unbounded.
+- Linux GPU lane (2026-10-24, ISO-39; rental approved by Ryan): `isocast-linux-gpu`, AWS profile `anomaly`,
+  us-east-2, instance `i-079a3708582ed1251` (g4dn.xlarge, NVIDIA T4, x86_64, Ubuntu24.04, encrypted100GiB gp3).
+  Dedicated SSH key `~/.ssh/isocast-linux-gpu` (0600); its own security group allows SSH only from Ryan's
+  current public /32. Never modify the Macs or their groups. **Stop, do not terminate, when unused.**
+  Bounded start/stop/SSH commands and provisioning scripts: `/Volumes/IsocastBuild/linux-gpu/scratch/`.
+  NVIDIA580.178.04/Vulkan discrete GPU and native app startup verified. GNOME46 headless rendered on
+  NVIDIA GBM, but its stock portal segfaulted; approved sway/stock portal-wlr fallback uses GPU GLES2.
+  **1080p30 software encoding not qualified:**30s/300s four-source takes fully decode, but drop frames
+  and audio.300s headless program1463/9000 frame slots lost; app+preview3121/9000. Host idle6.1%/2.4%;
+  engine297.5%/278.8% of one core, app27.9%; GPU20.8%/29.2%, hardware encoder0%. Live app previews,
+  routed desktop/mic audio and recorded RGB swatches verified; worst headless A/V38.7ms exceeds one frame.
+  Evidence `/Volumes/IsocastBuild/linux-gpu/scratch/REPORT.md`.
+  **Experimental/unreleased NVENC13.0 H.264** uses the system NVIDIA driver with OpenH264 creation-time fallback
+  (no codec switch mid-file), CPU Rec.709 NV12 conversion and GPU readback/upload.
+  **Still not qualified:** desktop audio gaps and long preview program/A/V failures persist after
+  the shared PipeWire race fix. Scratch traces show skipped
+  256/512-sample PipeWire cycles with unchanged graph-delay correction; the A/V outlier corresponds
+  to a source flash picture absent from the recording. No audio timestamp adjustment applied.
+  NVENC is synchronous; driver waits are not cancellable. Failed native rate reconfiguration poisons
+  the session (next encode errors); rate_uncertain is not a guarantee that restoration can succeed.
+  Doctor probes/caches NVENC availability; machine().hardware_encoders remains empty, as on Windows.
+  Latest GPU matrix after shared race/idle-shutdown fixes (2026-10-24):30s headless/app all outputs
+ 900/900 video frames; screen audio24/171 gaps.300s headless all27000 video frames retained,
+  engine213.95%/940MiB, screen198 audio gaps, worst A/V23.85ms.300s app program57/9000 drops,
+  screen2250/program105 audio gaps, worst A/V44.85ms; engine238.89%/1014MiB + app37.82%/261MiB.
+  All12 matrix files fully decode; routing/RGB/hardware flags pass; all four daemons exit0.
+ 107 engine tests and63 platform tests pass, plus3 explicit GPU/PipeWire tests; fmt/Clippy pass.
+  Residual audio probe: desktop256-frame graph, capture486 xruns; mic2048-frame graph, capture0;
+  engine pw-data-loop threads are TS, not realtime. RTKit/scheduling remains a follow-up, not a fix claimed.
+  Fresh-install check (2026-10-24): two isolated installs of the unchanged CI tarball per resolution,
+  immediate first30s/warm30s. At1080p30 both synthetic ISOs retain900 frames; program drops231→260
+  and235→263 (sustained loss, not first-only). At720p30 all first/warm files retain900 frames with
+  zero video/audio loss. Two fresh NVENC candidate installs with four real capture sources retain
+  900 frames on every first/warm output; screen audio gaps54→40 and23→30 remain. All36 files fully
+  decode. Linux calibration reports unavailable/not running. The VM's first-only all-file~100-drop
+  signature did not reproduce; no VM root cause established. No app previews in these added tests.
+  Fresh real-capture shutdown exposed another crash site: `v4l2 camera` in NVIDIA EGL. Investigation
+  proved daemon idle teardown removes State.engine before stopping it, letting concurrent shutdown
+  exit during teardown. `stop_idle_engine_now` now holds shutdown_lock until teardown completes.
+  Forced3s GDB overlap: old exits81ms into teardown, fixed waits3.124s and exits0. Five real four-source
+  app-preview GDB cycles exit0; no new kernel SIGSEGV. Original driver faulting stack not recaptured;
+  in-flight engine-start admission and native-driver hangs remain separate limitations.
+  Instance restarted after17:26:16UTC stop for audio diagnosis; stop when idle. Hosted gates pending.
+  Real-GPU capture also exposed a PipeWire callback race.
+  GPU lane now includes `agent/pw-loop-race` c78984f1/c20df193, replacing its duplicate
+  pipewire_loop.rs guard with upstream `pw_loop::WorkerLoop` and `WorkerStream` disconnect/flush.
+  Native T4 regression reports0 off-worker callbacks versus36 with the old per-poll enter/leave.
 
 **Test Macs** (`scripts/testmac.sh`, `ISOCAST_TESTMAC`). Prefer `push BIN_DIR` (~25 s) to `build`. `gui '<cmd>'` runs in
 the desktop session through an interactive launch-agent bridge (needed for windows, `open`, cua-driver).

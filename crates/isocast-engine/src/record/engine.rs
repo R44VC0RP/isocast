@@ -1197,6 +1197,7 @@ impl<P: Platform> Engine<P> {
         let inner = &self.inner;
         inner.stopping.store(true, Ordering::SeqCst);
         inner.wake.notify_all();
+        frame_stream::stop(&inner.frame_streams);
         for thread in self.threads.lock().drain(..) {
             let _ = thread.join();
         }
@@ -1639,7 +1640,7 @@ impl<P: Platform> Engine<P> {
         };
         let inner = self.inner.clone();
         let target = target.to_string();
-        Ok(frame_stream::watch(
+        frame_stream::watch(
             &self.inner.frame_streams,
             &self.inner.platform,
             key,
@@ -1647,7 +1648,7 @@ impl<P: Platform> Engine<P> {
             // Called with the stream's rate now (the highest any of its
             // viewers wants), which the program is drawn at least at.
             move |fps| stream_source(&inner, &target, fps, false, (max_width, None)),
-        ))
+        )
     }
 
     /// `target`'s picture (see [`Engine::frame`]) for a monitor in a

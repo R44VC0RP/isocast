@@ -989,6 +989,8 @@ struct Daemon {
     projects: Mutex<()>,
     hotkeys: hotkeys::HotkeyRuntime,
     shutting_down: AtomicBool,
+    /// Serialize process shutdown with idle engine teardown, including
+    /// native workers no longer reachable through `state.engine`.
     shutdown_lock: Mutex<()>,
     /// Read-held by every call that starts something (a take, a stream,
     /// the virtual camera); `shutdown_if_idle` write-holds it,
@@ -4298,6 +4300,10 @@ impl Daemon {
     /// Stop the live engine if nothing needs it: no recording, no hold, and
     /// no client asking for frames lately.
     fn stop_idle_engine_now(&self) {
+        // Taking it out of state does not mean its native workers have
+        // finished. Shutdown must wait for this stop before process exit
+        // can run the GPU driver's finalizers on another thread.
+        let _shutdown = self.shutdown_lock.lock();
         let engine = {
             let mut state = self.state.lock();
             let idle = state.session.is_none()

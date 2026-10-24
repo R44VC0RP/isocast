@@ -304,7 +304,7 @@ fn packet(stream: &openh264::encoder::EncodedBitStream<'_>, pts: Time) -> Result
     })
 }
 
-fn avcc(parameters: &ParameterSets) -> Result<Vec<u8>> {
+pub(crate) fn avcc(parameters: &ParameterSets) -> Result<Vec<u8>> {
     let sps = parameters.sps.first().context("video: missing SPS")?;
     if sps.len() < 4
         || parameters.sps.len() > 31
@@ -337,7 +337,7 @@ fn avcc(parameters: &ParameterSets) -> Result<Vec<u8>> {
     Ok(config)
 }
 
-struct I420 {
+pub(crate) struct I420 {
     width: usize,
     height: usize,
     y: Vec<u8>,
@@ -346,7 +346,7 @@ struct I420 {
 }
 
 impl I420 {
-    fn new(width: usize, height: usize) -> Self {
+    pub(crate) fn new(width: usize, height: usize) -> Self {
         Self {
             width,
             height,
@@ -356,7 +356,7 @@ impl I420 {
         }
     }
 
-    fn read_bgra(&mut self, bgra: &[u8]) -> Result<()> {
+    pub(crate) fn read_bgra(&mut self, bgra: &[u8]) -> Result<()> {
         if bgra.len() != self.width * self.height * 4 {
             bail!("video.frame: expected tightly packed BGRA pixels");
         }
@@ -385,6 +385,19 @@ impl I420 {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn write_nv12(&self, output: &mut Vec<u8>) {
+        output.resize(self.y.len() + self.u.len() * 2, 0);
+        output[..self.y.len()].copy_from_slice(&self.y);
+        for (uv, (&u, &v)) in output[self.y.len()..]
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(self.u.iter().zip(&self.v))
+        {
+            uv.copy_from_slice(&[u, v]);
+        }
     }
 }
 
