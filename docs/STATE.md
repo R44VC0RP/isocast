@@ -130,6 +130,9 @@ the desktop session through an interactive launch-agent bridge (needed for windo
   shell is cmd.exe: use `exon-desk-ps '<cmd>'` or a heredoc; never hand-quote PowerShell.
 - **Layout:** `C:\isocast-dev\{src,target,cargo,home,appdata,localappdata,scratch,staging,tmp}` is the main Windows
   root; each lane gets `C:\isocast-dev\lanes\<lane>` (`ISOCAST_WINDOWS_ROOT=C:/isocast-dev/lanes/<lane>`); `vm\` has Hyper-V.
+- 2026-10-24: exon-desk's blank screensaver (`scrnsave.scr`, about 70 idle minutes, no password on resume) makes
+  `gui-native` report "Screen is locked or a secure desktop is active". Stop it over SSH with
+  `Stop-Process -Name scrnsave -Force` and retry; don't change Ryan's screensaver settings.
 - **Locks:** every Cargo build or test takes `C:\isocast-dev\build.lock` and never starts while `gpu.lock` is held.
   Anything else you run there (an engine, the app; both can hold NVENC or the GPU) runs only while you hold
   `gpu.lock`, and stops before you release it (delegator, 2026-10-22).

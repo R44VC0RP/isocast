@@ -264,7 +264,7 @@ struct AvSync {
     video_times: Vec<u32>,
     audio_first: Option<u32>,
     audio_next: Option<u32>,
-    audio_gaps: u64,
+    audio_gaps: Vec<(u32, u32)>,
     quiet: usize,
     pending_beep: Option<u32>,
     beeps: Vec<u32>,
@@ -273,10 +273,12 @@ struct AvSync {
 impl AvSync {
     fn audio(&mut self, time: u32, samples: &[f32]) {
         self.audio_first.get_or_insert(time);
-        if self.audio_next.is_some_and(|next| next != time) {
+        if let Some(next) = self.audio_next
+            && next != time
+        {
             // Missing samples are not observed silence. Invalidate any pulse
             // spanning the gap, but keep subsequent onsets on packet RTP time.
-            self.audio_gaps += 1;
+            self.audio_gaps.push((next, time));
             self.quiet = 0;
             self.pending_beep = None;
         }
@@ -308,7 +310,7 @@ impl AvSync {
                 "audio_present": self.audio_clock.latest.is_some(),
                 "audio_count": self.audio_clock.reports,
                 "audio_max_anchor_error_ms": self.audio_clock.max_anchor_error * 1000.0,
-                "audio_packet_gaps": self.audio_gaps
+                "audio_packet_gaps": self.audio_gaps.len()
             }})
         );
         let video = self.video_clock.latest.context("video SR missing")?;
@@ -398,6 +400,33 @@ impl AvSync {
             .iter()
             .map(|&time| self.audio_clock.map(time, origin))
             .collect::<Result<Vec<_>>>()?;
+        let audio_gaps = self
+            .audio_gaps
+            .iter()
+            .map(|&(expected, actual)| {
+                Ok((
+                    self.audio_clock.map(expected, origin)?,
+                    self.audio_clock.map(actual, origin)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Emit the evidence BEFORE the verdict: a missing pulse otherwise
+        // loses its timestamps, so a hosted failure cannot be attributed or
+        // replayed. A timestamp gap alone does not prove a particular beep
+        // was lost, and never relaxes the strict pairing check below.
+        println!(
+            "{}",
+            serde_json::json!({"av_sync_observations": {
+                "time_origin": "video RTCP SR NTP (seconds since Unix epoch)",
+                "origin_unix_seconds": origin.duration_since(SystemTime::UNIX_EPOCH)?.as_secs_f64(),
+                "start_seconds": start, "end_seconds": end,
+                "flash_seconds": flashes, "beep_seconds": beeps,
+                "video_seconds": times,
+                "audio_gap_seconds": audio_gaps,
+                "audio_gap_scope": "expected next decoded sample, actual packet start; not proof of network loss or late-input silence",
+                "complete_beep_sample_indices": self.beeps.iter().map(|&time| signed_rtp_delta(time, first_audio) as i64).collect::<Vec<_>>()
+            }})
+        );
         let pairs = pair_pulses(&flashes, &beeps, start, end)?;
         let flashes: Vec<_> = pairs.iter().map(|(flash, _)| *flash).collect();
         let beeps: Vec<_> = pairs.iter().map(|(_, beep)| *beep).collect();
@@ -796,5 +825,38 @@ mod timing_tests {
         assert_eq!(pair_pulses(&flashes, &beeps, 0.0, 3.4).unwrap().len(), 3);
         assert!(pair_pulses(&flashes, &[0.15002, 1.15002, 3.15002], 0.0, 3.4).is_err());
         assert!(pair_pulses(&flashes, &[0.35, 1.35, 2.35, 3.35], 0.0, 3.6).is_err());
+    }
+
+    #[test]
+    fn audio_gap_evidence_preserves_positions_and_invalidates_partial_pulses() {
+        let mut sync = AvSync::default();
+        // Start just before RTP wraps; the first contiguous packet after
+        // wrapping is not a gap. Observe silence, then a pulse onset.
+        let start = u32::MAX - 479;
+        sync.audio(start, &[0.0; 960]);
+        sync.audio(0, &[0.0; 4800]);
+        assert!(sync.audio_gaps.is_empty());
+        sync.audio(2400, &[0.25; 960]);
+        assert_eq!(sync.pending_beep, Some(2400));
+        // The same 60 ms capture hole seen in run 39973821917. It erases
+        // this incomplete pulse, not the location of the missing samples.
+        sync.audio(5760, &[0.0; 4800]);
+        assert_eq!(sync.audio_gaps, [(2880, 5760)]);
+        assert!(sync.pending_beep.is_none());
+        assert!(sync.beeps.is_empty());
+        sync.audio(8160, &[0.25; 960]);
+        sync.audio(8640, &[0.0; 4800]);
+        assert_eq!(sync.beeps, [8160]);
+    }
+
+    #[test]
+    fn aggregate_gap_counts_cannot_excuse_missing_or_mistimed_pulses() {
+        let flashes = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(pair_pulses(&flashes, &flashes, 0.0, 6.0).unwrap().len(), 5);
+        // Most pulses present is insufficient without loss attribution.
+        assert!(pair_pulses(&flashes, &[1.0, 2.0, 4.0, 5.0], 0.0, 6.0).is_err());
+        assert!(pair_pulses(&flashes, &[1.0, 2.0, 3.07, 4.0, 5.0], 0.0, 6.0).is_err());
+        assert!(pair_pulses(&flashes, &[1.0, 2.0, 3.0, 3.5, 4.0, 5.0], 0.0, 6.0).is_err());
+        assert!(pair_pulses(&flashes, &[1.0], 0.0, 6.0).is_err());
     }
 }
