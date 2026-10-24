@@ -282,6 +282,7 @@ fn run<P: Platform>(
     let mut gpu_retries = 0;
     let (mut scaled_tx, mut scaled_rx) = sync_channel(1);
     let mut pace = Pace::default();
+    let mut effective_key = key.clone();
     loop {
         let fps = shared
             .viewers
@@ -298,6 +299,10 @@ fn run<P: Platform>(
             continue;
         };
         let fps = crate::governor::monitor_fps(fps);
+        if fps == 0 {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         let Source { slot, grid, drawn } = match source(fps) {
             Ok(source) => source,
             Err(why) => return end(streams, key, shared, &why),
@@ -308,14 +313,25 @@ fn run<P: Platform>(
             continue;
         };
         let size = platform.frame_size(&frame);
+        effective_key.max_width = Some(
+            super::shared_frames::fitted(
+                size,
+                crate::governor::monitor_size((key.max_width, None)),
+            )
+            .0,
+        );
         let needs_stage = needs_conversion(
             size,
-            scaled(size, key.max_width),
+            scaled(size, effective_key.max_width),
             platform.frame_is_ycbcr(&frame),
             platform.encoder_frame_format(),
         );
-        if encoding.as_ref().is_none_or(|e| e.input != size) || scaling.is_some() != needs_stage {
-            let started = start_encoder(platform, size, key, fps).and_then(|started| {
+        if encoding
+            .as_ref()
+            .is_none_or(|e| e.input != size || e.output != scaled(size, effective_key.max_width))
+            || scaling.is_some() != needs_stage
+        {
+            let started = start_encoder(platform, size, &effective_key, fps).and_then(|started| {
                 let scaling = if needs_stage {
                     Some(
                         IsoFrames::new(

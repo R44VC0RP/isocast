@@ -241,6 +241,31 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 6. Gotchas that still bite
 
+- 2026-10-24: Windows #128's optimized hosted WARP control cannot sustain 1080p30 headless:
+  program-only, two synthetic sources, no preview consumers, 19 stored / 274 dropped / 1 repeated
+  over 9.733333 s; CPU 83–95%, GPU completion p50 ~1.43 s / p99 ~1.48 s. The movie fully decodes.
+  Adapter 1414:008c, Media Foundation software H.264, four-vCPU Windows hosted runner;
+  snapshot cfb7946b, Windows run 40068061059. These completion times include callback delay,
+  not proven shader execution time. The subsequent off-air preview failed before the preview-on
+  take began. This is a failed headless capacity control, not a preview-on comparison.
+  #128 is re-scoped to qualify a lower zero-drop reference profile, then shed previews there;
+  WARP renderer optimization is outside the assignment. Evidence: windows-perf scratch/issue128/REPORT.md.
+  The proposed preview-freeze policy holds during a paused take too and restores on stop;
+  lifting it during pause needs immediate re-admission protection on resume, not the 100 ms sampler.
+  The first re-scoped hosted sweep also failed headless: 720p30 stored44/dropped257,
+  540p30 stored80/dropped221, 360p30 stored178/dropped123 (each10s, one tail repeat,
+  no audio dropouts). Four-vCPU AMD EPYC7763, Windows Server24H2, snapshot440d7103,
+  Windows40073504327. No preview-on take ran; a lower reference is still unqualified.
+  Reviewed snapshot9472f03b, Windows40075859442 then qualified **480×270 at30fps**:
+  300/300 headless frames and600/600 with two60fps shared preview consumers open,
+  zero drops/repeats/audio dropouts; full media checks passed. Both previews paused
+  ~20.824s, survived45s, and resumed after stop. 240p30 and180p30 also passed headless;
+  360p30 still dropped130/300slots. This is the highest passing tested profile, not an
+  exact limit or universal capacity: four-vCPU EPYC7763/16GB/Server24H2 WARP+MFsoftwareH264,
+  two same-sized synthetic sources+tone, program only, noISO/stream. Advisory reference
+  now names this workload; local capacity remains unknown. The final harness also makes
+  real revision changes: the earlier empty patches were no-ops, not fresh-frame evidence.
+
 - 2026-10-23: The strict 60fps oracle's 1.5× media source has only a 2.78ms eligibility margin on alternate slots. ISO-21's initial ISO10 run had one one-picture-late program sample; a fixed three-pair merged-baseline/candidate comparison then passed all six runs. Baseline did not fail; the transient is retained, not a demonstrated settings regression or a cleared pacing defect (`iso-21-setting/REPORT.md` in mac-perf scratch).
 
 - 2026-10-23: ISO-21 base-M2 virtual-display cadence is missing pictures upstream of Isocast: the unchanged standalone SCK trace yields 55–56 Complete samples/s with skipped marker IDs and 33–50 ms PTS gaps; retained engine ingress is ~56/s. The base PTS interval is ~16.6656 ms, not 59.94/120 Hz. No ISO pacing fix; see mac-perf scratch `iso-21/REPORT.md` (cadence section; Idle/callback-arrival detail was not retained).

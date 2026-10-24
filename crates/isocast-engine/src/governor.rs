@@ -16,6 +16,12 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static MAIN_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VERTICAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PREVIEW: AtomicU32 = AtomicU32::new(0);
+// Zero remains "requested rate" internally; the public status uses Some(0)
+// for a paused preview. No recording cadence uses this sentinel.
+const PREVIEW_PAUSED: u32 = u32::MAX;
+static SOFTWARE_RENDERER: AtomicBool = AtomicBool::new(false);
+static PREVIEW_PINNED: AtomicBool = AtomicBool::new(false);
+static RECORDINGS: AtomicU32 = AtomicU32::new(0);
 static MONITOR_DEMAND: AtomicU32 = AtomicU32::new(0);
 static REMOTE_VIEWERS: AtomicU32 = AtomicU32::new(0);
 
@@ -96,8 +102,21 @@ fn viewer_pressure_until(now: u64) -> u64 {
 }
 
 #[cfg(test)]
-mod remote_viewer_tests {
-    use super::RemoteViewers;
+mod tests {
+    use super::{PREVIEW_PAUSED, RemoteViewers, preview_step};
+
+    #[test]
+    fn every_preview_step_reduces_actual_canvas_work() {
+        // A 60 fps request on a 30 fps canvas must not first become 30.
+        assert_eq!(preview_step(0, 60, 30), Some(15));
+        assert_eq!(preview_step(15, 60, 30), Some(5));
+        assert_eq!(preview_step(5, 60, 30), Some(PREVIEW_PAUSED));
+        assert_eq!(preview_step(PREVIEW_PAUSED, 60, 30), None);
+        assert_eq!(preview_step(0, 60, 60), Some(30));
+        assert_eq!(preview_step(30, 60, 60), Some(15));
+        assert_eq!(preview_step(0, 7, 30), Some(5));
+        assert_eq!(preview_step(0, 0, 30), None);
+    }
 
     #[test]
     fn sheds_newest_once_per_protected_pressure_episode() {
@@ -252,6 +271,14 @@ pub fn status() -> GovernorStatus {
     let mut status = shared().lock().status.clone();
     status.remote_viewers = REMOTE_VIEWERS.load(Ordering::Acquire);
     status.native_iso_percent = crate::record::pressure::snapshot().1;
+    if previews_paused() {
+        status.preview_fps = Some(0);
+        if !status.reason.contains("previews paused") {
+            status
+                .reason
+                .push_str("; previews paused to protect recording");
+        }
+    }
     status
 }
 
@@ -266,11 +293,97 @@ pub fn clock_ms() -> u64 {
 
 pub fn monitor_fps(requested: u32) -> u32 {
     MONITOR_DEMAND.fetch_max(requested, Ordering::Relaxed);
+    if !ENABLED.load(Ordering::Relaxed) || PREVIEW_PINNED.load(Ordering::Relaxed) {
+        return requested;
+    }
+    if previews_paused() {
+        return 0;
+    }
     let cap = PREVIEW.load(Ordering::Relaxed);
-    if ENABLED.load(Ordering::Relaxed) && cap > 0 {
+    if cap > 0 {
         requested.min(cap)
     } else {
         requested
+    }
+}
+
+pub(crate) fn previews_paused() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+        && !PREVIEW_PINNED.load(Ordering::Relaxed)
+        && (PREVIEW.load(Ordering::Relaxed) == PREVIEW_PAUSED
+            || is_software_renderer()
+                && (RECORDINGS.load(Ordering::Relaxed) > 0 || ACTIVE.load(Ordering::Relaxed)))
+}
+
+/// Shed software previews before opening writers, not on the first sampler
+/// tick after files open. The guard also covers ISO-only takes and failed
+/// starts; Windows writers do not use the Mac's EncoderPressure counters.
+pub(crate) struct Recording;
+
+impl Recording {
+    pub(crate) fn new(settings: &GovernorSettings) -> Self {
+        ENABLED.store(settings.enabled, Ordering::Relaxed);
+        PREVIEW_PINNED.store(settings.pinned("preview.fps"), Ordering::Relaxed);
+        RECORDINGS.fetch_add(1, Ordering::Relaxed);
+        NOTICES.fetch_add(1, Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        RECORDINGS.fetch_sub(1, Ordering::Relaxed);
+        NOTICES.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Adapter identity, not a utilization guess. Software rendering competes
+/// with the recorder for CPU even when no hardware encoder reports pressure.
+pub(crate) fn software_renderer(software: bool) {
+    SOFTWARE_RENDERER.store(software, Ordering::Relaxed);
+    NOTICES.fetch_add(1, Ordering::Release);
+}
+
+pub fn is_software_renderer() -> bool {
+    SOFTWARE_RENDERER.load(Ordering::Relaxed)
+}
+
+/// Smaller disposable pictures at the last live preview step. Never changes
+/// a recording's canvas or a stream output's dimensions.
+pub(crate) fn monitor_size(size: (Option<u32>, Option<u32>)) -> (Option<u32>, Option<u32>) {
+    if ENABLED.load(Ordering::Relaxed)
+        && !PREVIEW_PINNED.load(Ordering::Relaxed)
+        && PREVIEW.load(Ordering::Relaxed) == 5
+    {
+        (
+            Some(size.0.unwrap_or(960).min(960)),
+            Some(size.1.unwrap_or(540).min(540)),
+        )
+    } else {
+        size
+    }
+}
+
+fn preview_step(current: u32, requested: u32, canvas_fps: u32) -> Option<u32> {
+    if current == PREVIEW_PAUSED {
+        return None;
+    }
+    let rate = requested.min(canvas_fps.max(1));
+    let rate = if current == 0 {
+        rate
+    } else {
+        rate.min(current)
+    };
+    if rate == 0 {
+        None
+    } else if rate > 30 {
+        Some(30)
+    } else if rate > 15 {
+        Some(15)
+    } else if rate > 5 {
+        Some(5)
+    } else {
+        Some(PREVIEW_PAUSED)
     }
 }
 
@@ -497,6 +610,7 @@ impl Headroom {
 
 #[derive(Default)]
 pub struct Sample {
+    pub canvas_fps: u32,
     pub active: bool,
     pub main_protected: bool,
     /// Any canvas besides main has a protected output (its program file,
@@ -700,6 +814,7 @@ impl Controller {
         MAIN_ACTIVE.store(sample.main_protected, Ordering::Relaxed);
         VERTICAL_ACTIVE.store(sample.vertical_protected, Ordering::Relaxed);
         ENABLED.store(settings.enabled, Ordering::Relaxed);
+        PREVIEW_PINNED.store(settings.pinned("preview.fps"), Ordering::Relaxed);
         let mut limits = Limits::read();
         if !sample.has_stream {
             limits.stream = 100;
@@ -736,6 +851,7 @@ impl Controller {
                 && sample.congested_canvases & (1 << stream.slot) != 0
                 && !stream.failed.load(Ordering::Acquire)
         });
+        let software_preview = sample.active && sample.has_monitors && is_software_renderer();
         let cause = if self.disk_bad {
             Some("disk")
         } else if health.is_some_and(|h| h.thermal_state >= 2)
@@ -754,7 +870,7 @@ impl Controller {
             && health.is_some_and(|h| h.cpu_percent.is_some_and(|p| p >= 70.0))
         {
             Some("CPU (software ProRes)")
-        } else if recent_loss
+        } else if (cfg!(windows) || recent_loss)
             && sample.cpu_late
             && health.is_some_and(|h| h.cpu_percent.is_some_and(|p| p >= 90.0))
         {
@@ -776,7 +892,9 @@ impl Controller {
         };
         let emergency = production_loss
             || health.is_some_and(|h| h.encoder_threatened && h.pending_frames >= 8);
-        let cause = cause.or(emergency.then_some("output"));
+        let cause = cause
+            .or(emergency.then_some("output"))
+            .or(software_preview.then_some("software renderer"));
         if settings.enabled && sample.active && !sample.paused && emergency && unpinned_iso {
             request_hold();
         }
@@ -861,25 +979,37 @@ impl Controller {
         } else if let Some(cause) = cause {
             let sustained = now.duration_since(*self.pressure_since.get_or_insert(now))
                 >= Duration::from_secs(2);
-            if sustained && now.duration_since(self.last_step) >= Duration::from_secs(5) {
-                let preview_step = if limits.preview == 0 && self.monitor_fps > 30 {
-                    Some(30)
-                } else if limits.preview != 15 && self.monitor_fps > 15 {
-                    Some(15)
+            // Software graphics needs proactive protection. Hardware keeps
+            // the existing sustained-pressure hold, not a pause on one stall.
+            let urgent_preview = software_preview && limits.preview != PREVIEW_PAUSED;
+            let ordinary =
+                sustained && now.duration_since(self.last_step) >= Duration::from_secs(5);
+            if urgent_preview || ordinary {
+                let preview_step = if software_preview {
+                    (limits.preview != PREVIEW_PAUSED).then_some(PREVIEW_PAUSED)
                 } else {
-                    None
+                    preview_step(limits.preview, self.monitor_fps, sample.canvas_fps)
+                        .filter(|rate| cfg!(windows) || matches!(rate, 15 | 30))
                 };
                 if sample.has_monitors
-                    && !matches!(cause, "disk" | "upload")
+                    && (software_preview || !matches!(cause, "disk" | "upload"))
                     && !settings.pinned("preview.fps")
                     && let Some(preview_step) = preview_step
                 {
                     limits.preview = preview_step;
-                    reason = format!(
-                        "Automatic quality: {cause} pressure; preview limited to {} fps",
-                        limits.preview
-                    );
-                } else if !matches!(cause, "upload" | "encoder" | "output" | "frame budget")
+                    reason = if limits.preview == PREVIEW_PAUSED {
+                        format!("Automatic quality: {cause}; previews paused to protect recording")
+                    } else {
+                        format!(
+                            "Automatic quality: {cause} pressure; preview limited to {} fps",
+                            limits.preview
+                        )
+                    };
+                } else if ordinary
+                    && !matches!(
+                        cause,
+                        "software renderer" | "upload" | "encoder" | "output" | "frame budget"
+                    )
                     && sample.has_isos
                     && unpinned_iso
                     && limits.iso > 25
@@ -889,7 +1019,8 @@ impl Controller {
                         "Automatic quality: {cause} pressure; unpinned ISO video limited to {}%",
                         limits.iso
                     );
-                } else if upload
+                } else if ordinary
+                    && upload
                     && sample.has_stream
                     && !settings.pinned("stream.video_bitrate_kbps")
                     && limits.stream > 25
@@ -900,7 +1031,8 @@ impl Controller {
                         "Automatic quality: upload queue is behind; requesting {}% stream bitrate",
                         limits.stream
                     );
-                } else if sample.has_vertical
+                } else if ordinary
+                    && sample.has_vertical
                     && sample.main_protected
                     && unpinned_secondary
                     && limits.vertical > 25
@@ -913,7 +1045,7 @@ impl Controller {
                         "Automatic quality: {cause} pressure remains; unpinned secondary canvas video limited to {}%",
                         limits.vertical
                     );
-                } else {
+                } else if limits.preview != PREVIEW_PAUSED || cause != "software renderer" {
                     pinned = (sample.has_monitors
                         && settings.pinned("preview.fps")
                         && !matches!(cause, "disk" | "upload"))
@@ -941,7 +1073,9 @@ impl Controller {
                     );
                 }
             }
-            if self.last_restore.is_some() && (sustained || production_loss) {
+            if self.last_restore.is_some()
+                && ((sustained && cause != "software renderer") || production_loss)
+            {
                 self.restore_after = now + Duration::from_secs(120);
                 self.last_restore = None;
             }
@@ -952,6 +1086,10 @@ impl Controller {
         // recovering. A single native stall event is not a new 30 s blackout:
         // require actual production loss or an unhealthy measured budget.
         let video_limited = limits.preview > 0 || limits.iso < 100 || limits.vertical < 100;
+        let restorable = limits.iso < 100
+            || limits.vertical < 100
+            || limits.preview > 0 && !software_preview
+            || limits.stream < 100;
         let healthy = !held
             && !frame_pressure
             && !production_loss
@@ -969,7 +1107,7 @@ impl Controller {
         if settings.enabled && sample.active && !sample.paused {
             if healthy {
                 let quiet = *self.quiet_since.get_or_insert(now);
-                if limits != Limits::full()
+                if restorable
                     && now >= self.restore_after
                     && now.duration_since(quiet) >= Duration::from_secs(30)
                 {
@@ -977,8 +1115,13 @@ impl Controller {
                         limits.vertical = (limits.vertical + 25).min(100);
                     } else if limits.iso < 100 {
                         limits.iso = (limits.iso + 25).min(100);
-                    } else if limits.preview > 0 {
-                        limits.preview = if limits.preview == 15 { 30 } else { 0 };
+                    } else if limits.preview > 0 && !software_preview {
+                        limits.preview = match limits.preview {
+                            PREVIEW_PAUSED => 5,
+                            5 => 15,
+                            15 if sample.canvas_fps > 30 => 30,
+                            _ => 0,
+                        };
                     } else if sample.upload_congestion < 0.1 {
                         limits.stream = (limits.stream + 25).min(100);
                     }
@@ -1061,6 +1204,14 @@ impl Controller {
         if limits.stream == 100 {
             STREAM_TARGETS.store(0, Ordering::Relaxed);
         }
+        // An emergency ISO hold must not hide the software preview pause
+        // already enforced by the recording guard from status/events.
+        if settings.enabled && software_preview && !settings.pinned("preview.fps") {
+            limits.preview = PREVIEW_PAUSED;
+        }
+        if limits.preview == PREVIEW_PAUSED && !reason.contains("previews paused") {
+            reason.push_str("; previews paused to protect recording");
+        }
         limits.apply();
         if limits != self.previous || held != self.held || targets_changed {
             self.steps += 1;
@@ -1074,7 +1225,11 @@ impl Controller {
             bottleneck: cause.map(str::to_string),
             reason,
             steps: self.steps,
-            preview_fps: (limits.preview > 0).then_some(limits.preview),
+            preview_fps: (limits.preview > 0).then_some(if limits.preview == PREVIEW_PAUSED {
+                0
+            } else {
+                limits.preview
+            }),
             iso_percent: if held { 0 } else { limits.iso },
             vertical_percent: limits.vertical,
             stream_bitrate_percent: if sample.has_stream {
@@ -1094,18 +1249,15 @@ impl Controller {
                 100
             },
             native_iso_percent: sample.native_iso_percent,
-            recovery_seconds: self
-                .quiet_since
-                .filter(|_| limits != Limits::full())
-                .map(|since| {
-                    (30.0 - now.duration_since(since).as_secs_f64())
-                        .max(0.0)
-                        .max(
-                            self.restore_after
-                                .saturating_duration_since(now)
-                                .as_secs_f64(),
-                        )
-                }),
+            recovery_seconds: self.quiet_since.filter(|_| restorable).map(|since| {
+                (30.0 - now.duration_since(since).as_secs_f64())
+                    .max(0.0)
+                    .max(
+                        self.restore_after
+                            .saturating_duration_since(now)
+                            .as_secs_f64(),
+                    )
+            }),
             limited_by_pins: pinned,
             error: rate_error,
         };

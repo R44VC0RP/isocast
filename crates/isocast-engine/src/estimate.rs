@@ -1667,6 +1667,196 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
     })
 }
 
+/// Highest zero-loss profile in the hosted 720/540/360/270/240/180p30 sweep
+/// (#128, Windows run 40075859442). A reference, not this machine's capacity.
+/// Ten seconds headless and twenty with two paused previews: H.264 program
+/// only, two same-sized test-pattern sources and a tone, no ISO or stream.
+const SOFTWARE_REFERENCE: (u32, u32, u32) = (480, 270, 30);
+const SOFTWARE_REFERENCE_HOST: &str =
+    "four-vCPU AMD EPYC 7763, Windows Server 24H2, WARP and Media Foundation software H.264";
+
+/// The `software_renderer` resource an estimate carries on a software
+/// graphics adapter, so `check` can say so.
+const SOFTWARE_RESOURCE: &str = "software_renderer";
+
+/// Whether this process's graphics adapter is a software one, opening (or
+/// reusing) the shared GPU on `platform` as the live engine does, so it is
+/// known before an estimate or a take even when no preview has run. A failed
+/// device open is not evidence of a hardware adapter.
+pub fn software_adapter<P: crate::Platform>(platform: &P) -> Result<bool, String> {
+    crate::gpu::Gpu::for_platform(platform)
+        .map(|_| crate::governor::is_software_renderer())
+        .map_err(|error| format!("could not identify the graphics adapter: {error:#}"))
+}
+
+/// The estimate on a software graphics adapter (#128): compositing, preview
+/// and frame conversion run on the CPU, so the hardware encoder tables say
+/// nothing. Judged only against the assumed advisory reference: within it
+/// is no margin (never fits), above it frames are expected to drop, and
+/// streams, ISO files and other canvases are not qualified at all.
+pub fn software(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstimate, String> {
+    let setup = inputs.setup;
+    let (ref_w, ref_h, ref_fps) = SOFTWARE_REFERENCE;
+    let reference = format!("{ref_w}×{ref_h} at {ref_fps} fps");
+    let within = |w: u32, h: u32, fps: u32| {
+        w.max(h) <= ref_w.max(ref_h) && w.min(h) <= ref_w.min(ref_h) && fps <= ref_fps
+    };
+    // The outputs (which encodes run, at what size), not engine costs.
+    let mut outputs = judge(
+        &chip(""),
+        setup,
+        inputs.formats,
+        inputs.streaming[0],
+        inputs.streaming[1],
+    )
+    .outputs;
+    for output in &mut outputs {
+        output.pixels_per_second =
+            f64::from(output.width) * f64::from(output.height) * f64::from(output.fps);
+    }
+    let canvas = &setup.canvas;
+    let demand = f64::from(canvas.width) * f64::from(canvas.height) * f64::from(canvas.fps);
+    let above = !within(canvas.width, canvas.height, canvas.fps);
+    let extra: Vec<&str> = outputs
+        .iter()
+        .filter(|o| o.kind != OutputKind::Program || o.output != PROGRAM)
+        .map(|o| o.output.as_str())
+        .collect();
+    let larger: Vec<String> = setup
+        .sources
+        .iter()
+        .filter(|s| s.kind.has_video())
+        .filter_map(|s| {
+            let (w, h, fps, assumed) = iso_format(setup, inputs.formats, &s.id);
+            (!assumed && !within(w, h, fps)).then(|| format!("{} ({w}×{h}, {fps} fps)", s.id))
+        })
+        .collect();
+    let basis = format!(
+        "assumed: software graphics adapter; advisory program-only reference {reference}, \
+         tested on {SOFTWARE_REFERENCE_HOST} with two same-sized test-pattern sources and a tone, \
+         one H.264 program recording, no ISO or stream; zero drops for 10 seconds headless \
+         and 20 seconds with two previews paused. Local capacity is unmeasured; streams, \
+         ISO files, other codecs and other canvases are not qualified"
+    );
+    let mut summary = if above {
+        format!(
+            "software graphics adapter ({}): the {}×{} at {} fps canvas is above the assumed \
+             advisory reference of {reference} for a program recording only, so expect dropped \
+             frames; lower the canvas and its sources to {reference} or less (a smaller output \
+             encode alone doesn't reduce the compositing work)",
+            inputs.machine.chip, canvas.width, canvas.height, canvas.fps
+        )
+    } else {
+        format!(
+            "software graphics adapter ({}): compositing and preview run on the CPU; the {}×{} \
+             at {} fps canvas is within the assumed advisory reference of {reference} for a \
+             program recording only, which is not a capacity guarantee: other load on this \
+             machine can still cost frames",
+            inputs.machine.chip, canvas.width, canvas.height, canvas.fps
+        )
+    };
+    summary.push_str(&format!(
+        "; reference tested on {SOFTWARE_REFERENCE_HOST} with two same-sized test-pattern \
+         sources, a tone and one H.264 program recording; local capacity is unmeasured"
+    ));
+    if !extra.is_empty() {
+        summary.push_str(&format!(
+            "; additional outputs ({}) are not qualified on a software adapter and may drop frames",
+            extra.join(", ")
+        ));
+    }
+    if !larger.is_empty() {
+        summary.push_str(&format!(
+            "; sources above the reference ({}) are not qualified: lower them too",
+            larger.join(", ")
+        ));
+    }
+    let suggestions = if above {
+        vec![CapacitySuggestion {
+            description: format!(
+                "lower the canvas and its sources to {reference} or less, recording the program only"
+            ),
+            change: None,
+            method: None,
+            load: 0.0,
+            capacity: Capacity::NoMargin,
+            after_take: inputs.recording,
+        }]
+    } else {
+        Vec::new()
+    };
+    let admission = match add_iso {
+        Some(id) => {
+            let source = setup
+                .source(id)
+                .filter(|s| s.kind.has_video())
+                .ok_or_else(|| {
+                    let ids: Vec<&str> = setup
+                        .sources
+                        .iter()
+                        .filter(|s| s.kind.has_video())
+                        .map(|s| s.id.as_str())
+                        .collect();
+                    format!(
+                        "add_iso: no video source {id:?}; video sources: {}",
+                        ids.join(", ")
+                    )
+                })?;
+            let iso = &setup.recording.iso;
+            let on = iso.enabled && iso.sources.contains(&source.id);
+            Some(IsoAdmission {
+                source: id.into(),
+                on,
+                as_is: on,
+                change: None,
+                description: if on {
+                    format!("{id}'s ISO file is already on")
+                } else {
+                    format!("{id}'s ISO file stays off")
+                },
+                reason: (!on).then(|| {
+                    format!(
+                        "ISO files are not qualified on a software graphics adapter; the \
+                         {reference} reference covers only a single H.264 program recording, \
+                         and local capacity remains unmeasured"
+                    )
+                }),
+                width: None,
+                height: None,
+                fps: None,
+            })
+        }
+        None => None,
+    };
+    Ok(CapacityEstimate {
+        chip: inputs.machine.chip.clone(),
+        encode_engines: 0,
+        engine_pixels_per_second: 0.0,
+        basis: basis.clone(),
+        summary,
+        workload_key: workload_key(&outputs),
+        // No qualified resource load; the resource explicitly reports unknown.
+        load: 0.0,
+        // This machine is unmeasured. Exceeding a reference is a warning,
+        // not proof of its local maximum throughput.
+        capacity: Capacity::NoMargin,
+        streaming: inputs.streaming.iter().any(|on| *on),
+        iso_drop_percent: 0.0,
+        outputs,
+        resources: vec![isocast_protocol::api::ResourceEstimate {
+            resource: SOFTWARE_RESOURCE.into(),
+            unit: "pixels_per_second".into(),
+            demand,
+            capacity: None,
+            load: None,
+            basis,
+        }],
+        suggestions,
+        admission,
+        measured: None,
+    })
+}
+
 /// Each ISO source's format, and `add_iso`'s (the ISO file asked to be
 /// turned on), by probing it without opening it (a screen's size, a
 /// camera's best format), but those `known` already; sources it can't
@@ -1714,13 +1904,26 @@ pub fn check(estimate: &CapacityEstimate) -> Option<isocast_protocol::api::Check
     if estimate.streaming {
         detail.push_str(" (including configured streams)");
     }
-    detail.push_str(&format!(
-        " [{}, {} engine(s); {}]",
-        estimate.chip,
-        estimate.encode_engines,
-        estimate.basis.split(':').next().unwrap_or("")
-    ));
-    if estimate.capacity != Capacity::Fits
+    let software = estimate
+        .resources
+        .iter()
+        .any(|r| r.resource == SOFTWARE_RESOURCE);
+    if software {
+        // No engine count to show: the CPU composites and converts.
+        detail.push_str(&format!(
+            " [{}, software graphics adapter; assumed advisory reference, not measured]",
+            estimate.chip
+        ));
+    } else {
+        detail.push_str(&format!(
+            " [{}, {} engine(s); {}]",
+            estimate.chip,
+            estimate.encode_engines,
+            estimate.basis.split(':').next().unwrap_or("")
+        ));
+    }
+    if !software
+        && estimate.capacity != Capacity::Fits
         && estimate.outputs.iter().any(|o| o.kind == OutputKind::Iso)
     {
         detail.push_str(&format!(". {ISO_THINNING_NOTE}"));
@@ -1730,7 +1933,12 @@ pub fn check(estimate: &CapacityEstimate) -> Option<isocast_protocol::api::Check
         None => s.description.clone(),
     });
     Some(Check {
-        name: "encoder capacity".into(),
+        name: if software {
+            "software graphics capacity"
+        } else {
+            "encoder capacity"
+        }
+        .into(),
         status,
         detail,
         fix,
@@ -1797,6 +2005,128 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn run_software(setup: &Setup, add_iso: Option<&str>) -> CapacityEstimate {
+        let m = machine("Microsoft Basic Render Driver");
+        let none = |_: &str| None;
+        software(
+            &Inputs {
+                machine: &m,
+                setup,
+                formats: &none,
+                streaming: [false; 2],
+                memory: None,
+                recording: false,
+                profile: None,
+            },
+            add_iso,
+        )
+        .unwrap()
+    }
+
+    /// A program-only setup at `w`×`h`, `fps`, its one source as large.
+    fn program_only(w: u32, h: u32, fps: u32) -> Setup {
+        let setup = Setup::from_value(json!({
+            "version": 1,
+            "name": "software",
+            "canvas": { "width": w, "height": h, "fps": fps },
+            "sources": [{ "id": "bars", "kind": "test_pattern", "width": w, "height": h, "fps": fps }],
+            "scenes": [{ "id": "main", "items": [{ "source": "bars", "rect": { "x": 0, "y": 0, "width": w, "height": h } }] }],
+            "recording": { "folder": "/tmp", "program": { "encoder": { "codec": "h264" } } }
+        }))
+        .unwrap();
+        assert_eq!(setup.validate(), Vec::new());
+        setup
+    }
+
+    #[test]
+    fn software_adapter_never_fits_and_warns_above_the_reference() {
+        // Within the assumed reference: no margin, never "fits", and the
+        // capacity stays unknown rather than a number.
+        let small = run_software(&program_only(320, 180, 30), None);
+        assert_eq!(small.capacity, Capacity::NoMargin);
+        assert!(small.basis.starts_with("assumed:"), "{}", small.basis);
+        assert!(
+            small.summary.contains("not a capacity guarantee"),
+            "{}",
+            small.summary
+        );
+        assert!(small.suggestions.is_empty());
+        let resource = &small.resources[0];
+        assert_eq!((resource.capacity, resource.load), (None, None));
+        let check = check(&small).unwrap();
+        assert_eq!(check.status, isocast_protocol::api::CheckStatus::Warning);
+        assert!(
+            check.detail.contains("software graphics adapter"),
+            "{}",
+            check.detail
+        );
+        assert!(!check.detail.contains("engine(s)"), "{}", check.detail);
+
+        // Above it: frames expected to drop, naming the canvas and the
+        // advice to lower the canvas and sources, not just the encode.
+        let large = run_software(&program_only(1920, 1080, 60), None);
+        assert_eq!(large.capacity, Capacity::NoMargin);
+        assert!(
+            large.summary.contains("1920×1080 at 60 fps"),
+            "{}",
+            large.summary
+        );
+        assert!(
+            large.summary.contains("expect dropped frames"),
+            "{}",
+            large.summary
+        );
+        assert!(
+            large.summary.contains("bars (1920×1080, 60 fps)"),
+            "{}",
+            large.summary
+        );
+        assert!(
+            large.suggestions[0]
+                .description
+                .contains("canvas and its sources")
+        );
+
+        // A higher rate alone is above the reference too.
+        assert_eq!(
+            run_software(&program_only(480, 270, 60), None).capacity,
+            Capacity::NoMargin
+        );
+    }
+
+    #[test]
+    fn software_adapter_does_not_qualify_iso_files_or_streams() {
+        let setup = soak(&[("a", 1280, 720)], true);
+        let estimate = run_software(&setup, None);
+        assert!(
+            estimate
+                .summary
+                .contains("additional outputs (a) are not qualified"),
+            "{}",
+            estimate.summary
+        );
+        let program = program_only(1280, 720, 30);
+        let admitted = run_software(&program, Some("bars")).admission.unwrap();
+        assert!(!admitted.on);
+        assert!(admitted.reason.unwrap().contains("not qualified"));
+        let m = machine("Microsoft Basic Render Driver");
+        let none = |_: &str| None;
+        let inputs = Inputs {
+            machine: &m,
+            setup: &program,
+            formats: &none,
+            streaming: [false; 2],
+            memory: None,
+            recording: false,
+            profile: None,
+        };
+        assert!(
+            software(&inputs, Some("nope"))
+                .unwrap_err()
+                .contains("bars")
+        );
     }
 
     #[test]
