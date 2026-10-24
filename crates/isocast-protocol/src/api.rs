@@ -1890,8 +1890,10 @@ pub fn is_engine_executable(name: &std::ffi::OsStr) -> bool {
 }
 
 /// Where the daemon listens: `$ISOCAST_SOCKET`, or else
-/// `~/Library/Application Support/Isocast/isocastd.sock` on macOS and
-/// `~/.isocast/isocastd.sock` elsewhere.
+/// `~/Library/Application Support/Isocast/isocastd.sock` on macOS,
+/// `$XDG_RUNTIME_DIR/isocast/isocastd.sock` on Linux (in the support
+/// folder without a runtime directory), and in the support folder
+/// elsewhere.
 pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("ISOCAST_SOCKET") {
         return PathBuf::from(path);
@@ -1901,7 +1903,44 @@ pub fn socket_path() -> PathBuf {
 
 /// The user's own engine's socket, whatever `$ISOCAST_SOCKET` says.
 pub fn default_socket_path() -> PathBuf {
+    if cfg!(target_os = "linux") {
+        return linux_socket_path(
+            std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+            |dir| dir.is_dir(),
+            &support_folder(),
+        );
+    }
     support_folder().join("isocastd.sock")
+}
+
+/// Linux's socket: in `$XDG_RUNTIME_DIR/isocast` when that is an absolute
+/// path to a folder that exists (`is_dir`), else in `support`. The CLI,
+/// app and daemon must see the same `XDG_RUNTIME_DIR` to find each other.
+fn linux_socket_path(
+    runtime: Option<&std::ffi::OsStr>,
+    is_dir: impl Fn(&std::path::Path) -> bool,
+    support: &std::path::Path,
+) -> PathBuf {
+    match runtime
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute() && is_dir(dir))
+    {
+        Some(runtime) => runtime.join("isocast").join("isocastd.sock"),
+        None => support.join("isocastd.sock"),
+    }
+}
+
+/// A file of the user's own engine that must outlive a login (its
+/// bootstrap log `log`, the diagnostics `install-id`): beside the socket
+/// and named after it (`isocastd.sock` → `isocastd.log`), except on Linux,
+/// whose default socket is in `$XDG_RUNTIME_DIR` (cleared at logout): there
+/// in the support folder. A socket of its own (`$ISOCAST_SOCKET`) keeps
+/// its files beside it.
+pub fn daemon_file(extension: &str) -> PathBuf {
+    if cfg!(target_os = "linux") && std::env::var_os("ISOCAST_SOCKET").is_none() {
+        return support_folder().join("isocastd").with_extension(extension);
+    }
+    socket_path().with_extension(extension)
 }
 
 /// The file a running daemon holds locked (and writes its pid in), next to
@@ -1971,6 +2010,8 @@ pub fn home_folder() -> PathBuf {
 
 /// `~/Library/Application Support/Isocast` on macOS, `%LOCALAPPDATA%/Isocast`
 /// on Windows (the LocalAppData known folder when the variable is unset),
+/// `$XDG_DATA_HOME/isocast` (`~/.local/share/isocast`) on Linux, where a
+/// `~/.isocast` from earlier builds is still used if it is there, and
 /// `~/.isocast` elsewhere.
 pub fn support_folder() -> PathBuf {
     let home = home_folder();
@@ -1978,9 +2019,34 @@ pub fn support_folder() -> PathBuf {
         home.join("Library/Application Support/Isocast")
     } else if cfg!(windows) {
         windows_folder("LOCALAPPDATA", "AppData/Local").join("Isocast")
+    } else if cfg!(target_os = "linux") {
+        linux_support_folder(
+            &home,
+            std::env::var_os("XDG_DATA_HOME").as_deref(),
+            home.join(".isocast").is_dir(),
+        )
     } else {
         home.join(".isocast")
     }
+}
+
+/// Linux's support folder: `~/.isocast` if it exists (`legacy`, from
+/// earlier builds), else `$XDG_DATA_HOME/isocast` when that is absolute
+/// (the XDG spec ignores relative and empty values), else
+/// `~/.local/share/isocast`.
+fn linux_support_folder(
+    home: &std::path::Path,
+    data_home: Option<&std::ffi::OsStr>,
+    legacy: bool,
+) -> PathBuf {
+    if legacy {
+        return home.join(".isocast");
+    }
+    data_home
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("isocast")
 }
 
 /// A per-user Windows folder: its environment variable when set (so
@@ -3525,15 +3591,74 @@ mod tests {
         {
             let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
             assert_eq!(home_folder(), home);
-            assert_eq!(
-                support_folder(),
-                home.join(if cfg!(target_os = "macos") {
-                    "Library/Application Support/Isocast"
-                } else {
-                    ".isocast"
-                })
-            );
+            let expected = if cfg!(target_os = "macos") {
+                home.join("Library/Application Support/Isocast")
+            } else if cfg!(target_os = "linux") {
+                linux_support_folder(
+                    &home,
+                    std::env::var_os("XDG_DATA_HOME").as_deref(),
+                    home.join(".isocast").is_dir(),
+                )
+            } else {
+                home.join(".isocast")
+            };
+            assert_eq!(support_folder(), expected);
         }
+    }
+
+    // Unix paths (absolute only there); the rule is Linux's.
+    #[cfg(unix)]
+    #[test]
+    fn linux_support_folder_follows_xdg_data_home() {
+        use std::ffi::OsStr;
+        use std::path::Path;
+        let home = Path::new("/home/me");
+        let xdg =
+            |value: Option<&str>, legacy| linux_support_folder(home, value.map(OsStr::new), legacy);
+        assert_eq!(xdg(None, false), Path::new("/home/me/.local/share/isocast"));
+        assert_eq!(xdg(Some("/data"), false), Path::new("/data/isocast"));
+        // Relative and empty values are ignored, as the XDG spec says.
+        assert_eq!(
+            xdg(Some("data"), false),
+            Path::new("/home/me/.local/share/isocast")
+        );
+        assert_eq!(
+            xdg(Some(""), false),
+            Path::new("/home/me/.local/share/isocast")
+        );
+        // An existing ~/.isocast from earlier builds wins.
+        assert_eq!(xdg(Some("/data"), true), Path::new("/home/me/.isocast"));
+        assert_eq!(xdg(None, true), Path::new("/home/me/.isocast"));
+    }
+
+    // Unix paths (absolute only there); the rule is Linux's.
+    #[cfg(unix)]
+    #[test]
+    fn linux_socket_in_runtime_dir_when_it_exists() {
+        use std::ffi::OsStr;
+        use std::path::Path;
+        let support = Path::new("/home/me/.local/share/isocast");
+        let exists = |_: &Path| true;
+        let missing = |_: &Path| false;
+        assert_eq!(
+            linux_socket_path(Some(OsStr::new("/run/user/1000")), exists, support),
+            Path::new("/run/user/1000/isocast/isocastd.sock")
+        );
+        // Unset, a folder that isn't there, empty or relative: the support folder.
+        let fallback = Path::new("/home/me/.local/share/isocast/isocastd.sock");
+        assert_eq!(linux_socket_path(None, exists, support), fallback);
+        assert_eq!(
+            linux_socket_path(Some(OsStr::new("/run/user/1000")), missing, support),
+            fallback
+        );
+        assert_eq!(
+            linux_socket_path(Some(OsStr::new("")), exists, support),
+            fallback
+        );
+        assert_eq!(
+            linux_socket_path(Some(OsStr::new("run")), exists, support),
+            fallback
+        );
     }
 
     #[test]

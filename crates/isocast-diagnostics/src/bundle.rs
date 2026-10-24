@@ -282,7 +282,7 @@ pub fn generate(
         }
     }
     let home = isocast_protocol::api::home_folder();
-    let bootstrap = isocast_protocol::api::socket_path().with_extension("log");
+    let bootstrap = isocast_protocol::api::daemon_file("log");
     if bootstrap.exists() {
         collect(
             &bootstrap,

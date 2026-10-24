@@ -1336,7 +1336,8 @@ impl Isocast {
     }
 
     #[tool(
-        description = wording::select("Remove Isocast Virtual Camera from macOS (the release app's camera extension), for deleting Isocast cleanly: stops the camera, then macOS asks the user for an administrator password; waits for it (up to about 4 minutes). Ask the user first. A later virtual_camera_start installs it again.", "Request removal of Isocast Virtual Camera. Windows support depends on the native backend; an unsupported operation is reported without installing or removing anything. Ask the user first."),
+        description = wording::select_linux("Remove Isocast Virtual Camera from macOS (the release app's camera extension), for deleting Isocast cleanly: stops the camera, then macOS asks the user for an administrator password; waits for it (up to about 4 minutes). Ask the user first. A later virtual_camera_start installs it again.", "Request removal of Isocast Virtual Camera. Windows support depends on the native backend; an unsupported operation is reported without installing or removing anything. Ask the user first.",
+            "Request removal of Isocast Virtual Camera. Linux has no Isocast Virtual Camera yet: the operation is reported as unsupported, without changing anything."),
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1898,10 +1899,11 @@ impl Isocast {
     }
 
     #[tool(
-        description = wording::select("The screen recording, camera and microphone permissions, without asking, \
+        description = wording::select_linux("The screen recording, camera and microphone permissions, without asking, \
                        with the next step for each that isn't granted: request it, or turn it \
                        on in System Settings (which app, which pane, and whether isocastd must \
-                       restart afterwards).", "Report Windows capture, camera and microphone access without requesting changes, with the backend's next step. Camera and Microphone privacy settings must allow desktop apps; the recording engine is isocastd.exe."),
+                       restart afterwards).", "Report Windows capture, camera and microphone access without requesting changes, with the backend's next step. Camera and Microphone privacy settings must allow desktop apps; the recording engine is isocastd.exe.",
+"Report screen, camera and microphone access without requesting changes, with the next step for each. On Linux, screens are chosen through the desktop's screen-sharing portal (xdg-desktop-portal) and sound comes through PipeWire."),
         annotations(read_only_hint = true)
     )]
     async fn get_permissions(&self) -> Result<Json<PermissionsReport>, String> {
@@ -1909,10 +1911,11 @@ impl Isocast {
     }
 
     #[tool(
-        description = wording::select("Restart isocastd, which only sees a permission granted in System \
+        description = wording::select_linux("Restart isocastd, which only sees a permission granted in System \
                        Settings (screen recording, above all) once restarted; the live setup \
                        is kept. Refused, atomically by isocastd, while it records, streams, \
-                       exports or feeds the virtual camera.", "Restart isocastd.exe after changing access or device settings, keeping the live setup. The daemon atomically refuses while recording or output work is active."),
+                       exports or feeds the virtual camera.", "Restart isocastd.exe after changing access or device settings, keeping the live setup. The daemon atomically refuses while recording or output work is active.",
+"Restart isocastd after changing access or device settings, keeping the live setup. The daemon atomically refuses while recording or output work is active."),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1933,10 +1936,11 @@ impl Isocast {
     }
 
     #[tool(
-        description = wording::select("Ask macOS for screen recording, camera and microphone access where it \
+        description = wording::select_linux("Ask macOS for screen recording, camera and microphone access where it \
                        hasn't been decided yet (or only `permission`). Its prompts appear on the \
                        user's screen; waits up to a minute for answers and returns the \
-                       permissions with next steps.", "Check/request Windows capture access supported by the backend (or only permission). Desktop camera and microphone access is controlled in Windows Settings, not individual app permission switches. Returns the permissions and next steps; unsupported operations are reported."),
+                       permissions with next steps.", "Check/request Windows capture access supported by the backend (or only permission). Desktop camera and microphone access is controlled in Windows Settings, not individual app permission switches. Returns the permissions and next steps; unsupported operations are reported.",
+"Check/request screen, camera and microphone access supported by the backend (or only permission). On Linux the desktop's screen-sharing portal asks for a screen when one is first captured."),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1956,10 +1960,11 @@ impl Isocast {
     }
 
     #[tool(
-        description = wording::select("Open System Settings on the user's screen at the pane where a \
+        description = wording::select_linux("Open System Settings on the user's screen at the pane where a \
                        permission (screen_recording, camera, microphone or system_audio) is \
                        turned on by \
-                       hand, for one that was refused.", "Ask the backend to open Windows Settings for screen_recording, camera, microphone or system_audio access. Camera and Microphone must allow desktop apps (isocastd.exe); system audio uses output-device loopback. Unsupported settings pages are reported."),
+                       hand, for one that was refused.", "Ask the backend to open Windows Settings for screen_recording, camera, microphone or system_audio access. Camera and Microphone must allow desktop apps (isocastd.exe); system audio uses output-device loopback. Unsupported settings pages are reported.",
+"Ask the backend to open the desktop's settings for screen_recording, camera, microphone or system_audio access, where it has a page for it; an unsupported request is reported without changing anything."),
         annotations(
             read_only_hint = false,
             destructive_hint = false,

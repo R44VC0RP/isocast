@@ -174,6 +174,79 @@ jobs:
             ${{ runner.temp }}/linux-e2e
           retention-days: 7
 
+  linux-app:
+    # The desktop app on Linux against a local engine, and the tarball people
+    # download (scripts/package-linux.sh): x86_64 and arm64. Rendering runs on
+    # Mesa's software Vulkan here; a snapshot proves the window draws.
+    name: Linux app + tarball (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      XDG_RUNTIME_DIR: /tmp/isocast-runtime
+      CFLAGS: -O2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Linux build dependencies
+        timeout-minutes: 15
+        run: |
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev
+          mkdir -m 700 "$XDG_RUNTIME_DIR"
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: linux-app-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build app, engine and CLI
+        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
+
+      - name: App checks
+        run: |
+          cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -- -D warnings
+          cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics
+
+      - name: Offscreen snapshot against a local engine
+        run: |
+          work="$RUNNER_TEMP/linux-app"
+          mkdir -p "$work"
+          export ISOCAST_SOCKET="$work/engine.sock" ISOCAST_SETUP="$work/setup.toml" ISOCAST_CALIBRATION=off
+          target/release/isocast apply --revision 0 packaging/linux/test-setup.toml
+          target/release/isocast-ui --snapshot "$work/main.png" --size 1280x800 --wait-ms 3000
+          target/release/isocast-ui --snapshot "$work/settings.png" --size 1280x800 --state settings:output
+          target/release/isocast engine shutdown || true
+
+      - name: Package
+        run: scripts/package-linux.sh
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: isocast-linux-${{ matrix.arch }}
+          path: dist/isocast-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 30
+
+      - name: Upload snapshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-app-snapshots-${{ matrix.arch }}
+          path: ${{ runner.temp }}/linux-app/*.png
+          retention-days: 7
+
   engine:
     # W.1e: UI/native services compile with explicit platform stubs, not a
     # Windows capture, recording or shared-GPU-surface claim.
@@ -231,6 +304,31 @@ jobs:
       - name: Check Media Foundation AAC transactions
         timeout-minutes: 30
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
+
+      - name: Install recording recovery decoder
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install FFmpeg' }
+          }
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Recover recordings after engine and process-tree termination
+        timeout-minutes: 10
+        run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json
+
+      - name: Keep recording recovery evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-recording-recovery
+          path: |
+            windows-recovery.json
+            ${{ runner.temp }}/windows-recovery
+          if-no-files-found: warn
+          retention-days: 14
 
       # Slint compiles the whole interface into one generated Rust module
       # (the isocast-ui-interface crate, built once and shared by the app

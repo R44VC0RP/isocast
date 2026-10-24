@@ -64,22 +64,19 @@ pub fn hello() -> Option<Hello> {
 }
 
 /// The engine machine's operating system. A local window's is this
-/// machine's (macOS words off Windows, as `platform_text::select` has
-/// them); a remote one's is what `hello` said, else the app's until then.
+/// machine's; a remote one's is what `hello` said, else the app's until
+/// then.
 pub fn os() -> EngineOs {
-    let own = if cfg!(windows) {
-        EngineOs::Windows
-    } else {
-        EngineOs::Macos
-    };
+    let own = EngineOs::current();
     if is_local() {
         return own;
     }
     hello().map_or(own, |hello| hello.os)
 }
 
-/// Whether the engine's words are Windows' (the Slint side's
-/// `PlatformText.engine-windows`).
+/// Whether the engine's conventions are Windows' (the Slint side's
+/// `PlatformText.engine-windows`): off macOS, Linux's too, as
+/// `platform_text::pick` has them.
 pub fn windows() -> bool {
     !matches!(os(), EngineOs::Macos)
 }

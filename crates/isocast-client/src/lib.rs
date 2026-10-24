@@ -807,7 +807,8 @@ fn running_daemon() -> Option<String> {
 
 /// The daemon's log, next to its socket and named after it
 /// (`isocastd.sock` → `isocastd.log`), so daemons on sockets of their own
-/// in one folder (`$ISOCAST_SOCKET`) don't share a log.
+/// in one folder (`$ISOCAST_SOCKET`) don't share a log; on Linux in the
+/// support folder (`api::daemon_file`).
 pub fn log_path() -> PathBuf {
-    socket_path().with_extension("log")
+    isocast_protocol::api::daemon_file("log")
 }

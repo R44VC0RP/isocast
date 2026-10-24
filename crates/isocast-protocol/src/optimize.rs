@@ -298,13 +298,14 @@ pub fn prepare(setup: &Setup, goal: Goal, stream: Option<&StreamChoice>) -> (Set
     (out, notes)
 }
 
-/// Favour quality: HEVC at the High preset, keeping ProRes or a better
-/// preset.
+/// Favour quality: HEVC at the High preset (H.264 where the platform
+/// records that only, `Codec::platform_default`), keeping ProRes or a
+/// better preset.
 fn quality_encoder(codec: &mut Codec, quality: &mut EncoderQuality) {
     if !matches!(codec, Codec::H264 | Codec::Hevc) {
         return;
     }
-    *codec = Codec::Hevc;
+    *codec = Codec::platform_default();
     let better = matches!(
         quality,
         EncoderQuality::Preset(QualityPreset::VeryHigh | QualityPreset::Incredible)
@@ -456,13 +457,14 @@ mod tests {
     #[test]
     fn recording_favours_quality_and_iso_files() {
         let (out, _) = prepare(&setup(), Goal::Recording, None);
-        assert_eq!(out.recording.program.encoder.codec, Codec::Hevc);
+        let codec = Codec::platform_default();
+        assert_eq!(out.recording.program.encoder.codec, codec);
         assert_eq!(out.recording.iso.sources, ["screen", "camera"]);
         assert!(out.recording.iso.enabled);
         assert!(out.validate().is_empty(), "{:?}", out.validate());
         assert_eq!(
             summary(&out, Goal::Recording),
-            "1080p60, HEVC High, 2 ISO files"
+            format!("1080p60, {} High, 2 ISO files", codec_label(codec))
         );
     }
 
@@ -491,7 +493,10 @@ mod tests {
         let (both, _) = prepare(&setup(), Goal::Both, Some(&fast));
         assert_eq!(
             summary(&both, Goal::Both),
-            "1080p60, HEVC High, 2 ISO files, 6 Mbps stream"
+            format!(
+                "1080p60, {} High, 2 ISO files, 6 Mbps stream",
+                codec_label(Codec::platform_default())
+            )
         );
     }
 }

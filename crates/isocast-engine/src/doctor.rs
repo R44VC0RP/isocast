@@ -91,9 +91,10 @@ pub fn doctor_writing<P: Platform>(
                     (Permission::NotDetermined, _) => check(
                         &name,
                         CheckStatus::Warning,
-                        isocast_protocol::platform_text::select(
+                        isocast_protocol::platform_text::select_linux(
                             "not asked yet; macOS asks the first time it is needed",
                             "not checked yet; review Windows privacy access for desktop apps",
+                            "not checked yet",
                         )
                         .into(),
                         fix,

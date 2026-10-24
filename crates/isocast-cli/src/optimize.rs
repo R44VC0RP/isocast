@@ -66,9 +66,10 @@ pub fn discover(folder: Option<PathBuf>, json: bool) -> Result<ExitCode> {
             if p.current { " (current)" } else { "" },
             p.summary,
             if p.stream.as_ref().is_some_and(|s| s.key_in_file) {
-                isocast_protocol::platform_text::select(
+                isocast_protocol::platform_text::select_linux(
                     " (stream key in plain text: --obs-stream-key moves it to the Keychain)",
                     " (stream key in plain text: --obs-stream-key moves it to Credential Manager)",
+                    " (stream key in plain text: --obs-stream-key moves it to Isocast's credentials file)",
                 )
             } else {
                 ""

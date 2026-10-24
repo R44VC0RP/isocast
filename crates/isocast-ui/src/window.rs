@@ -51,6 +51,33 @@ pub(crate) fn with_app(f: impl FnOnce(&Rc<App>)) {
     });
 }
 
+/// The app's id on Linux: its Wayland app id, X11 class and desktop file
+/// name (packaging/linux/dev.isocast.Isocast.desktop).
+#[cfg(target_os = "linux")]
+const APP_ID: &str = "dev.isocast.Isocast";
+
+/// The window draws with Skia on the CPU (set before the app is made).
+static CPU_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this process's window is drawn on the CPU (Linux without a GPU
+/// adapter): it calls no rendering notifier, and every frame it paints
+/// costs CPU time a recording needs.
+pub fn cpu_window() -> bool {
+    CPU_WINDOW.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the window draws with Skia on the CPU: when the adapter is a
+/// CPU one (llvmpipe), or `ISOCAST_UI_RENDERER` says `software` (`gpu`
+/// forces the GPU path).
+#[cfg(target_os = "linux")]
+fn software_renderer(gpu: &Gpu) -> bool {
+    match std::env::var("ISOCAST_UI_RENDERER").as_deref() {
+        Ok("software") => true,
+        Ok("gpu") => false,
+        _ => gpu.adapter.get_info().device_type == slint::wgpu_30::wgpu::DeviceType::Cpu,
+    }
+}
+
 pub fn run(options: &Options) -> Result<()> {
     #[cfg(windows)]
     daemon::prewarm_preview();
@@ -61,10 +88,28 @@ pub fn run(options: &Options) -> Result<()> {
     }
     // Test and measurement runs never take focus (see background.rs).
     let background = background::enabled(options);
-    let mut selector = slint::BackendSelector::new()
-        .backend_name("winit".into())
+    let selector = slint::BackendSelector::new().backend_name("winit".into());
+    #[cfg(not(target_os = "linux"))]
+    let mut selector = selector
         .renderer_name("skia".into())
         .require_wgpu_30(gpu.slint_configuration());
+    // Linux without a GPU driver (a VM, a bare PC): Skia on the CPU, which
+    // redraws only what changed, instead of whole frames through Mesa's
+    // software Vulkan (about four times the CPU, taken from the recording).
+    // Linux previews are RGBA images (frames.rs), so nothing needs the GPU.
+    #[cfg(target_os = "linux")]
+    let cpu_window = software_renderer(&gpu);
+    #[cfg(target_os = "linux")]
+    CPU_WINDOW.store(cpu_window, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(target_os = "linux")]
+    let mut selector = if cpu_window {
+        isocast_diagnostics::diagnostic!("info"; "window: Skia on the CPU (no GPU adapter)");
+        selector.renderer_name("skia-software".into())
+    } else {
+        selector
+            .renderer_name("skia".into())
+            .require_wgpu_30(gpu.slint_configuration())
+    };
     if background {
         selector = background::configure(selector);
     }
@@ -73,9 +118,27 @@ pub fn run(options: &Options) -> Result<()> {
     {
         selector = crate::chrome_windows::configure(selector, background);
     }
+    // Linux: the app id the desktop file names (dev.isocast.Isocast), so
+    // the compositor and the dock match the window to its icon and entry;
+    // the dark theme for any decorations the compositor draws.
+    #[cfg(target_os = "linux")]
+    {
+        selector = selector.with_winit_window_attributes_hook(move |attributes| {
+            use slint::winit_030::winit::platform::wayland::WindowAttributesExtWayland;
+            use slint::winit_030::winit::platform::x11::WindowAttributesExtX11;
+            let attributes = WindowAttributesExtWayland::with_name(attributes, APP_ID, "isocast");
+            let attributes = WindowAttributesExtX11::with_name(attributes, APP_ID, "isocast");
+            let attributes =
+                attributes.with_theme(Some(slint::winit_030::winit::window::Theme::Dark));
+            match background {
+                true => attributes.with_active(false),
+                false => attributes,
+            }
+        });
+    }
     selector
         .select()
-        .context("Slint could not open a window with Skia on the GPU")?;
+        .context("Slint could not open a window with Skia")?;
 
     let app = AppWindow::new()?;
     // Decided before the window exists: Slint makes the window
@@ -272,7 +335,11 @@ pub fn run(options: &Options) -> Result<()> {
                 );
                 if !occluded_time.get().is_zero() {
                     isocast_diagnostics::diagnostic!("warn";
-                        "{}", isocast_protocol::platform_text::select("the window was covered for part of the run (macOS reported it occluded), so it wasn't drawn then: this measurement is not valid", "the window was covered for part of the run (Windows reported it occluded), so it wasn't drawn then: this measurement is not valid")
+                        "{}", isocast_protocol::platform_text::select_linux(
+                            "the window was covered for part of the run (macOS reported it occluded), so it wasn't drawn then: this measurement is not valid",
+                            "the window was covered for part of the run (Windows reported it occluded), so it wasn't drawn then: this measurement is not valid",
+                            "the window was covered for part of the run (the compositor reported it occluded), so it wasn't drawn then: this measurement is not valid",
+                        )
                     );
                 }
                 let _ = slint::quit_event_loop();

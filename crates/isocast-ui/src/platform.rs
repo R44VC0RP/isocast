@@ -75,7 +75,7 @@ pub struct Choose<'a> {
 }
 
 /// `path` with a leading `~` made this user's home folder.
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 pub fn expand_home(path: &str) -> String {
     match (path.strip_prefix('~'), std::env::var("HOME")) {
         (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with('/') => {
@@ -232,8 +232,28 @@ pub fn reveal(path: &str) {
     }
 }
 
+/// Open the folder holding `path` (or `path`, a folder) in the file
+/// manager.
 #[cfg(not(any(target_os = "macos", windows)))]
-pub fn reveal(_path: &str) {}
+pub fn reveal(path: &str) {
+    let path = std::path::PathBuf::from(expand_home(path));
+    let folder = match path.is_dir() {
+        true => path.clone(),
+        false => path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or(path.clone()),
+    };
+    match std::process::Command::new("xdg-open").arg(&folder).spawn() {
+        // Reaped when it exits (it hands the folder to the file manager).
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+        }
+        Err(error) => {
+            isocast_diagnostics::diagnostic!("error"; "couldn’t show {}: {error}", folder.display())
+        }
+    }
+}
 
 /// Open a web page in the browser (a prefilled GitHub issue to post).
 pub fn open_url(url: &str) {

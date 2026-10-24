@@ -84,6 +84,18 @@ pub struct WorkLog {
     pub updates: Vec<Duration>,
 }
 
+/// The engine machine's words in the interface (decision 22): its
+/// conventions (Windows' off macOS) and nouns (Mac, PC or computer;
+/// Keychain, Credential Manager or keyring; Finder, Explorer or file
+/// manager).
+fn set_engine_words(words: &crate::PlatformText<'_>) {
+    words.set_engine_windows(crate::engine::windows());
+    let nouns = crate::engine::words();
+    words.set_machine(nouns.machine.into());
+    words.set_credential_store(nouns.credential_store.into());
+    words.set_file_manager(nouns.file_manager.into());
+}
+
 impl App {
     pub fn new(
         window: &AppWindow,
@@ -92,10 +104,12 @@ impl App {
         canvas: areas::canvas::Canvas,
     ) -> Rc<Self> {
         let words = window.global::<crate::PlatformText>();
-        words.set_windows(cfg!(windows));
+        // The app's own conventions (menus, shortcuts): Windows' on Linux
+        // too (Ctrl, Exit, Maximize, F11).
+        words.set_windows(!cfg!(target_os = "macos"));
         // The engine's words (decision 22): this machine's until a remote
         // engine says what it runs (`Update::Hello`).
-        words.set_engine_windows(crate::engine::windows());
+        set_engine_words(&words);
         window
             .global::<Ui>()
             .set_engine_remote(!crate::engine::is_local());
@@ -334,9 +348,7 @@ impl App {
             Update::Hello(hello) => {
                 crate::engine::set_hello(*hello);
                 if let Some(window) = self.window() {
-                    window
-                        .global::<crate::PlatformText>()
-                        .set_engine_windows(crate::engine::windows());
+                    set_engine_words(&window.global::<crate::PlatformText>());
                     window
                         .global::<Ui>()
                         .set_engine_name(crate::engine::name().unwrap_or_default().into());

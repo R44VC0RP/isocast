@@ -193,7 +193,8 @@ https://datatracker.ietf.org/ipr/1526/
 H.264 encoder
 =============
 
-The Linux server encodes H.264 with Cisco's OpenH264, compiled from the
+The Linux server encodes H.264, and the Linux app decodes its previews,
+with Cisco's OpenH264, compiled from the
 sources bundled in openh264-sys2 0.9.9 (https://github.com/cisco/openh264
 at commit 1bca62311e447fd9c39fc93de2c4b96cd5ce971c). OpenH264 is under the BSD 2-clause licence
 below.

@@ -655,9 +655,10 @@ mod other {
         pub fn show(_app: &Path, _text: &str, _returned: impl Fn() + 'static) -> Result<Helper> {
             bail!(
                 "{}",
-                isocast_protocol::platform_text::select(
+                isocast_protocol::platform_text::select_linux(
                     "the permission helper is macOS's",
-                    "Windows uses Settings access for desktop apps; there is no draggable permission helper"
+                    "Windows uses Settings access for desktop apps; there is no draggable permission helper",
+                    "the permission helper is macOS's"
                 )
             )
         }
@@ -666,9 +667,10 @@ mod other {
     pub fn render_png(_app: &Path, _text: &str, _out: &Path, _scale: f32) -> Result<()> {
         bail!(
             "{}",
-            isocast_protocol::platform_text::select(
+            isocast_protocol::platform_text::select_linux(
                 "the permission helper is macOS's",
-                "Windows uses Settings access for desktop apps; there is no draggable permission helper"
+                "Windows uses Settings access for desktop apps; there is no draggable permission helper",
+                "the permission helper is macOS's"
             )
         )
     }

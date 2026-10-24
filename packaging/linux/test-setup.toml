@@ -1,0 +1,54 @@
+# A synthetic setup for the Linux app's CI snapshot (no capture devices).
+version = 1
+name = "Linux test"
+
+[canvas]
+width = 1280
+height = 720
+fps = 30
+
+[recording]
+folder = "/tmp/isocast-linux-app/recordings"
+program = { encoder = { codec = "h264" }, audio = ["tone"] }
+iso = { enabled = true, sources = ["camera", "slides"], audio = ["tone"] }
+
+[[sources]]
+id = "camera"
+name = "Camera"
+kind = "test_pattern"
+width = 1280
+height = 720
+fps = 30
+
+[[sources]]
+id = "slides"
+name = "Slides"
+kind = "test_pattern"
+width = 1280
+height = 720
+fps = 30
+
+[[sources]]
+id = "tone"
+name = "Tone"
+kind = "tone"
+
+[[scenes]]
+id = "main"
+name = "Main"
+
+[[scenes.items]]
+source = "slides"
+rect = { x = 0, y = 0, width = 1280, height = 720 }
+
+[[scenes.items]]
+source = "camera"
+rect = { x = 880, y = 440, width = 360, height = 240 }
+
+[[scenes]]
+id = "camera-only"
+name = "Camera"
+
+[[scenes.items]]
+source = "camera"
+rect = { x = 0, y = 0, width = 1280, height = 720 }

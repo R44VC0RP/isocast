@@ -277,6 +277,9 @@ pub struct Preview {
     /// The picture's size in pixels on screen; the frames are asked for it
     /// (see `window_drawn`).
     size: (u32, u32),
+    /// The widest picture to ask for, whatever the monitor's size (a
+    /// window drawn on the CPU while recording: `set_max_width`).
+    max_width: Option<u32>,
     /// A size not asked for yet (the monitor is still being resized), the
     /// timer that asks once it settles, and when the daemon was last asked.
     pending_size: Rc<Cell<Option<(u32, u32)>>>,
@@ -346,6 +349,7 @@ impl Preview {
             fps,
             hidden: false,
             size: (0, 0),
+            max_width: None,
             pending_size: Rc::default(),
             size_timer: slint::Timer::default(),
             size_asked_at: Rc::default(),
@@ -380,6 +384,19 @@ impl Preview {
         self.fps = fps;
         if !self.hidden {
             self.feed.set_fps(fps);
+        }
+    }
+
+    /// Ask for pictures at most `width` wide (none: the monitor's size),
+    /// scaled on screen: each pixel the engine scales and encodes for a
+    /// monitor costs it CPU time.
+    pub fn set_max_width(&mut self, width: Option<u32>) {
+        if self.max_width == width {
+            return;
+        }
+        self.max_width = width;
+        if self.size != (0, 0) {
+            self.ask_size(self.size);
         }
     }
 
@@ -675,6 +692,13 @@ impl Preview {
     /// asked at most every `RESIZE_EVERY` and once the size settles; the
     /// layers (or the image) scale the frames meanwhile.
     fn ask_size(&mut self, size: (u32, u32)) {
+        let size = match self.max_width {
+            Some(max) if size.0 > max => (
+                max,
+                (u64::from(size.1) * u64::from(max) / u64::from(size.0)).max(16) as u32,
+            ),
+            _ => size,
+        };
         let due = self
             .size_asked_at
             .get()

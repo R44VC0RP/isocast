@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Isocast
+GenericName=Screen and camera recorder
+Comment=Record scenes, and every source as its own file
+Exec=isocast-ui
+Icon=dev.isocast.Isocast
+Terminal=false
+Categories=AudioVideo;Video;Recorder;
+Keywords=record;recorder;screen;obs;iso;stream;
+StartupWMClass=dev.isocast.Isocast
+StartupNotify=true

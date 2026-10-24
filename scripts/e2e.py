@@ -90,7 +90,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern (Windows has no media files yet).
-             "win_record", "win_takes", "win_scenes") + (("linux_record", "linux_recovery") if sys.platform.startswith("linux") else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery") + (("linux_record", "linux_recovery") if sys.platform.startswith("linux") else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -358,6 +358,46 @@ def engine_connection(sock_path, timeout=30):
 ENGINE_ENV = {}  # --engine-env
 
 
+class WindowsChild:
+    """Retain the crash parent's daemon identity, even if its parent dies first."""
+
+    def __init__(self, pid):
+        import ctypes
+        from ctypes import wintypes
+        self.k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        self.k32.OpenProcess.restype = wintypes.HANDLE
+        self.k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self.k32.WaitForSingleObject.restype = wintypes.DWORD
+        self.k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        self.k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        self.k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.handle = self.k32.OpenProcess(0x100000 | 0x1000 | 1, False, pid)  # synchronize/query/terminate
+        require(self.handle, f"cannot retain test daemon {pid}: {ctypes.get_last_error()}")
+
+    def wait(self, milliseconds):
+        result = self.k32.WaitForSingleObject(self.handle, milliseconds)
+        require(result in (0, 258), f"waiting for test daemon failed: {result}")
+        return result == 0
+
+    def exit_code(self):
+        import ctypes
+        from ctypes import wintypes
+        code = wintypes.DWORD()
+        require(self.k32.GetExitCodeProcess(self.handle, ctypes.byref(code)), "cannot read test daemon exit")
+        return code.value
+
+    def close(self):
+        if self.handle:
+            try:
+                if not self.wait(0):
+                    require(self.k32.TerminateProcess(self.handle, 1), "could not terminate owned test daemon")
+                    require(self.wait(10000), "owned test daemon survived termination")
+            finally:
+                self.k32.CloseHandle(self.handle)
+                self.handle = None
+
+
 class Engine:
     def __init__(self, root, daemon):
         self.root = root
@@ -394,12 +434,20 @@ class Engine:
             self.env["ISOCAST_DEV_APP"] = str(self.app)
         self.log = open(root / "daemon.log", "ab", buffering=0)
         self.process = None
+        self.child = None
         self.start()
 
-    def start(self):
+    def start(self, crash_parent=False):
         # Its own folder as the working directory: anything it (or a tool it
         # starts) writes to a relative path stays in the scenario's folder.
-        self.process = subprocess.Popen([str(self.binary)], env=self.env, stdout=self.log, stderr=self.log,
+        self.crash_parent = crash_parent
+        argv = [str(self.binary)]
+        if crash_parent:
+            # A real parent/child tree for the Windows crash test, without
+            # requiring a capture device or manufacturing a dummy child.
+            require(WINDOWS, "crash parent is Windows-only")
+            argv = [sys.executable, "-c", "import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))", *argv]
+        self.process = subprocess.Popen(argv, env=self.env, stdout=self.log, stderr=self.log,
                                         cwd=str(self.root))
 
         def ready():
@@ -408,7 +456,9 @@ class Engine:
                 return self.rpc("status")
             except (OSError, RpcError):
                 return None
-        until(ready, description="isolated daemon")
+        status = until(ready, description="isolated daemon")
+        if crash_parent:
+            self.child = WindowsChild(status["daemon"]["pid"])
 
     def rpc(self, method, params=None, timeout=30):
         request = {"jsonrpc": "2.0", "id": 1, "method": method}
@@ -450,14 +500,22 @@ class Engine:
         return self.rpc("apply", {"revision": rev, "setup": setup})
 
     def stop(self):
-        if self.process is None or self.process.poll() is not None:
-            return
         try:
-            self.rpc("shutdown", timeout=15)
-            self.process.wait(timeout=15)
-        except (OSError, ValueError, Failure, subprocess.TimeoutExpired):
-            self.process.kill()
-            self.process.wait(timeout=5)
+            if self.process is None or self.process.poll() is not None:
+                return
+            try:
+                self.rpc("shutdown", timeout=15)
+                self.process.wait(timeout=15)
+            except (OSError, ValueError, Failure, subprocess.TimeoutExpired):
+                if self.crash_parent:
+                    command(["taskkill", "/PID", str(self.process.pid), "/T", "/F"], check=False)
+                else:
+                    self.process.kill()
+                self.process.wait(timeout=5)
+        finally:
+            if self.child:
+                self.child.close()
+                self.child = None
 
     def close(self):
         try:
@@ -3836,6 +3894,28 @@ def discovery_without_bus(e):
 def scenario_linux_recovery(e, cfg, evidence):
     """SIGKILL with committed program/ISO fragments, then restart and verify
     finalized indexes, real decoded counts and persisted recovery metadata."""
+    fragment_recovery(e, cfg, evidence)
+
+
+def scenario_win_recovery(e, cfg, evidence):
+    """Terminate the engine, then its whole tree, without orderly finalization.
+    The tree case kills a harness parent and its actual recording-engine child.
+    This models process loss, not loss of the OS/disk's write cache."""
+    if not WINDOWS:
+        raise Skip("Windows process-tree crash recovery")
+    # Recovery integrity, not throughput: also runnable with WARP/MF software
+    # encoding on windows-latest. No hosted frame-loss allowance is involved.
+    cfg = setup(e.root, "h264", width=640, height=360, fps=30)
+    evidence["recovery_profile"] = cfg["canvas"].copy()
+    for label, tree in (("engine", False), ("process_tree", True)):
+        case = evidence.setdefault("cases", {}).setdefault(label, {})
+        fragment_recovery(e, copy.deepcopy(cfg), case, kill_tree=tree)
+
+
+def fragment_recovery(e, cfg, evidence, kill_tree=False):
+    if kill_tree:
+        e.stop()
+        e.start(crash_parent=True)
     win_setup(e, cfg)
     e.apply(cfg)
     started = e.rpc("start", {})
@@ -3843,13 +3923,53 @@ def scenario_linux_recovery(e, cfg, evidence):
 
     def committed():
         files = (e.rpc("status").get("live") or {}).get("files", [])
-        return len(files) == 3 and all((f.get("committed_seconds") or 0) >= 2 for f in files)
-    until(committed, 30, "two committed seconds in every output")
-    e.process.kill()
+        return files if len(files) == 3 and all((f.get("committed_seconds") or 0) >= 2 for f in files) else None
+    saved = until(committed, 30, "two committed seconds in every output")
+    evidence["committed_before_kill"] = {f["source"]: f["committed_seconds"] for f in saved}
+    children = None
+    if WINDOWS:
+        children = json.loads(command(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; ConvertTo-Json -Compress -InputObject "
+            f"@(Get-CimInstance Win32_Process -Filter 'ParentProcessId={e.process.pid}' | "
+            "Select-Object ProcessId,Name)"]).stdout.decode("utf-8-sig"))
+    require(e.process.poll() is None, "engine exited before crash injection")
+    if kill_tree:
+        require(WINDOWS, "process-tree crash injection requires Windows")
+        daemon = e.rpc("status")["daemon"]["pid"]
+        require(any(p["ProcessId"] == daemon for p in children) and daemon != e.process.pid,
+                "tree crash must kill an actual recording-engine child, not just its parent")
+        killed = command(["taskkill", "/PID", str(e.process.pid), "/T", "/F"], check=False)
+        evidence["taskkill_exit"] = killed.returncode  # a child may exit during enumeration
+        require(killed.returncode in (0, 128), f"taskkill failed: {killed.returncode}")
+    else:
+        e.process.kill()
     e.process.wait(timeout=10)
-    require(e.process.returncode == -signal.SIGKILL, "daemon was not killed with SIGKILL")
+    if not WINDOWS:
+        require(e.process.returncode == -signal.SIGKILL, "daemon was not killed with SIGKILL")
+    else:
+        require(e.process.returncode != 0, "daemon exited normally instead of being terminated")
+    evidence["termination"] = {"pid": e.process.pid, "exit": e.process.returncode,
+                               "tree": kill_tree, "children": children}
+    if kill_tree:
+        require(e.child.wait(10000), "recording-engine child survived process-tree termination")
+        evidence["termination"]["daemon_exit"] = e.child.exit_code()
+        require(evidence["termination"]["daemon_exit"] != 0, "recording-engine child exited normally")
+        e.stop()  # release the retained child handle before restarting
     before = read_json(path)
     require(before["status"] == "recording", "killed take was already marked finished")
+    require(len(before["files"]) == 3 and {f["source"] for f in before["files"]} == {"program", "bars", "bars2"},
+            "killed take did not publish the program and both ISO files")
+    partials = {}
+    if WINDOWS:
+        # Deterministically cover the tiny metadata-write/rename crash window
+        # too. These are abandoned metadata, not MOV/MP4 fragments: neither a
+        # complete unpublished copy nor a torn JSON copy may replace the last
+        # published manifest or masquerade as another take.
+        for serial, data in enumerate((path.read_bytes(), b'{"status":"recording",')):
+            orphan = path.parent / f".isocast-{e.process.pid}-0-{serial:x}.partial"
+            with orphan.open("xb") as file:
+                file.write(data)
+            partials[orphan] = data
 
     def header_kind(movie):
         with open(movie, "rb") as file:
@@ -3865,9 +3985,19 @@ def scenario_linux_recovery(e, cfg, evidence):
     e.start()
     recovered = until(lambda: (m if m["status"] == "interrupted" and
                      all(f.get("frames") is not None for f in m["files"]) else None)
-                     if (m := read_json(path)) else None, 30, "Linux startup fragment recovery")
-    require(any(Path(r["manifest"]) == path for r in e.rpc("status").get("interrupted", [])),
-            "status did not expose the recovered take")
+                     if (m := read_json(path)) else None, 30, "startup fragment recovery")
+    require(len(recovered["files"]) == 3 and
+            {(f["path"], f["source"]) for f in recovered["files"]} ==
+            {(f["path"], f["source"]) for f in before["files"]},
+            "recovery lost or relabeled an output")
+    interrupted = [r for r in e.rpc("status").get("interrupted", []) if Path(r["manifest"]) == path]
+    require(len(interrupted) == 1 and interrupted[0]["recording"] == recovered,
+            "status did not expose the recovered take with its persisted facts")
+    project = read_json(path.parent / ".isocast-project.json")["id"]
+    listed = [p for p in e.rpc("list_projects")["projects"] if p["id"] == project]
+    require(len(listed) == 1 and sum(Path(t) == path for t in listed[0]["takes"]) == 1,
+            "project listing omitted or duplicated the recovered take")
+    evidence["manifest"] = str(path)
     evidence["files"] = []
     for f in recovered["files"]:
         movie = path.parent / f["path"]
@@ -3878,7 +4008,8 @@ def scenario_linux_recovery(e, cfg, evidence):
         require(video["codec_name"] == "h264" and audio["codec_name"] == "aac", "wrong recovered codecs")
         require(int(video["nb_read_frames"]) == f["frames"] and f["frames"] >= 2,
                 "recovered manifest disagrees with decoded frames")
-        require(min(float(video["duration"]), float(audio["duration"])) >= 1,
+        require(min(float(video["duration"]), float(audio["duration"])) + .001 >=
+                evidence["committed_before_kill"][f["source"]],
                 "committed media was lost during recovery")
         require(abs(max(float(video["duration"]), float(audio["duration"])) - f["duration_seconds"]) < .001,
                 "recovered manifest duration disagrees with indexed media")
@@ -3889,12 +4020,17 @@ def scenario_linux_recovery(e, cfg, evidence):
                                   "video_seconds": float(video["duration"]),
                                   "audio_seconds": float(audio["duration"])})
     # A second launch must not append another moov or rewrite stable facts.
-    sizes = {f["path"]: (path.parent / f["path"]).stat().st_size for f in recovered["files"]}
+    hashes = {f["path"]: hashlib.sha256((path.parent / f["path"]).read_bytes()).hexdigest()
+              for f in recovered["files"]}
     e.stop()
     e.start()
     require(read_json(path) == recovered, "repeated startup changed the recovered manifest")
-    require(all((path.parent / name).stat().st_size == size for name, size in sizes.items()),
+    require(all(hashlib.sha256((path.parent / name).read_bytes()).hexdigest() == digest
+                for name, digest in hashes.items()),
             "repeated startup rewrote an already finished movie")
+    require(all(orphan.read_bytes() == data for orphan, data in partials.items()),
+            "recovery changed unpublished metadata orphans")
+    evidence["retained_metadata_partials"] = [p.name for p in partials]
 
 
 def scenario_win_takes(e, cfg, evidence):

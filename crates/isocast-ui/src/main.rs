@@ -322,11 +322,12 @@ fn attach_console() {
 fn main() {
     #[cfg(windows)]
     attach_console();
-    // A Windows VM can have only Microsoft's CPU/WARP adapter. Our device
+    // A Windows VM can have only Microsoft's CPU/WARP adapter, and a Linux
+    // VM or a PC without Vulkan drivers only Mesa's llvmpipe. Our device
     // selection already permits that fallback, but Slint otherwise rejects
     // it before opening any window. Permit CPU adapters, not force them: a
     // hardware adapter remains preferred on ordinary PCs.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     if std::env::var_os("SLINT_WGPU_CPU").is_none() {
         // SAFETY: the first operation in main, before logging, updater or
         // worker threads start. The setting is process-local, not persisted.

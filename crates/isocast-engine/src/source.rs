@@ -497,9 +497,10 @@ impl OpenHelp {
         match (&self.permission, self.device) {
             (Some(p), _) => format!(
                 "waiting for permission: {p}; {}",
-                wording::select(
+                wording::select_linux(
                     "check the macOS permission prompt or Privacy & Security",
-                    "check Windows Settings › Privacy & security (Privacy on Windows 10); Camera and Microphone must allow desktop apps (isocastd.exe)"
+                    "check Windows Settings › Privacy & security (Privacy on Windows 10); Camera and Microphone must allow desktop apps (isocastd.exe)",
+                    "check that the device exists and isn't held by another app, and that PipeWire and the desktop's screen-sharing portal are running"
                 )
             ),
             (None, true) => format!(
