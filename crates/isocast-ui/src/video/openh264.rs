@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use openh264::decoder::{DecodeOptions, Decoder as Codec};
 use openh264::formats::YUVSource;
 
-use super::{AccessUnit, Decoder, ParameterSets, Picture, nal_units};
+use super::{AccessUnit, Decoded, Decoder, ParameterSets, Picture, nal_units};
 
 /// The largest picture side decoded: the parameter sets come from the
 /// engine (another computer's, for a remote one), and say how much the
@@ -36,7 +36,20 @@ impl Decoder for OpenH264 {
         "OpenH264 (software)".into()
     }
 
-    fn decode(&mut self, sets: &ParameterSets, unit: &AccessUnit) -> Result<Option<Picture>> {
+    /// Linux shows pictures as Slint images: always pixels.
+    fn decode(
+        &mut self,
+        sets: &ParameterSets,
+        unit: &AccessUnit,
+        _surfaces: bool,
+    ) -> Result<Option<Decoded>> {
+        Ok(self.picture(sets, unit)?.map(Decoded::Pixels))
+    }
+}
+
+impl OpenH264 {
+    /// `unit`'s picture as RGBA, if it completes one.
+    fn picture(&mut self, sets: &ParameterSets, unit: &AccessUnit) -> Result<Option<Picture>> {
         let fresh = self.sets.as_ref() != Some(sets);
         if fresh && !unit.keyframe {
             // New parameter sets need a keyframe to start from.
@@ -323,7 +336,7 @@ mod tests {
         let red = [63, 102, 240];
         let (sets, unit) = encode(&solid(64, 48, red));
         assert_eq!(sps_size(&sets.sps[0]), Some((64, 48)));
-        let picture = decoder.decode(&sets, &unit).unwrap().expect("a picture");
+        let picture = decoder.picture(&sets, &unit).unwrap().expect("a picture");
         assert_eq!((picture.width(), picture.height()), (64, 48));
         let middle = (24 * 64 + 32) * 4;
         let bytes = picture.as_bytes();
@@ -337,7 +350,7 @@ mod tests {
         let blue = [32, 240, 118];
         let (sets, unit) = encode(&solid(128, 96, blue));
         assert_eq!(sps_size(&sets.sps[0]), Some((128, 96)));
-        let picture = decoder.decode(&sets, &unit).unwrap().expect("a picture");
+        let picture = decoder.picture(&sets, &unit).unwrap().expect("a picture");
         assert_eq!((picture.width(), picture.height()), (128, 96));
         let middle = (48 * 128 + 64) * 4;
         let bytes = picture.as_bytes();
@@ -373,10 +386,10 @@ mod tests {
         );
         assert_eq!(sps_size(&sps), Some((8192, 16)));
         sets.sps = vec![sps];
-        let error = OpenH264::default().decode(&sets, &unit).unwrap_err();
+        let error = OpenH264::default().picture(&sets, &unit).unwrap_err();
         assert!(error.to_string().contains("8192x16"), "{error:#}");
         // An SPS cut short is refused too.
         sets.sps = vec![vec![0x67, 66]];
-        assert!(OpenH264::default().decode(&sets, &unit).is_err());
+        assert!(OpenH264::default().picture(&sets, &unit).is_err());
     }
 }

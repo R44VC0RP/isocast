@@ -79,6 +79,11 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Desktop client on a remote server (R2) is on main (2026-10-23):** pairing in the app, engine picker, one window
   per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA), verified basebook <-> exon-desk both
   ways (`/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).
+  - 2026-10-24: remote video stays on the GPU in the canvas monitors (native layers). Windows: DXVA NV12 → D3D11
+    video processor → RGBA surfaces shared with the DX12 renderer (decoder device on the renderer's adapter LUID).
+    macOS: VideoToolbox's BGRA IOSurfaces go straight into the layers, tagged sRGB like local frames (remote and
+    local windows match; the remote image path stays untagged). A surface the GPU never finishes reading
+    poisons its ring: Windows falls back to Slint images instead of freezing. Projectors and `--preview image` still get pixels (Slint images take only RGBA).
 
 ## 2. Architecture map
 

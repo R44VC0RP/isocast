@@ -7,11 +7,14 @@
 //!   on its own R1 connection, str0m receiving) will be another `Source`
 //!   that turns each received Annex B frame into [`Intake`] with
 //!   [`from_annex_b`], and nothing below it changes;
-//! - a [`Decoder`] (VideoToolbox on macOS, Media Foundation on Windows,
-//!   both hardware; OpenH264 in software on Linux) turning access units
-//!   into RGBA pictures;
+//! - a [`Decoder`] (VideoToolbox on macOS and Media Foundation on
+//!   Windows, both hardware; OpenH264 in software on Linux) turning
+//!   access units into pictures: on macOS and Windows on the GPU where it
+//!   can ([`Decoded::Frame`], shown as the local engine's shared frames
+//!   are), else (and always on Linux) RGBA pixels;
 //! - the window's monitors, which show each picture as they show the
-//!   engine's stills (`frames::Incoming::Still`).
+//!   local engine's frames (`frames::Incoming::Frame`) or the engine's
+//!   stills (`frames::Incoming::Still`).
 //!
 //! Access units are AVCC: each NAL unit after its length (4 bytes, big
 //! endian), as MP4 and the `frames` records carry them. The parameter sets
@@ -28,11 +31,15 @@ use isocast_protocol::api::{FrameRate, FramesParams, frames};
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 
 #[cfg(windows)]
+mod dxva_frames;
+#[cfg(windows)]
 mod media_foundation;
 #[cfg(target_os = "linux")]
 mod openh264;
 pub mod sound;
 pub mod sync;
+#[cfg(any(windows, target_os = "macos"))]
+pub mod uploads;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 mod whep;
@@ -139,14 +146,50 @@ pub trait Source: Send {
 /// A decoded picture, ready for a monitor.
 pub type Picture = SharedPixelBuffer<Rgba8Pixel>;
 
+/// A decoded picture: still on the GPU, in a surface the window's
+/// renderer reads in place, or RGBA pixels.
+pub enum Decoded {
+    /// Not on Linux: its decoder works in software and the window shows
+    /// Slint images.
+    #[cfg_attr(
+        target_os = "linux",
+        expect(dead_code, reason = "macOS and Windows only")
+    )]
+    Frame(isocast_client::shared::SharedFrame),
+    Pixels(Picture),
+}
+
+impl Decoded {
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Decoded::Frame(frame) => (frame.width(), frame.height()),
+            Decoded::Pixels(pixels) => (pixels.width(), pixels.height()),
+        }
+    }
+}
+
 /// Turns access units into pictures (hardware where the OS has it;
 /// OpenH264 in software on Linux).
 pub trait Decoder {
     /// Decode `unit`, coded with `sets`: its picture, or none (the decoder
-    /// is waiting for a keyframe, or holds the picture back).
-    fn decode(&mut self, sets: &ParameterSets, unit: &AccessUnit) -> Result<Option<Picture>>;
+    /// is waiting for a keyframe, holds the picture back, or has nowhere
+    /// free to put it). With `surfaces` (the monitor shows them in place:
+    /// native layers) the picture stays on the GPU where the decoder can
+    /// keep it there; else, or where it can't, it comes as RGBA pixels.
+    /// (macOS's surfaces are BGRA, which Slint images don't take.)
+    fn decode(
+        &mut self,
+        sets: &ParameterSets,
+        unit: &AccessUnit,
+        surfaces: bool,
+    ) -> Result<Option<Decoded>>;
     /// What decodes, for diagnostics ("VideoToolbox (hardware)").
     fn name(&self) -> String;
+    /// Pictures decoded but skipped since last asked: every surface they
+    /// could go in was still in use.
+    fn take_skipped(&mut self) -> u32 {
+        0
+    }
 }
 
 /// No decoder can decode the stream on this machine at all (Windows N
@@ -316,17 +359,31 @@ pub fn now_nanos(at: Instant) -> u64 {
 #[derive(Default)]
 pub struct Stats {
     pictures: u32,
+    skipped: u32,
     lates: Vec<f64>,
     decodes: Vec<f64>,
     since: Option<Instant>,
 }
 
 impl Stats {
+    /// Pictures skipped for want of a free surface (logged even if none
+    /// is shown).
+    pub fn skip(&mut self, pictures: u32) {
+        self.since.get_or_insert_with(Instant::now);
+        self.skipped += pictures;
+        self.log_when_due();
+    }
+
     pub fn add(&mut self, late_ms: Option<f64>, decode_ms: f64) {
-        let since = *self.since.get_or_insert_with(Instant::now);
+        self.since.get_or_insert_with(Instant::now);
         self.pictures += 1;
         self.lates.extend(late_ms);
         self.decodes.push(decode_ms);
+        self.log_when_due();
+    }
+
+    fn log_when_due(&mut self) {
+        let Some(since) = self.since else { return };
         if since.elapsed() < Duration::from_secs(5) {
             return;
         }
@@ -336,8 +393,9 @@ impl Stats {
             values.get(values.len() / 2).copied().unwrap_or(f64::NAN)
         };
         let line = format!(
-            "remote video: {:.1} fps, arrival {:.1} ms after drawn (median), decode {:.2} ms (median)",
+            "remote video: {:.1} fps ({} skipped, no free surface), arrival {:.1} ms after drawn (median), decode {:.2} ms (median)",
             f64::from(self.pictures) / seconds,
+            self.skipped,
             median(&mut self.lates),
             median(&mut self.decodes),
         );

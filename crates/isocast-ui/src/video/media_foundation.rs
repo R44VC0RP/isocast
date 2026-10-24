@@ -1,8 +1,11 @@
-//! Media Foundation: H.264 access units to RGBA pictures. Windows' H.264
-//! decoder MFT decodes on the GPU (DXVA) through a D3D11 device of our own,
-//! in low-latency mode (a picture out for each one in); its NV12 pictures
-//! are read back and converted to RGBA here (half a million pixels at 960
-//! wide). Without a usable GPU the same MFT decodes in software.
+//! Media Foundation: H.264 access units to pictures. Windows' H.264
+//! decoder MFT decodes on the GPU (DXVA) through a D3D11 device of our own
+//! on the window's adapter, in low-latency mode (a picture out for each one
+//! in); the video processor converts its NV12 pictures to RGBA surfaces the
+//! window shows in place ([`super::dxva_frames`]). Where that isn't
+//! possible the pictures are read back and converted to RGBA here (half a
+//! million pixels at 960 wide). Without a usable GPU the same MFT decodes
+//! in software.
 //!
 //! Not `Send`: made, used and dropped on the one thread that receives the
 //! video (it joins the MTA and starts Media Foundation).
@@ -10,17 +13,19 @@
 use std::mem::ManuallyDrop;
 
 use anyhow::{Context, Result, anyhow, bail};
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Foundation::{HMODULE, LUID};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
     D3D11_TEXTURE2D_DESC, D3D11CreateDevice, ID3D11Device, ID3D11Multithread, ID3D11Texture2D,
 };
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory4};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::core::Interface;
 
-use super::{AccessUnit, Decoder, ParameterSets, Picture, nal_units};
+use super::dxva_frames::DxvaFrames;
+use super::{AccessUnit, Decoded, Decoder, ParameterSets, Picture, nal_units};
 
 /// Output types to look through: decoders offer a handful.
 const MAX_TYPES: u32 = 64;
@@ -54,6 +59,8 @@ impl Drop for Activation {
 pub struct MediaFoundation {
     /// The GPU the decoder uses (none: software).
     manager: Option<(ID3D11Device, IMFDXGIDeviceManager)>,
+    /// DXVA pictures to the window's surfaces (none: read back instead).
+    frames: Option<DxvaFrames>,
     started: Option<Started>,
 }
 
@@ -64,15 +71,27 @@ impl MediaFoundation {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             MFStartup(MF_VERSION, MFSTARTUP_LITE).context("could not start Media Foundation")?;
         }
-        let manager = match gpu() {
+        let luid = super::dxva_frames::renderer_luid();
+        let manager = match gpu(luid) {
             Ok(manager) => Some(manager),
             Err(error) => {
                 isocast_diagnostics::diagnostic!("warn"; "video: no GPU decoding, software instead: {error:#}");
                 None
             }
         };
+        let frames = match (&manager, luid) {
+            (Some((device, _)), Some(_)) => match DxvaFrames::new(device) {
+                Ok(frames) => Some(frames),
+                Err(error) => {
+                    isocast_diagnostics::diagnostic!("warn"; "video: decoded pictures go through the CPU: {error:#}");
+                    None
+                }
+            },
+            _ => None,
+        };
         Ok(Self {
             manager,
+            frames,
             started: None,
         })
     }
@@ -146,6 +165,7 @@ impl Drop for MediaFoundation {
     fn drop(&mut self) {
         // The decoder and the device first, then Media Foundation.
         self.started = None;
+        self.frames = None;
         self.manager = None;
         let _ = unsafe { MFShutdown() };
     }
@@ -160,7 +180,12 @@ impl Decoder for MediaFoundation {
         }
     }
 
-    fn decode(&mut self, sets: &ParameterSets, unit: &AccessUnit) -> Result<Option<Picture>> {
+    fn decode(
+        &mut self,
+        sets: &ParameterSets,
+        unit: &AccessUnit,
+        surfaces: bool,
+    ) -> Result<Option<Decoded>> {
         if self.started.as_ref().is_none_or(|s| s.sets != *sets) {
             if !unit.keyframe {
                 return Ok(None);
@@ -169,10 +194,17 @@ impl Decoder for MediaFoundation {
             let started = self.start(sets, unit)?;
             isocast_diagnostics::diagnostic!("info"; "video: decoding {}x{} H.264 with Media Foundation ({})", unit.width, unit.height, if started.hardware { "DXVA" } else { "software" });
             self.started = Some(started);
+            if let Some(frames) = &mut self.frames {
+                frames.forget_inputs();
+            }
         }
         let transform = self.started.as_ref().unwrap().transform.clone();
         let began = std::time::Instant::now();
-        let result = decode(&transform, sets, unit);
+        let frames = match surfaces {
+            true => &mut self.frames,
+            false => &mut None,
+        };
+        let result = decode(&transform, sets, unit, frames);
         if matches!(result, Ok(Some(_))) {
             TIMING.with(|timing| timing.borrow_mut().picture(began.elapsed()));
         }
@@ -182,13 +214,18 @@ impl Decoder for MediaFoundation {
         }
         result
     }
+
+    fn take_skipped(&mut self) -> u32 {
+        self.frames.as_mut().map_or(0, DxvaFrames::take_skipped)
+    }
 }
 
 fn decode(
     transform: &IMFTransform,
     sets: &ParameterSets,
     unit: &AccessUnit,
-) -> Result<Option<Picture>> {
+    frames: &mut Option<DxvaFrames>,
+) -> Result<Option<Decoded>> {
     let sample = input_sample(sets, unit)?;
     let mut picture = None;
     unsafe {
@@ -197,18 +234,25 @@ fn decode(
                 return Err(error).context("the decoder refused a picture");
             }
             // A picture waits to come out first.
-            picture = drain(transform, unit)?;
+            picture = drain(transform, unit, frames)?;
             transform
                 .ProcessInput(0, &sample, 0)
                 .context("the decoder refused a picture")?;
         }
     }
-    Ok(drain(transform, unit)?.or(picture))
+    Ok(drain(transform, unit, frames)?.or(picture))
 }
 
 /// Every picture the decoder has ready: the newest.
-fn drain(transform: &IMFTransform, unit: &AccessUnit) -> Result<Option<Picture>> {
+fn drain(
+    transform: &IMFTransform,
+    unit: &AccessUnit,
+    frames: &mut Option<DxvaFrames>,
+) -> Result<Option<Decoded>> {
     let mut newest = None;
+    // The newest picture from before a format change, made while its type
+    // was current.
+    let mut before_change = None;
     let mut changes = 0;
     loop {
         let info = unsafe { transform.GetOutputStreamInfo(0)? };
@@ -249,13 +293,24 @@ fn drain(transform: &IMFTransform, unit: &AccessUnit) -> Result<Option<Picture>>
         drop(unsafe { ManuallyDrop::take(&mut buffer.pEvents) });
         match result {
             Ok(()) => {
-                if let Some(sample) = produced {
-                    newest = Some(picture(transform, &sample, unit)?);
+                if produced.is_some() {
+                    newest = produced;
                 }
             }
-            Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(newest),
+            Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                return match newest {
+                    Some(sample) => {
+                        Ok(picture(transform, &sample, unit, frames)?.or(before_change))
+                    }
+                    None => Ok(before_change),
+                };
+            }
             Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE && changes < 3 => {
                 changes += 1;
+                // Pictures so far are of the old type: read them now.
+                if let Some(sample) = newest.take() {
+                    before_change = picture(transform, &sample, unit, frames)?.or(before_change);
+                }
                 choose_nv12(transform)?;
             }
             Err(error) => return Err(error).context("the decoder failed"),
@@ -294,7 +349,8 @@ fn input_sample(sets: &ParameterSets, unit: &AccessUnit) -> Result<IMFSample> {
 
 /// Where a picture's time goes (logged every [`TIMING_EVERY`] pictures):
 /// the whole decode, mapping the decoded surface for the CPU (a GPU copy
-/// and wait on DXVA) and the NV12 to RGBA conversion.
+/// and wait on DXVA; none when the picture stays on the GPU) and the NV12
+/// to RGBA conversion (on the GPU: until it's done).
 #[derive(Default)]
 struct Timing {
     pictures: u32,
@@ -322,8 +378,15 @@ thread_local! {
     static TIMING: std::cell::RefCell<Timing> = std::cell::RefCell::default();
 }
 
-/// A decoded NV12 sample as RGBA, cropped to the picture's size.
-fn picture(transform: &IMFTransform, sample: &IMFSample, unit: &AccessUnit) -> Result<Picture> {
+/// A decoded NV12 sample as RGBA, cropped to the picture's size: on the
+/// GPU while `frames` can (none: no slot free, the picture is skipped),
+/// else read back.
+fn picture(
+    transform: &IMFTransform,
+    sample: &IMFSample,
+    unit: &AccessUnit,
+    frames: &mut Option<DxvaFrames>,
+) -> Result<Option<Decoded>> {
     unsafe {
         let current = transform.GetOutputCurrentType(0)?;
         let size = current.GetUINT64(&MF_MT_FRAME_SIZE)?;
@@ -343,10 +406,37 @@ fn picture(transform: &IMFTransform, sample: &IMFSample, unit: &AccessUnit) -> R
             Ok(dxgi) => {
                 let mut texture: Option<ID3D11Texture2D> = None;
                 dxgi.GetResource(&ID3D11Texture2D::IID, &mut texture as *mut _ as *mut *mut _)?;
+                let texture = texture.context("a decoded surface without a texture")?;
+                if let Some(to_gpu) = frames {
+                    let converting = std::time::Instant::now();
+                    let colours = super::dxva_frames::input_colours(
+                        current.GetUINT32(&MF_MT_YUV_MATRIX).ok()
+                            == Some(MFVideoTransferMatrix_BT601.0 as u32),
+                        current.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).ok()
+                            == Some(MFNominalRange_0_255.0 as u32),
+                    );
+                    let converted = dxgi
+                        .GetSubresourceIndex()
+                        .map_err(anyhow::Error::from)
+                        .and_then(|slice| {
+                            to_gpu.convert(&texture, slice, (width, height), colours)
+                        });
+                    TIMING.with(|timing| timing.borrow_mut().convert += converting.elapsed());
+                    match converted {
+                        Ok(frame) => return Ok(frame.map(Decoded::Frame)),
+                        // This picture through the CPU; the next tries the
+                        // GPU again unless it keeps failing.
+                        Err(error) if !to_gpu.failing() => {
+                            isocast_diagnostics::diagnostic!("warn"; "video: a decoded picture goes through the CPU: {error:#}");
+                        }
+                        Err(error) => {
+                            isocast_diagnostics::diagnostic!("warn"; "video: decoded pictures go through the CPU from now on: {error:#}");
+                            *frames = None;
+                        }
+                    }
+                }
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
-                texture
-                    .context("a decoded surface without a texture")?
-                    .GetDesc(&mut desc);
+                texture.GetDesc(&mut desc);
                 desc.Height
             }
             Err(_) => coded_height,
@@ -377,7 +467,7 @@ fn picture(transform: &IMFTransform, sample: &IMFSample, unit: &AccessUnit) -> R
                 timing.lock += converting - locking;
                 timing.convert += converting.elapsed();
             });
-            return result;
+            return result.map(|pixels| Some(Decoded::Pixels(pixels)));
         }
         // A plain buffer: rows of the type's default stride (else the
         // width).
@@ -393,7 +483,7 @@ fn picture(transform: &IMFTransform, sample: &IMFSample, unit: &AccessUnit) -> R
         buffer.Lock(&mut at, None, Some(&mut length))?;
         let result = convert(at, pitch as usize, length as usize);
         let _ = buffer.Unlock();
-        result
+        result.map(|pixels| Some(Decoded::Pixels(pixels)))
     }
 }
 
@@ -439,13 +529,29 @@ fn nv12_to_rgba(luma: &[u8], chroma: &[u8], pitch: usize, width: u32, height: u3
     picture
 }
 
-/// Our own D3D11 device for DXVA, shared with Media Foundation.
-fn gpu() -> Result<(ID3D11Device, IMFDXGIDeviceManager)> {
+/// Our own D3D11 device for DXVA, shared with Media Foundation: on the
+/// window's adapter (`luid`) so its pictures can stay on the GPU, else the
+/// default one.
+fn gpu(luid: Option<(u32, i32)>) -> Result<(ID3D11Device, IMFDXGIDeviceManager)> {
     unsafe {
+        let adapter: Option<IDXGIAdapter> = match luid {
+            Some((low, high)) => Some(
+                CreateDXGIFactory1::<IDXGIFactory4>()?
+                    .EnumAdapterByLuid(LUID {
+                        LowPart: low,
+                        HighPart: high,
+                    })
+                    .context("the window's graphics adapter is gone")?,
+            ),
+            None => None,
+        };
         let mut device = None;
         D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
+            adapter.as_ref(),
+            match adapter {
+                Some(_) => D3D_DRIVER_TYPE_UNKNOWN,
+                None => D3D_DRIVER_TYPE_HARDWARE,
+            },
             HMODULE::default(),
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             None,

@@ -38,8 +38,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use isocast_protocol::api::shared::{Control, Event};
 use isocast_protocol::api::{Method, SharedFrameStream, SharedFramesParams};
-pub use isocast_surfaces::host_now;
-use isocast_surfaces::{Surface, Token};
+use isocast_surfaces::Token;
+pub use isocast_surfaces::{Surface, host_now};
 
 use crate::Client;
 
@@ -113,6 +113,14 @@ pub fn register_gpu(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<()> {
     Ok(())
 }
 
+/// The rendering device and queue [`register_gpu`] registered, if any: a
+/// [`LocalRing`]'s surfaces are made on that device, and its frames
+/// retired on that queue.
+#[cfg(all(windows, feature = "wgpu"))]
+pub fn rendering_gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+    RENDERING_GPU.get()?.lock().unwrap().clone()
+}
+
 impl Client {
     /// Watch a target's picture through surfaces shared with the daemon
     /// (`shared_frames`). Dropping the result stops watching.
@@ -160,6 +168,8 @@ struct Ring {
     surfaces: Vec<Surface>,
     #[cfg(feature = "wgpu")]
     textures: Mutex<Vec<Option<(wgpu::Device, wgpu::Texture)>>>,
+    /// What else the surfaces' pixels need kept (a decoder's buffer).
+    _keep: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl SharedFrames {
@@ -224,17 +234,18 @@ impl SharedFrames {
                         surfaces,
                         #[cfg(feature = "wgpu")]
                         textures,
+                        _keep: None,
                     }));
                 }
                 Event::Frame(frame) => {
                     let release = Release {
-                        writer: self.writer.clone(),
-                        generation: frame.generation,
+                        to: ReleaseTo::Daemon {
+                            writer: self.writer.clone(),
+                            generation: frame.generation,
+                        },
                         slot: frame.slot,
                         #[cfg(all(windows, feature = "wgpu"))]
-                        queue: RENDERING_GPU.get().and_then(|gpu| {
-                            gpu.lock().unwrap().as_ref().map(|(_, queue)| queue.clone())
-                        }),
+                        queue: registered_queue(),
                     };
                     let Some(ring) = self
                         .ring
@@ -353,6 +364,118 @@ fn send(writer: &Mutex<UnixStream>, control: &Control) -> Result<()> {
     result.context("lost the shared frame stream")
 }
 
+/// Surfaces this process fills itself (decoded video from another
+/// computer's engine), handed out as [`SharedFrame`]s so every preview
+/// path shows them as it shows the daemon's. Dropping a frame frees its
+/// slot (on Windows once the rendering queue is done reading it).
+pub struct LocalRing {
+    ring: Arc<Ring>,
+    slots: Arc<Slots>,
+}
+
+/// Which of a [`LocalRing`]'s slots are free, and whether the ring can't be
+/// used any more.
+struct Slots {
+    free: Mutex<Vec<bool>>,
+    /// Why a slot could not be handed back (the GPU never said it was done
+    /// reading it): the ring is unusable, and its producer must fall back
+    /// rather than wait for slots that never come.
+    poisoned: Mutex<Option<String>>,
+}
+
+impl Slots {
+    /// `slot`'s reads are over (`Ok`), or never will be known to be.
+    fn retired(&self, slot: usize, safe: Result<(), String>) {
+        match safe {
+            Ok(()) => {
+                if let Some(slot) = self.free.lock().unwrap().get_mut(slot) {
+                    *slot = true;
+                }
+            }
+            Err(why) => {
+                isocast_diagnostics::diagnostic!("warn";
+                    "decoded pictures: a surface could not be handed back ({why}); falling back");
+                self.poisoned.lock().unwrap().get_or_insert(why);
+            }
+        }
+    }
+}
+
+impl LocalRing {
+    pub fn new(surfaces: Vec<Surface>) -> Result<Self> {
+        Self::keeping(surfaces, None)
+    }
+
+    /// Surfaces whose pixels belong to `keep` too (a decoder's pixel
+    /// buffer, which its pool would otherwise reuse): kept until the last
+    /// frame is dropped.
+    pub fn keeping(
+        surfaces: Vec<Surface>,
+        keep: Option<Box<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<Self> {
+        let identity = next_ring_identity()?;
+        let slots = Arc::new(Slots {
+            free: Mutex::new(vec![true; surfaces.len()]),
+            poisoned: Mutex::new(None),
+        });
+        #[cfg(feature = "wgpu")]
+        let textures = Mutex::new(vec![None; surfaces.len()]);
+        Ok(Self {
+            ring: Arc::new(Ring {
+                identity,
+                generation: identity,
+                surfaces,
+                #[cfg(feature = "wgpu")]
+                textures,
+                _keep: keep,
+            }),
+            slots,
+        })
+    }
+
+    pub fn surfaces(&self) -> &[Surface] {
+        &self.ring.surfaces
+    }
+
+    /// A free slot to fill, now taken (none: every slot is still shown or
+    /// being read). An error once a slot could not be handed back (the GPU
+    /// stopped answering): the ring is done for, so fall back to another
+    /// way of showing pictures instead of waiting.
+    pub fn take(&self) -> Result<Option<u32>> {
+        if let Some(why) = self.slots.poisoned.lock().unwrap().as_ref() {
+            bail!("decoded pictures' surfaces can't be reused: {why}");
+        }
+        #[cfg(all(windows, feature = "wgpu"))]
+        if isocast_surfaces::retirement_failed() {
+            bail!("decoded pictures' surfaces can't be reused: the GPU stopped answering");
+        }
+        let mut free = self.slots.free.lock().unwrap();
+        let Some(slot) = free.iter().position(|free| *free) else {
+            return Ok(None);
+        };
+        free[slot] = false;
+        Ok(Some(slot as u32))
+    }
+
+    /// Slot `slot` (from [`Self::take`]), filled and finished on the GPU,
+    /// as a frame; dropping it frees the slot. Not filled after all: drop
+    /// the frame at once.
+    pub fn frame(&self, slot: u32, time: u64, revision: Option<u64>) -> SharedFrame {
+        SharedFrame {
+            ring: self.ring.clone(),
+            slot,
+            time,
+            revision,
+            _release: Release {
+                to: ReleaseTo::Local(self.slots.clone()),
+                slot,
+                #[cfg(all(windows, feature = "wgpu"))]
+                queue: registered_queue(),
+            },
+        }
+    }
+}
+
 fn next_ring_identity() -> Result<u64> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -360,48 +483,93 @@ fn next_ring_identity() -> Result<u64> {
         .map_err(|_| anyhow::anyhow!("shared image cache identity exhausted"))
 }
 
+#[cfg(all(windows, feature = "wgpu"))]
+fn registered_queue() -> Option<wgpu::Queue> {
+    RENDERING_GPU
+        .get()
+        .and_then(|gpu| gpu.lock().unwrap().as_ref().map(|(_, queue)| queue.clone()))
+}
+
 /// Hands a slot back when dropped.
 struct Release {
-    writer: Arc<Mutex<UnixStream>>,
-    generation: u64,
+    to: ReleaseTo,
     slot: u32,
     #[cfg(all(windows, feature = "wgpu"))]
     queue: Option<wgpu::Queue>,
 }
 
+/// Whose slot it is.
+enum ReleaseTo {
+    /// The daemon's ring: a release line on the stream.
+    Daemon {
+        writer: Arc<Mutex<UnixStream>>,
+        generation: u64,
+    },
+    /// A [`LocalRing`] of this process: the slot is marked free.
+    Local(Arc<Slots>),
+}
+
 impl Drop for Release {
     fn drop(&mut self) {
+        let (writer, generation) = match &self.to {
+            ReleaseTo::Daemon { writer, generation } => (writer.clone(), *generation),
+            ReleaseTo::Local(slots) => {
+                let slot = self.slot as usize;
+                // Free once the rendering queue's reads of it are done. A
+                // stalled or lost GPU never frees it (a picture in use is
+                // never overwritten): it poisons the ring instead, so the
+                // producer falls back rather than run out of slots.
+                #[cfg(all(windows, feature = "wgpu"))]
+                if let Some(queue) = &self.queue {
+                    let retired = slots.clone();
+                    if let Err(error) = isocast_surfaces::retire(
+                        queue,
+                        Box::new(move |safe| {
+                            retired.retired(
+                                slot,
+                                if safe {
+                                    Ok(())
+                                } else {
+                                    Err("the GPU didn't finish reading it".into())
+                                },
+                            )
+                        }),
+                    ) {
+                        slots.retired(slot, Err(format!("{error:#}")));
+                    }
+                    return;
+                }
+                slots.retired(slot, Ok(()));
+                return;
+            }
+        };
         let control = Control::Release {
-            generation: self.generation,
+            generation,
             slot: self.slot,
         };
         #[cfg(all(windows, feature = "wgpu"))]
         if let Some(queue) = &self.queue {
-            let writer = self.writer.clone();
+            let retired = writer.clone();
             if let Err(error) = isocast_surfaces::retire(
                 queue,
                 Box::new(move |safe| {
                     if safe {
-                        let _ = send(&writer, &control);
+                        let _ = send(&retired, &control);
                     } else {
-                        let _ = writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
+                        let _ = retired.lock().unwrap().shutdown(std::net::Shutdown::Both);
                     }
                 }),
             ) {
                 // Never release early on a stalled/lost GPU. The bounded ring
                 // stalls only this viewer; closing its stream retires the ring.
                 eprintln!("shared preview release: {error:#}");
-                let _ = self
-                    .writer
-                    .lock()
-                    .unwrap()
-                    .shutdown(std::net::Shutdown::Both);
+                let _ = writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
             }
             return;
         }
         // A frame never submitted to a GPU (or a Mac frame retained by the
         // existing presentation contract) can be returned directly.
-        let _ = send(&self.writer, &control);
+        let _ = send(&writer, &control);
     }
 }
 
@@ -426,12 +594,9 @@ impl SharedFrame {
     /// Windows dialog changes targets before replacing its displayed image.
     #[cfg(windows)]
     pub fn close_stream(&self) {
-        let _ = self
-            ._release
-            .writer
-            .lock()
-            .unwrap()
-            .shutdown(std::net::Shutdown::Both);
+        if let ReleaseTo::Daemon { writer, .. } = &self._release.to {
+            let _ = writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
+        }
     }
     /// The surface holding the picture.
     pub fn surface(&self) -> &Surface {
@@ -491,5 +656,51 @@ impl SharedFrame {
         )?;
         *cached = Some((device.clone(), texture.clone()));
         Ok(texture)
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_local_ring_hands_out_each_slot_once_until_its_frame_is_dropped() {
+        let surfaces = (0..2).map(|_| Surface::rgba(16, 16).unwrap()).collect();
+        let ring = LocalRing::new(surfaces).unwrap();
+        let first = ring.take().unwrap().unwrap();
+        let second = ring.take().unwrap().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(ring.take().unwrap(), None, "both slots are taken");
+        let frame = ring.frame(first, 1, Some(7));
+        assert_eq!((frame.width(), frame.revision), (16, Some(7)));
+        assert_eq!(ring.take().unwrap(), None, "a shown frame keeps its slot");
+        drop(frame);
+        assert_eq!(
+            ring.take().unwrap(),
+            Some(first),
+            "dropping the frame frees its slot"
+        );
+        // Frames of one ring share its cache identity, slot by slot.
+        let (a, b) = (ring.frame(first, 2, None), ring.frame(second, 3, None));
+        assert_eq!(a.cache_key().0, b.cache_key().0);
+        assert_ne!(a.cache_key().1, b.cache_key().1);
+    }
+
+    #[test]
+    fn a_slot_that_cant_be_retired_poisons_the_ring_instead_of_freezing_it() {
+        let surfaces = (0..2).map(|_| Surface::rgba(16, 16).unwrap()).collect();
+        let ring = LocalRing::new(surfaces).unwrap();
+        let slot = ring.take().unwrap().unwrap();
+        // What the GPU retirement's completion reports when the rendering
+        // queue's fence never completes (`isocast_surfaces::retire`).
+        ring.slots.retired(
+            slot as usize,
+            Err("preview GPU completion timed out".into()),
+        );
+        let error = ring.take().unwrap_err();
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        // Still an error with a slot free: the producer must fall back.
+        ring.slots.retired(slot as usize, Ok(()));
+        assert!(ring.take().is_err());
     }
 }

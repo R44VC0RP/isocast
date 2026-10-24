@@ -432,12 +432,10 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
         if crate::engine::is_local() {
             crate::update::start(&shell);
         }
-        // Another computer's engine sends stills, shown as images (R2).
-        let mode = if crate::engine::is_local() {
-            setup.mode
-        } else {
-            crate::preview::Mode::Image
-        };
+        // Another computer's engine's video decodes into surfaces the
+        // layers show as they show local frames (pictures that come as
+        // pixels are put in surfaces first).
+        let mode = setup.mode;
         let output = crate::preview::Output::new(&app, mode, &setup.device, setup.test_outline);
         match output {
             Ok(output) => {
@@ -461,7 +459,12 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
                             crate::preview::Role::Extra => 2,
                         };
                         let mut incoming = Some(incoming);
-                        if matches!(incoming, Some(crate::frames::Incoming::Still(_))) {
+                        let decoded = match &incoming {
+                            Some(crate::frames::Incoming::Still(_)) => true,
+                            Some(crate::frames::Incoming::Frame(_)) => !crate::engine::is_local(),
+                            _ => false,
+                        };
+                        if decoded {
                             let waiting = mailboxes[index]
                                 .lock()
                                 .unwrap()

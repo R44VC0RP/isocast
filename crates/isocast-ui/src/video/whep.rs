@@ -253,7 +253,10 @@ impl Source for WhepSource {
 }
 
 /// Sound packets str0m may hold back for reordering: 30 ms at the engine's
-/// 10 ms packets.
+/// 10 ms packets. Sound is scheduled from its packets' arrival
+/// (`network_time`), so a held-back packet reaches the queue up to 30 ms
+/// later than its schedule assumes; the playout margin (`sync::MARGIN`,
+/// 40 ms) absorbs that.
 const SOUND_HOLD_BACK: usize = 3;
 /// The most lost sound packets concealed at once (longer gaps start the
 /// queue again).
@@ -275,10 +278,11 @@ pub(crate) fn lost_between(last: u32, now: u32, packet: u32) -> u32 {
     if lost > MAX_CONCEALED { 0 } else { lost }
 }
 
-/// Room for a burst of the engine's packets while this thread is busy.
-/// Windows gives a UDP socket 64 KB, and a lost packet makes str0m wait
-/// for its retransmission (the sound stalls ~70 ms and the output runs
-/// short): on exon-desk one sound packet in ~1000 was lost that way.
+/// A 4 MB receive buffer on Windows: room for a burst of the engine's
+/// packets while this thread is busy (Windows gives a UDP socket 64 KB).
+/// It didn't change the ~1 in 1,000 sound packets lost on the way to
+/// exon-desk (concealed instead, see [`SOUND_HOLD_BACK`]); kept as cheap
+/// headroom.
 const RECEIVE_BUFFER: i32 = 4 << 20;
 
 #[cfg(windows)]

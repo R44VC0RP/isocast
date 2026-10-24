@@ -7,7 +7,9 @@
 //! A window on another computer's engine can't share GPU surfaces (the
 //! engine refuses `shared_frames` to network callers): it shows the
 //! engine's live H.264 video instead, decoded here in hardware
-//! (`crate::video`), each picture as an [`Incoming::Still`]. If this
+//! (`crate::video`): each picture an [`Incoming::Frame`] of this
+//! process's own surfaces where the decoder keeps it on the GPU, else an
+//! [`Incoming::Still`]. If this
 //! machine can't decode it, the engine's JPEG stills (`frame`), a few a
 //! second. A Linux window on its own engine does the same (no shared GPU
 //! surfaces there yet), without WebRTC: the engine plays its own sound.
@@ -237,6 +239,9 @@ pub struct Feed {
     /// Offer WebRTC again now, before the fallback's wait is over (the
     /// speaker was clicked).
     retry: Arc<std::sync::atomic::AtomicBool>,
+    /// Another computer's engine: the monitor shows decoded pictures'
+    /// surfaces in place (native layers), so they needn't come as pixels.
+    surfaces: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Feed {
@@ -260,6 +265,7 @@ impl Feed {
             control: Arc::default(),
             sound: Arc::default(),
             retry: Arc::default(),
+            surfaces: Arc::default(),
         };
         let thread_feed = feed.clone();
         thread::Builder::new()
@@ -283,6 +289,12 @@ impl Feed {
     /// computer's engine's program (from its next connection).
     pub fn set_sound(&self, on: bool) {
         self.sound.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the monitor takes decoded pictures as surfaces (see
+    /// [`crate::video::Decoder::decode`]); else pixels. Off at first.
+    pub fn set_surfaces(&self, on: bool) {
+        self.surfaces.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Offer WebRTC again now if the feed fell back to `frames`.
@@ -580,8 +592,14 @@ impl Feed {
                 Some(Intake::Unit(unit)) => {
                     let Some(sets) = &sets else { continue };
                     let started = Instant::now();
-                    let pixels = match decoder.decode(sets, &unit) {
-                        Ok(Some(pixels)) => pixels,
+                    let surfaces = self.surfaces.load(std::sync::atomic::Ordering::SeqCst);
+                    let decoded = decoder.decode(sets, &unit, surfaces);
+                    let skipped = decoder.take_skipped();
+                    if skipped > 0 {
+                        stats.skip(skipped);
+                    }
+                    let decoded = match decoded {
+                        Ok(Some(decoded)) => decoded,
                         Ok(None) => continue,
                         Err(error) if crate::video::no_decoder(&error) => return Err(error),
                         Err(error) => {
@@ -604,7 +622,12 @@ impl Feed {
                     });
                     if !said {
                         said = true;
-                        isocast_diagnostics::diagnostic!("info"; "video: {target} {}x{} (sent as {}x{}) decoded by {}", pixels.width(), pixels.height(), unit.width, unit.height, decoder.name());
+                        let (width, height) = decoded.size();
+                        let on = match decoded {
+                            crate::video::Decoded::Frame(_) => "shown from the GPU",
+                            crate::video::Decoded::Pixels(_) => "shown as pixels",
+                        };
+                        isocast_diagnostics::diagnostic!("info"; "video: {target} {width}x{height} (sent as {}x{}) decoded by {}, {on}", unit.width, unit.height, decoder.name());
                     }
                     stats.add(late, started.elapsed().as_secs_f64() * 1e3);
                     let revision = revisions
@@ -614,7 +637,15 @@ impl Feed {
                         .map(|(_, revision)| *revision);
                     *delay = Duration::from_millis(250);
                     *pictured = true;
-                    deliver(Incoming::Still(Still { pixels, revision }));
+                    deliver(match decoded {
+                        crate::video::Decoded::Frame(mut frame) => {
+                            frame.revision = revision;
+                            Incoming::Frame(frame)
+                        }
+                        crate::video::Decoded::Pixels(pixels) => {
+                            Incoming::Still(Still { pixels, revision })
+                        }
+                    });
                 }
             }
         }

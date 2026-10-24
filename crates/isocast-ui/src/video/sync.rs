@@ -23,6 +23,10 @@ const ON_TIME: f64 = 0.005;
 /// The most one late packet may raise the delay above what the streams'
 /// smallest transits ask for; a packet later than that (after a stall)
 /// is too late to wait for, and the delay above it falls at once.
+/// Because the base itself covers the sound's slowest recent arrival
+/// (`JITTER_WINDOW`), and that can be up to `MAX_RISE` above the fastest,
+/// the effective delay can reach about 2 × `MAX_RISE` above the fastest
+/// transit after a stall: bounded, and gone within 15 s.
 pub const MAX_RISE: f64 = 0.200;
 /// How fast the delay may fall, in seconds per second.
 const FALL: f64 = 0.01;

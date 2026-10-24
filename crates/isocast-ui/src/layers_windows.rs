@@ -272,6 +272,11 @@ impl Layers {
     pub fn available(&self) -> bool {
         !self.failed
     }
+    /// Stop the native pictures for good: the window's monitors show Slint
+    /// images from now on (decoded pictures' surfaces can't be reused).
+    pub fn give_up(&mut self, error: anyhow::Error) {
+        self.fail(error);
+    }
     pub fn device(&self) -> wgpu::Device {
         self.composition.gpu.device.clone()
     }

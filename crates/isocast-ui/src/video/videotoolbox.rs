@@ -1,12 +1,16 @@
 //! VideoToolbox: H.264 access units to RGBA pictures, decoded on the media
 //! engine, synchronously (one picture in, one out: the `frames` stream has
-//! no reordered pictures).
+//! no reordered pictures). Pictures are BGRA IOSurfaces: the window's
+//! layers show them in place (as their contents, as they show the local
+//! engine's frames); a monitor that isn't layers gets them copied out as
+//! RGBA pixels.
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use isocast_client::shared::{LocalRing, Surface};
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer,
@@ -14,9 +18,10 @@ use objc2_core_media::{
 };
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
-    CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
-    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelBufferPixelFormatTypeKey,
-    kCVPixelFormatType_32BGRA,
+    CVPixelBufferGetHeight, CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType,
+    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA,
 };
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
@@ -104,13 +109,19 @@ impl VideoToolbox {
             .filter(|_| status == 0)
             .ok_or_else(|| anyhow!("VideoToolbox refused the stream's SPS/PPS (error {status})"))?;
         let format = unsafe { CFRetained::from_raw(format) };
-        // BGRA: VideoToolbox converts from 4:2:0 on the GPU, with the
-        // colours the stream says.
-        let bgra = CFNumber::new_i32(kCVPixelFormatType_32BGRA as i32);
+        // BGRA IOSurfaces (VideoToolbox gives no RGBA: error -6680):
+        // VideoToolbox converts from 4:2:0 on the GPU, with the colours the
+        // stream says.
+        let pixels = CFNumber::new_i32(kCVPixelFormatType_32BGRA as i32);
+        let surface: CFRetained<CFDictionary<CFString, CFType>> =
+            CFDictionary::from_slices(&[], &[]);
         let attributes = unsafe {
             CFDictionary::<CFString, CFType>::from_slices(
-                &[kCVPixelBufferPixelFormatTypeKey],
-                &[&*bgra],
+                &[
+                    kCVPixelBufferPixelFormatTypeKey,
+                    kCVPixelBufferIOSurfacePropertiesKey,
+                ],
+                &[&*pixels, surface.as_ref()],
             )
         };
         let decoded = Box::new(Mutex::new(Decoded::default()));
@@ -146,7 +157,12 @@ impl Decoder for VideoToolbox {
         "VideoToolbox".into()
     }
 
-    fn decode(&mut self, sets: &ParameterSets, unit: &AccessUnit) -> Result<Option<Picture>> {
+    fn decode(
+        &mut self,
+        sets: &ParameterSets,
+        unit: &AccessUnit,
+        surfaces: bool,
+    ) -> Result<Option<super::Decoded>> {
         if self.session.as_ref().is_none_or(|s| s.sets != *sets) {
             if !unit.keyframe {
                 return Ok(None);
@@ -172,7 +188,22 @@ impl Decoder for VideoToolbox {
             self.session = None;
             bail!("VideoToolbox could not decode a picture (error {error})");
         }
-        picture.map(|picture| rgba(&picture)).transpose()
+        let Some(picture) = picture else {
+            return Ok(None);
+        };
+        if surfaces && let Some(surface) = CVPixelBufferGetIOSurface(Some(&picture)) {
+            // One surface per picture (the decoder's pool cycles a few),
+            // its buffer kept until the window is done with it.
+            let ring = LocalRing::keeping(
+                vec![Surface::from_io_surface(surface)],
+                Some(Box::new(Keep(picture))),
+            )
+            .context("could not hand over a decoded picture")?;
+            let slot = ring.take()?.context("a new ring without a slot")?;
+            let frame = ring.frame(slot, isocast_client::shared::host_now(), None);
+            return Ok(Some(super::Decoded::Frame(frame)));
+        }
+        rgba(&picture).map(|pixels| Some(super::Decoded::Pixels(pixels)))
     }
 }
 
@@ -232,8 +263,18 @@ fn sample(format: &CMFormatDescription, data: &[u8]) -> Result<CFRetained<CMSamp
     Ok(unsafe { CFRetained::from_raw(sample) })
 }
 
-/// A BGRA pixel buffer's picture as RGBA.
+/// A decoded picture's buffer, kept while the window shows its surface (the
+/// decoder's pool would otherwise reuse it).
+struct Keep(#[expect(dead_code, reason = "held, never read")] CFRetained<CVPixelBuffer>);
+
+// SAFETY: Core Video buffers are reference counted atomically; this one is
+// only held, never touched.
+unsafe impl Send for Keep {}
+unsafe impl Sync for Keep {}
+
+/// A BGRA or RGBA pixel buffer's picture as RGBA.
 fn rgba(buffer: &CVPixelBuffer) -> Result<Picture> {
+    let bgra = CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA;
     let read_only = CVPixelBufferLockFlags(1);
     if unsafe { CVPixelBufferLockBaseAddress(buffer, read_only) } != 0 {
         bail!("could not read a decoded picture");
@@ -258,7 +299,10 @@ fn rgba(buffer: &CVPixelBuffer) -> Result<Picture> {
                 .iter_mut()
                 .zip(row.as_chunks::<4>().0)
             {
-                *d = [s[2], s[1], s[0], 255];
+                *d = match bgra {
+                    true => [s[2], s[1], s[0], 255],
+                    false => [s[0], s[1], s[2], 255],
+                };
             }
         }
         Ok(picture)

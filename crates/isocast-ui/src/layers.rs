@@ -425,6 +425,8 @@ impl Layers {
         // and tagged BT.709 (as the
         // engine's H.264 monitor stream is) the window server applies the
         // video transfer curve and darkens it (#1f3a4a showed as #122f41).
+        // Another computer's engine's decoded pictures too (VideoToolbox's
+        // BT.709 tag is replaced), so remote and local windows match.
         if let Some(space) = &self.srgb
             && self.tagged.insert(frame.slot())
         {

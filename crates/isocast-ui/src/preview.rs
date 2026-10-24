@@ -308,6 +308,10 @@ pub struct Preview {
     last_rows: Option<u64>,
     repeat_run: u64,
     pub stats: Stats,
+    /// Another computer's engine's pictures that came as pixels, into
+    /// surfaces for the layers.
+    #[cfg(any(windows, target_os = "macos"))]
+    uploads: crate::video::uploads::Uploads,
 }
 
 /// `size` scaled down to at most `max` wide, keeping its aspect (the height
@@ -351,6 +355,11 @@ impl Preview {
         fps: u32,
         check: bool,
     ) -> Self {
+        feed.set_surfaces(match &output {
+            #[cfg(any(target_os = "macos", windows))]
+            Output::Layers(_) => true,
+            Output::Image(_) => false,
+        });
         let preview = Self {
             app: app.as_weak(),
             role,
@@ -379,6 +388,8 @@ impl Preview {
             last_rows: None,
             repeat_run: 0,
             stats: Stats::default(),
+            #[cfg(any(windows, target_os = "macos"))]
+            uploads: Default::default(),
         };
         preview.set_waiting(app, true, "");
         preview
@@ -503,10 +514,7 @@ impl Preview {
         // Another computer's engine: keep the last picture under the
         // window's Reconnecting overlay (which says what's wrong) until
         // video comes back. With none yet, say why on the monitor.
-        if !crate::engine::is_local()
-            && matches!(self.output, Output::Image(_))
-            && self.still.is_some()
-        {
+        if !crate::engine::is_local() && (self.still.is_some() || self.showing.is_some()) {
             self.stats.last_lost = Some(why);
             return;
         }
@@ -615,15 +623,41 @@ impl Preview {
         self.put(&app, None, rect);
     }
 
-    /// A still from another computer's engine (R2's interim previews): in
-    /// the monitor's image, with the box at the layout it was drawn from.
-    /// Remote windows show pictures as images (`Mode::Image`).
+    /// A still from another computer's engine (R2's interim previews, or
+    /// video decoded to pixels): in the monitor's image, with the box at
+    /// the layout it was drawn from; in the layers as a frame.
     pub fn still(&mut self, still: crate::frames::Still) {
+        #[cfg(any(windows, target_os = "macos"))]
+        if !self.shows_images() {
+            match self.uploads.frame(&still.pixels, still.revision) {
+                Ok(Some(frame)) => return self.frame(frame),
+                Ok(None) => {
+                    self.stats.received += 1;
+                    return;
+                }
+                // Windows: the surfaces can't be reused (the GPU stopped
+                // answering), so the monitors show Slint images from now
+                // on, this picture first, rather than freeze.
+                #[cfg(windows)]
+                Err(error) => {
+                    if let Output::Layers(layers) = &self.output {
+                        layers.borrow_mut().give_up(error);
+                    }
+                    self.feed.set_surfaces(false);
+                }
+                #[cfg(target_os = "macos")]
+                Err(error) => {
+                    self.stats.received += 1;
+                    isocast_diagnostics::diagnostic!("warn"; "preview: can't show a picture: {error:#}");
+                    return;
+                }
+            }
+        }
         self.stats.received += 1;
         let Some(app) = self.app.upgrade() else {
             return;
         };
-        if !matches!(self.output, Output::Image(_)) {
+        if !self.shows_images() {
             return;
         }
         let canvas = app.global::<CanvasArea>();
@@ -644,6 +678,18 @@ impl Preview {
         let now = crate::clock::now();
         if let Some(last) = self.last_shown_at.replace(now) {
             self.stats.longest_gap = self.stats.longest_gap.max(now - last);
+        }
+    }
+
+    /// Whether pictures go in Slint images (not native layers, or Windows
+    /// layers that fell back).
+    fn shows_images(&self) -> bool {
+        match &self.output {
+            Output::Image(_) => true,
+            #[cfg(windows)]
+            Output::Layers(layers) => !layers.borrow().available(),
+            #[cfg(target_os = "macos")]
+            Output::Layers(_) => false,
         }
     }
 

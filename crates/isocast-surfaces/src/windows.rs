@@ -226,6 +226,13 @@ impl Surface {
         u32::from_le_bytes(self.0.name.0[..4].try_into().unwrap())
     }
 
+    /// The allocation's NT handle, to open it on another graphics API of
+    /// this process (D3D11's `OpenSharedResource1`). Valid while `self`
+    /// lives; don't close it.
+    pub fn shared_handle(&self) -> HANDLE {
+        *self.0.handle.0
+    }
+
     #[cfg(feature = "wgpu")]
     pub fn rgba_on(device: &wgpu::Device, width: u32, height: u32) -> Result<Self> {
         let budget = Budget::new(width, height)?;
