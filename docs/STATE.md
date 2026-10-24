@@ -48,6 +48,13 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   file (`/proc/self/fd/N`). Without it, H.264
   recording/streaming are refused naming the fix, the app shows stills, `doctor` reports a problem. CI
   installs the same pinned file (cached); `package-linux.sh` refuses binaries with OpenH264 compiled in.
+- **Linux .deb packages (2026-10-24):** `scripts/package-deb.sh BIN_DIR ubuntu24.04|debian12` builds
+  `isocast_<ver>-1~<distro>_<arch>.deb` (/usr/bin isocast, isocastd, isocast-ui and the per-user
+  `isocast-openh264-install`, which is packaging/linux/install.sh run under that name; docs and Cisco's licence
+  in /usr/share/doc/isocast; no maintainer scripts, no OpenH264). Ubuntu 24.04 debs reuse the tarball's
+  binaries; Debian 12 needs its own build in `debian:12` (24.04 builds need glibc 2.38; bookworm has 2.36) and
+  PipeWire >= 1.0.5 from bookworm-backports. Depends = dpkg-shlibdeps plus the dlopen'd Vulkan, Wayland, X11
+  and xkbcommon libraries. CI (`deb-*` jobs in windows.yml) lints them and installs them on clean machines.
 - **Linux streaming and monitoring (2026-10-24), experimental/unreleased:** RTMP streams use OpenH264 with
   its own CBR padding (`ENCODER_PADDING_PADDING`: filler data holds the rate) and in-place `set_rate` through
   `SetOption` (no IDR; never above the creation bitrate, which the wrapper pins as the layer maximum), plus libxaac AAC-LC (`audio::StreamEncoder`). Monitoring plays through a PipeWire

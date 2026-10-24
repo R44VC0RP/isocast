@@ -86,7 +86,7 @@ fn shared_frames(_options: shared_frames::Options) -> Result<ExitCode> {
                   saves a picture of the program, `isocast start --seconds 10` records a test, \
                   and `isocast status` shows how it went. Agents: `isocast mcp`.",
                   "Getting started: `isocast permissions` reports Windows access, `isocast setup init --apply` makes a setup from this PC's devices, `isocast frame` saves a picture of the program, `isocast start --seconds 10` records a test, and `isocast status` shows how it went. Windows Camera and Microphone settings must allow desktop apps; the recording engine is isocastd.exe. Agents: `isocast mcp`.",
-"Getting started: `isocast permissions` reports what can be captured, `isocast setup init --apply` makes a setup from this computer's devices, `isocast frame` saves a picture of the program, `isocast start --seconds 10` records a test, and `isocast status` shows how it went. Windows Camera and Microphone settings must allow desktop apps; the recording engine is isocastd.exe. Agents: `isocast mcp`.")
+"Getting started: `isocast permissions` reports what can be captured, `isocast setup init --apply` makes a setup from this computer's devices, `isocast frame` saves a picture of the program, `isocast start --seconds 10` records a test, and `isocast status` shows how it went. Agents: `isocast mcp`.")
 )]
 struct Cli {
     /// Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE.
