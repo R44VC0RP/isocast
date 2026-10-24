@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use isocast_protocol::{CanvasId, Setup};
+use isocast_protocol::{CanvasId, Codec, Setup};
 use serde_json::{Map, Value, json};
 use slint::{ComponentHandle, SharedString};
 
@@ -15,7 +15,7 @@ use super::items;
 use super::preview::SourcePreview;
 use crate::app::App;
 use crate::form::schema::{self, humanize};
-use crate::form::{self, Context, FormEvent, FormModel, Outcome, Target};
+use crate::form::{self, Context, FormEvent, FormModel, Group, Outcome, Row, Target};
 use crate::kit::{self, model};
 use crate::model as setup_model;
 use crate::session::EditOptions;
@@ -173,6 +173,78 @@ fn kind_has_video(kind: &str) -> bool {
         kind,
         "microphone" | "system_audio" | "application_audio" | "tone"
     )
+}
+
+/// Properties' row for a video source's own ISO file depth
+/// (`encoder.bit_depth`), which isn't one of its kind's fields.
+const ISO_DEPTH: &str = "@iso_depth";
+
+/// The ISO Colour Depth row: follow Settings → Recording's Screen / ISO
+/// Colour Depth, or
+/// the source's own 8 or 10. 10 is offered where its file and capture can
+/// have it (kept, with a warning, if it is set where they can't). None
+/// for ProRes ISO files, always 10-bit, unless the source has its own.
+fn iso_depth_group(
+    kind: &str,
+    setup: Option<&Setup>,
+    value: &Map<String, Value>,
+    lane: bool,
+) -> Option<Group> {
+    let own = value
+        .get("encoder")
+        .and_then(|encoder| encoder["bit_depth"].as_u64());
+    let iso = setup.map(|setup| &setup.recording.iso.encoder);
+    let codec = iso.map_or(Codec::Hevc, |encoder| encoder.codec);
+    if !matches!(codec, Codec::Hevc | Codec::H264) && own.is_none() {
+        return None;
+    }
+    let screen = matches!(kind, "display" | "window" | "application");
+    let no_ten = if codec == Codec::H264 {
+        Some("H.264 ISO files are 8-bit only; choose HEVC in Settings → Recording for 10-bit.")
+    } else if screen && !crate::areas::settings::engine_is_mac() {
+        Some("This engine captures screens in 8 bits only.")
+    } else {
+        None
+    };
+    let follows = if matches!(codec, Codec::H264 | Codec::Hevc) {
+        iso.map_or(8, |encoder| encoder.depth())
+    } else {
+        10 // ProRes files are always 10-bit.
+    };
+    let mut options = vec![
+        (
+            String::new(),
+            "Follow Recording Settings".to_string(),
+            format!("{follows}-bit"),
+        ),
+        ("8".into(), "8-bit".into(), "Smaller files".into()),
+    ];
+    if no_ten.is_none() || own == Some(10) {
+        options.push(("10".into(), "10-bit".into(), "Smoother gradients".into()));
+    }
+    Some(Group {
+        row: Row {
+            key: ISO_DEPTH.into(),
+            label: "ISO Colour Depth".into(),
+            kind: "choice",
+            value: own.map(|depth| depth.to_string()).unwrap_or_default(),
+            options,
+            hint: format!(
+                "Applies when this source records an ISO file. {}",
+                no_ten.unwrap_or(
+                    "10-bit gives smoother gradients, takes more CPU and makes screen files \
+                     about 40% larger.",
+                )
+            ),
+            hint_warn: no_ten.is_some() && own == Some(10),
+            tooltip: "This source’s ISO file depth, over Screen / ISO Colour Depth in Settings → \
+                      Recording."
+                .into(),
+            lane,
+            ..Row::default()
+        },
+        children: Vec::new(),
+    })
 }
 
 fn kind_has_audio(source: &Value) -> bool {
@@ -758,7 +830,11 @@ impl Dialogs {
             refreshing: self.refreshing.get(),
             typing: self.props_typing.get(),
         };
-        let groups = form::build(&ctx, &fields, &value);
+        let mut groups = form::build(&ctx, &fields, &value);
+        if kind_has_video(&kind) {
+            let lane = groups.iter().any(|group| group.row.lane);
+            groups.extend(iso_depth_group(&kind, ctx.setup, &value, lane));
+        }
         area.set_preview_format(source_format(running).into());
         let failed = running
             .filter(|r| r.state == isocast_protocol::api::SourceRun::Failed)
@@ -893,10 +969,12 @@ impl Dialogs {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        // Its own ISO file depth goes back to following the recording's.
         let optional: Vec<String> = form::fields("Source", &kind)
             .into_iter()
             .filter(|f| f.optional)
             .map(|f| f.name)
+            .chain(["encoder".to_string()])
             .collect();
         if let Some(pending) = self.pending.borrow_mut().as_mut() {
             pending.draft.retain(|k, _| !optional.contains(k));
@@ -956,6 +1034,19 @@ impl Dialogs {
     ) {
         if let FormEvent::Refresh = event {
             self.refresh_devices(app, window);
+            return;
+        }
+        if form_id == "props" && key == ISO_DEPTH {
+            if let FormEvent::Choose(chosen) = event {
+                let mut changes = Map::new();
+                let own = chosen.parse::<u8>().ok();
+                changes.insert(
+                    "encoder".into(),
+                    own.map_or(Value::Null, |depth| json!({ "bit_depth": depth })),
+                );
+                self.props_change(app, changes, None);
+                self.reshow(app, window, form_id);
+            }
             return;
         }
         let (fields, value, kind, typing) = match form_id {

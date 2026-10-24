@@ -2,15 +2,20 @@ name: Windows
 
 on:
   push:
-    # This lane publishes snapshots only here. Add main after qualification.
-    branches: ['ci/**']
+    # ci/<lane>: candidates published by scripts/ci.sh before they merge.
+    # main: catches a break that merged anyway, and saves the Rust caches
+    # every lane restores (GitHub scopes caches to a branch, and only the
+    # default branch's are readable from every other one).
+    branches: [main, 'ci/**']
 
 permissions:
   contents: read
 
 concurrency:
   group: windows-${{ github.ref }}
-  cancel-in-progress: true
+  # Per branch, so lanes never cancel each other; a lane's newer candidate
+  # cancels its older run, main's never.
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/ci/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,7 +50,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: windows-portable
-          save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --all --check
@@ -133,7 +138,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           key: linux-server
-          save-if: ${{ github.ref == 'refs/heads/ci/linux-server' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build daemon and CLI
         run: cargo build --release --locked -p isocast-daemon -p isocast-cli
@@ -207,7 +212,7 @@ jobs:
         with:
           key: windows-engine
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Qualification build identity
         run: |
@@ -226,18 +231,24 @@ jobs:
         timeout-minutes: 30
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
 
-      # Slint compiles the whole interface into one generated Rust module;
-      # rustc needs 13.6 GiB for it (15.1 GiB committed), measured on
-      # exon-desk, and run 39135916369 died with `rustc-LLVM ERROR: out of
-      # memory` on this 16 GB runner with the bin and its test binary side by
-      # side. So the UI builds in its own step: one rustc at a time (-j 1),
-      # and without the kit gallery (build.rs ISOCAST_UI_NO_GALLERY: the
+      # Slint compiles the whole interface into one generated Rust module
+      # (the isocast-ui-interface crate, built once and shared by the app
+      # and its tests); rustc needs 13.6 GiB for it (15.1 GiB committed),
+      # measured on exon-desk, and run 39135916369 died with `rustc-LLVM
+      # ERROR: out of memory` on this 16 GB runner when the module was
+      # still compiled into the bin and its test binary side by side. So the
+      # UI builds in its own step: one rustc at a time (-j 1), and without
+      # the kit gallery (isocast-ui-interface/build.rs ISOCAST_UI_NO_GALLERY: the
       # `--state kit` design board, a quarter of the module), which brings
       # each rustc to 10.8 GiB (12.2 committed). The gallery's .slint is not
       # compiled here; macOS CI and the exon-desk qualification build it.
+      # The same packages as the updater tests below, so Cargo resolves the
+      # same features and `cargo test` reuses this build (with only
+      # `-p isocast-ui` here, the tests rebuilt the dependencies and the
+      # interface: 9.5 min, run 39947489790).
       - name: Build UI and its test binary (do not run)
         id: native_build
-        run: cargo build --locked --all-targets -j 1 -p isocast-ui
+        run: cargo build --locked --all-targets -j 1 -p isocast-client -p isocast-cli -p isocast-ui
 
       - name: Check updater clients
         run: |
@@ -388,7 +399,11 @@ jobs:
       - name: Build second update candidate
         run: |
           export ISOCAST_WINDOWS_BUILD_VERSION="$ISOCAST_WINDOWS_BASE_VERSION.2"
-          cargo build --locked -j 1 -p isocast-ui
+          # The UI build's package set (same features), so the dependencies
+          # and the interface are reused. The version change reruns
+          # isocast-client's build script (it reads ISOCAST_WINDOWS_BUILD_VERSION),
+          # so isocast-client and the app recompile and isocast.exe relinks.
+          cargo build --locked -j 1 -p isocast-client -p isocast-cli -p isocast-ui
 
       - name: Package second update candidate
         shell: pwsh

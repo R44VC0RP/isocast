@@ -90,7 +90,7 @@ How the vertical program is recorded, in `recording.folder` alongside the main p
 
 | Field | Type | Description |
 |---|---|---|
-| `bit_depth` | integer | 8 or 10. 10-bit HEVC uses the Main 10 profile and captures displays in 10 bits, which avoids banding in gradients. ProRes is always 10-bit; H.264 can only be 8-bit. The incredible HEVC preset promotes 8 to 10, including the display capture format. Default `8`. Max 255. |
+| `bit_depth` | integer | 8 or 10. 10-bit HEVC uses the Main 10 profile, which avoids banding in gradients. ProRes is always 10-bit; H.264 can only be 8-bit. The incredible HEVC preset promotes 8 to 10. Default `8`. Max 255. |
 | `codec` (required) | [Codec](#codec) | |
 | `container` | [Container](#container) |  Default `"mov"`. |
 | `quality` | [EncoderQuality](#encoderquality) | A named quality preset, or the original 1–100 constant quality. Ignored by ProRes, which is constant quality. Default `"high"`. |
@@ -329,7 +329,7 @@ One of:
 | Field | Type | Description |
 |---|---|---|
 | `folder` (required) | string | Folder recordings are written to. `~` expands to the home folder. |
-| `iso` | [IsoRecording](#isorecording) | Separate recordings of individual sources. Default `{"enabled": false, "encoder": {"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}, "filename": "{SOURCE}-{date} {time}", "sources": []}`. |
+| `iso` | [IsoRecording](#isorecording) | Separate recordings of individual sources. Default `{"enabled": false, "encoder": {"codec": "hevc", "container": "mov", "quality": "high"}, "filename": "{SOURCE}-{date} {time}", "sources": []}`. |
 | `keep_free_gb` | number | Free space, in GB, a recording never uses: it won't start without room for its estimated size plus this, and it stops cleanly, finishing every file, when free space falls below it (or below about 10 s of its files, at least 64 MB, if that is more). Default `1.0`. |
 | `open_editor` | boolean | Retired with the editor (2026-10-22): read and ignored, so setups that set it still load; never written. |
 | `program` (required) | [ProgramRecording](#programrecording) | The composited program recording. |
@@ -343,11 +343,22 @@ ISO ("isolated") recording: each listed source is written to its own file at its
 |---|---|---|
 | `audio` | list of string (optional) | Audio sources written into every ISO file without a list of its own in `source_audio`. Omitted: each ISO uses its own source's sound. An explicit list (including []) preserves the chosen shared routing. A source's audio.iso can override its own sound. |
 | `enabled` | boolean |  Default `false`. |
-| `encoder` | [Encoder](#encoder) |  Default `{"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}`. |
+| `encoder` | [IsoEncoder](#isoencoder) |  Default `{"codec": "hevc", "container": "mov", "quality": "high"}`. |
 | `filename` | string | File name without extension. Tokens: {SOURCE} (upper-case id), {source}, {date}, {time}. Default `"{SOURCE}-{date} {time}"`. |
 | `filtered` | boolean | Record sources with filters as filtered (as the program shows them) rather than as captured, and audio with its audio filters (all but sidechain ducking). Keyed-out areas come out black, since the files have no transparency. |
 | `source_audio` | map of list of string | Audio sources for one ISO file, by its video source's id, instead of `audio`: `{ camera = ["mic"], screen = ["desktop"] }`. An empty list records that file without audio. Sources not listed follow `audio`; a source's audio.iso still adds or drops its own sound. |
 | `sources` | list of string | Video sources to record separately. Default `[]`. |
+
+## IsoEncoder
+
+The ISO files' encoder: [`Encoder`]'s fields, but `bit_depth` can be left out (it then stays out when saved).
+
+| Field | Type | Description |
+|---|---|---|
+| `bit_depth` | integer (optional) | 8 or 10, for every ISO file without a depth of its own (a source's `encoder.bit_depth`). 10-bit HEVC uses the Main 10 profile, which avoids banding in gradients, and captures displays, windows and applications in 10 bits, at more encoder work and bigger files. ProRes is always 10-bit; H.264 can only be 8-bit. A set 8 stays 8 even at the incredible preset. Left out: 8, but 10 at incredible HEVC. Max 255. |
+| `codec` (required) | [Codec](#codec) | |
+| `container` | [Container](#container) |  Default `"mov"`. |
+| `quality` | [EncoderQuality](#encoderquality) | A named quality preset, or the original 1–100 constant quality. Ignored by ProRes, which is constant quality. Default `"high"`. |
 
 ## ProgramRecording
 
@@ -866,6 +877,7 @@ One input. `id` is the stable machine identifier; `name` is a label.
 |---|---|---|
 | `audio` | [AudioSettings](#audiosettings) | For audio sources: the program mix and sync settings. |
 | `audio_filters` | list of [AudioFilter](#audiofilter) | For audio sources: filters run on the sound, in order, before the program mix (ISO files keep it as captured unless `recording.iso.filtered`). |
+| `encoder` | [SourceEncoder](#sourceencoder) | For video sources: how its own ISO file is encoded, over `recording.iso.encoder`. Left out, it follows the recording settings. |
 | `filters` | list of [Filter](#filter) | For video sources: effect filters run on the picture, in order, wherever it is shown (ISO files keep it as captured). |
 | `id` (required) | string | Stable identifier, lowercase letters, digits and dashes. |
 | `name` | string (optional) | Display label. Defaults to the id. |
@@ -1031,6 +1043,14 @@ Turns the lows, mids and highs up or down (OBS's 3-Band Equalizer). The bands me
 | `high_db` | number | −20 to 20 dB above 4 kHz. Default `0.0`. |
 | `low_db` | number | −20 to 20 dB below 250 Hz. Default `0.0`. |
 | `mid_db` | number | −20 to 20 dB from 250 Hz to 4 kHz. Default `0.0`. |
+
+## SourceEncoder
+
+A video source's own ISO file encoding, over `recording.iso.encoder`.
+
+| Field | Type | Description |
+|---|---|---|
+| `bit_depth` | integer (optional) | 8 or 10: this source's ISO file depth, over `recording.iso.encoder.bit_depth` (an 8 here stays 8 even at the incredible preset). 10-bit HEVC uses the Main 10 profile, which avoids banding in gradients, at more encoder work and bigger files; a display, window or application is then also captured in 10 bits. Needs a 10-bit ISO codec (HEVC; ProRes is always 10-bit). Left out, the file follows the recording settings. Max 255. |
 
 ## Filter
 

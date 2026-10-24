@@ -451,6 +451,7 @@ fn source(id: &str, name: &str, kind: SourceKind) -> Source {
         audio: AudioSettings::default(),
         filters: Vec::new(),
         audio_filters: Vec::new(),
+        encoder: SourceEncoder::default(),
         unknown: UnknownFields::new(),
     }
 }

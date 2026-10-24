@@ -875,6 +875,11 @@ pub struct Source {
     /// `recording.iso.filtered`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_filters: Vec<AudioFilter>,
+    /// For video sources: how its own ISO file is encoded, over
+    /// `recording.iso.encoder`. Left out, it follows the recording
+    /// settings.
+    #[serde(default, skip_serializing_if = "SourceEncoder::is_default")]
+    pub encoder: SourceEncoder,
     /// Fields its kind doesn't have, kept for validation to report.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -884,7 +889,36 @@ pub struct Source {
 fields::keep_unknown_fields!(Source, kind, SourceKind);
 
 /// The fields every source has, besides its kind's.
-const SOURCE_FIELDS: &[&str] = &["id", "name", "kind", "audio", "filters", "audio_filters"];
+const SOURCE_FIELDS: &[&str] = &[
+    "id",
+    "name",
+    "kind",
+    "audio",
+    "filters",
+    "audio_filters",
+    "encoder",
+];
+
+/// A video source's own ISO file encoding, over `recording.iso.encoder`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceEncoder {
+    /// 8 or 10: this source's ISO file depth, over
+    /// `recording.iso.encoder.bit_depth` (an 8 here stays 8 even at the
+    /// incredible preset). 10-bit HEVC uses the Main 10 profile, which
+    /// avoids banding in gradients, at more encoder work and bigger files;
+    /// a display, window or application is then also captured in 10 bits.
+    /// Needs a 10-bit ISO codec (HEVC; ProRes is always 10-bit). Left out,
+    /// the file follows the recording settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_depth: Option<u8>,
+}
+
+impl SourceEncoder {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
 
 /// How an audio source sounds in the program mix, and its sync offset.
 /// ISO files keep the source's audio as captured, only shifted by the
@@ -1681,7 +1715,7 @@ pub struct IsoRecording {
     #[serde(default = "default_iso_filename")]
     pub filename: String,
     #[serde(default)]
-    pub encoder: Encoder,
+    pub encoder: IsoEncoder,
     /// Audio sources written into every ISO file without a list of its
     /// own in `source_audio`. Omitted: each ISO uses its own source's
     /// sound. An explicit list (including []) preserves the chosen shared
@@ -1708,7 +1742,7 @@ impl Default for IsoRecording {
             enabled: false,
             sources: Vec::new(),
             filename: default_iso_filename(),
-            encoder: Encoder::default(),
+            encoder: IsoEncoder::default(),
             audio: None,
             source_audio: BTreeMap::new(),
             filtered: false,
@@ -1717,6 +1751,34 @@ impl Default for IsoRecording {
 }
 
 impl IsoRecording {
+    /// The depth of `source`'s ISO file: the source's own
+    /// `encoder.bit_depth` if set, else the ISO encoder's
+    /// ([`IsoEncoder::depth`]).
+    pub fn bit_depth_for(&self, source: &Source) -> u8 {
+        source.encoder.bit_depth.unwrap_or(self.encoder.depth())
+    }
+
+    /// The encoder `source`'s ISO file is written with: `encoder`, at the
+    /// depth [`IsoRecording::bit_depth_for`] gives it.
+    pub fn encoder_for(&self, source: &Source) -> Encoder {
+        self.encoder.at_depth(self.bit_depth_for(source))
+    }
+
+    /// Whether screen `source` opens its capture in 10 bits. With a depth
+    /// of its own, only while it records a 10-bit ISO file; without one,
+    /// while ISO recording is enabled and its encoder's depth is 10
+    /// (every screen).
+    pub fn captures_ten_bit(&self, source: &Source) -> bool {
+        match source.encoder.bit_depth {
+            Some(_) => {
+                self.enabled
+                    && self.sources.contains(&source.id)
+                    && self.encoder_for(source).bit_depth == 10
+            }
+            None => self.enabled && self.encoder.depth() == 10,
+        }
+    }
+
     /// Effective tracks for one file. `has_audio` comes from the opened
     /// source, since a media file or browser can have no audio stream.
     pub fn audio_for(&self, source: &Source, has_audio: bool) -> Vec<String> {
@@ -1772,12 +1834,82 @@ pub struct Encoder {
     pub quality: EncoderQuality,
     #[serde(default)]
     pub container: Container,
-    /// 8 or 10. 10-bit HEVC uses the Main 10 profile and captures displays
-    /// in 10 bits, which avoids banding in gradients. ProRes is always
-    /// 10-bit; H.264 can only be 8-bit. The incredible HEVC preset promotes
-    /// 8 to 10, including the display capture format.
+    /// 8 or 10. 10-bit HEVC uses the Main 10 profile, which avoids banding
+    /// in gradients. ProRes is always 10-bit; H.264 can only be 8-bit. The
+    /// incredible HEVC preset promotes 8 to 10.
     #[serde(default = "default_bit_depth")]
     pub bit_depth: u8,
+}
+
+/// The ISO files' encoder: [`Encoder`]'s fields, but `bit_depth` can be
+/// left out (it then stays out when saved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IsoEncoder {
+    pub codec: Codec,
+    /// A named quality preset, or the original 1–100 constant quality.
+    /// Ignored by ProRes, which is constant quality.
+    #[serde(default = "default_quality")]
+    pub quality: EncoderQuality,
+    #[serde(default)]
+    pub container: Container,
+    /// 8 or 10, for every ISO file without a depth of its own (a source's
+    /// `encoder.bit_depth`). 10-bit HEVC uses the Main 10 profile, which
+    /// avoids banding in gradients, and captures displays, windows and
+    /// applications in 10 bits, at more encoder work and bigger files.
+    /// ProRes is always 10-bit; H.264 can only be 8-bit. A set 8 stays 8
+    /// even at the incredible preset. Left out: 8, but 10 at incredible
+    /// HEVC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_depth: Option<u8>,
+}
+
+impl Default for IsoEncoder {
+    fn default() -> Self {
+        Self {
+            codec: Codec::Hevc,
+            quality: default_quality(),
+            container: Container::default(),
+            bit_depth: None,
+        }
+    }
+}
+
+impl IsoEncoder {
+    /// The depth of an ISO file without one of its own: `bit_depth` if
+    /// set (8 stays 8 at the incredible preset); left out, 8, but 10 for
+    /// HEVC at the incredible preset.
+    pub fn depth(&self) -> u8 {
+        match self.bit_depth {
+            Some(depth) => depth,
+            None if self.codec == Codec::Hevc
+                && self.quality == EncoderQuality::Preset(QualityPreset::Incredible) =>
+            {
+                10
+            }
+            None => default_bit_depth(),
+        }
+    }
+
+    /// This encoder as a writer takes it, at `bit_depth`. An 8-bit HEVC
+    /// file at the incredible preset gets its number (100), which the
+    /// writer doesn't promote to 10 bits.
+    pub fn at_depth(&self, bit_depth: u8) -> Encoder {
+        let quality = match self.quality {
+            EncoderQuality::Preset(QualityPreset::Incredible)
+                if self.codec == Codec::Hevc && bit_depth == 8 =>
+            {
+                EncoderQuality::Value(self.quality.value())
+            }
+            quality => quality,
+        };
+        Encoder {
+            codec: self.codec,
+            quality,
+            container: self.container,
+            bit_depth,
+        }
+    }
 }
 
 impl Serialize for Encoder {
@@ -2259,6 +2391,7 @@ impl Setup {
                 audio: AudioSettings::default(),
                 filters: Vec::new(),
                 audio_filters: Vec::new(),
+                encoder: SourceEncoder::default(),
                 unknown: UnknownFields::new(),
             });
         }
@@ -2651,6 +2784,34 @@ impl Setup {
                 source.kind.fields(),
                 SOURCE_FIELDS,
             );
+            if let Some(depth) = source.encoder.bit_depth {
+                let path = format!("sources[{i}].encoder.bit_depth");
+                let codec = self.recording.iso.encoder.codec;
+                if !source.kind.has_video() {
+                    issues.add(
+                        format!("sources[{i}].encoder"),
+                        format!(
+                            "only video sources have an ISO file to encode, and this is a {} \
+                             source; remove encoder",
+                            source.kind.label()
+                        ),
+                    );
+                } else if !matches!(depth, 8 | 10) {
+                    issues.add(
+                        path,
+                        format!(
+                            "{depth} is not supported; use 8 or 10, or leave it out to follow \
+                             recording.iso.encoder.bit_depth"
+                        ),
+                    );
+                } else if depth == 10 && codec == Codec::H264 {
+                    issues.add(
+                        path,
+                        "h264 can only be 8-bit here; set recording.iso.encoder.codec to hevc \
+                         (or a prores codec) for a 10-bit ISO file, or use 8",
+                    );
+                }
+            }
             if !source.filters.is_empty() && !source.kind.has_video() {
                 issues.add(
                     format!("sources[{i}].filters"),
@@ -2890,23 +3051,40 @@ impl Setup {
                 format!("{} must be a number of GB from 0 up", rec.keep_free_gb),
             );
         }
-        for (path, encoder) in [
-            ("recording.program.encoder", &rec.program.encoder),
-            ("recording.iso.encoder", &rec.iso.encoder),
+        let iso = &rec.iso.encoder;
+        for (path, codec, container, quality, bit_depth) in [
+            (
+                "recording.program.encoder",
+                rec.program.encoder.codec,
+                rec.program.encoder.container,
+                rec.program.encoder.quality,
+                Some(rec.program.encoder.bit_depth),
+            ),
+            (
+                "recording.iso.encoder",
+                iso.codec,
+                iso.container,
+                iso.quality,
+                iso.bit_depth,
+            ),
         ] {
-            if let Some(problem) = encoder.codec.container_problem(encoder.container) {
+            if let Some(problem) = codec.container_problem(container) {
                 issues.add(format!("{path}.container"), problem);
             }
-            if !(1..=100).contains(&encoder.quality.value()) {
+            if !(1..=100).contains(&quality.value()) {
                 issues.add(
                     format!("{path}.quality"),
                     format!(
                         "{} is out of range; use 1–100 or low, medium, high, very_high, incredible",
-                        encoder.quality.value()
+                        quality.value()
                     ),
                 );
             }
-            match (encoder.bit_depth, encoder.codec) {
+            // Left out (ISO files only), the engine picks a valid depth.
+            let Some(bit_depth) = bit_depth else {
+                continue;
+            };
+            match (bit_depth, codec) {
                 (8, _) | (10, Codec::Hevc) => {}
                 (10, Codec::H264) => issues.add(
                     format!("{path}.bit_depth"),
@@ -3508,6 +3686,7 @@ fn is_valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn json_errors_name_their_path() {
@@ -3891,5 +4070,275 @@ iso = { enabled = false, encoder = { codec = "hevc", quality = 70 } }
             .collect();
         assert_eq!(order, ["inner", "top"]);
         assert_eq!(top.video_sources(&setup.scenes), ["y", "x"]);
+    }
+
+    /// A display, a window, a camera and a keyed display, all ISO
+    /// sources, and a tone, with `encoder` as the ISO encoder and
+    /// `screen` as the display's own `encoder` (if any).
+    fn iso_setup(encoder: &str, screen: &str) -> Setup {
+        Setup::from_toml(&format!(
+            r##"
+version = 1
+name = "t"
+canvas = {{ width = 1920, height = 1080, fps = 30 }}
+
+[[sources]]
+id = "screen"
+kind = "display"
+display = "main"
+{screen}
+
+[[sources]]
+id = "window"
+kind = "window"
+app = "Safari"
+
+[[sources]]
+id = "camera"
+kind = "camera"
+device = "Cam"
+
+[[sources]]
+id = "keyed"
+kind = "display"
+display = "main"
+filters = [{{ kind = "chroma_key" }}]
+
+[[sources]]
+id = "beep"
+kind = "tone"
+
+[[scenes]]
+id = "main"
+items = [{{ source = "screen", rect = {{ x = 0, y = 0, width = 1920, height = 1080 }} }}]
+
+[recording]
+folder = "."
+program = {{ encoder = {{ codec = "hevc", quality = 70 }} }}
+iso = {{ enabled = true, sources = ["screen", "window", "camera", "keyed"], encoder = {encoder} }}
+"##
+        ))
+        .unwrap()
+    }
+
+    /// Each ISO source's file depth.
+    fn iso_depths(setup: &Setup) -> Vec<(&str, u8)> {
+        let iso = &setup.recording.iso;
+        iso.sources
+            .iter()
+            .map(|id| {
+                let source = setup.source(id).unwrap();
+                (id.as_str(), iso.encoder_for(source).bit_depth)
+            })
+            .collect()
+    }
+
+    /// Which screens capture in 10 bits.
+    fn ten_bit_captures(setup: &Setup) -> Vec<&str> {
+        ["screen", "window", "keyed"]
+            .into_iter()
+            .filter(|id| {
+                let source = setup.source(id).unwrap();
+                setup.recording.iso.captures_ten_bit(source)
+            })
+            .collect()
+    }
+
+    /// Saved and read back through JSON (the API) and TOML.
+    fn round_trips(setup: &Setup) -> serde_json::Value {
+        let json = serde_json::to_value(setup).unwrap();
+        assert_eq!(&Setup::from_value(json.clone()).unwrap(), setup);
+        assert_eq!(&Setup::from_toml(&setup.to_toml().unwrap()).unwrap(), setup);
+        json
+    }
+
+    #[test]
+    fn iso_files_are_eight_bit_unless_set() {
+        let setup = iso_setup(r#"{ codec = "hevc" }"#, "");
+        assert_eq!(setup.validate(), Vec::new());
+        // Left out, it stays out, and so does every source's own.
+        let json = round_trips(&setup);
+        assert_eq!(json["recording"]["iso"]["encoder"].get("bit_depth"), None);
+        assert_eq!(json["recording"]["program"]["encoder"]["bit_depth"], 8);
+        assert!(
+            json["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s.get("encoder").is_none())
+        );
+        // Every file is 8-bit, on every platform (nothing asks one), and
+        // no screen captures 10 bits.
+        assert_eq!(
+            iso_depths(&setup),
+            [("screen", 8), ("window", 8), ("camera", 8), ("keyed", 8)]
+        );
+        assert!(ten_bit_captures(&setup).is_empty());
+        for codec in ["h264", "prores422"] {
+            let other = iso_setup(&format!(r#"{{ codec = "{codec}" }}"#), "");
+            assert_eq!(other.validate(), Vec::new(), "{codec}");
+            assert!(iso_depths(&other).iter().all(|(_, d)| *d == 8), "{codec}");
+        }
+        // Left out at the incredible HEVC preset: 10 bits, as before.
+        let incredible = iso_setup(r#"{ codec = "hevc", quality = "incredible" }"#, "");
+        assert!(iso_depths(&incredible).iter().all(|(_, d)| *d == 10));
+        assert_eq!(ten_bit_captures(&incredible), ["screen", "window", "keyed"]);
+        assert_eq!(
+            round_trips(&incredible)["recording"]["iso"]["encoder"].get("bit_depth"),
+            None
+        );
+    }
+
+    #[test]
+    fn saved_iso_depths_keep_their_meaning() {
+        for depth in [8u8, 10] {
+            let setup = iso_setup(&format!(r#"{{ codec = "hevc", bit_depth = {depth} }}"#), "");
+            assert_eq!(setup.validate(), Vec::new());
+            let json = round_trips(&setup);
+            assert_eq!(json["recording"]["iso"]["encoder"]["bit_depth"], depth);
+            // Every ISO file, cameras too, keeps the saved depth. Screen
+            // capture uses it only while ISO recording is enabled.
+            assert!(iso_depths(&setup).iter().all(|(_, d)| *d == depth));
+            let mut program_only = setup.clone();
+            program_only.recording.iso.enabled = false;
+            assert!(ten_bit_captures(&program_only).is_empty());
+            assert_eq!(
+                round_trips(&program_only)["recording"]["iso"]["encoder"]["bit_depth"],
+                depth
+            );
+            let expected: &[&str] = if depth == 10 {
+                &["screen", "window", "keyed"]
+            } else {
+                &[]
+            };
+            program_only.recording.iso.enabled = true;
+            assert_eq!(ten_bit_captures(&program_only), expected);
+            // The program's encoder is its own.
+            assert_eq!(setup.recording.program.encoder.bit_depth, 8);
+        }
+        // A set 8 stays 8 at the incredible preset: its files are written
+        // at quality 100, which the writer doesn't promote, no screen
+        // captures 10 bits, and the setup keeps the preset's name and 8.
+        let incredible = iso_setup(
+            r#"{ codec = "hevc", quality = "incredible", bit_depth = 8 }"#,
+            "",
+        );
+        assert_eq!(incredible.validate(), Vec::new());
+        assert_eq!(incredible.recording.iso.encoder.bit_depth, Some(8));
+        assert!(iso_depths(&incredible).iter().all(|(_, d)| *d == 8));
+        let camera = incredible
+            .recording
+            .iso
+            .encoder_for(incredible.source("camera").unwrap());
+        assert_eq!(camera.quality, EncoderQuality::Value(100));
+        assert_eq!(camera.effective_bit_depth(), 8);
+        assert!(ten_bit_captures(&incredible).is_empty());
+        let json = round_trips(&incredible);
+        assert_eq!(json["recording"]["iso"]["encoder"]["quality"], "incredible");
+        assert_eq!(json["recording"]["iso"]["encoder"]["bit_depth"], 8);
+        // A set 10 there is 10.
+        let ten = iso_setup(
+            r#"{ codec = "hevc", quality = "incredible", bit_depth = 10 }"#,
+            "",
+        );
+        assert!(iso_depths(&ten).iter().all(|(_, d)| *d == 10));
+    }
+
+    #[test]
+    fn a_source_depth_beats_the_iso_encoders() {
+        // Its own 8 under a set 10: only that file and capture are 8.
+        let setup = iso_setup(
+            r#"{ codec = "hevc", bit_depth = 10 }"#,
+            "encoder = { bit_depth = 8 }",
+        );
+        assert_eq!(setup.validate(), Vec::new());
+        let json = round_trips(&setup);
+        assert_eq!(json["sources"][0]["encoder"], json!({ "bit_depth": 8 }));
+        assert_eq!(json["sources"][1].get("encoder"), None);
+        assert_eq!(
+            iso_depths(&setup),
+            [("screen", 8), ("window", 10), ("camera", 10), ("keyed", 10)]
+        );
+        assert_eq!(ten_bit_captures(&setup), ["window", "keyed"]);
+        // Its own 10 over the 8 left out: only that file and capture.
+        let setup = iso_setup(r#"{ codec = "hevc" }"#, "encoder = { bit_depth = 10 }");
+        assert_eq!(setup.validate(), Vec::new());
+        assert_eq!(
+            round_trips(&setup)["recording"]["iso"]["encoder"].get("bit_depth"),
+            None
+        );
+        assert_eq!(
+            iso_depths(&setup),
+            [("screen", 10), ("window", 8), ("camera", 8), ("keyed", 8)]
+        );
+        assert_eq!(ten_bit_captures(&setup), ["screen"]);
+        // Without its ISO file, it captures for the program in 8 bits.
+        let mut program_only = setup.clone();
+        program_only.recording.iso.enabled = false;
+        assert!(ten_bit_captures(&program_only).is_empty());
+        let mut others = setup.clone();
+        others.recording.iso.sources.retain(|id| id != "screen");
+        assert!(ten_bit_captures(&others).is_empty());
+        // Its own 8 holds at the incredible preset: quality 100, which the
+        // writer doesn't promote; the others stay 10.
+        let setup = iso_setup(
+            r#"{ codec = "hevc", quality = "incredible" }"#,
+            "encoder = { bit_depth = 8 }",
+        );
+        let screen = setup
+            .recording
+            .iso
+            .encoder_for(setup.source("screen").unwrap());
+        assert_eq!(screen.bit_depth, 8);
+        assert_eq!(screen.quality, EncoderQuality::Value(100));
+        assert_eq!(screen.effective_bit_depth(), 8);
+        let camera = setup
+            .recording
+            .iso
+            .encoder_for(setup.source("camera").unwrap());
+        assert_eq!(camera.effective_bit_depth(), 10);
+        assert_eq!(
+            camera.quality,
+            EncoderQuality::Preset(QualityPreset::Incredible)
+        );
+    }
+
+    #[test]
+    fn source_depths_are_checked() {
+        let paths = |setup: &Setup| -> Vec<String> {
+            setup.validate().into_iter().map(|i| i.path).collect()
+        };
+        let odd = iso_setup(r#"{ codec = "hevc" }"#, "encoder = { bit_depth = 12 }");
+        assert_eq!(paths(&odd), ["sources.screen.encoder.bit_depth"]);
+        assert!(odd.validate()[0].message.contains("use 8 or 10"));
+        let h264 = iso_setup(r#"{ codec = "h264" }"#, "encoder = { bit_depth = 10 }");
+        assert_eq!(paths(&h264), ["sources.screen.encoder.bit_depth"]);
+        let message = &h264.validate()[0].message;
+        assert!(message.contains("can only be 8-bit"));
+        assert!(message.contains("hevc") && message.contains("prores"));
+        let h264 = iso_setup(r#"{ codec = "h264" }"#, "encoder = { bit_depth = 8 }");
+        assert_eq!(paths(&h264), Vec::<String>::new());
+        let prores = iso_setup(r#"{ codec = "prores422" }"#, "encoder = { bit_depth = 10 }");
+        assert_eq!(paths(&prores), Vec::<String>::new());
+        let global = iso_setup(r#"{ codec = "hevc", bit_depth = 12 }"#, "");
+        assert_eq!(paths(&global), ["recording.iso.encoder.bit_depth"]);
+        assert!(global.validate()[0].message.contains("use 8 or 10"));
+        let global = iso_setup(r#"{ codec = "h264", bit_depth = 10 }"#, "");
+        assert_eq!(paths(&global), ["recording.iso.encoder.bit_depth"]);
+        assert!(global.validate()[0].message.contains("can only be 8-bit"));
+        // A sound has no ISO picture to encode.
+        let mut value = serde_json::to_value(iso_setup(r#"{ codec = "hevc" }"#, "")).unwrap();
+        value["sources"][4]["encoder"] = json!({ "bit_depth": 8 });
+        assert_eq!(
+            paths(&Setup::from_value(value.clone()).unwrap()),
+            ["sources.beep.encoder"]
+        );
+        // Misspelt, it doesn't load.
+        value["sources"][4]
+            .as_object_mut()
+            .unwrap()
+            .remove("encoder");
+        value["sources"][0]["encoder"] = json!({ "depth": 10 });
+        assert!(Setup::from_value(value).is_err());
     }
 }

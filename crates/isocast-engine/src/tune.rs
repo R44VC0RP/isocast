@@ -13,7 +13,7 @@ use isocast_protocol::api::{Candidate, Capacity, SkippedSource, TunedStream, Tun
 use isocast_protocol::change::merge_patch;
 use isocast_protocol::platform_text::MACHINE;
 use isocast_protocol::{
-    CanvasId, Codec, Encoder, EncoderQuality, PROGRAM, QualityPreset, Setup, SourceKind,
+    CanvasId, Codec, Encoder, EncoderQuality, IsoEncoder, PROGRAM, QualityPreset, Setup, SourceKind,
 };
 use serde_json::{Value, json};
 
@@ -278,6 +278,9 @@ fn setup_loads<P: Platform>(
                 continue;
             }
         };
+        let Some(source) = setup.source(id) else {
+            continue;
+        };
         loads.push(Load {
             stream: TunedStream {
                 source: id.clone(),
@@ -286,7 +289,7 @@ fn setup_loads<P: Platform>(
                 fps,
             },
             input: (width, height),
-            encoder: iso.encoder.clone(),
+            encoder: iso.encoder_for(source),
         });
     }
     // The program shares the encoders, drawn at the canvas size.
@@ -397,6 +400,8 @@ fn changes(setup: &Setup) -> Vec<Change> {
     let mut quality = Vec::new();
     {
         let iso_used = recording.iso.enabled && !recording.iso.sources.is_empty();
+        // Only its codec and quality matter here, not a file's depth.
+        let iso_encoder = recording.iso.encoder.at_depth(8);
         let mut patch = serde_json::Map::new();
         let mut names = Vec::new();
         for (key, used, encoder) in [
@@ -405,7 +410,7 @@ fn changes(setup: &Setup) -> Vec<Change> {
                 recording.program.enabled,
                 &recording.program.encoder,
             ),
-            ("iso", iso_used, &recording.iso.encoder),
+            ("iso", iso_used, &iso_encoder),
         ] {
             if let Some(lower) = lower_quality(encoder).filter(|_| used) {
                 let value = serde_json::to_value(lower).unwrap_or(Value::Null);
@@ -614,7 +619,7 @@ impl<P: Platform> Tuner<'_, P> {
         let setup = self.setup;
         let disk_before = space::write_speed(folder)?;
         self.free = self.platform.volume(folder)?.free_bytes;
-        let current = setup.recording.iso.encoder.clone();
+        let current = own_iso_encoder(setup);
         let programs: Vec<String> = setup
             .canvas_ids()
             .into_iter()
@@ -622,21 +627,49 @@ impl<P: Platform> Tuner<'_, P> {
             .collect();
         let program = |source: &str| programs.iter().any(|p| p == source);
         let has_iso = loads.iter().any(|l| !program(&l.stream.source));
+        // Each ISO file has its own depth (a source's own may differ):
+        // the setup's own files are benchmarked as they are, and
+        // `current` names them only if they all share it.
+        let uniform = loads
+            .iter()
+            .filter(|l| !program(&l.stream.source))
+            .all(|l| l.encoder == current);
         let encoders = if has_iso {
-            iso_encoders(&current)
+            iso_encoders(&current, uniform)
         } else {
             // Without ISO files, the ISO encoder makes no difference.
             vec![current.clone()]
         };
-        let with = |encoder: &Encoder| -> Vec<Load> {
+        // A candidate is the ISO encoder its change sets: every ISO file at
+        // its codec and depth, but a source's own depth stays (the change
+        // keeps it). H.264 can't take a source's own 10, so it isn't a
+        // choice then.
+        let with = |encoder: &Encoder| -> Result<Vec<Load>> {
             loads
                 .iter()
-                .map(|load| match load.stream.source.as_str() {
-                    source if program(source) => load.clone(),
-                    _ => Load {
-                        encoder: encoder.clone(),
-                        ..load.clone()
-                    },
+                .map(|load| -> Result<Load> {
+                    match load.stream.source.as_str() {
+                        source if program(source) => Ok(load.clone()),
+                        id => {
+                            let own = setup.source(id).and_then(|s| s.encoder.bit_depth);
+                            if own == Some(10) && encoder.codec == Codec::H264 {
+                                bail!(
+                                    "sources.{id}.encoder.bit_depth is 10, which h264 can't \
+                                     record; set it to 8 or leave it out to consider h264"
+                                );
+                            }
+                            let file = IsoEncoder {
+                                codec: encoder.codec,
+                                quality: setup.recording.iso.encoder.quality,
+                                container: encoder.container,
+                                bit_depth: None,
+                            };
+                            Ok(Load {
+                                encoder: file.at_depth(own.unwrap_or(encoder.bit_depth)),
+                                ..load.clone()
+                            })
+                        }
+                    }
                 })
                 .collect()
         };
@@ -644,9 +677,18 @@ impl<P: Platform> Tuner<'_, P> {
         // Benchmark first, then judge every result against the same disk
         // reading.
         let mut results = Vec::new();
-        for encoder in encoders {
-            let loads = with(&encoder);
-            let result = self.measure(&loads);
+        for (i, encoder) in encoders.into_iter().enumerate() {
+            let (loads, result) = match i {
+                0 => (loads.to_vec(), self.measure(loads)),
+                _ => match with(&encoder) {
+                    Ok(loads) => {
+                        let result = self.measure(&loads);
+                        (loads, result)
+                    }
+                    // Not a choice; its reason says why.
+                    Err(err) => (loads.to_vec(), Err(err)),
+                },
+            };
             results.push((encoder, loads, result));
         }
         // A burst test reads low while something else writes to the disk
@@ -822,6 +864,7 @@ impl<P: Platform> Tuner<'_, P> {
             }
         }
 
+        // Sources' own depths stay as they are (they were benchmarked so).
         let iso_change = |encoder: &Encoder| {
             json!({ "recording": { "iso": { "encoder": {
                 "codec": encoder.codec,
@@ -857,7 +900,7 @@ impl<P: Platform> Tuner<'_, P> {
                 let changed: Setup =
                     Setup::from_value(merge_patch(&serde_json::to_value(setup)?, &v.change))?;
                 (
-                    Some(changed.recording.iso.encoder),
+                    Some(own_iso_encoder(&changed)),
                     format!(
                         "{} ({:.2}× real time{margin})",
                         v.description, v.realtime_factor
@@ -954,19 +997,31 @@ impl<P: Platform> Tuner<'_, P> {
     }
 }
 
+/// The ISO encoder tune names `setup`'s files by: its first ISO source's
+/// (which may have a depth of its own), else the ISO encoder at its depth.
+fn own_iso_encoder(setup: &Setup) -> Encoder {
+    let iso = &setup.recording.iso;
+    match iso.sources.iter().find_map(|id| setup.source(id)) {
+        Some(source) if iso.enabled => iso.encoder_for(source),
+        _ => iso.encoder.at_depth(iso.encoder.depth()),
+    }
+}
+
 /// The ISO encoders benchmarked: the setup's, then HEVC 8 and 10-bit,
-/// H.264 and ProRes, each once.
-fn iso_encoders(current: &Encoder) -> Vec<Encoder> {
+/// H.264 and ProRes, each once, each set for every ISO file. `uniform`:
+/// every ISO file of the setup is at `current`, so another the same isn't
+/// benchmarked again.
+fn iso_encoders(current: &Encoder, uniform: bool) -> Vec<Encoder> {
     let with = |codec, bit_depth| {
-        let mut encoder = Encoder {
+        IsoEncoder {
             codec,
-            bit_depth,
-            ..current.clone()
-        };
-        encoder.bit_depth = encoder.effective_bit_depth();
-        encoder
+            quality: current.quality,
+            container: current.container,
+            bit_depth: Some(bit_depth),
+        }
+        .at_depth(bit_depth)
     };
-    let mut encoders = vec![
+    let encoders = [
         current.clone(),
         with(Codec::Hevc, 8),
         with(Codec::Hevc, 10),
@@ -975,15 +1030,22 @@ fn iso_encoders(current: &Encoder) -> Vec<Encoder> {
         with(Codec::Prores422Hq, 8),
     ];
     let mut seen = Vec::new();
-    encoders.retain(|e| {
-        // ProRes ignores bit_depth: it always keeps 10 bits or more.
-        let prores = !matches!(e.codec, Codec::H264 | Codec::Hevc);
-        let key = (e.codec, if prores { 0 } else { e.bit_depth });
-        let new = !seen.contains(&key);
-        seen.push(key);
-        new
-    });
     encoders
+        .into_iter()
+        .enumerate()
+        .filter(|(i, e)| {
+            if *i == 0 && !uniform {
+                return true;
+            }
+            // ProRes ignores bit_depth: it always keeps 10 bits or more.
+            let prores = !matches!(e.codec, Codec::H264 | Codec::Hevc);
+            let key = (e.codec, if prores { 0 } else { e.bit_depth });
+            let new = !seen.contains(&key);
+            seen.push(key);
+            new
+        })
+        .map(|(_, e)| e)
+        .collect()
 }
 
 /// Encode every file's video at once, as fast as the encoders take frames.

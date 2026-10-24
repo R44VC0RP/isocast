@@ -109,13 +109,85 @@ quality 70 used previously.
 | `medium` | 50 | Configured depth |
 | `high` (default) | 70 | Configured depth |
 | `very_high` | 85 | Configured depth |
-| `incredible` | 100 | 10-bit Main 10 |
+| `incredible` | 100 | 10-bit Main 10 (ISO: only with `bit_depth` left out) |
 
 These are constant-quality settings: resolution and frame rate stay the
-same, and busy pictures use more space. `incredible` promotes HEVC
-`bit_depth = 8` to 10 in the setup before capture opens. Returning to a lower
+same, and busy pictures use more space. For the program, `incredible`
+promotes HEVC `bit_depth = 8` to 10 in the setup. Returning to a lower
 preset keeps that explicit 10-bit setting; set `bit_depth = 8` to return to
-8-bit. Numeric quality remains the manual option and never changes depth.
+8-bit. ISO files at `incredible` are 10-bit only while
+`recording.iso.encoder.bit_depth` is left out; a set 8 stays 8 (written at
+quality 100). Numeric quality remains the manual option and never changes
+depth.
+
+## Colour depth (8 or 10 bits)
+
+ISO files are **8-bit by default on every platform**: smaller files and less
+encoder work. 10-bit HEVC (Main 10) retains more gradient detail and reduces
+banding: on a base M2 at 4K, about 4.5–5 points more of one core and files
+about 40% larger on real screen content. Choose it in two places, both the
+same setup fields the CLI and MCP change:
+
+| Where | Field | Values |
+|---|---|---|
+| Settings → Recording → ISO Recording → **Screen / ISO Colour Depth** | `recording.iso.encoder.bit_depth` | `8`, `10`; left out is 8 (10 at `incredible` HEVC) |
+| A video source's Properties → **ISO Colour Depth** | `sources[].encoder.bit_depth` | `8`, `10`; left out follows the row above ("Follow Recording Settings") |
+
+`recording.iso.encoder.bit_depth` is every ISO file's depth, cameras and
+media included, unless a source sets its own; while ISO recording is enabled,
+a set 10 also captures every display, window and application in 10 bits.
+With ISO recording disabled, screens capture in 8 bits without changing the saved depth.
+A source's own depth beats it either way (its 8 under a set 10, its 10
+under the default 8, its 8 or 10 at `incredible`), and a screen with its own
+10 captures 10 bits only when ISO recording is enabled and it is selected. Use a source's own
+10 to get 10-bit screens without making camera files bigger. Cameras keep
+their device's native capture format whatever the depth; a 10-bit file
+can't restore precision an 8-bit camera never delivered.
+
+Both are checked when the setup changes: 8 or 10 only; 10 needs HEVC or
+ProRes (`h264` can only be 8-bit); `encoder` only on a video source. Screens
+are captured in 10 bits only on macOS: the Windows engine refuses a 10-bit
+screen capture when the source opens rather than recording 8 bits, so the
+app offers 10-bit only where it works. No platform automatically promotes
+screen files: a setup that leaves depth out records 8 bits (10 at `incredible` HEVC).
+Setups saved before have `bit_depth = 8` (or 10) set and keep it: a set
+depth always wins, 8 at `incredible` included.
+
+The same change through the CLI or MCP (`plan_change`, then
+`apply_change` with the same `patch`):
+
+```sh
+# Every ISO file 10-bit (Settings → Recording → Screen / ISO Colour Depth):
+isocast plan --patch '{"recording":{"iso":{"encoder":{"bit_depth":10}}}}' --json
+isocast apply --revision N --patch '{"recording":{"iso":{"encoder":{"bit_depth":10}}}}' --json
+# Only the screen source "screen" 10-bit (its Properties → ISO Colour Depth):
+isocast apply --revision N --patch '{"sources":[{"id":"screen","encoder":{"bit_depth":10}}]}' --json
+# Back to following the recording settings:
+isocast apply --revision N --patch '{"sources":[{"id":"screen","encoder":null}]}' --json
+# Back to the default 8 for every file:
+isocast apply --revision N --patch '{"recording":{"iso":{"encoder":{"bit_depth":8}}}}' --json
+```
+
+In a setup file:
+
+```toml
+[[sources]]
+id = "screen"
+kind = "display"
+display = "main"
+encoder = { bit_depth = 10 }
+```
+
+A depth change applies to the next recording. While idle, a screen whose
+capture depth changes reopens (only that screen); a recording keeps its
+captures and its files' depths until it stops, splits included. `tune`,
+`capacity`, `doctor` and the disk check count each file at its own depth.
+`tune` measures each codec candidate with the sources' own depths kept,
+and its change sets only `recording.iso.encoder`, leaving them; H.264 is
+not a candidate while an ISO source has its own 10 (the reason names it).
+The program compositor and filtered ISO stage currently produce 8-bit
+pictures; Main 10 doesn't turn that processing into native 10-bit precision.
+As-captured screen ISOs can retain 10-bit detail end to end.
 
 For example, this preserves the old encoder configuration exactly:
 
@@ -123,22 +195,12 @@ For example, this preserves the old encoder configuration exactly:
 encoder = { codec = "hevc", quality = 70, bit_depth = 8 }
 ```
 
-And the same change through the shared engine API:
+And a quality change through the shared engine API:
 
 ```sh
 isocast plan --patch '{"recording":{"iso":{"encoder":{"quality":"incredible"}}}}' --json
 isocast apply --revision N --patch '{"recording":{"iso":{"encoder":{"quality":"incredible"}}}}' --json
 ```
-
-Encoder changes apply to the next recording. A screen's native capture depth
-currently follows the **ISO** encoder and is chosen when its capture opens;
-a program-only depth change does not select the capture format. A running
-engine keeps an already-open screen's capture format across encoder edits.
-Restart the engine while
-idle to open that screen in the new depth. Cameras keep their device's native
-format; writing a 10-bit file cannot restore precision absent from the source.
-The current program compositor also produces 8-bit canvases; Main 10 does
-not turn that composition into native 10-bit processing.
 
 ### Measured tradeoffs
 

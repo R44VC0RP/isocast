@@ -1,0 +1,36 @@
+[package]
+name = "isocast-ui-interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Isocast app's interface (crates/isocast-ui/ui/*.slint) compiled into Rust, in a crate of its own."
+publish = false
+
+# The generated module is one huge unit (rustc needs ~14 GiB for it). As
+# the app's own library it builds once per profile; inside the app's binary
+# it built twice, for the app and again for the app's unit tests (and
+# clippy --all-targets checked it twice). It has no tests of its own.
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[features]
+# isocast-ui's `live-slint` (development only): the interface is read from
+# ui/*.slint at run time instead of compiled in; see build.rs.
+live-slint = ["slint/live-preview"]
+
+[dependencies]
+slint = { version = "=1.18.1", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "accessibility",
+    "backend-winit",
+    "renderer-skia",
+    "unstable-wgpu-30",
+    "unstable-winit-030",
+] }
+
+[build-dependencies]
+slint-build = "=1.18.1"

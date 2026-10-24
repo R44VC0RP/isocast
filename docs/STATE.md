@@ -207,6 +207,20 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 6. Gotchas that still bite
 
+- 2026-10-23: The strict 60fps oracle's 1.5× media source has only a 2.78ms eligibility margin on alternate slots. ISO-21's initial ISO10 run had one one-picture-late program sample; a fixed three-pair merged-baseline/candidate comparison then passed all six runs. Baseline did not fail; the transient is retained, not a demonstrated settings regression or a cleared pacing defect (`iso-21-setting/REPORT.md` in mac-perf scratch).
+
+- 2026-10-23: ISO-21 base-M2 virtual-display cadence is missing pictures upstream of Isocast: the unchanged standalone SCK trace yields 55–56 Complete samples/s with skipped marker IDs and 33–50 ms PTS gaps; retained engine ingress is ~56/s. The base PTS interval is ~16.6656 ms, not 59.94/120 Hz. No ISO pacing fix; see mac-perf scratch `iso-21/REPORT.md` (cadence section; Idle/callback-arrival detail was not retained).
+
+- 2026-10-23: Mac SCK x420 screen buffers can omit explicit Rec.709 primaries/transfer/matrix while
+  carrying a 709 ICC space. Filling missing tags on the owned screen copy avoids VideoToolbox's tonal
+  shift; generic frame copies must not impose these tags on cameras. ISO-21 measured identical raw
+  inputs and Main10 gradient RMSE 13.39→1.20 common 10-bit codes after tagging.
+- 2026-10-23: ISO colour depth defaults to 8-bit (performance first; ASK-14). Settings → Recording
+  exposes `recording.iso.encoder.bit_depth`; Properties can override it with `sources[].encoder.bit_depth`.
+  A source's explicit depth wins over the global depth, and explicit 8 stays 8 even at Incredible.
+  Omission is preserved; omitted Incredible HEVC depth retains its legacy 10-bit promotion. The global
+  setting covers all ISO files, cameras included; disabling ISO recording stops it requesting 10-bit
+  screen capture without changing the saved depth. Native camera capture and program defaults are unchanged.
 - 2026-10-23: Linux recovery uses `isocast_mux::recovery`, not the legacy `Platform::recover_file` hook
   (which deliberately refuses a second path-based lease). It currently targets GNU/Linux with procfs and
   glibc 2.28+ (`renameat2`). Directory/media flock support is required; unsupported FUSE/network mounts

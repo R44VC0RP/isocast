@@ -778,7 +778,10 @@ impl Platform for WindowsPlatform {
         sink: VideoSink<Frame>,
     ) -> Result<(Capture, CaptureFormat)> {
         if ten_bit {
-            bail!("screen.bit_depth: Windows capture currently supports 8-bit only");
+            bail!(
+                "recording.iso.encoder.bit_depth or sources.<id>.encoder.bit_depth: \
+                 Windows screen capture supports 8-bit only; valid option: 8"
+            );
         }
         let target = crate::devices::screen_target(target)?;
         let helper = std::env::current_exe()?.with_file_name("isocast-capture.exe");

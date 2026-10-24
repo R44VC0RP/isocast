@@ -1,6 +1,6 @@
 //! Display capture with ScreenCaptureKit.
 
-use std::sync::{Mutex, mpsc};
+use std::sync::{Mutex, Once, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,15 +12,15 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_foundation::CFArray;
 use objc2_core_graphics::{
-    CGDirectDisplayID, CGDisplayCopyAllDisplayModes, CGDisplayMode, kCGColorSpaceITUR_709,
-    kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
+    CGColorSpace, CGDirectDisplayID, CGDisplayCopyAllDisplayModes, CGDisplayMode,
+    kCGColorSpaceITUR_709, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
-    CVAttachmentMode, kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferColorPrimariesKey,
-    kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferTransferFunctionKey,
-    kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrixKey,
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    CVAttachmentMode, kCVImageBufferCGColorSpaceKey, kCVImageBufferColorPrimaries_ITU_R_709_2,
+    kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunction_ITU_R_709_2,
+    kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+    kCVImageBufferYCbCrMatrixKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
 };
 use objc2_foundation::{
@@ -138,6 +138,8 @@ pub fn capture_screen(
         } else {
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         });
+        // Keep this SDR Rec.709 request in sync with tag_screen_frame's
+        // missing-tag fallback; HDR or another space needs a different policy.
         config.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
         config.setColorSpaceName(kCGColorSpaceITUR_709);
         config.setShowsCursor(cursor);
@@ -344,12 +346,33 @@ define_class!(
 
 /// The stream requests SDR Rec.709. SCK can omit the explicit YCbCr tags
 /// on x420 buffers. Make the encoder input's tags agree with that request,
-/// filling only our owned copy, never the capture's buffer.
+/// filling only our owned copy, never the capture's buffer. The fallback
+/// is coupled to the SDR Rec.709 configuration above, not a general default.
+/// Call before handing the frame to the sink.
 fn tag_screen_frame(frame: &PixelBuffer) {
-    // SAFETY: these exported constants are valid CFStrings; each value is
-    // appropriate for its colour key. The frame has not been published yet.
-    unsafe {
-        for (key, value) in [
+    // One guard per process; unnamed ICC spaces cannot be compared by name.
+    static CHECK_COLOR_SPACE: Once = Once::new();
+    CHECK_COLOR_SPACE.call_once(|| {
+        // SAFETY: the exported key is a valid CFString; no attachment-mode
+        // output is requested. Inspect, but never replace, the owned attachment.
+        let space = unsafe {
+            frame
+                .0
+                .attachment(kCVImageBufferCGColorSpaceKey, std::ptr::null_mut())
+        };
+        if let Some(space) = space.and_then(|space| space.downcast::<CGColorSpace>().ok())
+            && let Some(name) = CGColorSpace::name(Some(&space))
+            // SAFETY: the exported name is a valid CFString.
+            && name.to_string() != unsafe { kCGColorSpaceITUR_709 }.to_string()
+        {
+            isocast_diagnostics::diagnostic!("warn";
+                "screen capture requested SDR Rec.709, but its attached CGColorSpace is {}; \
+                 review the missing-colour-tag fallback", name.to_string());
+        }
+    });
+    // SAFETY: these exported constants are valid CFStrings.
+    let tags = unsafe {
+        [
             (
                 kCVImageBufferColorPrimariesKey,
                 kCVImageBufferColorPrimaries_ITU_R_709_2,
@@ -362,8 +385,13 @@ fn tag_screen_frame(frame: &PixelBuffer) {
                 kCVImageBufferYCbCrMatrixKey,
                 kCVImageBufferYCbCrMatrix_ITU_R_709_2,
             ),
-        ] {
-            if !frame.0.has_attachment(key) {
+        ]
+    };
+    for (key, value) in tags {
+        if !frame.0.has_attachment(key) {
+            // SAFETY: each value is appropriate for its colour key. This
+            // owned frame has not been handed to the sink or another reader.
+            unsafe {
                 frame
                     .0
                     .set_attachment(key, value, CVAttachmentMode::ShouldPropagate);

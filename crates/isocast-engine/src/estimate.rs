@@ -329,7 +329,7 @@ enum Coverage {
 /// at least one HEVC file, H.264) High/8-bit within 3840×2160 and 60 fps,
 /// at a known size. A source at an assumed (canvas) size never certifies
 /// a measured fit; live streams don't change the choice (their cost stays
-/// the table's share either way).
+/// the table's share either way). Each ISO file is at its own depth.
 fn coverage(setup: &Setup, formats: Formats) -> Coverage {
     // These concurrent cells cover HEVC High/8-bit, not another depth or
     // encoder effort; H.264 at the same settings keeps its table cost.
@@ -365,9 +365,10 @@ fn coverage(setup: &Setup, formats: Formats) -> Coverage {
     if iso.enabled {
         for id in &iso.sources {
             let (w, h, fps, assumed) = iso_format(setup, formats, id);
+            let encoder = setup.source(id).map(|source| iso.encoder_for(source));
             files.push((
                 iso.encoder.codec,
-                eligible(&iso.encoder) && !assumed && format_covered(w, h, fps),
+                encoder.as_ref().is_some_and(eligible) && !assumed && format_covered(w, h, fps),
             ));
         }
     }
@@ -844,7 +845,8 @@ fn prores_resources(
     let mut disk_bytes = 0.0;
     for output in outputs.iter().filter(|o| o.kind != OutputKind::Stream) {
         let encoder = if output.kind == OutputKind::Iso {
-            setup.recording.iso.encoder.clone()
+            // The data rate estimate doesn't depend on the depth.
+            setup.recording.iso.encoder.at_depth(8)
         } else if output.output == PROGRAM {
             setup.recording.program.encoder.clone()
         } else {
@@ -1795,6 +1797,32 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn only_ten_bit_iso_files_leave_the_measured_hevc_fit() {
+        let mut value = serde_json::to_value(soak(&[("cam", 1920, 1080)], false)).unwrap();
+        value["sources"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "id": "screen", "kind": "display", "display": "main" }));
+        value["recording"]["iso"]["sources"] = json!(["cam", "screen"]);
+        let formats = |id: &str| (id == "screen").then_some((1920, 1080, 60));
+        let coverage_of = |value: &serde_json::Value| {
+            coverage(&Setup::from_value(value.clone()).unwrap(), &formats)
+        };
+        // The fit measures 8-bit HEVC: screens left to the default (8)
+        // are covered; a screen's own 10-bit file isn't, nor a set 10.
+        assert_eq!(coverage_of(&value), Coverage::Hevc);
+        let screen = value["sources"].as_array().unwrap().len() - 1;
+        value["sources"][screen]["encoder"] = json!({ "bit_depth": 10 });
+        assert_eq!(coverage_of(&value), Coverage::Table);
+        // Its own 8 under a set 10 is, but the camera's 10 isn't.
+        value["sources"][screen]["encoder"] = json!({ "bit_depth": 8 });
+        value["recording"]["iso"]["encoder"]["bit_depth"] = json!(10);
+        assert_eq!(coverage_of(&value), Coverage::Table);
+        value["recording"]["iso"]["encoder"]["bit_depth"] = json!(8);
+        assert_eq!(coverage_of(&value), Coverage::Hevc);
     }
 
     #[test]

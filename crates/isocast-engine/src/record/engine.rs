@@ -2072,6 +2072,16 @@ fn definition_of(setup: &Setup, id: &str) -> serde_json::Value {
             {
                 fields.insert("canvas_fps".into(), setup.canvas.fps.into());
             }
+            // A screen's capture depth follows its ISO file: a new depth
+            // opens it again (a recording keeps it as it is).
+            if matches!(
+                source.kind,
+                SourceKind::Display(_) | SourceKind::Window(_) | SourceKind::Application(_)
+            ) && setup.recording.iso.captures_ten_bit(source)
+                && let Some(fields) = definition.as_object_mut()
+            {
+                fields.insert("capture_ten_bit".into(), true.into());
+            }
             Some(definition)
         })
         .unwrap_or_default()
@@ -5430,5 +5440,68 @@ mod tests {
             .unwrap();
         }
         assert!(!pool.iter().any(|f| Arc::strong_count(f) == 1));
+    }
+
+    #[test]
+    fn only_screens_whose_capture_depth_changes_reopen() {
+        let setup = |screen: &str, iso: &str| {
+            Setup::from_toml(&format!(
+                r##"
+version = 1
+name = "t"
+canvas = {{ width = 1920, height = 1080, fps = 30 }}
+sources = [
+  {{ id = "screen", kind = "display", display = "main"{screen} }},
+  {{ id = "other", kind = "display", display = "side" }},
+  {{ id = "cam", kind = "camera", device = "Cam" }},
+  {{ id = "beep", kind = "tone" }},
+]
+[[scenes]]
+id = "main"
+items = [{{ source = "screen", rect = {{ x = 0, y = 0, width = 1920, height = 1080 }} }}]
+[recording]
+folder = "."
+program = {{ encoder = {{ codec = "hevc", quality = 70 }} }}
+iso = {iso}
+"##
+            ))
+            .unwrap()
+        };
+        let iso = |depth: &str| {
+            format!(
+                r#"{{ enabled = true, sources = ["screen", "cam"], encoder = {{ codec = "hevc"{depth} }} }}"#
+            )
+        };
+        let ids = ["screen", "other", "cam", "beep"];
+        let changed = |a: &Setup, b: &Setup| -> Vec<&'static str> {
+            ids.into_iter()
+                .filter(|id| definition_of(a, id) != definition_of(b, id))
+                .collect()
+        };
+        let default = setup("", &iso(""));
+        // The default (8) and a saved 8 open everything as before.
+        let eight = setup("", &iso(", bit_depth = 8"));
+        assert!(changed(&default, &eight).is_empty());
+        // The screen's own 10 reopens only it; the other screen, the
+        // camera (native as ever) and the tone stay open.
+        let own_ten = setup(", encoder = { bit_depth = 10 }", &iso(""));
+        assert_eq!(changed(&default, &own_ten), ["screen"]);
+        // Its own 8 is as the default; so is its own 10 without its ISO
+        // file, as the program draws 8 bits.
+        let own_eight = setup(", encoder = { bit_depth = 8 }", &iso(""));
+        assert!(changed(&default, &own_eight).is_empty());
+        let off = r#"{ enabled = false, encoder = { codec = "hevc" } }"#;
+        let program_only = setup(", encoder = { bit_depth = 10 }", off);
+        assert!(changed(&setup("", off), &program_only).is_empty());
+        // A set 10 reopens every screen, as it always did; the screen's own
+        // 8 keeps only it as it was.
+        let ten = setup("", &iso(", bit_depth = 10"));
+        assert_eq!(changed(&default, &ten), ["screen", "other"]);
+        let mut disabled = ten.clone();
+        disabled.recording.iso.enabled = false;
+        assert!(changed(&default, &disabled).is_empty());
+        assert_eq!(changed(&ten, &disabled), ["screen", "other"]);
+        let ten_own_eight = setup(", encoder = { bit_depth = 8 }", &iso(", bit_depth = 10"));
+        assert_eq!(changed(&default, &ten_own_eight), ["other"]);
     }
 }

@@ -960,9 +960,9 @@ fn profile_from(
             // The scene collection's ISO sources, if it has any.
             iso: ProfileIso {
                 enabled: true,
-                encoder: Encoder {
+                encoder: IsoEncoder {
                     container,
-                    ..Encoder::default()
+                    ..IsoEncoder::default()
                 },
                 ..ProfileIso::default()
             },
@@ -1682,7 +1682,7 @@ struct Importer<'a, 'v> {
     iso: Vec<String>,
     /// Source Record's "different audio" source, by recorded source.
     iso_audio: BTreeMap<String, Vec<String>>,
-    iso_encoder: Option<Encoder>,
+    iso_encoder: Option<IsoEncoder>,
     unsupported: Vec<Unsupported>,
     notes: Vec<String>,
     /// What is found about the profile's settings, kept apart.
@@ -1885,6 +1885,7 @@ impl<'a, 'v> Importer<'a, 'v> {
             audio,
             filters: Vec::new(),
             audio_filters: Vec::new(),
+            encoder: SourceEncoder::default(),
             unknown: UnknownFields::new(),
         });
         self.counts.sources += 1;
@@ -3087,10 +3088,10 @@ impl<'a, 'v> Importer<'a, 'v> {
             },
             None => None,
         };
-        let encoder = Encoder {
+        let encoder = IsoEncoder {
             codec: codec.unwrap_or(Codec::Hevc),
             quality: (int(s, "quality").unwrap_or(70).clamp(1, 100) as u8).into(),
-            ..Encoder::default()
+            ..IsoEncoder::default()
         };
         match &self.iso_encoder {
             None => self.iso_encoder = Some(encoder),
@@ -3772,9 +3773,9 @@ impl<'a, 'v> Importer<'a, 'v> {
             iso: IsoRecording {
                 enabled: !self.iso.is_empty(),
                 sources: std::mem::take(&mut self.iso),
-                encoder: self.iso_encoder.clone().unwrap_or(Encoder {
+                encoder: self.iso_encoder.clone().unwrap_or(IsoEncoder {
                     container,
-                    ..Encoder::default()
+                    ..IsoEncoder::default()
                 }),
                 // Without "different audio", Source Record records the
                 // source's own sound, as Isocast's ISO files do by default.

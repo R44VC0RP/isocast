@@ -16,7 +16,7 @@ Run by .github/workflows/pr-checks.yml; tested by pr_checks_test.py.
 import re
 import sys
 
-UI_PATHS = ("crates/isocast-ui/", "crates/isocast-app/ui/")
+UI_PATHS = ("crates/isocast-ui/", "crates/isocast-ui-interface/", "crates/isocast-app/ui/")
 VERIFIED_HEADING = "how it was verified"
 
 IMAGE_PATTERNS = (
