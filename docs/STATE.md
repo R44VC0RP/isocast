@@ -68,14 +68,15 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   reconnect to a different input. Real mid-take virtual-mic removal gave a disconnected-source error
   and silence, then reopened the same ID after take completion. Three stops returned to identical
   FD/thread counts. Linux Clippy/release build and 37 platform tests pass; prior Mac gates passed316.
-  **Reserved quiet-window 720p30:** 30s and300s program plus two ISOs have900/9000 frames each and
-  zero writer drops/repeats/audio dropouts; routing and complete file durations pass. **Not qualified:**
-  captured flash/beep skew54.69ms/55.96ms exceeds one frame. Five-minute screen oracle decodes9000 IDs
-  but finds165 held pictures. Independent wf-recorder also sees variable~55ms skew; fixture playback
-  is not a calibrated presentation reference, and Isocast timing is not exonerated. Bounded probes
-  show valid video header PTS and zero reported audio delay/buffering; nonzero delay signs remain
-  unverified. No timestamp arithmetic changed. Keep the failed1080p evidence; use a calibrated native
-  desktop A/V fixture before claiming strict qualification. Hosted candidate CI remains pending.
+  **Linux A/V sync (2026-10-24, ISO-30):** a driving sink's monitor arrives one graph cycle late, which
+  `pw_time.delay` doesn't report (+42.67 ms at 2048/48000); `pipewire_audio.rs` now subtracts it only when the
+  linked sink drives the graph (followers and mics unchanged). Measured against a source-clock fixture (Wayland
+  presentation feedback, RT PipeWire playback, an independent monitor tap) in a reserved VM at 720p30: 30 s takes
+  with zero writer losses and every A/V pulse within one frame (worst 19.4 ms); a 300 s screen ISO 9,000/9,000 with
+  all 293 pulses within one frame. Still failing: the 300 s program lost 16 frames and had 1 audio dropout
+  (software Vulkan compositing in the VM). Held screen pictures come from the source (compositor cadence and
+  frames never handed to PipeWire), not Isocast. Not covered: graph reconfiguration mid-take (driver, link or
+  quantum changes), real speakers and scanout. Evidence: `/Volumes/IsocastBuild/linux-sync/scratch/REPORT.md`.
 - **Desktop client on a remote server (R2) is on main (2026-10-23):** pairing in the app, engine picker, one window
   per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA), verified basebook <-> exon-desk both
   ways (`/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).

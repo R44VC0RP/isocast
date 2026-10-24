@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -393,6 +393,96 @@ struct StreamData {
     concealed_samples: u64,
     corrupted_chunks: u64,
     clock_offset: i64,
+    microphone: bool,
+    links: Rc<RefCell<BTreeMap<u32, (u32, u32)>>>,
+    position: *const spa::sys::spa_io_position,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GraphClock {
+    id: u32,
+    nsec: u64,
+    duration: u64,
+    num: u32,
+    denom: u32,
+}
+
+impl StreamData {
+    fn monitor_delay(&self, node: u32, graph: u64) -> u64 {
+        if self.microphone || self.position.is_null() {
+            return 0;
+        }
+        let Some(peer) = linked_peer(&self.links.borrow(), node) else {
+            return 0;
+        };
+        // The IO mapping belongs to PipeWire until io_changed replaces/removes
+        // it on this main loop. Its clock is written by the external driver;
+        // access only its aligned scalar fields through atomic loads.
+        let read = || {
+            // SAFETY: io_changed validated this native mapping's size/alignment.
+            // Read only aligned atomic scalars, not a reference to the whole clock.
+            unsafe {
+                let clock = std::ptr::addr_of!((*self.position).clock);
+                GraphClock {
+                    id: AtomicU32::from_ptr(std::ptr::addr_of!((*clock).id).cast_mut())
+                        .load(Ordering::Relaxed),
+                    nsec: AtomicU64::from_ptr(std::ptr::addr_of!((*clock).nsec).cast_mut())
+                        .load(Ordering::Relaxed),
+                    duration: AtomicU64::from_ptr(std::ptr::addr_of!((*clock).duration).cast_mut())
+                        .load(Ordering::Relaxed),
+                    num: AtomicU32::from_ptr(std::ptr::addr_of!((*clock).rate.num).cast_mut())
+                        .load(Ordering::Relaxed),
+                    denom: AtomicU32::from_ptr(std::ptr::addr_of!((*clock).rate.denom).cast_mut())
+                        .load(Ordering::Relaxed),
+                }
+            }
+        };
+        let clock = read();
+        let next = read();
+        if clock.id != next.id
+            || clock.duration != next.duration
+            || clock.num != next.num
+            || clock.denom != next.denom
+        {
+            return 0;
+        }
+        monitor_delay(false, Some(peer), next, graph)
+    }
+}
+
+fn linked_peer(links: &BTreeMap<u32, (u32, u32)>, node: u32) -> Option<u32> {
+    let mut peers = links.values().filter(|&&(input, _)| input == node);
+    let &(_, peer) = peers.next()?;
+    if peers.any(|&(_, output)| output != peer) {
+        return None;
+    }
+    Some(peer)
+}
+
+fn monitor_delay(microphone: bool, peer: Option<u32>, clock: GraphClock, graph: u64) -> u64 {
+    // Only a sink that drives this cycle supplies last cycle's monitor samples.
+    // Do not infer the peer from default metadata: desktop capture can relink.
+    // Like pw_time.delay, this uses the current graph configuration for queued
+    // buffers. Callback lag must not toggle the correction on a stable graph.
+    // Buffers spanning a driver/quantum change can still use the newer state.
+    if microphone
+        || peer != Some(clock.id)
+        || clock.id == u32::MAX
+        || graph == 0
+        || clock.nsec < graph
+        || clock.num == 0
+        || clock.denom == 0
+    {
+        return 0;
+    }
+    let nanos = u128::from(clock.duration) * u128::from(clock.num) * 1_000_000_000
+        / u128::from(clock.denom);
+    // Reject implausible/uninitialized graph quanta without overflowing or
+    // applying an unbounded timestamp adjustment to a recording.
+    if nanos == 0 || nanos > 1_000_000_000 {
+        return 0;
+    }
+    nanos as u64
 }
 
 impl Drop for StreamData {
@@ -477,6 +567,37 @@ fn capture_worker(
         })
         .register();
     let stream = pw::stream::StreamBox::new(&core, "Isocast audio capture", props)?;
+    let registry = core.get_registry_rc()?;
+    let links = Rc::new(RefCell::new(BTreeMap::new()));
+    let added = links.clone();
+    let removed = links.clone();
+    let _registry_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            if global.type_ != pw::types::ObjectType::Link {
+                return;
+            }
+            let Some(props) = global.props else {
+                return;
+            };
+            let Some(input) = props
+                .get("link.input.node")
+                .and_then(|v| v.parse::<u32>().ok())
+            else {
+                return;
+            };
+            let Some(output) = props
+                .get("link.output.node")
+                .and_then(|v| v.parse::<u32>().ok())
+            else {
+                return;
+            };
+            added.borrow_mut().insert(global.id, (input, output));
+        })
+        .global_remove(move |id| {
+            removed.borrow_mut().remove(&id);
+        })
+        .register();
     let clock_offset = clock_offset()?;
     // Share only the Send sink, never a PipeWire object.
     let data = StreamData {
@@ -488,8 +609,21 @@ fn capture_worker(
         concealed_samples: 0,
         corrupted_chunks: 0,
         clock_offset,
+        microphone,
+        links,
+        position: std::ptr::null(),
     };
     let _listener = stream.add_local_listener_with_user_data(data)
+        .io_changed(|_, data, id, area, size| {
+            if id != spa::sys::SPA_IO_Position { return; }
+            data.position = if size as usize >= std::mem::size_of::<spa::sys::spa_io_position>()
+                && !area.is_null() && area.cast::<spa::sys::spa_io_position>().is_aligned()
+            {
+                area.cast()
+            } else {
+                std::ptr::null()
+            };
+        })
         .state_changed(|_, data, _, state| match state {
             StreamState::Error(error) => data.status.borrow_mut().error = Some(error),
             StreamState::Unconnected => data.status.borrow_mut().error = Some("audio stream disconnected".into()),
@@ -656,6 +790,8 @@ fn process(stream: &pw::stream::Stream, state: &mut StreamData) -> Result<()> {
         // pw_buffer.time is this buffer's graph-cycle time, even when several
         // cycles queued before this non-RT callback. Subtract the capture path
         // and resampler delay; do not subtract callback latency a second time.
+        // A driving sink's monitor is one cycle old in PipeWire's scheduler;
+        // that cycle is not included in pw_time.delay.
         let timestamp = timestamp(
             raw.time,
             state.clock_offset,
@@ -663,6 +799,7 @@ fn process(stream: &pw::stream::Stream, state: &mut StreamData) -> Result<()> {
             rate.num,
             rate.denom,
             timing.buffered(),
+            state.monitor_delay(stream.node_id(), raw.time),
         )?;
         (state.sink.samples)(&state.samples, timestamp);
         state.status.borrow_mut().ready = Some(state.pick.len() as u32);
@@ -800,6 +937,7 @@ fn timestamp(
     num: u32,
     denom: u32,
     buffered: u64,
+    monitor: u64,
 ) -> Result<Time> {
     ensure!(
         denom != 0 && num != 0,
@@ -809,7 +947,8 @@ fn timestamp(
     // is ever accumulated, and missed graph cycles remain visible as gaps.
     let nanos = i128::from(graph) + i128::from(offset)
         - i128::from(delay) * i128::from(num) * 1_000_000_000 / i128::from(denom)
-        - i128::from(buffered) * 1_000_000_000 / i128::from(RATE);
+        - i128::from(buffered) * 1_000_000_000 / i128::from(RATE)
+        - i128::from(monitor);
     Ok(Time::from_nanos(
         i64::try_from(nanos).context("audio.timestamp: overflow")?,
     ))
@@ -907,14 +1046,122 @@ mod tests {
         let graph = 9_000_000_000_000;
         let offset = -8_999_000_000_000;
         assert_eq!(
-            timestamp(graph, offset, 480, 1, RATE, 48)
+            timestamp(graph, offset, 480, 1, RATE, 48, 0)
                 .unwrap()
                 .as_nanos(),
             989_000_000
         );
-        let first = timestamp(graph, offset, 0, 1, RATE, 0).unwrap();
-        let hour = timestamp(graph + 3_600_000_000_000, offset, 0, 1, RATE, 0).unwrap();
+        let first = timestamp(graph, offset, 0, 1, RATE, 0, 0).unwrap();
+        let hour = timestamp(graph + 3_600_000_000_000, offset, 0, 1, RATE, 0, 0).unwrap();
         assert_eq!(hour.ticks_since(first, RATE), 3_600 * i64::from(RATE));
-        assert!(timestamp(graph, offset, 0, 1, 0, 0).is_err());
+        assert!(timestamp(graph, offset, 0, 1, 0, 0, 0).is_err());
+    }
+
+    #[test]
+    fn linked_peer_requires_one_distinct_output_node() {
+        let mut links = BTreeMap::new();
+        assert_eq!(linked_peer(&links, 10), None);
+        links.insert(1, (20, 30));
+        assert_eq!(linked_peer(&links, 10), None);
+        links.insert(2, (10, 40));
+        assert_eq!(linked_peer(&links, 10), Some(40));
+        links.insert(3, (10, 40));
+        assert_eq!(linked_peer(&links, 10), Some(40));
+        links.insert(4, (10, 50));
+        assert_eq!(linked_peer(&links, 10), None);
+    }
+
+    #[test]
+    fn monitor_correction_requires_the_linked_sink_to_drive_this_buffer() {
+        let clock = GraphClock {
+            id: 46,
+            nsec: 9_000_000_000,
+            duration: 2048,
+            num: 1,
+            denom: 48_000,
+        };
+        assert_eq!(
+            monitor_delay(false, Some(46), clock, clock.nsec),
+            42_666_666
+        );
+        assert_eq!(monitor_delay(false, Some(59), clock, clock.nsec), 0);
+        assert_eq!(monitor_delay(true, Some(46), clock, clock.nsec), 0);
+        assert_eq!(monitor_delay(false, None, clock, clock.nsec), 0);
+        assert_eq!(
+            monitor_delay(false, Some(46), clock, clock.nsec - 1),
+            42_666_666
+        );
+        for cycles in 1..=64 {
+            assert_eq!(
+                monitor_delay(false, Some(46), clock, clock.nsec - cycles * 42_666_666),
+                42_666_666
+            );
+        }
+        assert_eq!(monitor_delay(false, Some(46), clock, clock.nsec + 1), 0);
+        let clock = GraphClock {
+            duration: 1024,
+            denom: 44_100,
+            ..clock
+        };
+        assert_eq!(
+            monitor_delay(false, Some(46), clock, clock.nsec),
+            23_219_954
+        );
+        let clock = GraphClock {
+            duration: 512,
+            num: 2,
+            ..clock
+        };
+        assert_eq!(
+            monitor_delay(false, Some(46), clock, clock.nsec),
+            23_219_954
+        );
+    }
+
+    #[test]
+    fn monitor_correction_rejects_invalid_clocks_and_timestamp_overflow() {
+        let clock = GraphClock {
+            id: 46,
+            nsec: 9_000_000_000,
+            duration: 2048,
+            num: 1,
+            denom: RATE,
+        };
+        for invalid in [
+            GraphClock { num: 0, ..clock },
+            GraphClock { denom: 0, ..clock },
+            GraphClock { nsec: 0, ..clock },
+            GraphClock {
+                duration: 0,
+                ..clock
+            },
+            GraphClock {
+                duration: u64::MAX,
+                num: u32::MAX,
+                ..clock
+            },
+            GraphClock {
+                duration: u64::from(RATE) + 1,
+                ..clock
+            },
+            GraphClock {
+                id: u32::MAX,
+                ..clock
+            },
+        ] {
+            assert_eq!(
+                monitor_delay(false, Some(invalid.id), invalid, invalid.nsec),
+                0
+            );
+        }
+        let correction = monitor_delay(false, Some(46), clock, clock.nsec);
+        assert_eq!(
+            timestamp(clock.nsec, -8_000_000_000, 480, 1, RATE, 48, correction)
+                .unwrap()
+                .as_nanos(),
+            946_333_334
+        );
+        assert!(timestamp(u64::MAX, 0, 0, 1, RATE, 0, correction).is_err());
+        assert!(timestamp(1, i64::MIN, 0, 1, RATE, 0, correction).is_err());
     }
 }
