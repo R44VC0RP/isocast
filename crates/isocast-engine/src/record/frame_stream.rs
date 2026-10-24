@@ -317,15 +317,18 @@ fn run<P: Platform>(
         if encoding.as_ref().is_none_or(|e| e.input != size) || scaling.is_some() != needs_stage {
             let started = start_encoder(platform, size, key, fps).and_then(|started| {
                 let scaling = if needs_stage {
-                    Some(IsoFrames::new(
-                        platform,
-                        Gpu::for_platform(platform)?,
-                        &key.target,
-                        started.output,
-                        None,
-                        Time::from_nanos(0),
-                        ScaleFilter::Area,
-                    )?)
+                    Some(
+                        IsoFrames::new(
+                            platform,
+                            Gpu::for_platform(platform)?,
+                            &key.target,
+                            started.output,
+                            None,
+                            Time::from_nanos(0),
+                            ScaleFilter::Area,
+                        )?
+                        .with_cached_imports(),
+                    )
                 } else {
                     None
                 };

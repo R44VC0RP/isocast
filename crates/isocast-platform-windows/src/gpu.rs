@@ -317,3 +317,42 @@ fn pixels(frame: &Frame, texture: wgpu::Texture) -> GpuPixels {
         PixelFormat::Bgra8 | PixelFormat::Rgba10 => GpuPixels::Rgb(texture),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GraphicsDevice, OutputPool};
+    use isocast_engine::FramePool;
+
+    #[test]
+    #[ignore = "requires a native DX12 GPU; run under gpu.lock"]
+    fn pooled_monitor_imports_reuse_texture_wrappers_without_pinning_frames() -> Result<()> {
+        let gpu = Gpu::new()?;
+        let mut importer = Dx12Importer::new(&gpu)?;
+        let mut pool = OutputPool::new(GraphicsDevice::new()?, 64, 64)?;
+        let frames = (0..4)
+            .map(|_| pool.take().map(|frame| frame.expect("four free slots")))
+            .collect::<Result<Vec<_>>>()?;
+        let mut textures = Vec::new();
+        for _ in 0..32 {
+            for frame in &frames {
+                let imported = importer.import_cached(frame)?.expect("DX12 caches imports");
+                let GpuPixels::Rgb(texture) = imported.pixels else {
+                    panic!("BGRA pool must import as RGB")
+                };
+                if !textures.contains(&texture) {
+                    textures.push(texture);
+                }
+            }
+        }
+        // 128 imports, but only four native/wgpu texture wrappers. A hit
+        // still submits the current frame's producer fence wait each time.
+        assert_eq!(textures.len(), 4);
+        assert_eq!(importer.surfaces.len(), 4);
+        let first = frames[0].texture().as_raw();
+        drop(frames);
+        let reused = pool.take()?.expect("cache must not hold a frame lease");
+        assert_eq!(reused.texture().as_raw(), first);
+        Ok(())
+    }
+}
