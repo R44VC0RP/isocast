@@ -410,3 +410,5 @@ hotkey actions are `replay.start`, `replay.stop`, `replay.toggle` and
 seconds = 60
 max_memory_mb = 512
 ```
+
+<!-- CI budget measurement (never merged). -->
