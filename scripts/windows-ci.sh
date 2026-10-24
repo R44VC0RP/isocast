@@ -5,7 +5,7 @@
 #   scripts/windows-ci.sh --dry-run   # export HEAD and scan, no GitHub writes
 #   scripts/windows-ci.sh             # snapshot, push only ci/windows, wait
 #
-# Also passes on --merge-main and --allow-workflow-changes (see ci.sh).
+# Also forwards --merge-main and --allow-workflow-changes to ci.sh.
 # Evidence goes under $ISOCAST_CI_DIR/windows (see scripts/ci.sh).
 set -euo pipefail
 for arg in "$@"; do
