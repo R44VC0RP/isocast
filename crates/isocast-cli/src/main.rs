@@ -81,11 +81,12 @@ fn shared_frames(_options: shared_frames::Options) -> Result<ExitCode> {
 #[command(
     name = "isocast",
     version,
-    after_help = wording::select("Getting started: `isocast permissions` shows what macOS allows, `isocast \
+    after_help = wording::select_linux("Getting started: `isocast permissions` shows what macOS allows, `isocast \
                   setup init --apply` makes a setup from this Mac's devices, `isocast frame` \
                   saves a picture of the program, `isocast start --seconds 10` records a test, \
                   and `isocast status` shows how it went. Agents: `isocast mcp`.",
-                  "Getting started: `isocast permissions` reports Windows access, `isocast setup init --apply` makes a setup from this PC's devices, `isocast frame` saves a picture of the program, `isocast start --seconds 10` records a test, and `isocast status` shows how it went. Windows Camera and Microphone settings must allow desktop apps; the recording engine is isocastd.exe. Agents: `isocast mcp`.")
+                  "Getting started: `isocast permissions` reports Windows access, `isocast setup init --apply` makes a setup from this PC's devices, `isocast frame` saves a picture of the program, `isocast start --seconds 10` records a test, and `isocast status` shows how it went. Windows Camera and Microphone settings must allow desktop apps; the recording engine is isocastd.exe. Agents: `isocast mcp`.",
+"Getting started: `isocast permissions` reports what can be captured, `isocast setup init --apply` makes a setup from this computer's devices, `isocast frame` saves a picture of the program, `isocast start --seconds 10` records a test, and `isocast status` shows how it went. Windows Camera and Microphone settings must allow desktop apps; the recording engine is isocastd.exe. Agents: `isocast mcp`.")
 )]
 struct Cli {
     /// Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE.
@@ -3563,9 +3564,10 @@ fn permissions(
         if undecided {
             isocast_diagnostics::diagnostic!(
                 "{}",
-                wording::select(
+                wording::select_linux(
                     "Asking macOS; answer its prompts (waiting up to a minute)…",
-                    "Checking Windows access (waiting up to a minute); Camera and Microphone settings must allow desktop apps (isocastd.exe)…"
+                    "Checking Windows access (waiting up to a minute); Camera and Microphone settings must allow desktop apps (isocastd.exe)…",
+                    "Checking access (waiting up to a minute)…"
                 )
             );
         }

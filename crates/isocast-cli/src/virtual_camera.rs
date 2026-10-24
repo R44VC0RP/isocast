@@ -31,9 +31,10 @@ pub fn run(command: Command) -> Result<ExitCode> {
         if !json {
             println!(
                 "{}",
-                isocast_protocol::platform_text::select(
+                isocast_protocol::platform_text::select_linux(
                     "Removing Isocast Virtual Camera: enter an administrator password when macOS asks…",
-                    "Requesting removal of Isocast Virtual Camera; Windows support depends on this build"
+                    "Requesting removal of Isocast Virtual Camera; Windows support depends on this build",
+                    "Requesting removal of Isocast Virtual Camera; Linux has none yet"
                 )
             );
         }

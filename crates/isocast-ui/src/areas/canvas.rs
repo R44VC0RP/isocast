@@ -69,6 +69,18 @@ const FRAME: Duration = Duration::from_millis(16);
 const MAX_FPS: u32 = 60;
 /// Frames a second at rest when saving power.
 const POWER_SAVING_FPS: u32 = 30;
+/// The most frames a second a window drawn on the CPU (no GPU adapter)
+/// shows, and while recording: every frame it paints and every frame the
+/// engine encodes for it take CPU time from the recording.
+const CPU_WINDOW_FPS: u32 = 30;
+const CPU_WINDOW_RECORDING_FPS: u32 = 15;
+/// The widest picture such a window asks for while recording: the engine
+/// scales and encodes half the pixels of a 960-wide one, for about half
+/// the CPU (measured in a 3-vCPU VM).
+const CPU_WINDOW_RECORDING_WIDTH: u32 = 640;
+/// How often such a window's monitors check their size (there is no
+/// rendering notifier to say when the layout moved them).
+const CPU_WINDOW_FOLLOW: Duration = Duration::from_millis(250);
 /// How long after a gesture monitors keep the faster rate.
 const GESTURE_TAIL: Duration = Duration::from_millis(500);
 /// How far from a handle's centre the pointer takes it, in points.
@@ -279,6 +291,11 @@ pub struct Canvas {
     tail_timer: slint::Timer,
     /// The most frames a second the monitors ask for (`--fps`).
     max_fps: Cell<u32>,
+    /// The window is drawn on the CPU (`crate::window::cpu_window`): fewer
+    /// frames (`CPU_WINDOW_FPS`), and monitors' sizes followed by
+    /// `follow_timer` instead of a rendering notifier.
+    cpu_window: Cell<bool>,
+    follow_timer: slint::Timer,
     boxes: Rc<VecModel<CanvasBox>>,
     guides: Rc<VecModel<CanvasGuide>>,
 }
@@ -304,6 +321,8 @@ impl Canvas {
             gesture_tail: Cell::new(None),
             tail_timer: slint::Timer::default(),
             max_fps: Cell::new(MAX_FPS),
+            cpu_window: Cell::new(crate::window::cpu_window()),
+            follow_timer: slint::Timer::default(),
             boxes: Rc::new(VecModel::default()),
             guides: Rc::new(VecModel::default()),
         }
@@ -511,16 +530,24 @@ impl Canvas {
         } else {
             MAX_FPS
         };
-        fps.min(canvas).min(self.max_fps.get()).max(1)
+        let cpu_cap = match (self.cpu_window.get(), recording(&app.session.borrow())) {
+            (false, _) => MAX_FPS,
+            (true, false) => CPU_WINDOW_FPS,
+            (true, true) => CPU_WINDOW_RECORDING_FPS,
+        };
+        fps.min(canvas).min(self.max_fps.get()).min(cpu_cap).max(1)
     }
 
     fn update_fps(&self, app: &Rc<App>) {
         let fps = self.wanted_fps(app);
+        let max_width = (self.cpu_window.get() && recording(&app.session.borrow()))
+            .then_some(CPU_WINDOW_RECORDING_WIDTH);
         for cell in [&self.preview, &self.program, &self.extra] {
             if let Ok(mut preview) = cell.try_borrow_mut()
                 && let Some(preview) = preview.as_mut()
             {
                 preview.set_fps(fps);
+                preview.set_max_width(max_width);
             }
         }
     }
@@ -1765,6 +1792,26 @@ impl Area for Canvas {
             }
         });
 
+        // Skia on the CPU calls no rendering notifier (it has no graphics
+        // API to hand over), and any notifier turns off its partial
+        // rendering (only what changed is drawn). There the monitors
+        // follow their size on a timer instead; the bench's frame counts
+        // and the test picture need a GPU window.
+        if self.cpu_window.get() {
+            let weak = Rc::downgrade(app);
+            self.follow_timer
+                .start(slint::TimerMode::Repeated, CPU_WINDOW_FOLLOW, move || {
+                    let Some(app) = weak.upgrade() else { return };
+                    for cell in [&app.canvas.preview, &app.canvas.program, &app.canvas.extra] {
+                        if let Ok(mut preview) = cell.try_borrow_mut()
+                            && let Some(preview) = preview.as_mut()
+                        {
+                            preview.window_drawn();
+                        }
+                    }
+                });
+            return;
+        }
         let weak = Rc::downgrade(app);
         window
             .window()
@@ -1820,7 +1867,7 @@ impl Area for Canvas {
         if changed.any(Changed::SELECTION | Changed::SETUP | Changed::SCENES) {
             self.place_box(app, window);
         }
-        if changed.any(Changed::SETUP) {
+        if changed.any(Changed::SETUP) || (self.cpu_window.get() && changed.any(Changed::STATUS)) {
             self.update_fps(app);
         }
         if changed.any(

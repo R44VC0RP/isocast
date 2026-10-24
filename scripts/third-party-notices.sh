@@ -160,7 +160,8 @@ section("H.264 encoder")
 h264, h264_dir = source("openh264-sys2")
 upstream = (h264_dir / "upstream" / "VERSION").read_text().split()
 assert len(upstream) == 2 and upstream[0].startswith("https://"), upstream
-print(f"""The Linux server encodes H.264 with Cisco's OpenH264, compiled from the
+print(f"""The Linux server encodes H.264, and the Linux app decodes its previews,
+with Cisco's OpenH264, compiled from the
 sources bundled in openh264-sys2 {h264["version"]} ({upstream[0]}
 at commit {upstream[1]}). OpenH264 is under the BSD 2-clause licence
 below.

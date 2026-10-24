@@ -27,9 +27,10 @@ export enum ConnectionState { connecting, connected, disconnected, failed, misma
 export global PlatformText {
     in property <bool> windows;
     in property <bool> engine-windows;
-    out property <string> machine: root.engine-windows ? "PC" : "Mac";
-    out property <string> credential-store: root.engine-windows ? "Credential Manager" : "Keychain";
-    out property <string> file-manager: root.engine-windows ? "Explorer" : "Finder";
+    // The engine machine's nouns, from Rust (`platform_text::Words`).
+    in property <string> machine: "Mac";
+    in property <string> credential-store: "Keychain";
+    in property <string> file-manager: "Finder";
     out property <string> primary: root.windows ? "Ctrl+" : "⌘";
     out property <string> shift-primary: root.windows ? "Ctrl+Shift+" : "⇧⌘";
     out property <string> primary-key: root.windows ? "Ctrl" : "⌘";

@@ -249,6 +249,8 @@ fn grouped(id: &str) -> String {
 fn this_machine() -> (&'static str, &'static str) {
     if cfg!(windows) {
         ("This PC", "PC")
+    } else if cfg!(target_os = "linux") {
+        ("This computer", "computer")
     } else {
         ("This Mac", "Mac")
     }
@@ -1757,7 +1759,9 @@ pub fn choose(
     options: Choose,
     done: impl FnOnce(&Rc<App>, Option<Vec<String>>) + 'static,
 ) {
-    if !is_remote(app) {
+    // Linux has no open panel of the app's own yet: its engine's file
+    // browser (files_roots, files_list), as for another computer's engine.
+    if !is_remote(app) && !cfg!(target_os = "linux") {
         let chosen = crate::platform::choose(options);
         done(app, chosen);
         return;

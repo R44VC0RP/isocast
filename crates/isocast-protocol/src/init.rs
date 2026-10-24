@@ -95,9 +95,13 @@ pub struct Initialized {
     pub applied: Option<crate::api::Applied>,
 }
 
-/// Recording folder when none is given.
-pub const DEFAULT_FOLDER: &str =
-    crate::platform_text::select("~/Movies/Isocast", "~/Videos/Isocast");
+/// Recording folder when none is given: Movies on macOS, Videos elsewhere
+/// (Windows' library folder, Linux's XDG videos folder by its usual name).
+pub const DEFAULT_FOLDER: &str = if cfg!(target_os = "macos") {
+    "~/Movies/Isocast"
+} else {
+    "~/Videos/Isocast"
+};
 
 /// Conservative starting cadence for a new setup/profile, never an edit to
 /// an existing one. Memory and CPU counts are portable; they don't pretend
@@ -247,8 +251,9 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
                 iso.push("camera".to_string());
                 if permissions.camera == Permission::NotDetermined {
                     notes.push(
-                        crate::platform_text::select("macOS asks for camera access the first time the camera is used; \
-                         `isocast permissions --request` asks now.", "Windows Camera privacy settings must allow desktop apps. isocastd.exe is the recording engine; `isocast permissions` reports access.")
+                        crate::platform_text::select_linux("macOS asks for camera access the first time the camera is used; \
+                         `isocast permissions --request` asks now.", "Windows Camera privacy settings must allow desktop apps. isocastd.exe is the recording engine; `isocast permissions` reports access.",
+"Linux opens cameras as V4L2 devices (/dev/video*) your user must be able to read; `isocast permissions` reports access.")
                             .into(),
                     );
                 }
@@ -325,8 +330,9 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             });
             if permissions.microphone == Permission::NotDetermined {
                 notes.push(
-                    crate::platform_text::select("macOS asks for microphone access the first time it is used; `isocast \
-                     permissions --request` asks now.", "Windows Microphone privacy settings must allow desktop apps. isocastd.exe is the recording engine; `isocast permissions` reports access.")
+                    crate::platform_text::select_linux("macOS asks for microphone access the first time it is used; `isocast \
+                     permissions --request` asks now.", "Windows Microphone privacy settings must allow desktop apps. isocastd.exe is the recording engine; `isocast permissions` reports access.",
+"Linux records microphones through PipeWire; `isocast permissions` reports access.")
                         .into(),
                 );
             }

@@ -7,8 +7,9 @@
 //!   on its own R1 connection, str0m receiving) will be another `Source`
 //!   that turns each received Annex B frame into [`Intake`] with
 //!   [`from_annex_b`], and nothing below it changes;
-//! - a hardware [`Decoder`] (VideoToolbox on macOS, Media Foundation on
-//!   Windows) turning access units into RGBA pictures;
+//! - a [`Decoder`] (VideoToolbox on macOS, Media Foundation on Windows,
+//!   both hardware; OpenH264 in software on Linux) turning access units
+//!   into RGBA pictures;
 //! - the window's monitors, which show each picture as they show the
 //!   engine's stills (`frames::Incoming::Still`).
 //!
@@ -28,6 +29,8 @@ use slint::{Rgba8Pixel, SharedPixelBuffer};
 
 #[cfg(windows)]
 mod media_foundation;
+#[cfg(target_os = "linux")]
+mod openh264;
 pub mod sound;
 pub mod sync;
 #[cfg(target_os = "macos")]
@@ -51,7 +54,7 @@ pub fn width_step(width: u32) -> u32 {
         .unwrap_or(WIDTHS[WIDTHS.len() - 1])
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub use isocast_protocol::h264::nal_units;
 /// H.264 framing (untrusted bytes from the engine), parsed in the
 /// protocol crate where its fuzz target reaches it.
@@ -136,7 +139,8 @@ pub trait Source: Send {
 /// A decoded picture, ready for a monitor.
 pub type Picture = SharedPixelBuffer<Rgba8Pixel>;
 
-/// Turns access units into pictures (hardware where the OS has it).
+/// Turns access units into pictures (hardware where the OS has it;
+/// OpenH264 in software on Linux).
 pub trait Decoder {
     /// Decode `unit`, coded with `sets`: its picture, or none (the decoder
     /// is waiting for a keyframe, or holds the picture back).
@@ -170,7 +174,9 @@ pub fn decoder() -> Result<Box<dyn Decoder>> {
     return Ok(Box::new(videotoolbox::VideoToolbox::default()));
     #[cfg(windows)]
     return Ok(Box::new(media_foundation::MediaFoundation::new()?));
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    return Ok(Box::new(openh264::OpenH264::default()));
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Err(NoDecoder("no H.264 decoder on this OS".into()).into())
 }
 

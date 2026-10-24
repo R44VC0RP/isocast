@@ -2166,7 +2166,8 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
         } else {
             SourceRun::Opening
         };
-        pending.error = permission.as_ref().map(|p| format!("waiting for permission: {p}; {}", isocast_protocol::platform_text::select("check macOS Privacy & Security or its permission prompt", "check Windows Settings › Privacy & security (Privacy on Windows 10); Camera and Microphone must allow desktop apps (isocastd.exe)")));
+        pending.error = permission.as_ref().map(|p| format!("waiting for permission: {p}; {}", isocast_protocol::platform_text::select_linux("check macOS Privacy & Security or its permission prompt", "check Windows Settings › Privacy & security (Privacy on Windows 10); Camera and Microphone must allow desktop apps (isocastd.exe)",
+            "check that the device exists and isn't held by another app, and that PipeWire and the desktop's screen-sharing portal are running")));
         let event = pending.status(&id);
         let old = {
             let mut state = inner.state.lock();

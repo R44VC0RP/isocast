@@ -729,6 +729,10 @@ mod platform {
         pub fn start(_render: super::Render) -> anyhow::Result<Self> {
             anyhow::bail!("no sound output on this OS")
         }
+
+        pub fn alive(&self) -> bool {
+            false
+        }
     }
 }
 

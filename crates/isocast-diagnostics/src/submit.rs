@@ -18,9 +18,13 @@ pub fn endpoint() -> Option<String> {
         .or_else(|| REPORT_ENDPOINT.map(String::from))
 }
 
-/// A random id kept beside the daemon's socket, sent only for rate limiting.
+/// A random id kept beside the daemon's socket (in the support folder on
+/// Linux, `api::daemon_file`), sent only for rate limiting.
 fn install_id() -> Result<String, String> {
-    let path = isocast_protocol::api::socket_path().with_extension("install-id");
+    let path = isocast_protocol::api::daemon_file("install-id");
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::create_dir_all(folder);
+    }
     if let Ok(id) = std::fs::read_to_string(&path)
         && id.trim().len() == 32
         && id.trim().bytes().all(|b| b.is_ascii_hexdigit())

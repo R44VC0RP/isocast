@@ -9,7 +9,8 @@
 //! engine's live H.264 video instead, decoded here in hardware
 //! (`crate::video`), each picture as an [`Incoming::Still`]. If this
 //! machine can't decode it, the engine's JPEG stills (`frame`), a few a
-//! second.
+//! second. A Linux window on its own engine does the same (no shared GPU
+//! surfaces there yet), without WebRTC: the engine plays its own sound.
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -18,6 +19,10 @@ use std::time::{Duration, Instant};
 use isocast_client::shared::{SharedController, SharedFrame};
 use isocast_protocol::api::{FrameParams, FramesParams, Method, RpcError, SharedFramesParams};
 use slint::{Rgba8Pixel, SharedPixelBuffer};
+
+/// Whether this OS's engine shares its GPU surfaces with a local window
+/// (`shared_frames`); elsewhere a local window shows its `frames` video.
+const SHARED_SURFACES: bool = cfg!(any(target_os = "macos", windows));
 
 /// The most stills a second a remote window asks for (R2's interim
 /// previews: a few, at about 0.1 MB each on the network).
@@ -319,7 +324,7 @@ impl Feed {
     }
 
     fn receive(&self, deliver: impl Fn(Incoming)) {
-        if !crate::engine::is_local() {
+        if !crate::engine::is_local() || !SHARED_SURFACES {
             return self.receive_video(deliver);
         }
         let mut delay = Duration::from_millis(250);
@@ -401,7 +406,11 @@ impl Feed {
         // encoders take only the canvas's size so far): ask for them as
         // they are, and the monitor scales them.
         let mut unscaled = false;
-        let mut plan = WebRtcPlan::Use;
+        // The local engine plays its own monitoring: no WebRTC sound here.
+        let mut plan = match crate::engine::is_local() {
+            true => WebRtcPlan::Never,
+            false => WebRtcPlan::Use,
+        };
         let mut sound_was = self.sound.load(std::sync::atomic::Ordering::SeqCst);
         loop {
             let want = self.want.lock().unwrap().clone();

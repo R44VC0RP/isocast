@@ -516,7 +516,7 @@ fn recording_settings(
         Some(e) if e.contains("hevc") || e.contains("h265") || e.contains("265") => Codec::Hevc,
         Some(e) if e.contains("264") || e.contains("avc") => Codec::H264,
         Some(e) if e.contains("prores") => Codec::Prores422,
-        _ => Codec::Hevc,
+        _ => Codec::platform_default(),
     };
     let filename = match profile.and_then(|p| p.filename.as_deref()) {
         Some(format) => {
@@ -3089,7 +3089,7 @@ impl<'a, 'v> Importer<'a, 'v> {
             None => None,
         };
         let encoder = IsoEncoder {
-            codec: codec.unwrap_or(Codec::Hevc),
+            codec: codec.unwrap_or(Codec::platform_default()),
             quality: (int(s, "quality").unwrap_or(70).clamp(1, 100) as u8).into(),
             ..IsoEncoder::default()
         };

@@ -1867,7 +1867,7 @@ pub struct IsoEncoder {
 impl Default for IsoEncoder {
     fn default() -> Self {
         Self {
-            codec: Codec::Hevc,
+            codec: Codec::platform_default(),
             quality: default_quality(),
             container: Container::default(),
             bit_depth: None,
@@ -1997,7 +1997,7 @@ pub enum QualityPreset {
 impl Default for Encoder {
     fn default() -> Self {
         Self {
-            codec: Codec::Hevc,
+            codec: Codec::platform_default(),
             quality: default_quality(),
             container: Container::default(),
             bit_depth: default_bit_depth(),
@@ -2036,6 +2036,17 @@ pub struct EncoderOption {
 }
 
 impl Codec {
+    /// The codec a new recording uses: HEVC where the OS has a hardware
+    /// encoder for it (macOS, Windows), H.264 on Linux, whose software
+    /// recording (OpenH264) has only that.
+    pub fn platform_default() -> Self {
+        if cfg!(target_os = "linux") {
+            Self::H264
+        } else {
+            Self::Hevc
+        }
+    }
+
     pub const ALL: [Self; 7] = [
         Self::H264,
         Self::Hevc,

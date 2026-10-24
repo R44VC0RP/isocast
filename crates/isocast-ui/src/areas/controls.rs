@@ -630,9 +630,10 @@ impl Area for Controls {
                 app.toast(
                     ToastKind::Error,
                     "Couldn’t start recording",
-                    wording::select(
+                    wording::select_linux(
                         "Not enough free space on Macintosh HD: 3.2 GB free, 20 GB needed.",
                         "Not enough free space on C: 3.2 GB free, 20 GB needed.",
+                        "Not enough free space on /home: 3.2 GB free, 20 GB needed.",
                     ),
                 );
                 app.toast(
@@ -738,7 +739,8 @@ fn sample_overload(fits: bool) -> Overload {
         protected_dropping: false,
         reason: String::new(),
         estimate: Some(CapacityEstimate {
-            chip: wording::select("Apple M2", "Sample Windows PC").into(),
+            chip: wording::select_linux("Apple M2", "Sample Windows PC", "Sample Linux computer")
+                .into(),
             encode_engines: 1,
             engine_pixels_per_second: 8e8,
             basis: "measured".into(),
@@ -1579,9 +1581,13 @@ impl Controls {
         let estimate = overload.estimate.as_ref();
         let at_capacity = estimate.is_none_or(|e| e.capacity != Capacity::Fits);
         let fix = estimate.and_then(|e| e.suggestions.first()).cloned();
+        let machine_title = format!(
+            "This {} can’t keep up with every file",
+            crate::engine::words().machine
+        );
         let (title, mut message) = if at_capacity {
             (
-                "This Mac can’t keep up with every file",
+                machine_title.as_str(),
                 if overload.protected_dropping {
                     "Its video encoders are full, so files are dropping frames.".to_string()
                 } else {
@@ -2642,11 +2648,13 @@ fn sample_vcam(app: &Rc<App>, which: &str) -> anyhow::Result<VirtualCameraStatus
     match which {
         "missing" => {
             status.state = VirtualCameraState::Failed;
-            status.last_error = Some(wording::select("virtual_camera: Isocast Virtual Camera is not installed/approved; run scripts/vcam-install.sh (a development engine never installs it)", "virtual_camera: Windows virtual camera installation is not available in this build").into());
+            status.last_error = Some(wording::select_linux("virtual_camera: Isocast Virtual Camera is not installed/approved; run scripts/vcam-install.sh (a development engine never installs it)", "virtual_camera: Windows virtual camera installation is not available in this build",
+                "virtual_camera: Linux has no Isocast Virtual Camera yet").into());
         }
         "approval" => {
             status.state = VirtualCameraState::Failed;
-            status.last_error = Some(wording::select("virtual_camera: allow Isocast Virtual Camera in System Settings › General › Login Items & Extensions › Camera Extensions (macOS asks once); it starts as soon as you do", "virtual_camera: Windows virtual camera installation is not available in this build").into());
+            status.last_error = Some(wording::select_linux("virtual_camera: allow Isocast Virtual Camera in System Settings › General › Login Items & Extensions › Camera Extensions (macOS asks once); it starts as soon as you do", "virtual_camera: Windows virtual camera installation is not available in this build",
+                "virtual_camera: Linux has no Isocast Virtual Camera yet").into());
         }
         "running" => {
             status.state = VirtualCameraState::Running;
@@ -3217,10 +3225,11 @@ fn sample_stream(which: &str) -> anyhow::Result<StreamStatus> {
         "key-problem" => json!({
             "state": "offline", "service": "twitch", "server": "live.twitch.tv",
             "key_set": true,
-            "key_problem": wording::select("The saved key was stored by a differently signed copy of this \
+            "key_problem": wording::select_linux("The saved key was stored by a differently signed copy of this \
                 Isocast, and macOS lets only that copy use or replace it. Open Keychain Access, \
                 delete the “dev.isocast.release.stream” item, then paste the key and press Save Key.",
-                "The saved key could not be read from Credential Manager. Open Credential Manager › Windows Credentials and check the Isocast entry, then paste the key and press Save Key.")
+                "The saved key could not be read from Credential Manager. Open Credential Manager › Windows Credentials and check the Isocast entry, then paste the key and press Save Key.",
+        "The saved key could not be read from Isocast's credentials file. Paste the key again to replace it.")
         }),
         other => anyhow::bail!(
             "no sample stream {other:?}; one of live, reconnecting, connecting, short, \

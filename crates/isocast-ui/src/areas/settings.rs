@@ -464,14 +464,19 @@ impl Area for Settings {
         })));
         // What makes the files (shown after the codec: Paper's Encoder row).
         // The engine machine's encoder (decision 22).
+        let linux = crate::engine::os() == isocast_protocol::hello::EngineOs::Linux;
         let engine = if engine_is_mac() {
             "Apple VideoToolbox"
+        } else if linux {
+            "OpenH264 (software)"
         } else {
             ""
         };
+        // A Linux engine records H.264 only (its software encoder).
         area.set_codecs(model(
             CODECS
                 .iter()
+                .filter(|(value, _)| !linux || *value == "h264")
                 .map(|(value, label)| kit::option(value, label, engine)),
         ));
         area.set_pan_laws(model(
@@ -852,9 +857,10 @@ impl Area for Settings {
                     _ => Link::Failed,
                 };
                 let why = if arg.is_empty() && link == Link::Failed {
-                    wording::select(
+                    wording::select_linux(
                         "connect /tmp/isocast.sock: No such file or directory (os error 2)",
                         "connect to isocastd.exe: the recording engine is not available",
+                        "connect to isocastd: the recording engine is not available",
                     )
                 } else {
                     arg
@@ -2829,7 +2835,11 @@ impl Settings {
             });
             area.set_cameras(model(camera_choices));
             let default_mic = devices.microphones.iter().find(|m| m.default).map_or(
-                wording::select("Follows System Settings", "Follows Windows Settings"),
+                wording::select_linux(
+                    "Follows System Settings",
+                    "Follows Windows Settings",
+                    "Follows the desktop's settings",
+                ),
                 |m| m.name.as_str(),
             );
             let mut mic_choices = vec![DeviceChoice {

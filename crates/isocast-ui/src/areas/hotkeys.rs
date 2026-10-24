@@ -280,7 +280,8 @@ impl HotkeysPage {
             ]),
             configured: Default::default(),
             warnings: vec![
-                isocast_protocol::platform_text::select("hotkeys.media-play: media keys need Input Monitoring for Isocast’s engine (System Settings › Privacy & Security › Input Monitoring); they work while Isocast is in front meanwhile", "hotkeys.media-play: this Windows build cannot register this media key globally; choose another shortcut").into(),
+                isocast_protocol::platform_text::select_linux("hotkeys.media-play: media keys need Input Monitoring for Isocast’s engine (System Settings › Privacy & Security › Input Monitoring); they work while Isocast is in front meanwhile", "hotkeys.media-play: this Windows build cannot register this media key globally; choose another shortcut",
+                    "hotkeys.media-play: this Linux build cannot register this media key globally; choose another shortcut").into(),
             ],
             pending: false,
             registrations: vec![isocast_protocol::hotkeys::Registration {
