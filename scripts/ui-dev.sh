@@ -1,5 +1,5 @@
 #!/bin/sh
-# The Slint app as a bundle somewhere else than ~/Applications/Isocast.app
+# The Slint app as a bundle somewhere other than ~/Applications/Isocast.app
 # (test Macs, scratch folders): scripts/app-dev.sh with the bundle at
 # $ISOCAST_UI_APP. Since N.3 the Slint app is Isocast.app itself.
 #
