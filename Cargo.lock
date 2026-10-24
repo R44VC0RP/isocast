@@ -3556,7 +3556,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "isocast-app"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
@@ -3576,7 +3576,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-cli"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3601,7 +3601,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-client"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "isocast-diagnostics",
@@ -3620,7 +3620,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-daemon"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3650,7 +3650,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-diagnostics"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
@@ -3665,7 +3665,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-discovery"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3678,7 +3678,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-engine"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3705,7 +3705,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-ipc"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "isocast-remote",
  "libc",
@@ -3715,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-mux"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "isocast-protocol",
@@ -3727,7 +3727,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-obsws"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.4.3",
@@ -3742,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-platform-contracts"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "isocast-engine",
@@ -3756,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-platform-credentials"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "libc",
@@ -3767,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-platform-linux"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -3792,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-platform-macos"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3831,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-platform-stub"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "isocast-engine",
@@ -3843,7 +3843,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-platform-windows"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "cc",
@@ -3861,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-protocol"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "schemars",
  "serde",
@@ -3874,7 +3874,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-remote"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.22.1",
  "isocast-protocol",
@@ -3892,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-surfaces"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "isocast-ipc",
@@ -3907,7 +3907,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-ui"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3949,7 +3949,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-ui-interface"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "slint",
  "slint-build",
@@ -3957,7 +3957,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-vp8"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "cc",
 ]

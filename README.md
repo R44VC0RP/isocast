@@ -75,7 +75,7 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 ## Features
 
-**In Isocast 0.0.8 (the current download):**
+**In Isocast 0.0.9 (the current download):**
 
 - Scenes and sources: screens, windows, cameras, microphones, desktop
   audio, one app's audio or everything but some apps (macOS 14.2+),
@@ -88,14 +88,20 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   switch and marker falls. Each ISO file can carry its own sound (the
   camera with the mic, the screen with desktop audio). Isocast warns
   before and during a take when this Mac can't keep up with every file,
-  and suggests the closest setup that fits.
+  and suggests the closest setup that fits. Screen ISO files record in
+  8-bit or, with HEVC, 10-bit for smoother gradients (Settings › Recording).
 - Crash-safe takes: files are committed every half second, so a crash
   loses about 0.5 s, and they are repaired on the next launch. Pause and
   resume in the same file, and markers.
-- A built-in editor (**Window › Editor**): trim, split, angles and crops
-  on one timeline of your ISO files, export, and File › Export to Final
-  Cut Pro, Premiere Pro or Resolve; recording targets and `.isoprj`
-  project files. Removed in the next release (see below).
+- **Export a take for Final Cut Pro, Premiere Pro or DaVinci Resolve:**
+  `isocast project export-nle` writes a take as a project that opens with
+  every angle on its own track, pointing at your original files (no
+  re-encoding), with markers and each source's audio. The in-app editor
+  is removed; existing `.isoprj` files stay untouched but no longer open
+  in Isocast.
+- **Remote control (early):** pair with another Mac running Isocast on
+  your network (Settings › Remote) and drive its engine from a window of
+  its own, with its program as live video and, if you turn it on, sound.
 - **Projectors and multiview:** the program, preview, any scene or any
   source full screen on another display or in a window, and an OBS-style
   multiview with tally (red program, green preview).
@@ -130,19 +136,16 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   remotes, Touch Portal, community Stream Deck plugins and obs-websocket
   scripts (obs-cmd, obsws-python) can drive Isocast.
 - Profiles and scene collections, as in OBS, global hotkeys, the
-  `isocast` CLI and MCP tools for agents.
+  `isocast` CLI and MCP tools for agents, with every engine method
+  described as OpenRPC (`isocast api spec --json`).
 - A warning when another app or a busy or hot Mac threatens the
   recording, before frames drop.
 - Automatic updates. macOS prompts name the engine "Isocast Engine".
 
 **Coming next** (not in a release yet; see [coming soon](docs/coming.md)):
 
-- **No more in-app editor:** the editor window, timelines, recording
-  targets and `.isoprj` files are gone, so Isocast stays a recorder.
-- **Export a take for Final Cut Pro, Premiere Pro or DaVinci Resolve:**
-  `isocast project export-nle` writes a take as a project that opens with
-  every angle on its own track, pointing at your original files (no
-  re-encoding), with markers and each source's audio.
+- **More remote control:** live video for every monitor, not just the
+  program, and a choice of where its sound plays.
 - **Windows:** recording works end to end in testing (screen, camera and
   microphone to the program and ISO files, with previews); streaming,
   media playback and an installer release come next.
