@@ -694,10 +694,13 @@ def video_packets_accounted(times, fps, accounted):
     received stream; any other gap is lost media and fails, hosted or not."""
     if len(times) <= 2 or not all(b > a for a, b in zip(times, times[1:])):
         return False
-    # Each gap over a frame (and its 2 ms slack) misses at least one frame.
-    missing = sum(max(1, round((b - a) * fps) - 1) for a, b in zip(times, times[1:])
-                  if b - a > 1 / fps + 0.002)
-    return missing <= accounted
+    # Each gap over a frame (and its 2 ms slack) misses at least one frame,
+    # and a dropped slot's gap lies on the frame grid (as the stream
+    # scenario's check): a jittered or late delivery isn't a counted drop.
+    gaps = [(b - a) * fps for a, b in zip(times, times[1:]) if b - a > 1 / fps + 0.002]
+    if any(abs(n - round(n)) > fps * 0.0011 for n in gaps):
+        return False
+    return sum(max(1, round(n) - 1) for n in gaps) <= accounted
 
 
 def check_take(path, manifest, duration=None, sync=False, expected_sources=None, evidence=None):
@@ -3525,6 +3528,19 @@ def oracle_rules_selftest(work):
         "hosted: a 3-frame gap for 1 counted drop": (
             "pass" if video_packets_accounted([t for k, t in enumerate(every) if k not in (150, 151)], 30, 1)
             else "fail", "fail"),
+        "hosted: two 2-frame gaps for 1 counted drop": (
+            "pass" if video_packets_accounted([t for k, t in enumerate(every) if k not in (100, 200)], 30, 1)
+            else "fail", "fail"),
+        "hosted: a gap off the frame grid for 1 counted drop": (
+            "pass" if video_packets_accounted([t + (0.01 if k >= 150 else 0) for k, t in enumerate(one_lost)], 30, 1)
+            else "fail", "fail"),
+        "video packets out of order": (
+            "pass" if video_packets_accounted([t if k != 100 else every[98] for k, t in enumerate(every)], 30, 5)
+            else "fail", "fail"),
+        "hosted: vertical stream drops 6 of 300 (the 2% edge)": (stream(6, 300, hosted()), "pass"),
+        "hosted: vertical stream drops 7 of 300": (stream(7, 300, hosted()), "fail"),
+        "hosted: vertical stream drops 3 of 100 (the 3-frame floor)": (stream(3, 100, hosted()), "pass"),
+        "hosted: vertical stream drops 4 of 100": (stream(4, 100, hosted()), "fail"),
         "received audio with a gap": (
             "pass" if packets_unbroken([k * 0.021333 for k in range(400) if k != 200], 0.023) else "fail", "fail"),
     })
