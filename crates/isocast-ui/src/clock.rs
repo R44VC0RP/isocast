@@ -33,3 +33,5 @@ pub fn set_virtual(at: Duration) {
     OFFSET_NS.store(at.as_nanos() as u64, Ordering::Relaxed);
     VIRTUAL.store(true, Ordering::Relaxed);
 }
+
+// CI budget measurement (never merged).
