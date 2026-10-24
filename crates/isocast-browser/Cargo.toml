@@ -1,0 +1,22 @@
+[package]
+name = "isocast-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Isocast's browser source renderer on Linux: a helper process isocastd starts per page (WebKitGTK 6, offscreen)."
+publish = false
+
+[[bin]]
+name = "isocast-browser"
+path = "src/main.rs"
+
+# Linux only (elsewhere the binary is a stub). The system's WebKitGTK 6 and
+# GTK 4 (LGPL, linked dynamically) run in this process, never in isocastd:
+# a missing library, crash or hang costs one browser source, not the engine.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit6 = "=0.6.1"
+# v4_10: webkit6 needs gtk::Accessible (GTK 4.10; Ubuntu 24.04 has 4.14).
+gtk4 = { version = "=0.11.5", features = ["v4_10"] }
+libc = "0.2"
+base64 = "0.22.1"

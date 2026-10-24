@@ -18,7 +18,7 @@ use crate::encoder::Encoder;
 use crate::frames::{Frame, FramePool, Importer};
 use crate::system;
 use crate::writer::Writer;
-use crate::{camera, pipewire_audio, portal};
+use crate::{browser, camera, pipewire_audio, portal};
 
 #[derive(Clone, Copy, Default)]
 pub struct LinuxPlatform;
@@ -28,6 +28,7 @@ pub enum Unsupported {}
 // Each native backend owns its shutdown; no capture thread is detached.
 pub enum Capture {
     Screen(portal::Capture),
+    Browser(browser::Capture),
     Audio(pipewire_audio::Capture),
     Camera(camera::Capture),
 }
@@ -76,6 +77,9 @@ impl Platform for LinuxPlatform {
                 fix: error.fix,
             }],
         }
+    }
+    fn browser_warning(&self) -> Option<isocast_engine::DoctorWarning> {
+        browser::doctor_warning()
     }
     fn video_encoders(&self) -> isocast_engine::VideoEncoders {
         isocast_engine::VideoEncoders {
@@ -207,7 +211,8 @@ impl Platform for LinuxPlatform {
             | SourceKind::Color(_)
             | SourceKind::Image(_)
             | SourceKind::Slideshow(_)
-            | SourceKind::Text(_) => Ok(None),
+            | SourceKind::Text(_)
+            | SourceKind::Browser(_) => Ok(None),
             other => Err(unsupported(other.label())),
         }
     }
@@ -344,11 +349,12 @@ impl Platform for LinuxPlatform {
     }
     fn capture_browser(
         &self,
-        _page: &BrowserPage<'_>,
-        _video: VideoSink<Frame>,
-        _audio: Option<AudioSink>,
+        page: &BrowserPage<'_>,
+        video: VideoSink<Frame>,
+        audio: Option<AudioSink>,
     ) -> Result<(Capture, CaptureFormat, Arc<dyn BrowserControl>)> {
-        Err(unsupported("browser capture"))
+        let (capture, format, control) = browser::capture_browser(page, video, audio)?;
+        Ok((Capture::Browser(capture), format, control))
     }
 
     fn has_secret(&self, service: &str, account: &str) -> Result<bool> {

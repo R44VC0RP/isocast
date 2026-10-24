@@ -225,7 +225,9 @@ jobs:
           echo "FIXTURE=$RUNNER_TEMP/linux-capture-fixture" >> "$GITHUB_ENV"
           echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev
+          # WebKitGTK 6 and GTK 4 build the browser helper; libgtk-4-bin has
+          # gtk4-broadwayd, its private display.
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev libwebkitgtk-6.0-dev libgtk-4-dev libgtk-4-bin
           scripts/linux-capture-fixture.sh deps
           rustup toolchain install stable --profile minimal
           rustup default stable
@@ -242,9 +244,9 @@ jobs:
           key: linux-capture-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build daemon and CLI
+      - name: Build daemon, CLI and browser helper
         timeout-minutes: 30
-        run: cargo build --release --locked -p isocast-daemon -p isocast-cli
+        run: cargo build --release --locked -p isocast-daemon -p isocast-cli -p isocast-browser
 
       # Cisco's OpenH264 (the recordings encode H.264 with it).
       - name: Cache Cisco's OpenH264
@@ -266,16 +268,19 @@ jobs:
           . "$FIXTURE/session.env"
           cargo test --release --locked -p isocast-platform-linux stream_callbacks_run_on_the_worker_thread -- --ignored
 
-      - name: Record screen, desktop audio, microphone and camera (hosted rules)
+      - name: Record screen, desktop audio, microphone, camera and a browser source (hosted rules)
         timeout-minutes: 20
         run: |
           . "$FIXTURE/session.env"
-          python3 scripts/e2e.py --hosted --only linux_capture --linux-profile 360p30 --codec h264 \
+          python3 scripts/e2e.py --hosted --only linux_capture --only linux_browser --linux-profile 360p30 --codec h264 \
             --work "$RUNNER_TEMP/linux-capture" --keep-failures --report linux-capture.json
-          # A skipped scenario would pass silently: it must have run.
+          # A skipped scenario would pass silently: both must have run.
           python3 - <<'PY'
           import json
           r = {s["name"]: s for s in json.load(open("linux-capture.json"))["scenarios"]}
+          b = r.get("linux_browser")
+          assert b and b["status"] == "PASS", f"linux_browser did not pass: {b and (b['status'], b.get('reason'))}"
+          print("browser:", {k: b["evidence"].get(k) for k in ("web_codes", "program_codes", "alpha", "tones", "writer_drops")})
           s = r.get("linux_capture")
           assert s and s["status"] == "PASS", f"linux_capture did not pass: {s and (s['status'], s.get('reason'))}"
           ev = s["evidence"]
@@ -339,7 +344,7 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev libwebkitgtk-6.0-dev libgtk-4-dev
           mkdir -m 700 "$XDG_RUNTIME_DIR"
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
@@ -361,13 +366,13 @@ jobs:
       - name: Cisco's OpenH264
         run: packaging/linux/install.sh --openh264
 
-      - name: Build app, engine and CLI
-        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
+      - name: Build app, engine, CLI and browser helper
+        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser
 
       - name: App checks
         run: |
-          cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -- -D warnings
-          cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics
+          cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -p isocast-browser -- -D warnings
+          cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics -p isocast-browser
 
       - name: Offscreen snapshot against a local engine
         run: |

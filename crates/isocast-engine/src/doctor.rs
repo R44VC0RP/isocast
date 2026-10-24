@@ -155,6 +155,18 @@ pub fn doctor_writing<P: Platform>(
         ));
     }
 
+    // Browser sources that would run degraded (Linux: no WebKit sandbox).
+    if (setup.is_none() || uses(|kind| matches!(kind, SourceKind::Browser(_))))
+        && let Some(warning) = platform.browser_warning()
+    {
+        checks.push(check(
+            "browser sources",
+            CheckStatus::Warning,
+            warning.detail,
+            Some(&warning.fix),
+        ));
+    }
+
     // Hardware encoders.
     let has = |name: &str| machine.hardware_encoders.iter().any(|e| e.contains(name));
     checks.push(check(

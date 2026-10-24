@@ -1,0 +1,23 @@
+# AppArmor profile for Isocast's browser source helper, installed by the
+# .deb as /etc/apparmor.d/isocast-browser.
+#
+# The helper runs WebKitGTK, whose web process sandbox (bubblewrap) needs
+# unprivileged user namespaces. Ubuntu 24.04 restricts those to programs
+# with a profile that allows them (kernel.apparmor_restrict_unprivileged_userns),
+# and ships profiles like this one for Chromium, Electron apps and
+# Epiphany: unconfined, only granting "userns". With it the helper keeps
+# WebKit's sandbox on; without it (the tarball) it runs pages unsandboxed
+# and says so in the log. The helper recognises this profile by its name.
+#
+# The path is where the .deb installs the helper: beside isocastd, which
+# looks for it in its own folder.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile isocast-browser /usr/bin/isocast-browser flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/isocast-browser>
+}
