@@ -232,7 +232,8 @@ Enterprise Evaluation (expires ~90 days after 2026-10-18), 8 vCPU, 32 GiB, no GP
 Users `isocast` (guest admin) and `packager` (standard, for installer tests). Checkpoints `clean` (72dfd346…) and
 `clean-prev` (0bb765b6…): keep only these when you finish, and leave the VM off.
 
-**Public repo and CI:** R44VC0RP/isocast has its own history. Only the delegator pushes; agents never write to GitHub.
+**Public repo and CI:** R44VC0RP/isocast has its own history; private history is never pushed. GitHub writes go only
+through `pr.sh` (implementers: ci/<lane> snapshots and their PRs) and `merge-pr.sh` (QA: main).
 - `scripts/publish-snapshot.sh [--push] "msg"` copies `git archive main` into `~/dev/isocast-public`, after scanning
   for secrets and AI attribution.
 - `scripts/ci.sh [--worktree] [--merge-main] [--lane NAME] [--allow-workflow-changes]` (2026-10-22) publishes a
@@ -242,6 +243,17 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   `--merge-main`) and a `.github/` that differs from private main (unless `--allow-workflow-changes`). ci, e2e and
   windows run on `ci/**` pushes; a lane's newer push cancels its older run, never another lane's.
   `scripts/windows-ci.sh` is `ci.sh --lane windows --workflow Windows`. Other workflows: release, nightly-soak, visual.
+- PR flow (2026-10-24, ISO-40): `scripts/pr.sh` = `ci.sh --source <tip> --merge-main --no-wait` plus a PR ci/<lane> ->
+  main built from REPORT.md (labels `area:*` and `needs:<none|windows-gpu|mac|linux-gpu>`, hidden marker
+  `<!-- isocast-pr {"session","branch","lane"} -->`). Snapshots carry `Isocast-Source/Include/Main/Tree` trailers;
+  `merge-pr.sh` merges only when the PR's snapshot is green, built from the branch's tip, contains current main
+  (else it re-publishes and waits), and the `--no-ff` merge's tree equals `Isocast-Tree`; then `cargo check` on a
+  build host (lane `merge-check`), ff main, `publish-snapshot.sh --push`, comment, close, delete ci/<lane>. Batches
+  publish ci/batch-<first PR>. Logic in `scripts/pr_flow.py`.
+- Same-repo PRs don't run ci.yml, e2e.yml or bench.yml jobs (job `if:` on head repo): their ci/<lane> push already ran
+  CI on the identical snapshot; fork PRs still run them. Visual and PR checks still run on every PR (no push twin).
+- GitHub won't let the account approve its own PRs, so QA verdicts are comments starting `QA: approved` / `QA: changes
+  requested` (prs.sh reads them).
 
 ## 4. Commands that matter
 

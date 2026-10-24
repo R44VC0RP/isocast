@@ -31,12 +31,41 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/ci/') }}
 
 jobs:
+  # Decides whether this change needs the engine run end to end
+  # (.github/scripts/ci_gate.py); its summary says why.
+  gate:
+    name: what to run
+    # Pull requests from this repo come from ci/<lane> (scripts/pr.sh), whose
+    # push already ran this workflow on the same snapshot: only fork pull
+    # requests run it here, so a candidate never takes the runners twice.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      e2e: ${{ steps.gate.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 2 }}
+          persist-credentials: false
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci_gate.py e2e
+
   e2e:
+    needs: gate
+    if: needs.gate.outputs.e2e != 'skip'
     # GitHub-hosted arm64 only. Untrusted PR code never reaches test Macs.
     runs-on: macos-15
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: 0
+      # full, or warm (main: restore the cache; build only if it missed).
+      MODE: ${{ needs.gate.outputs.e2e }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -50,39 +79,47 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        id: cache
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - if: env.MODE == 'full'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/Library/Caches/Homebrew
           key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/e2e.yml') }}
           restore-keys: ffmpeg-${{ runner.os }}-${{ runner.arch }}-
       - name: FFmpeg
+        if: env.MODE == 'full'
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
       - name: Frame oracle selftest (fixture, decoder and the oracle's own rules)
+        if: env.MODE == 'full'
         # The hosted loss rules pass VM losses but still fail a broken frame,
         # a frozen source, a 2-frame A/V offset and a missing ISO.
         run: python3 scripts/e2e.py --selftest --work "$RUNNER_TEMP/selftest"
       - name: Build release engine
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         # The CLI too: the frame oracle reads a scene feed with it (masks B5).
         run: cargo build --locked --release -p isocast-daemon -p isocast-cli --bins --examples
       - name: Diagnose timers, process policy, Metal and compositor pacing
+        if: env.MODE == 'full'
         timeout-minutes: 11
         continue-on-error: true
         run: |
           python3 scripts/pacing.py --work "$RUNNER_TEMP/pacing" \
             --report "$RUNNER_TEMP/pacing.json"
       - name: Measure VM hardware and qualify 720p30 (program, two ISOs and RTMP)
+        if: env.MODE == 'full'
         run: |
           python3 scripts/e2e.py --hosted --capabilities --keep-failures \
             --work "$RUNNER_TEMP/e2e" --report "$RUNNER_TEMP/capabilities.json"
       - name: End-to-end scenarios
+        if: env.MODE == 'full'
         run: |
           python3 scripts/e2e.py --hosted --capabilities-from "$RUNNER_TEMP/capabilities.json" \
             --keep-failures --work "$RUNNER_TEMP/e2e" \
             --report "$RUNNER_TEMP/e2e-report.json"
       - name: Job summary
-        if: always()
+        if: always() && env.MODE == 'full'
         run: |
           if [ -f "$RUNNER_TEMP/e2e-report.json" ]; then
             python3 scripts/e2e.py --summary "$RUNNER_TEMP/e2e-report.json" >> "$GITHUB_STEP_SUMMARY"
@@ -92,7 +129,7 @@ jobs:
             echo '## Engine E2E: build/startup failed before hardware qualification; see logs.' >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Report and failing files
-        if: always()
+        if: always() && env.MODE == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: engine-e2e

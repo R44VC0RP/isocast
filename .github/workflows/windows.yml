@@ -22,8 +22,40 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Decides which jobs this change needs (.github/scripts/ci_gate.py): by
+  # the paths that changed, and not at all when the same tree already
+  # passed CI, Engine E2E and Windows. Its summary says why each job runs.
+  gate:
+    name: what to run
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      portable: ${{ steps.gate.outputs.portable }}
+      linux: ${{ steps.gate.outputs.linux }}
+      linux_capture: ${{ steps.gate.outputs.linux_capture }}
+      linux_app: ${{ steps.gate.outputs.linux_app }}
+      win_build: ${{ steps.gate.outputs.win_build }}
+      win_release: ${{ steps.gate.outputs.win_release }}
+      win_recovery: ${{ steps.gate.outputs.win_recovery }}
+      win_wording: ${{ steps.gate.outputs.win_wording }}
+      win_package: ${{ steps.gate.outputs.win_package }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci_gate.py windows
+
   portable:
     name: portable (${{ matrix.os }})
+    needs: gate
+    if: needs.gate.outputs.portable != 'skip'
     strategy:
       # Keep both platforms' diagnostics when one fails.
       fail-fast: false
@@ -34,6 +66,8 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      MODE: ${{ needs.gate.outputs.portable }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -48,28 +82,32 @@ jobs:
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        id: cache
         with:
           key: windows-portable
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
+        if: env.MODE == 'full'
         run: cargo fmt --all --check
 
       # W.0 is the OS-independent foundation, not a runnable Windows recorder.
       # Native service builds live below; recording qualification needs W.2+.
       - name: Build portable crates
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         id: build
         run: cargo build --locked -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -p isocast-mux
 
       - name: Clippy portable crates
+        if: env.MODE == 'full'
         run: cargo clippy --locked --keep-going --all-targets -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -p isocast-mux -- -D warnings
 
       - name: Test portable crates
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: (!cancelled() && steps.build.outcome == 'success') && (env.MODE == 'full')
         run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -p isocast-mux
 
       - name: Protect adjacent release assets (no GitHub calls)
-        if: matrix.os == 'ubuntu-latest'
+        if: (matrix.os == 'ubuntu-latest') && (env.MODE == 'full')
         run: |
           python - <<'PY'
           import importlib.util, json
@@ -113,9 +151,12 @@ jobs:
 
   linux:
     name: headless Linux daemon (ubuntu-latest)
+    needs: gate
+    if: needs.gate.outputs.linux != 'skip'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      MODE: ${{ needs.gate.outputs.linux }}
       XDG_RUNTIME_DIR: /tmp/isocast-runtime
       # The OpenH264 load test fails, not skips, without the library.
       ISOCAST_OPENH264_REQUIRED: 1
@@ -139,26 +180,31 @@ jobs:
           rustup default stable
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        id: cache
         with:
           key: linux-server
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build daemon and CLI
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked -p isocast-daemon -p isocast-cli
 
       # Cisco's OpenH264 binary, as install.sh downloads it (pinned version
       # and SHA-256; Isocast compiles none): the encoder and decoder tests
       # and the e2e load it from ~/.local/lib/isocast.
       - name: Cache Cisco's OpenH264
+        if: env.MODE == 'full'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.local/lib/isocast/libopenh264-2.6.0-*.so
           key: openh264-2.6.0-${{ runner.arch }}
 
       - name: Cisco's OpenH264
+        if: env.MODE == 'full'
         run: packaging/linux/install.sh --openh264
 
       - name: Linux platform checks
+        if: env.MODE == 'full'
         run: |
           cargo clippy --release --locked --all-targets -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials -p isocast-daemon -- -D warnings
           cargo test --release --locked -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials
@@ -171,17 +217,18 @@ jobs:
       # lavapipe. Use the existing hosted policy for this integrity smoke;
       # the six-vCPU arm64 VM separately qualifies strict 720p30 zero drops.
       - name: Synthetic program, ISOs and a stream (hosted 360p30)
+        if: env.MODE == 'full'
         run: python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
 
       - name: E2E summary
-        if: always()
+        if: (always()) && (env.MODE == 'full')
         run: |
           if test -f linux-e2e.json; then
             python3 scripts/e2e.py --summary linux-e2e.json >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Linux recording evidence
-        if: always()
+        if: (always()) && (env.MODE == 'full')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: linux-e2e
@@ -201,6 +248,8 @@ jobs:
     # pictures are the clips' moving frame codes, and no file dropped a frame
     # or audio (zero, also under --hosted).
     name: Linux capture (${{ matrix.arch }})
+    needs: gate
+    if: needs.gate.outputs.linux_capture != 'skip'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -212,6 +261,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     env:
+      MODE: ${{ needs.gate.outputs.linux_capture }}
       XDG_RUNTIME_DIR: /tmp/isocast-runtime
       CFLAGS: -O2
     steps:
@@ -231,42 +281,50 @@ jobs:
           rustup default stable
 
       # The patched portal backend, built once per fixture script version.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - if: env.MODE == 'full'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/linux-capture-fixture/portal
           # The portal binary links the image's libpipewire and libwayland.
           key: linux-capture-portal-${{ matrix.arch }}-${{ env.IMAGE_VERSION }}-${{ hashFiles('scripts/linux-capture-fixture.sh') }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        id: cache
         with:
           key: linux-capture-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build daemon and CLI
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         timeout-minutes: 30
         run: cargo build --release --locked -p isocast-daemon -p isocast-cli
 
       # Cisco's OpenH264 (the recordings encode H.264 with it).
       - name: Cache Cisco's OpenH264
+        if: env.MODE == 'full'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.local/lib/isocast/libopenh264-2.6.0-*.so
           key: openh264-2.6.0-${{ runner.arch }}
 
       - name: Cisco's OpenH264
+        if: env.MODE == 'full'
         run: packaging/linux/install.sh --openh264
 
       - name: Start the headless desktop (portal, PipeWire, virtual devices)
+        if: env.MODE == 'full'
         timeout-minutes: 10
         run: scripts/linux-capture-fixture.sh start "$FIXTURE" 640x360
 
       - name: PipeWire callbacks run on the worker thread
+        if: env.MODE == 'full'
         timeout-minutes: 15
         run: |
           . "$FIXTURE/session.env"
           cargo test --release --locked -p isocast-platform-linux stream_callbacks_run_on_the_worker_thread -- --ignored
 
       - name: Record screen, desktop audio, microphone and camera (hosted rules)
+        if: env.MODE == 'full'
         timeout-minutes: 20
         run: |
           . "$FIXTURE/session.env"
@@ -287,19 +345,19 @@ jobs:
           PY
 
       - name: E2E summary
-        if: always()
+        if: (always()) && (env.MODE == 'full')
         run: |
           if test -f linux-capture.json; then
             python3 scripts/e2e.py --summary linux-capture.json >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Stop the desktop
-        if: always()
+        if: (always()) && (env.MODE == 'full')
         timeout-minutes: 2
         run: scripts/linux-capture-fixture.sh stop "$FIXTURE" || true
 
       - name: Capture evidence and fixture logs
-        if: always()
+        if: (always()) && (env.MODE == 'full')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: linux-capture-${{ matrix.arch }}
@@ -315,6 +373,8 @@ jobs:
     # download (scripts/package-linux.sh): x86_64 and arm64. Rendering runs on
     # Mesa's software Vulkan here; a snapshot proves the window draws.
     name: Linux app + tarball (${{ matrix.arch }})
+    needs: gate
+    if: needs.gate.outputs.linux_app != 'skip'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -326,6 +386,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     env:
+      MODE: ${{ needs.gate.outputs.linux_app }}
       XDG_RUNTIME_DIR: /tmp/isocast-runtime
       # The OpenH264 load test fails, not skips, without the library.
       ISOCAST_OPENH264_REQUIRED: 1
@@ -345,6 +406,7 @@ jobs:
           rustup default stable
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        id: cache
         with:
           key: linux-app-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -353,23 +415,28 @@ jobs:
       # and SHA-256; Isocast compiles none): the encoder and decoder tests
       # and the e2e load it from ~/.local/lib/isocast.
       - name: Cache Cisco's OpenH264
+        if: env.MODE == 'full'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.local/lib/isocast/libopenh264-2.6.0-*.so
           key: openh264-2.6.0-${{ runner.arch }}
 
       - name: Cisco's OpenH264
+        if: env.MODE == 'full'
         run: packaging/linux/install.sh --openh264
 
       - name: Build app, engine and CLI
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
 
       - name: App checks
+        if: env.MODE == 'full'
         run: |
           cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -- -D warnings
           cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics
 
       - name: Offscreen snapshot against a local engine
+        if: env.MODE == 'full'
         run: |
           work="$RUNNER_TEMP/linux-app"
           mkdir -p "$work"
@@ -380,9 +447,11 @@ jobs:
           target/release/isocast engine shutdown || true
 
       - name: Package
+        if: env.MODE == 'full'
         run: scripts/package-linux.sh
 
       - name: No OpenH264 in the tarball
+        if: env.MODE == 'full'
         run: |
           set -o pipefail
           tarball=dist/isocast-linux-${{ matrix.arch }}.tar.gz
@@ -401,6 +470,7 @@ jobs:
           done
 
       - name: Upload tarball
+        if: env.MODE == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: isocast-linux-${{ matrix.arch }}
@@ -408,23 +478,28 @@ jobs:
           retention-days: 30
 
       - name: Upload snapshots
-        if: always()
+        if: (always()) && (env.MODE == 'full')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: linux-app-snapshots-${{ matrix.arch }}
           path: ${{ runner.temp }}/linux-app/*.png
           retention-days: 7
 
-  engine:
+  win-build:
     # W.1e: UI/native services compile with explicit platform stubs, not a
     # Windows capture, recording or shared-GPU-surface claim.
     # Native runtime checks run on exon-desk; this is the clean-machine build.
-    name: daemon + CLI + UI + installer (windows-latest)
+    # Builds once and uploads the binaries; the qualification jobs below run
+    # in parallel from them (the single job took 70-83 minutes).
+    name: Windows build, unit tests, contracts (windows-latest)
+    needs: gate
+    if: needs.gate.outputs.win_build != 'skip'
     runs-on: windows-latest
     # Keep main's proven memory-bounded build: debug symbols off, no kit
     # gallery, and the UI compiled separately with exactly one Cargo job.
     timeout-minutes: 90
     env:
+      MODE: ${{ needs.gate.outputs.win_build }}
       CARGO_PROFILE_DEV_DEBUG: '0'
       # Every step that can compile the UI, including Clippy/tests and the
       # second installer, must keep this setting or restore the large module.
@@ -451,6 +526,7 @@ jobs:
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        id: cache
         with:
           key: windows-engine
           cache-on-failure: true
@@ -464,14 +540,115 @@ jobs:
           echo "ISOCAST_WINDOWS_BUILD_VERSION=$ISOCAST_WINDOWS_BUILD_VERSION" >> "$GITHUB_ENV"
 
       - name: Build native services and test binaries (do not run)
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts
 
       # Synchronous MF AAC transactions: serial, after the native build so
       # the test binary is cached. Package-only features can still rebuild
       # dependencies, so allow compilation time as well as test execution.
       - name: Check Media Foundation AAC transactions
+        if: env.MODE == 'full'
         timeout-minutes: 30
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
+
+      # Slint compiles the whole interface into one generated Rust module
+      # (the isocast-ui-interface crate, built once and shared by the app
+      # and its tests); rustc needs 13.6 GiB for it (15.1 GiB committed),
+      # measured on exon-desk, and run 39135916369 died with `rustc-LLVM
+      # ERROR: out of memory` on this 16 GB runner when the module was
+      # still compiled into the bin and its test binary side by side. So the
+      # UI builds in its own step: one rustc at a time (-j 1), and without
+      # the kit gallery (isocast-ui-interface/build.rs ISOCAST_UI_NO_GALLERY: the
+      # `--state kit` design board, a quarter of the module), which brings
+      # each rustc to 10.8 GiB (12.2 committed). The gallery's .slint is not
+      # compiled here; macOS CI and the exon-desk qualification build it.
+      # The same packages as the updater tests below, so Cargo resolves the
+      # same features and `cargo test` reuses this build (with only
+      # `-p isocast-ui` here, the tests rebuilt the dependencies and the
+      # interface: 9.5 min, run 39947489790).
+      - name: Build UI and its test binary (do not run)
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+        id: native_build
+        run: cargo build --locked --all-targets -j 1 -p isocast-client -p isocast-cli -p isocast-ui
+
+      - name: Check updater clients
+        if: env.MODE == 'full'
+        run: |
+          cargo clippy --locked --all-targets -j 1 -p isocast-discovery -p isocast-client -p isocast-cli -p isocast-ui -- -D warnings
+          cargo test --locked -j 1 -p isocast-client -p isocast-cli -p isocast-ui
+
+      - name: Check Platform contract harness
+        if: env.MODE == 'full'
+        run: |
+          cargo clippy --locked --all-targets -p isocast-platform-contracts -- -D warnings
+          python -m unittest discover -s scripts -p test_platform_contracts.py
+
+      # Explicit CPU placeholder baseline, NOT native Windows qualification.
+      - name: Clock and pool contracts (stub)
+        if: env.MODE == 'full'
+        run: python scripts/platform-contracts.py --bin target/debug/isocast-platform-contracts.exe --backend stub --suite core --work "$RUNNER_TEMP/platform-contracts"
+
+      - name: Keep the first build for the qualification jobs
+        if: env.MODE == 'full'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/bins/first" | Out-Null
+          foreach ($exe in @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe')) { Copy-Item "target/debug/$exe" "$env:RUNNER_TEMP/bins/first/" }
+
+      # A distinct compiled build, with the same qualification key, lets the
+      # clean VM prove update and authenticated rollback without release keys.
+      - name: Build second update candidate
+        if: env.MODE == 'full'
+        run: |
+          export ISOCAST_WINDOWS_BUILD_VERSION="$ISOCAST_WINDOWS_BASE_VERSION.2"
+          # The UI build's package set (same features), so the dependencies
+          # and the interface are reused. The version change reruns
+          # isocast-client's build script (it reads ISOCAST_WINDOWS_BUILD_VERSION),
+          # so isocast-client and the app recompile and isocast.exe relinks.
+          cargo build --locked -j 1 -p isocast-client -p isocast-cli -p isocast-ui
+
+      - name: Keep the second build
+        if: env.MODE == 'full'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/bins/next" | Out-Null
+          foreach ($exe in @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe')) { Copy-Item "target/debug/$exe" "$env:RUNNER_TEMP/bins/next/" }
+
+      - name: Hand the builds to the qualification jobs
+        if: env.MODE == 'full'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-debug-bins
+          path: ${{ runner.temp }}/bins
+          if-no-files-found: error
+          retention-days: 1
+
+  win-recovery:
+    # Recordings survive the engine and its process tree being killed.
+    name: Windows recording recovery (windows-latest)
+    needs: [gate, win-build]
+    if: needs.gate.outputs.win_recovery == 'full'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: The build's binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-debug-bins
+          path: ${{ runner.temp }}/bins
+
+      - name: Put the first build where the steps expect it
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/debug | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/bins/first/*.exe" target/debug/
 
       - name: Install recording recovery decoder
         timeout-minutes: 10
@@ -499,58 +676,32 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # Host-specific recording qualification uses optimized services, not the debug
-      # binaries used for recovery/contract checks above.
-      - name: Build recording qualification services
-        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli --bins
-
-      - name: Qualify headless profiles and protect recording by pausing previews
-        timeout-minutes: 9
-        run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
-
-      - name: Keep preview recording evidence
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+  win-wording:
+    # The app's Windows wording, drawn offscreen against an isolated engine.
+    name: Windows wording snapshots (windows-latest)
+    needs: [gate, win-build]
+    if: needs.gate.outputs.win_wording == 'full'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          name: windows-preview-recording
-          path: |
-            windows-preview.json
-            ${{ runner.temp }}/windows-preview
-          if-no-files-found: warn
-          retention-days: 14
+          persist-credentials: false
 
-      # Slint compiles the whole interface into one generated Rust module
-      # (the isocast-ui-interface crate, built once and shared by the app
-      # and its tests); rustc needs 13.6 GiB for it (15.1 GiB committed),
-      # measured on exon-desk, and run 39135916369 died with `rustc-LLVM
-      # ERROR: out of memory` on this 16 GB runner when the module was
-      # still compiled into the bin and its test binary side by side. So the
-      # UI builds in its own step: one rustc at a time (-j 1), and without
-      # the kit gallery (isocast-ui-interface/build.rs ISOCAST_UI_NO_GALLERY: the
-      # `--state kit` design board, a quarter of the module), which brings
-      # each rustc to 10.8 GiB (12.2 committed). The gallery's .slint is not
-      # compiled here; macOS CI and the exon-desk qualification build it.
-      # The same packages as the updater tests below, so Cargo resolves the
-      # same features and `cargo test` reuses this build (with only
-      # `-p isocast-ui` here, the tests rebuilt the dependencies and the
-      # interface: 9.5 min, run 39947489790).
-      - name: Build UI and its test binary (do not run)
-        id: native_build
-        run: cargo build --locked --all-targets -j 1 -p isocast-client -p isocast-cli -p isocast-ui
+      - name: The build's binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-debug-bins
+          path: ${{ runner.temp }}/bins
 
-      - name: Check updater clients
+      - name: Put the first build where the steps expect it
+        shell: pwsh
         run: |
-          cargo clippy --locked --all-targets -j 1 -p isocast-discovery -p isocast-client -p isocast-cli -p isocast-ui -- -D warnings
-          cargo test --locked -j 1 -p isocast-client -p isocast-cli -p isocast-ui
-
-      - name: Check Platform contract harness
-        run: |
-          cargo clippy --locked --all-targets -p isocast-platform-contracts -- -D warnings
-          python -m unittest discover -s scripts -p test_platform_contracts.py
-
-      # Explicit CPU placeholder baseline, NOT native Windows qualification.
-      - name: Clock and pool contracts (stub)
-        run: python scripts/platform-contracts.py --bin target/debug/isocast-platform-contracts.exe --backend stub --suite core --work "$RUNNER_TEMP/platform-contracts"
+          New-Item -ItemType Directory -Force target/debug | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/bins/first/*.exe" target/debug/
 
       - name: Windows wording snapshots (isolated, offscreen)
         timeout-minutes: 8
@@ -625,6 +776,33 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  win-package:
+    # W.7a: unsigned qualification only. No signing secrets or release writes.
+    name: Windows installer and update packages (windows-latest)
+    needs: [gate, win-build]
+    if: needs.gate.outputs.win_package == 'full'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: The build's binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-debug-bins
+          path: ${{ runner.temp }}/bins
+
+      - name: Put the first build where the steps expect it
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/debug | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/bins/first/*.exe" target/debug/
+
       # W.7a: unsigned qualification only. No signing secrets or release writes.
       - name: Package per-user installer
         # Includes the pinned, security-patched WinSparkle source build.
@@ -682,22 +860,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # A distinct compiled build, with the same qualification key, lets the
-      # clean VM prove update and authenticated rollback without release keys.
-      - name: Build second update candidate
-        run: |
-          export ISOCAST_WINDOWS_BUILD_VERSION="$ISOCAST_WINDOWS_BASE_VERSION.2"
-          # The UI build's package set (same features), so the dependencies
-          # and the interface are reused. The version change reruns
-          # isocast-client's build script (it reads ISOCAST_WINDOWS_BUILD_VERSION),
-          # so isocast-client and the app recompile and isocast.exe relinks.
-          cargo build --locked -j 1 -p isocast-client -p isocast-cli -p isocast-ui
-
       - name: Package second update candidate
         shell: pwsh
         timeout-minutes: 10
         run: |
-          ./scripts/windows/package.ps1 -BinDir target/debug -OutputDir "$env:RUNNER_TEMP/windows-package-next" -ToolsDir "$env:RUNNER_TEMP/package-tools" -CrtDir $env:ISOCAST_WINDOWS_CRT
+          ./scripts/windows/package.ps1 -BinDir "$env:RUNNER_TEMP/bins/next" -OutputDir "$env:RUNNER_TEMP/windows-package-next" -ToolsDir "$env:RUNNER_TEMP/package-tools" -CrtDir $env:ISOCAST_WINDOWS_CRT
 
       - name: Keep second qualification installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -708,20 +875,103 @@ jobs:
           retention-days: 14
 
       - name: Retain successful builds even if packaging fails
-        if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $folder = "$env:RUNNER_TEMP/windows-build-diagnostics"
           New-Item -ItemType Directory -Force $folder | Out-Null
-          Copy-Item target/debug/isocast.exe, target/debug/isocastd.exe, target/debug/isocast-ui.exe, target/debug/isocast-capture.exe $folder
+          Copy-Item "$env:RUNNER_TEMP/bins/next/*.exe" $folder
           if ($env:ISOCAST_WINDOWS_CRT) { Copy-Item "$env:ISOCAST_WINDOWS_CRT\*.dll" $folder }
           Get-ChildItem $folder -File | ForEach-Object { Get-FileHash $_.FullName -Algorithm SHA256 } | ConvertTo-Json | Set-Content "$folder/hashes.json"
 
       - name: Keep unpackaged diagnostic binaries
-        if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-x64-unpackaged-diagnostics
           path: ${{ runner.temp }}/windows-build-diagnostics
           if-no-files-found: error
+          retention-days: 14
+
+  win-release:
+    # Host-specific recording qualification uses optimized services, not the
+    # debug binaries of the build job; built here in parallel with it.
+    name: Windows release qualification (windows-latest)
+    needs: gate
+    if: needs.gate.outputs.win_release != 'skip'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      MODE: ${{ needs.gate.outputs.win_release }}
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      # Every step that can compile the UI, including Clippy/tests and the
+      # second installer, must keep this setting or restore the large module.
+      ISOCAST_UI_NO_GALLERY: '1'
+      # Qualification artifacts only, never release builds. The private half
+      # stays in the packaging lane's isolated VM-host folder, not GitHub.
+      ISOCAST_WINDOWS_UPDATE_TEST: '1'
+      ISOCAST_WINDOWS_UPDATE_KEY: '8mHwrJ82GhszmY2GnbKhW/qJsDL0XEYReeB5AsIT1Z0='
+      ISOCAST_WINDOWS_APPCAST_URL: 'http://127.0.0.1:17745/appcast-windows-test.xml'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustc --version --verbose
+          cargo --version
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        id: cache
+        with:
+          key: windows-release
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Qualification build identity
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          export ISOCAST_WINDOWS_BUILD_VERSION="$version.1"
+          echo "ISOCAST_WINDOWS_BASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "ISOCAST_WINDOWS_BUILD_VERSION=$ISOCAST_WINDOWS_BUILD_VERSION" >> "$GITHUB_ENV"
+
+      # Host-specific recording qualification uses optimized services, not the debug
+      # binaries used for recovery/contract checks above.
+      - name: Build recording qualification services
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli --bins
+
+      - name: Install recording recovery decoder
+        if: env.MODE == 'full'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --version=9.0.2 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install FFmpeg' }
+          }
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Qualify headless profiles and protect recording by pausing previews
+        if: env.MODE == 'full'
+        timeout-minutes: 9
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
+
+      - name: Keep preview recording evidence
+        if: (!cancelled()) && (env.MODE == 'full')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-preview-recording
+          path: |
+            windows-preview.json
+            ${{ runner.temp }}/windows-preview
+          if-no-files-found: warn
           retention-days: 14
