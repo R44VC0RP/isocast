@@ -46,6 +46,11 @@ Linux bootstrap: --only linux_record runs synthetic bars, tone and color at
 capture hardware or media-file decoder is required. For hosted software Vulkan,
 --hosted --linux-profile 360p30 uses the existing hosted loss/oracle policy;
 strict 720p30 qualification remains a separate run without --hosted.
+
+Linux capture: --only linux_capture records the real capture paths (the
+ScreenCast portal over PipeWire, PipeWire desktop audio, a microphone and a
+V4L2 camera) on the headless desktop of scripts/linux-capture-fixture.sh
+(source its session.env first; without it the scenario is skipped).
 """
 
 import argparse
@@ -90,7 +95,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern (Windows has no media files yet).
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery") if sys.platform.startswith("linux") else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery", "linux_capture") if sys.platform.startswith("linux") else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -3899,6 +3904,166 @@ def discovery_without_bus(e):
     require("panicked" not in out.stderr, f"discovery without a system bus panicked: {out.stderr.strip()[-400:]}")
     require(seconds <= 2.5, f"discovery without a system bus took {seconds}s, expected about 2s at most")
     return {"exit": out.returncode, "seconds": seconds}
+
+
+LINUX_CAPTURE_SECONDS = 15
+LINUX_CAPTURE_CANVAS = (480, 270)
+
+
+def tone_amplitudes(path, stream, freqs=(440, 880), start=2, seconds=2):
+    """The amplitude of each frequency in one audio stream of `path` (mono
+    mix of its channels, `seconds` from `start`), by a single-bin DFT."""
+    raw = ffmpeg("-ss", start, "-i", path, "-t", seconds, "-map", f"0:a:{stream}", "-ac", "1",
+                 "-ar", RATE, "-f", "f32le", "-").stdout
+    samples = array.array("f")
+    samples.frombytes(raw)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    require(len(samples) >= RATE, f"{Path(path).name} audio {stream}: under a second of sound")
+    out = {}
+    for f in freqs:
+        w = 2 * math.pi * f / RATE
+        re_ = sum(x * math.cos(w * i) for i, x in enumerate(samples))
+        im = sum(x * math.sin(w * i) for i, x in enumerate(samples))
+        out[f] = 2 * math.hypot(re_, im) / len(samples)
+    return out
+
+
+def scenario_linux_capture(e, cfg, evidence):
+    """The real Linux capture paths on scripts/linux-capture-fixture.sh's
+    headless desktop: the screen through the ScreenCast portal and PipeWire
+    (mpv showing the frame oracle's block-code clip), desktop audio from the
+    default sink (a 440 Hz tone), a microphone (880 Hz into a virtual source)
+    and, where the kernel has v4l2loopback, a V4L2 camera (the oracle's
+    second clip). One take: the program (screen and the camera in a corner,
+    desktop and mic audio) and ISOs of the screen (desktop audio) and camera
+    (mic audio). Every file decodes, each track carries its own tone and not
+    the other, the screen and camera pictures are the clips' moving frame
+    codes, and no file dropped a frame or audio (zero, also under --hosted;
+    the take's other checks follow the invocation's rules). Application audio joins once the app-audio source
+    lands (agent/linux-app-audio); evidence["app_audio"] says so meanwhile."""
+    if not LINUX:
+        raise Skip("Linux only")
+    if not (os.environ.get("WAYLAND_DISPLAY") and os.environ.get("ISOCAST_FIXTURE_MIC")):
+        raise Skip("needs the capture fixture: scripts/linux-capture-fixture.sh start DIR, then source DIR/session.env")
+    seconds, (w, h), fps = LINUX_CAPTURE_SECONDS, LINUX_CAPTURE_CANVAS, 30
+    camera = os.environ.get("ISOCAST_FIXTURE_CAMERA")
+    evidence["camera"] = camera or f"skipped: {os.environ.get('ISOCAST_FIXTURE_CAMERA_SKIP', 'no camera')}"
+    # The slot for application audio (an app playing its own tone, captured
+    # by the application source and kept out of desktop audio).
+    evidence["app_audio"] = "not covered yet: the Linux application-audio source is in review (agent/linux-app-audio)"
+    fixtures = e.root.parent / "fixtures"
+    clips = {tag: oracle_fixture(fixtures, ORACLE_TAGS[tag], fps) for tag in ("a", "b")}
+    count = ORACLE_SECONDS * fps
+    producers = []
+
+    def produce(name, argv):
+        log = open(e.root / f"{name}.log", "wb")
+        producers.append((name, subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT,
+                                                 stdin=subprocess.DEVNULL, start_new_session=True), log))
+
+    tone = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning", "-re", "-f", "lavfi"]
+    try:
+        produce("screen", ["mpv", "--no-config", "--vo=wlshm", "--hwdec=no", "--no-audio", "--loop-file=inf",
+                           "--fullscreen", "--osc=no", "--osd-level=0", "--input-default-bindings=no",
+                           "--wayland-app-id=isocast-fixture", str(clips["a"])])
+        produce("desktop-tone", tone + ["-i", f"sine=frequency=440:sample_rate={RATE}", "-ac", "2", "-f", "pulse",
+                                        "-device", os.environ.get("ISOCAST_FIXTURE_DESKTOP_SINK", "isocast_desktop"),
+                                        "IsocastDesktopTone"])
+        produce("mic-tone", tone + ["-i", f"sine=frequency=880:sample_rate={RATE}", "-ac", "1", "-f", "pulse",
+                                    "-device", os.environ.get("ISOCAST_FIXTURE_MIC_FEED", "isocast_mic_feed"),
+                                    "IsocastMicTone"])
+        if camera:
+            produce("camera", ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning", "-re",
+                               "-stream_loop", "-1", "-i", str(clips["b"]), "-an", "-vf", "format=yuyv422",
+                               "-f", "v4l2", camera])
+        until(lambda: b"isocast-fixture" in command(["swaymsg", "-t", "get_tree"], check=False).stdout,
+              20, "the fixture's screen picture on the headless output")
+        time.sleep(1)
+        for name, process, _ in producers:
+            require(process.poll() is None, f"fixture {name} exited early; see {name}.log in the scenario folder")
+
+        cfg["canvas"].update(width=w, height=h, fps=fps)
+        cfg["sources"] = [{"id": "screen", "kind": "display", "display": "main", "cursor": False},
+                          {"id": "desktop", "kind": "system_audio"},
+                          {"id": "mic", "kind": "microphone", "device": os.environ["ISOCAST_FIXTURE_MIC"]}]
+        layout = [("a", (0, 0, 1, 1))]
+        cfg["scenes"][0]["items"] = [item("screen", (0, 0, 1, 1), (w, h))]
+        iso = ["screen"]
+        source_audio = {"screen": ["desktop"]}
+        if camera:
+            cfg["sources"].append({"id": "camera", "kind": "camera", "device": camera,
+                                   "width": ORACLE_SIZE[0], "height": ORACLE_SIZE[1], "fps": fps})
+            cfg["scenes"][0]["items"].append(item("camera", (0.7, 0.7, 0.3, 0.3), (w, h)))
+            layout.append(("b", (0.7, 0.7, 0.3, 0.3)))
+            iso.append("camera")
+            source_audio["camera"] = ["mic"]
+        cfg["recording"]["program"]["audio"] = ["desktop", "mic"]
+        cfg["recording"]["iso"].update(enabled=True, sources=iso, audio=["desktop"], source_audio=source_audio)
+        e.apply(cfg)
+        # The portal session and PipeWire streams start with the engine
+        # (up to 105 s on a slow desktop; the fixture never asks).
+        e.rpc("engine", {"running": True}, timeout=150)
+        time.sleep(2)
+        evidence["devices"] = e.optional("devices")
+        path, manifest = take(e, seconds)
+        evidence["files"] = check_take(path, manifest, seconds, expected_sources=["program"] + iso,
+                                       evidence=evidence)
+        evidence["writer_drops"] = {f["source"]: {"dropped": f["dropped_frames"], "audio_dropouts": f["audio_dropouts"]}
+                                    for f in manifest["files"]}
+        # Zero writer drops even under --hosted, as win_preview_recording:
+        # 480x270p30 with two ISOs is well inside a hosted runner's capacity.
+        lost = {k: v for k, v in evidence["writer_drops"].items() if v["dropped"] or v["audio_dropouts"]}
+        require(not lost, f"writer drops (zero required, also under --hosted): {lost}")
+
+        # Sound: every track has its own tone and not the other one.
+        tones = {}
+        for f in manifest["files"]:
+            file = path.parent / f["path"]
+            streams = [s for s in probe(file)["streams"] if s["codec_type"] == "audio"]
+            require(streams, f"{file.name}: no audio track")
+            tones[f["source"]] = [tone_amplitudes(file, i) for i in range(len(streams))]
+        evidence["tones"] = {k: [{str(f): round(a, 5) for f, a in t.items()} for t in v] for k, v in tones.items()}
+        heard = lambda source, f: max(t[f] for t in tones[source])  # noqa: E731
+        require(heard("program", 440) > 0.01 and heard("program", 880) > 0.01,
+                f"program sound lacks the desktop (440 Hz) or microphone (880 Hz) tone: {evidence['tones']['program']}")
+        for source, want, other in (("screen", 440, 880), ("camera", 880, 440)):
+            if source in tones:
+                require(heard(source, want) > 0.01 and heard(source, other) < 0.1 * heard(source, want),
+                        f"{source} ISO sound should be the {want} Hz tone only: {evidence['tones'][source]}")
+
+        # Pictures: the clips' frame codes, moving forward.
+        def codes(file, regions, name):
+            rows = oracle_decode(file, regions, fps)
+            ids = [r[2][name] for r in rows]
+            good = [x[2] for x in ids if x[0] == "id" and x[1] == ORACLE_TAGS[name]]
+            back = sum(1 for a, b in zip(good, good[1:]) if 0 < (a - b) % count < count // 2)
+            result = {"pictures": len(rows), "decoded": len(good), "unique": len(set(good)), "backwards": back}
+            wrong = [x for x in ids if x[0] != "id" or x[1] != ORACLE_TAGS[name]]
+            require(not wrong, f"{file.name}: {len(wrong)} of {len(rows)} pictures don't show the {name} clip's "
+                               f"frame code (first: {wrong[:1]})")
+            require(back == 0, f"{file.name}: the {name} clip's frames went backwards {back} times")
+            # 90%: real runs show 447-450 of 450, and a stream that stalls after a few seconds must fail.
+            require(len(set(good)) >= seconds * fps * 9 // 10,
+                    f"{file.name}: only {len(set(good))} different {name} frames in {seconds} s (frozen or stalled)")
+            return result
+
+        screen_iso, _ = manifest_file(path, manifest, "screen")
+        evidence["screen_codes"] = codes(screen_iso, oracle_regions([("a", (0, 0, 1, 1))]), "a")
+        program, _ = manifest_file(path, manifest, "program")
+        evidence["program_codes"] = codes(program, [r for r in oracle_regions(layout) if r["name"] == "a"], "a")
+        if camera:
+            camera_iso, _ = manifest_file(path, manifest, "camera")
+            evidence["camera_codes"] = codes(camera_iso, oracle_regions([("b", (0, 0, 1, 1))]), "b")
+    finally:
+        for name, process, log in producers:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+            log.close()
 
 
 def scenario_linux_recovery(e, cfg, evidence):

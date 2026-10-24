@@ -362,6 +362,10 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   while a diagnostic trace measured 3.16 full-window UI presents/s. Removing Slint redraws alone did not
   meet the CPU target. No-redirection produced blank native-menu captures (physical screen unconfirmed);
   version metadata and ValidateRect probes gave no established win. None of those experiments is retained.
+- 2026-10-24: Hosted Ubuntu 24.04 runners (x86_64 and arm64) run the real Linux capture paths headless:
+  `scripts/linux-capture-fixture.sh` (sway pixman, xdg-desktop-portal-wlr 0.7.1 with a one-line DMA-BUF test patch,
+  PipeWire, null sinks, v4l2loopback after `modprobe videodev` from linux-modules-extra). windows.yml's
+  linux-capture job records them with `e2e.py --only linux_capture` at 480x270p30: zero drops on both arches.
 - 2026-10-22: GitHub's macos-15 runners (macOS 15.7.9, 3 vCPU M1 VM, paravirtual Metal and encoders) drop frames:
   GPU waits stall up to ~143 ms, and a zero-drop qualification never predicted a zero-drop suite (every hosted run
   2026-10-17..22 dropped somewhere; worst 1.5% of the suite's slots). So `e2e.py --hosted` always allows accounted
