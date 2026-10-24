@@ -1,0 +1,14 @@
+[package]
+name = "isocast-openh264"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cisco's OpenH264 binary on Linux: found, checked against its pinned SHA-256 and loaded at run time. Isocast ships no OpenH264 of its own."
+
+# No `source` feature: no OpenH264 is compiled into Isocast. Cisco's patent
+# licence covers only Cisco's own binary, which the installer downloads
+# (packaging/linux/install.sh --openh264).
+[target.'cfg(target_os = "linux")'.dependencies]
+openh264 = { version = "=0.9.9", default-features = false, features = ["libloading"] }
+sha2 = "0.10.9"

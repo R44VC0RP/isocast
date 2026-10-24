@@ -156,17 +156,18 @@ print("Program WebRTC audio uses libopus (https://opus-codec.org), bundled by li
 opus = next(p for p in packages.values() if p["name"] == "libopus_sys")
 print((Path(opus["manifest_path"]).parent / "opus" / "COPYING").read_text().rstrip())
 
-section("H.264 encoder")
-h264, h264_dir = source("openh264-sys2")
-upstream = (h264_dir / "upstream" / "VERSION").read_text().split()
-assert len(upstream) == 2 and upstream[0].startswith("https://"), upstream
-print(f"""The Linux server encodes H.264, and the Linux app decodes its previews,
-with Cisco's OpenH264, compiled from the
-sources bundled in openh264-sys2 {h264["version"]} ({upstream[0]}
-at commit {upstream[1]}). OpenH264 is under the BSD 2-clause licence
-below.
+section("H.264 codec")
+print("""Isocast contains no OpenH264. On Linux, its installer (install.sh,
+which runs on the user's computer) downloads Cisco's OpenH264 2.6.0 binary
+from https://ciscobinary.openh264.org, and the Linux engine (H.264 encoding)
+and app (preview decoding) load it at run time. `install.sh --remove-openh264`
+turns it off and `install.sh --openh264` on again. It is Cisco's binary, under
+Cisco's licence, reproduced in full below (packaging/linux/CISCO_H264_LICENSE.txt,
+https://www.openh264.org/BINARY_LICENSE.txt v1.0).
+
+OpenH264 Video Codec provided by Cisco Systems, Inc.
 """)
-print((h264_dir / "upstream" / "LICENSE").read_text().rstrip())
+print((root / "packaging/linux/CISCO_H264_LICENSE.txt").read_text().rstrip())
 
 section("AAC encoder")
 xaac_sys, xaac_dir = source("libxaac-sys")

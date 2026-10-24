@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use isocast_engine::{EncodedVideo, LiveVideoSpec, ParameterSets, Time, VideoEncoder};
+use isocast_openh264::openh264;
 use isocast_protocol::api::H264Profile;
 use openh264::encoder::{
     BitRate, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, Profile, QpRange,
@@ -140,10 +141,9 @@ impl Encoder {
                 .qp(QpRange::new(qp, qp))
                 .adaptive_quantization(false);
         }
-        let mut native = openh264::encoder::Encoder::with_api_config(
-            openh264::OpenH264API::from_source(),
-            config,
-        )?;
+        // Cisco's library, as installed: the reason and the fix if not.
+        let api = isocast_openh264::api()?;
+        let mut native = openh264::encoder::Encoder::with_api_config(api, config)?;
         let pixels = I420::new(spec.width as usize, spec.height as usize);
         // OpenH264 initializes lazily. Probe a black picture now, before the
         // output path is reserved, so invalid native settings fail at creation
@@ -451,7 +451,11 @@ mod tests {
             annex_b.extend_from_slice(&data[4..4 + size]);
             data = &data[4 + size..];
         }
-        let mut decoder = openh264::decoder::Decoder::new().unwrap();
+        let mut decoder = openh264::decoder::Decoder::with_api_config(
+            isocast_openh264::api().unwrap(),
+            openh264::decoder::DecoderConfig::new(),
+        )
+        .unwrap();
         let decoded = decoder.decode(&annex_b).unwrap().unwrap();
         assert_eq!(decoded.dimensions(), (32, 32));
         assert!(decoded.y().iter().all(|value| (230..=240).contains(value)));
@@ -517,7 +521,11 @@ mod tests {
             annex_b.extend_from_slice(&data[4..4 + size]);
             data = &data[4 + size..];
         }
-        let mut decoder = openh264::decoder::Decoder::new().unwrap();
+        let mut decoder = openh264::decoder::Decoder::with_api_config(
+            isocast_openh264::api().unwrap(),
+            openh264::decoder::DecoderConfig::new(),
+        )
+        .unwrap();
         let decoded = decoder.decode(&annex_b).unwrap().unwrap();
         assert_eq!(decoded.dimensions(), (64, 64));
         // The default is still High, as before.

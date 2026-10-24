@@ -37,6 +37,17 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   vz network blocks multicast (the host Mac's 6-second browse did not see the VM).
   The four-vCPU hosted Linux job uses a 360p30 integrity profile and the shared `--hosted` policy;
   strict zero-drop 720p30 is qualified separately in the six-vCPU arm64 VM, not claimed for the runner.
+- **OpenH264 is Cisco's binary, loaded at run time (2026-10-24, Ryan's decision):** Cisco's patent
+  licence covers only its own downloaded binary, so nothing compiles OpenH264 (`openh264` without its
+  `source` feature). `crates/isocast-openh264` finds `libopenh264-2.6.0-linux64.8.so` /
+  `-linux-arm64.8.so` in `~/.local/lib/isocast` (or `$ISOCAST_OPENH264`), checks its pinned SHA-256 and
+  loads it, for the engine's encoder and the app's decoder. `install.sh` downloads it from
+  ciscobinary.openh264.org (`--openh264` alone, `--remove-openh264` turns it off, `--no-openh264` to
+  skip; Cisco's licence is vendored as packaging/linux/CISCO_H264_LICENSE.txt and printed in full in
+  THIRD_PARTY_NOTICES, as its condition 4 requires). The library is hashed and loaded through one open
+  file (`/proc/self/fd/N`). Without it, H.264
+  recording/streaming are refused naming the fix, the app shows stills, `doctor` reports a problem. CI
+  installs the same pinned file (cached); `package-linux.sh` refuses binaries with OpenH264 compiled in.
 - **Linux streaming and monitoring (2026-10-24), experimental/unreleased:** RTMP streams use OpenH264 with
   its own CBR padding (`ENCODER_PADDING_PADDING`: filler data holds the rate) and in-place `set_rate` through
   `SetOption` (no IDR; never above the creation bitrate, which the wrapper pins as the layer maximum), plus libxaac AAC-LC (`audio::StreamEncoder`). Monitoring plays through a PipeWire

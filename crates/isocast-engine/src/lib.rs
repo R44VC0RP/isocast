@@ -51,6 +51,15 @@ use isocast_protocol::{Canvas, Container, Encoder, SourceKind};
 
 pub use time::Time;
 
+/// A codec this machine can't use now ([`Platform::missing_codecs`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MissingCodec {
+    /// Like "OpenH264".
+    pub name: String,
+    pub reason: String,
+    pub fix: String,
+}
+
 /// The video encoders found by [`Platform::video_encoders`], by name, in
 /// the order a recording tries them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -195,6 +204,13 @@ pub trait Platform: Clone + Send + Sync + 'static {
 
     /// The chip, memory, OS and hardware encoders.
     fn machine(&self) -> Machine;
+
+    /// Codecs this machine should have but can't use now (Linux: Cisco's
+    /// OpenH264, which the installer downloads), each with why and the
+    /// command that fixes it. `doctor` reports each as a problem.
+    fn missing_codecs(&self) -> Vec<MissingCodec> {
+        Vec::new()
+    }
 
     /// The video encoders a recording here would use, looked for in full
     /// (`doctor`): what `machine` lists, unless finding them is too slow
