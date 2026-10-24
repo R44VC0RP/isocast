@@ -1212,7 +1212,9 @@ pub fn change(app: &Rc<App>, t: &Target, key: &str, event: FormEvent) -> Outcome
                 FormEvent::Chosen(paths) => paths,
                 // Another computer's engine: its disk, through the engine
                 // file browser (area J), then this again with the paths.
-                _ if crate::areas::remote::is_remote(app) => {
+                // Linux too: the desktop portal's open panel, answered
+                // later (or that browser without a portal).
+                _ if crate::areas::remote::is_remote(app) || cfg!(target_os = "linux") => {
                     let (form, key) = (FORM.with(|f| f.borrow().clone()), key.to_string());
                     let options = crate::platform::Choose {
                         folders: false,

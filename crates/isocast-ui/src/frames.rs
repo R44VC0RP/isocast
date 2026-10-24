@@ -469,7 +469,7 @@ impl Feed {
                             target: target.clone(),
                             max_width: width,
                             fps: Some(want.fps.clamp(1, 60)),
-                            profile: None,
+                            profile: decoder.frames_profile(),
                         },
                     )?),
                 };

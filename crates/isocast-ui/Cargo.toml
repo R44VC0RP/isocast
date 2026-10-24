@@ -71,6 +71,14 @@ libc = "0.2"
 # engine encodes with too (isocast-openh264 loads it; none is compiled in).
 [target.'cfg(target_os = "linux")'.dependencies]
 isocast-openh264 = { path = "../isocast-openh264" }
+# Another computer's engine's sound (src/video/sound.rs): a PipeWire playback
+# stream, the binding and worker pattern isocast-platform-linux's monitoring
+# uses (src/playback.rs), pinned the same.
+pipewire = { version = "=0.10.1", features = ["v0_3_77"] }
+# Native open panels on Linux (src/platform.rs): the xdg-desktop-portal
+# FileChooser, through the portal binding isocast-platform-linux uses.
+ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "file_chooser"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 
 [target.'cfg(windows)'.dependencies]
 i-slint-renderer-skia = { version = "=1.18.1", default-features = false, features = ["unstable-wgpu-30"] }

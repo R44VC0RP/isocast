@@ -4177,6 +4177,7 @@ name = "isocast-ui"
 version = "0.0.9"
 dependencies = [
  "anyhow",
+ "ashpd",
  "base64 0.22.1",
  "block2 0.6.2",
  "i-slint-backend-testing",
@@ -4201,12 +4202,14 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "objc2-video-toolbox",
  "opus2",
+ "pipewire",
  "png",
  "raw-window-handle",
  "serde",
  "serde_json",
  "slint",
  "str0m",
+ "tokio",
  "toml",
  "wgpu",
  "windows",

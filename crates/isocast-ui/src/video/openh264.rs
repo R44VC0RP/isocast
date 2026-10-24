@@ -38,6 +38,12 @@ impl Decoder for OpenH264 {
         "OpenH264 (software)".into()
     }
 
+    /// OpenH264 smears High (CABAC with 8x8 transforms): Constrained
+    /// Baseline, as the WebRTC offer asks.
+    fn frames_profile(&self) -> Option<isocast_protocol::api::H264Profile> {
+        Some(isocast_protocol::api::H264Profile::ConstrainedBaseline)
+    }
+
     /// Linux shows pictures as Slint images: always pixels.
     fn decode(
         &mut self,
