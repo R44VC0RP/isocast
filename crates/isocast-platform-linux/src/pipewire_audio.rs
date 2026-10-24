@@ -25,6 +25,8 @@ use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
 use pw::spa::pod::Pod;
 use pw::{spa, stream::StreamState};
 
+use crate::pw_loop::WorkerLoop;
+
 const RATE: u32 = 48_000;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
@@ -232,8 +234,8 @@ pub fn devices() -> Result<(Vec<Microphone>, Vec<AudioOutput>, Vec<AudioApp>)> {
 fn enumerate(cancel: &AtomicBool, include_apps: bool) -> Result<Inventory> {
     pw::init();
     let deadline = Instant::now() + TIMEOUT;
-    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
-    let context = pw::context::ContextRc::new(&mainloop, None)?;
+    let mainloop = WorkerLoop::new()?;
+    let context = pw::context::ContextRc::new(mainloop.main_loop(), None)?;
     let core = context.connect_rc(None).context("connecting to PipeWire")?;
     let apps = include_apps
         .then(|| ApplicationWatch::new(&core, false, Rc::default()))
@@ -1016,13 +1018,8 @@ fn default_name(value: &str) -> Option<String> {
     props.get("name").map(str::to_owned)
 }
 
-fn iterate(mainloop: &pw::main_loop::MainLoopRc) -> Result<()> {
-    let result = mainloop.loop_().iterate(pw::loop_::Timeout::Finite(POLL));
-    ensure!(
-        result >= 0 || result == -libc::EINTR,
-        "PipeWire loop failed: {result}"
-    );
-    Ok(())
+fn iterate(mainloop: &WorkerLoop) -> Result<()> {
+    mainloop.iterate(POLL)
 }
 
 #[derive(Default)]
@@ -1255,8 +1252,8 @@ fn capture_worker(
         props.insert("stream.capture.sink", "true");
     }
     let deadline = Instant::now() + TIMEOUT;
-    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
-    let context = pw::context::ContextRc::new(&mainloop, None)?;
+    let mainloop = WorkerLoop::new()?;
+    let context = pw::context::ContextRc::new(mainloop.main_loop(), None)?;
     let core = context
         .connect_rc(None)
         .context("connecting audio stream to PipeWire")?;
@@ -1274,7 +1271,11 @@ fn capture_worker(
             }
         })
         .register();
-    let stream = pw::stream::StreamBox::new(&core, "Isocast audio capture", props)?;
+    let stream = mainloop.stream(pw::stream::StreamBox::new(
+        &core,
+        "Isocast audio capture",
+        props,
+    )?);
     let registry = core.get_registry_rc()?;
     let links = Rc::new(RefCell::new(BTreeMap::new()));
     let added = links.clone();

@@ -11,6 +11,7 @@ mod pipewire_video;
 mod platform;
 mod playback;
 mod portal;
+mod pw_loop;
 mod system;
 mod writer;
 

@@ -21,6 +21,8 @@ use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
 use pw::spa::pod::Pod;
 use pw::{spa, stream::StreamState};
 
+use crate::pw_loop::WorkerLoop;
+
 const RATE: u32 = 48_000;
 const CHANNELS: u32 = 2;
 const FRAME_BYTES: usize = CHANNELS as usize * 4;
@@ -176,8 +178,8 @@ fn playback_worker(
     if let Some(target) = target {
         props.insert("target.object", target);
     }
-    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
-    let context = pw::context::ContextRc::new(&mainloop, None)?;
+    let mainloop = WorkerLoop::new()?;
+    let context = pw::context::ContextRc::new(mainloop.main_loop(), None)?;
     let core = context
         .connect_rc(None)
         .context("connecting monitoring playback to PipeWire")?;
@@ -189,7 +191,7 @@ fn playback_worker(
             errors.borrow_mut().error = Some(message.to_owned());
         })
         .register();
-    let stream = pw::stream::StreamBox::new(&core, "Isocast monitor", props)?;
+    let stream = mainloop.stream(pw::stream::StreamBox::new(&core, "Isocast monitor", props)?);
     let data = PlayData {
         render,
         status: status.clone(),
@@ -245,11 +247,7 @@ fn playback_worker(
     let deadline = Instant::now() + TIMEOUT;
     let mut connected = false;
     while !cancel.load(Ordering::Acquire) {
-        let result = mainloop.loop_().iterate(pw::loop_::Timeout::Finite(POLL));
-        ensure!(
-            result >= 0 || result == -libc::EINTR,
-            "PipeWire loop failed: {result}"
-        );
+        mainloop.iterate(POLL)?;
         let mut state = status.borrow_mut();
         if let Some(error) = state.error.take() {
             bail!("{error}");

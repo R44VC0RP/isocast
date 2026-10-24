@@ -236,6 +236,12 @@ jobs:
         timeout-minutes: 10
         run: scripts/linux-capture-fixture.sh start "$FIXTURE" 640x360
 
+      - name: PipeWire callbacks run on the worker thread
+        timeout-minutes: 15
+        run: |
+          . "$FIXTURE/session.env"
+          cargo test --release --locked -p isocast-platform-linux stream_callbacks_run_on_the_worker_thread -- --ignored
+
       - name: Record screen, desktop audio, microphone and camera (hosted rules)
         timeout-minutes: 20
         run: |
