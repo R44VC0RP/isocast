@@ -164,6 +164,10 @@ impl FramePool {
         })
     }
 
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     fn free(&mut self) -> Result<Option<&mut Arc<Storage>>> {
         if let Some(index) = self
             .buffers

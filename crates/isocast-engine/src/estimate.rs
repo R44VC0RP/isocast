@@ -1667,13 +1667,13 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
     })
 }
 
-/// Highest zero-loss profile in the hosted 720/540/360/270/240/180p30 sweep
-/// (#128, Windows run 40075859442). A reference, not this machine's capacity.
+/// Conservative zero-loss reference across hosted Windows samples (#128).
+/// The highest single passing profile proved unstable across hosts/takes;
+/// this is a qualified workload reference, not this machine's capacity.
 /// Ten seconds headless and twenty with two paused previews: H.264 program
 /// only, two same-sized test-pattern sources and a tone, no ISO or stream.
-const SOFTWARE_REFERENCE: (u32, u32, u32) = (480, 270, 30);
-const SOFTWARE_REFERENCE_HOST: &str =
-    "four-vCPU AMD EPYC 7763, Windows Server 24H2, WARP and Media Foundation software H.264";
+const SOFTWARE_REFERENCE: (u32, u32, u32) = (320, 180, 30);
+const SOFTWARE_REFERENCE_HOST: &str = "four-vCPU hosted AMD EPYC and Intel Xeon runners, Windows Server 24H2, WARP and Media Foundation software H.264";
 
 /// Whether this process's graphics adapter is a software one, opening (or
 /// reusing) the shared GPU on `platform` as the live engine does, so it is
@@ -2084,6 +2084,12 @@ mod tests {
         );
         assert!(small.suggestions.is_empty());
         assert!(software_within_reference(&small));
+        assert!(small.basis.contains("320×180 at 30 fps"));
+        for (width, height) in [(426, 240), (480, 270)] {
+            let edge = run_software(&program_only(width, height, 30), None);
+            assert!(edge.summary.contains("expect dropped frames"));
+            assert!(!software_within_reference(&edge));
+        }
         let mut other = small.clone();
         other.outputs[0].codec = Codec::Hevc;
         assert!(!software_within_reference(&other));
@@ -2130,7 +2136,7 @@ mod tests {
         assert!(!software_within_reference(&large));
 
         // A canvas within it composing a larger source is not qualified.
-        let mut value = serde_json::to_value(program_only(480, 270, 30)).unwrap();
+        let mut value = serde_json::to_value(program_only(320, 180, 30)).unwrap();
         value["sources"][0]["width"] = json!(1920);
         value["sources"][0]["height"] = json!(1080);
         let wide = run_software(&Setup::from_value(value).unwrap(), None);
@@ -2145,7 +2151,7 @@ mod tests {
 
         // A higher rate alone is above the reference too.
         assert_eq!(
-            run_software(&program_only(480, 270, 60), None).capacity,
+            run_software(&program_only(320, 180, 60), None).capacity,
             Capacity::NoMargin
         );
     }

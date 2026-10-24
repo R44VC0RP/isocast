@@ -46,6 +46,8 @@ Linux bootstrap: --only linux_record runs synthetic bars, tone and color at
 capture hardware or media-file decoder is required. For hosted software Vulkan,
 --hosted --linux-profile 360p30 uses the existing hosted loss/oracle policy;
 strict 720p30 qualification remains a separate run without --hosted.
+--only linux_media plays a looping H.264/AAC MP4 through GStreamer (needs
+gstreamer1.0-libav) beside a test pattern: 60 s strict, 15 s with --hosted.
 
 Linux capture: --only linux_capture records the real capture paths (the
 ScreenCast portal over PipeWire, PipeWire desktop audio, a microphone and a
@@ -95,7 +97,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern (Windows has no media files yet).
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery", "linux_capture") if sys.platform.startswith("linux") else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery", "linux_media", "linux_capture") if sys.platform.startswith("linux") else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -2561,16 +2563,17 @@ def oracle_cells(tag, frame):
     return cells
 
 
-def oracle_fixture(folder, tag, fps, seconds=ORACLE_SECONDS):
+def oracle_fixture(folder, tag, fps, seconds=ORACLE_SECONDS, mp4=False):
     """A clip of `seconds` whose frame n carries (tag, n), with a marker
-    burst at each whole second. Made once per run and folder."""
+    burst at each whole second. Made once per run and folder. `mp4`: an
+    H.264/AAC MP4 instead of a MOV with PCM sound."""
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"oracle-v2-{tag}-{fps}-{seconds}.mov"
+    path = folder / f"oracle-v2-{tag}-{fps}-{seconds}.{'mp4' if mp4 else 'mov'}"
     if path.exists():
         return path
     cols, rows = ORACLE_GRID
     stem = folder / f".oracle-v2-{tag}-{fps}-{seconds}"
-    raw, sound, partial = (Path(f"{stem}.gray"), Path(f"{stem}.wav"), Path(f"{stem}.partial.mov"))
+    raw, sound, partial = (Path(f"{stem}.gray"), Path(f"{stem}.wav"), Path(f"{stem}.partial{path.suffix}"))
     lo, hi = ORACLE_LEVELS
     with open(raw, "wb") as out:
         for n in range(seconds * fps):
@@ -2590,7 +2593,8 @@ def oracle_fixture(folder, tag, fps, seconds=ORACLE_SECONDS):
                   ["-c:v", "prores_ks", "-profile:v", "0", "-pix_fmt", "yuv422p10le"]):
         out = ffmpeg("-f", "rawvideo", "-pixel_format", "gray", "-video_size", f"{cols}x{rows}",
                      "-framerate", fps, "-i", raw, "-i", sound, "-vf", f"scale={width}:{height}:flags=neighbor",
-                     *codec, "-g", fps, "-c:a", "pcm_s16le", "-y", partial, timeout=900, check=False)
+                     *codec, "-g", fps, *(["-c:a", "aac", "-b:a", "192k"] if mp4 else ["-c:a", "pcm_s16le"]),
+                     "-y", partial, timeout=900, check=False)
         if out.returncode == 0:
             break
     else:
@@ -4049,6 +4053,34 @@ def discovery_without_bus(e):
     return {"exit": out.returncode, "seconds": seconds}
 
 
+def scenario_linux_media(e, cfg, evidence):
+    """A looping H.264/AAC MP4 (the frame oracle's block-code clip, 4 s, a
+    marker burst each second) decoded by GStreamer beside a synthetic test
+    pattern and tone: the program and the media ISO, every picture against
+    the oracle across the loops (the file's own rate, clean wraps), each
+    burst within a frame of its picture, under the run's loss policy.
+    60 s strict; 15 s with --hosted."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    seconds, clip_seconds = (15 if evidence["capabilities"].get("hosted") else 60), 4
+    clip = oracle_fixture(e.root.parent / "fixtures", ORACLE_TAGS["a"], fps, clip_seconds, mp4=True)
+    count = clip_seconds * fps
+    cfg["developer"] = {"enabled": True}
+    cfg["sources"] = [s for s in cfg["sources"] if s["id"] in ("bars", "tone")]
+    cfg["sources"].append({"id": "a", "name": "Clip", "kind": "media", "files": [str(clip)], "loop": True})
+    layout = [("a", (0, 0, 0.75, 0.75))]
+    cfg["scenes"] = [{"id": "main", "name": "Main",
+                      "items": [item("a", layout[0][1], (w, h)), item("bars", (0.75, 0.75, 0.25, 0.25), (w, h))]}]
+    cfg["recording"]["program"]["audio"] = ["a"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["a"], audio=["a"])
+    e.apply(cfg)
+    path, manifest = take(e, seconds)
+    evidence["files"] = check_take(path, manifest, seconds, evidence=evidence)
+    require(sorted(f["source"] for f in manifest["files"]) == ["a", "program"],
+            f"files: {[f['source'] for f in manifest['files']]}")
+    evidence["clip"] = {"frames": count, "loops": round(seconds / clip_seconds, 2)}
+    evidence["t0"] = check_record_take(e, path, manifest, cfg, layout, count, evidence, isos=("a",))
+
+
 LINUX_CAPTURE_SECONDS = 15
 LINUX_CAPTURE_CANVAS = (480, 270)
 
@@ -4216,7 +4248,7 @@ def scenario_linux_recovery(e, cfg, evidence):
 
 
 def scenario_win_preview_recording(e, cfg, evidence):
-    """Qualify this host's headless profile, then protect it from previews.
+    """Qualify the conservative reference, then protect it from previews.
     Zero losses even under --hosted; paused consumers must survive and resume.
     A passing lower profile is not a universal software-renderer capacity claim."""
     if not WINDOWS:
@@ -4268,10 +4300,11 @@ def scenario_win_preview_recording(e, cfg, evidence):
         require(facts["frames"] == result["files"][0]["frames"], "program manifest/decoded frame mismatch")
         check_loss(result["loss"][0], 0)
 
-    # Sweep in descending order and preserve every failed take. The first
-    # hosted WARP sweep lost frames even at 360p30; do not invent a passing
-    # reference or weaken the loss allowance instead of measuring below it.
-    # Selection is made only after strict counters AND real-media checks pass.
+    # Retain the larger-profile measurements, but do not select a host's
+    # highest single 10-second pass: it can sit on the edge and lose frames
+    # during the longer preview take. Gate the same conservative reference
+    # named by estimate::SOFTWARE_REFERENCE, with no fallback or loss allowance.
+    reference = (320, 180)
     selected = None
     reference_warning_seen = False
     for width, height in ((1280, 720), (960, 540), (640, 360), (480, 270), (426, 240), (320, 180)):
@@ -4282,6 +4315,8 @@ def scenario_win_preview_recording(e, cfg, evidence):
         case = {"profile": cfg["canvas"].copy(), "status": "RUNNING", "samples": []}
         profiles.append(case)
         within_reference = "not a capacity guarantee" in e.rpc("estimate_capacity", {})["summary"]
+        require(within_reference == ((width, height) == reference),
+                "estimate reference disagrees with the gated profile")
         watch = Watch(e, ["warning", "started"], stop_after="started")
         try:
             baseline_start = e.rpc("start", {"seconds": 10})
@@ -4321,10 +4356,10 @@ def scenario_win_preview_recording(e, cfg, evidence):
             case.update(status="FAIL", reason=str(exc))
         else:
             case.update(status="PASS", reason="zero loss and strict media checks passed")
-            if selected is None:
+            if (width, height) == reference:
                 selected = copy.deepcopy(cfg)
                 evidence["preview_profile"] = case["profile"].copy()
-    require(selected is not None, "no headless profile passed strict zero-loss qualification; see headless_profiles")
+    require(selected is not None, "320x180@30 reference failed strict zero-loss qualification; see headless_profiles")
     cfg = selected
     e.apply(cfg)
     width, height = (cfg["canvas"][k] for k in ("width", "height"))
@@ -4346,6 +4381,8 @@ def scenario_win_preview_recording(e, cfg, evidence):
             require(process.poll() is None, f"{target} preview consumer exited before recording")
         evidence["before_preview_take"] = e.rpc("status")
         started = e.rpc("start", {"seconds": 20})
+        require(not any("software graphics adapter" in note for note in started["notes"]),
+                "within-reference warning repeated on the preview take")
         began = time.monotonic()
         for checkpoint in (2, 8, 16):
             while time.monotonic() - began < checkpoint:

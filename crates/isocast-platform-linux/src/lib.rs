@@ -5,6 +5,7 @@ mod audio;
 mod camera;
 mod encoder;
 pub mod frames;
+mod media;
 pub mod network;
 mod pipewire_audio;
 mod pipewire_video;

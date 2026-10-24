@@ -49,6 +49,16 @@ What it needs (install with your package manager)
     Arch:          vulkan-icd-loader vulkan-radeon / vulkan-intel / nvidia-utils
 - Fonts and keyboard: fontconfig, freetype, libxkbcommon (installed on any
   desktop).
+- GStreamer 1.x (libgstreamer1.0-0, gstreamer1.0-plugins-base), present on
+  any desktop: the engine needs it to start. Media file sources play what
+  your distribution's GStreamer plugins decode (VA-API hardware decoders
+  when present); for H.264/AAC MP4 add the libav plugin, for VP8/VP9 the
+  good plugins. These plugins (gstreamer1.0-libav among them) are loaded by
+  your system's GStreamer and aren't part of Isocast. `isocast doctor`
+  lists the decoders found.
+    Debian/Ubuntu: gstreamer1.0-libav gstreamer1.0-plugins-good
+    Fedora:        gstreamer1-plugin-libav gstreamer1-plugins-good
+    Arch:          gst-libav gst-plugins-good
 - Screen, microphone, desktop audio and camera capture (as it arrives):
   PipeWire, and xdg-desktop-portal with your desktop's backend
   (xdg-desktop-portal-gnome, -kde or -wlr) for choosing a screen.

@@ -21,7 +21,7 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
   sources, OpenH264 H.264 and Apache-2.0 libxaac AAC-LC through `isocast-mux`. Ubuntu 24.04 arm64 VM proof:
   program + two ISOs, 720p30, 310 frames each, zero drops, 1,240 frame-oracle checks, maximum A/V skew 0.021 ms.
-  No hardware encoding, media decoding or shared previews. Linux startup now finalizes retained mux fragments and persists verified
+  No hardware encoding or shared previews (media files: see below). Linux startup now finalizes retained mux fragments and persists verified
   counts through one pinned-directory recovery lease (SIGKILL + restart proved on three files, 2026-10-23).
   Drop/repeat/audio-loss counts after a crash remain unknown; empty cancelled reservations are retained.
   Remote secrets are plaintext 0600 files in an owner-only `$XDG_CONFIG_HOME/isocast/credentials` directory
@@ -58,6 +58,19 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   far more than OpenH264 (720p30: ~105% vs ~25% for two encodes; 1080p30: ~235% vs ~50%).
   Desktop-audio (sink-monitor) capture now hears Isocast's own monitoring: `exclude_own` is not
   implemented on Linux (capture lane's `pipewire_audio.rs`).
+- **Linux media file sources (2026-10-24), experimental/unreleased:** GStreamer 1.x (system libraries,
+  dynamically linked, so `libgstreamer1.0-0` + plugins-base are needed to start isocastd; gstreamer-rs 0.25)
+  decodes through `decodebin` with whatever plugins the distro has (VA-API when ranked first; untested, no
+  GPU in the VM); frames become BGRA pool frames, sound 48 kHz stereo F32 (`media.rs`). The other part's
+  stream is left encoded, never decoded. Any missing picture/sound decoder fails the file with the codec,
+  caps and Debian/Fedora/Arch package; `doctor` lists decoders per codec. Chunk times within 5 ms of
+  continuous are made continuous (Matroska rounds to 1 ms); a larger jump keeps its own time. A file
+  whose length stays unknown (elementary streams) is refused. Known risk: decoding runs in isocastd, so
+  a crashing GStreamer plugin takes the engine down mid-session (recordings recover from fragments); a
+  media helper process is the later hardening step. VM proof (2 vCPUs, strict 720p30, 60 s,
+  e2e `linux_media`): looping 4 s H.264/AAC MP4 + test pattern, program and media ISO 1800 frames each,
+  zero drops, 1800/1800 oracle frames across 15 loops, 60/60 bursts, max A/V skew 0.31 ms. Anamorphic
+  (non-square PAR) files play at their stored size.
 - **Linux capture lane (2026-10-23), experimental/unreleased:** portal/SHM screens, PipeWire default-sink
   desktop audio and microphones, and V4L2 MJPEG/YUYV cameras are implemented. PipeWire headers/runtime
   >=1.0.5 are required. Restore tokens are private engine-adjacent `*.linux-capture.json` files; devices
@@ -135,7 +148,7 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 - Platforms:
   - `isocast-platform-macos`: ScreenCaptureKit, AVFoundation, VideoToolbox, AVAssetWriter, IOSurface frames.
   - `isocast-platform-windows`: WGC via the helper `isocast-capture.exe`, MF cameras, WASAPI, NVENC/MF, DX12 import.
-  - `isocast-platform-linux`: portal/PipeWire screens and audio, V4L2 cameras, synthetic sources,
+  - `isocast-platform-linux`: portal/PipeWire screens and audio, V4L2 cameras, GStreamer media files, synthetic sources,
     Vulkan upload/readback, OpenH264/libxaac software recording and RTMP streaming, PipeWire monitoring.
   - `-stub`: fail-closed, for other OSes. `-contracts`: dev-only contract workers (`scripts/platform-contracts.py`).
   - `-credentials`: Keychain / Credential Manager / Linux private XDG files without media dependencies.
@@ -296,8 +309,16 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   replay alone; the reason names the protected output. Pins/off remain respected.
   This supersedes Linux's CPU-window 15fps/640px caps during takes. Hardware GPUs keep
   the 15fps floor and 2s/5s timers; on 30fps canvases Mac reaches15 one step earlier and
-  restores15→0 directly. Windows's 480×270@30 synthetic program-only hosted reference
-  is advisory, not local capacity. Measurement history: windows-perf scratch/issue128/REPORT.md.
+  restores15→0 directly. Windows's synthetic program-only hosted reference is
+  320×180@30 (2026-10-24), advisory rather than local capacity. The preview CI gate
+  uses this fixed reference, not the highest single 10s passing profile: five hosted
+  baseline samples lost frames at 270p twice and 240p once, while 180p headless passed
+  all five. Five fresh hosted samples (AMD EPYC and Intel Xeon) each passed 300/300
+  headless and 600/600 preview-take frames at 180p with zero loss. The earlier main
+  failure lost one of 600 preview-take frames at 240p. This is a bounded qualification,
+  not proof of a zero long-run flake rate.
+  Zero drops/repeats/audio loss and pause/resume checks remain strict. Evidence:
+  windows-preview-flake scratch/REPORT.md; earlier history: windows-perf scratch/issue128/REPORT.md.
 
 - 2026-10-23: The strict 60fps oracle's 1.5× media source has only a 2.78ms eligibility margin on alternate slots. ISO-21's initial ISO10 run had one one-picture-late program sample; a fixed three-pair merged-baseline/candidate comparison then passed all six runs. Baseline did not fail; the transient is retained, not a demonstrated settings regression or a cleared pacing defect (`iso-21-setting/REPORT.md` in mac-perf scratch).
 

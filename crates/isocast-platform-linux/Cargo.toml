@@ -30,3 +30,9 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 isocast-openh264 = { path = "../isocast-openh264" }
 # Apache-2.0 wrapper and bundled libxaac (AAC-LC); not FDK AAC.
 xaac-rs = "=0.2.0"
+# MIT/Apache-2.0 bindings to the system's GStreamer 1.x (LGPL, linked
+# dynamically) for media file sources; codecs come from distro plugins.
+gstreamer = "=0.25.4"
+gstreamer-app = "=0.25.2"
+gstreamer-video = "=0.25.4"
+gstreamer-pbutils = "=0.25.4"

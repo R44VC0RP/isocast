@@ -151,6 +151,16 @@ header = root / "crates/isocast-platform-windows/native/nvEncodeAPI.h"
 notice = header.read_text().split("*/", 1)[0].splitlines()[1:]
 print("\n".join(line.removeprefix(" *").removeprefix(" ") for line in notice).strip())
 
+section("System libraries")
+print("""The Linux build links dynamically to libraries of the system it runs on;
+they are not distributed with Isocast:
+- GStreamer 1.x (https://gstreamer.freedesktop.org), LGPL-2.1-or-later, decodes
+  media file sources. Isocast uses the distribution's own copy and the codec
+  plugins (such as gstreamer1.0-libav) it loads; their source is available
+  from the distribution or https://gitlab.freedesktop.org/gstreamer/gstreamer.
+- PipeWire (https://pipewire.org), MIT, for screen, camera and audio capture
+  and audio monitoring.""")
+
 section("Opus encoder")
 print("Program WebRTC audio uses libopus (https://opus-codec.org), bundled by libopus_sys.")
 opus = next(p for p in packages.values() if p["name"] == "libopus_sys")
