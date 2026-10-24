@@ -1431,7 +1431,7 @@ The sound of one app (OBS's Application Audio Capture).
 
 | Field | Type | Description |
 |---|---|---|
-| `app` (required) | string | The app's name or bundle id, or part of the name. |
+| `app` (required) | string | A stable app id from `devices`, or the app's name or bundle id, or part of the name on macOS. macOS matches substrings; Linux names and executable aliases match exactly, case-insensitively (stable ids are case-sensitive). |
 
 ## CameraSource
 

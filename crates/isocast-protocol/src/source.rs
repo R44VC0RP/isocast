@@ -81,7 +81,9 @@ impl Kind for ApplicationSource {
 /// The sound of one app (OBS's Application Audio Capture).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ApplicationAudioSource {
-    /// The app's name or bundle id, or part of the name.
+    /// A stable app id from `devices`, or the app's name or bundle id, or part of
+    /// the name on macOS. macOS matches substrings; Linux names and executable
+    /// aliases match exactly, case-insensitively (stable ids are case-sensitive).
     pub app: String,
 }
 

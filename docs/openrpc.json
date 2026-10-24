@@ -178,7 +178,7 @@
         "description": "The sound of one app (OBS's Application Audio Capture).",
         "properties": {
           "app": {
-            "description": "The app's name or bundle id, or part of the name.",
+            "description": "A stable app id from `devices`, or the app's name or bundle id, or part of\nthe name on macOS. macOS matches substrings; Linux names and executable\naliases match exactly, case-insensitively (stable ids are case-sensitive).",
             "type": "string"
           }
         },
@@ -351,11 +351,22 @@
       "AudioApp": {
         "description": "An app (or a command-line tool) that has opened audio.",
         "properties": {
+          "binary": {
+            "description": "The playback client's executable name, when reported by the backend.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "bundle_id": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "id": {
+            "description": "Stable application selector for `application_audio.app`, when available.\nLinux uses the PipeWire application id, executable or application name,\nnever the transient stream node id or process id.",
+            "type": "string"
           },
           "name": {
             "type": "string"

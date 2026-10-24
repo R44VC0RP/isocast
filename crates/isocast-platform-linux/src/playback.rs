@@ -109,7 +109,7 @@ pub fn play(device: &str, render: AudioRender) -> Result<(Playback, String)> {
     let (target, name) = if matches!(device, "default" | "") {
         (None, "Default output".to_string())
     } else {
-        let (_, outputs) = crate::pipewire_audio::devices()?;
+        let (_, outputs, _) = crate::pipewire_audio::devices()?;
         resolve(device, &outputs)?
     };
     let cancel = Arc::new(AtomicBool::new(false));

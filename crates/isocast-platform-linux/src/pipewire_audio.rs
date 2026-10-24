@@ -2,11 +2,11 @@
 //!
 //! Requires PipeWire headers/runtime >= 1.0.5 (per-buffer graph timestamps),
 //! and pipewire-rs's `v0_3_77` feature (resampler-delay queries). Linux
-//! has no audio playback yet, so excluding our own playback is vacuous; this
-//! must change when playback/monitoring is implemented.
+//! Application selection excludes this process's playback. Sink-monitor desktop
+//! capture still includes all sound sent to the selected output.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -18,8 +18,9 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use isocast_engine::{AudioSink, Time};
 use isocast_protocol as protocol;
 use pipewire as pw;
-use protocol::devices::{AudioOutput, Microphone};
+use protocol::devices::{AudioApp, AudioOutput, Microphone};
 use pw::properties::properties;
+use pw::proxy::ProxyT;
 use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
 use pw::spa::pod::Pod;
 use pw::{spa, stream::StreamState};
@@ -58,7 +59,11 @@ pub fn microphone(
     if let Some(channels) = channels {
         selection(MAX_CHANNELS, Some(channels))?;
     }
-    start(Some(device.to_owned()), channels.map(<[u32]>::to_vec), sink)
+    start(
+        Target::Microphone(device.to_owned()),
+        channels.map(<[u32]>::to_vec),
+        sink,
+    )
 }
 
 pub fn desktop(exclude: &[String], sink: AudioSink, _exclude_own: bool) -> Result<(Capture, u32)> {
@@ -66,15 +71,40 @@ pub fn desktop(exclude: &[String], sink: AudioSink, _exclude_own: bool) -> Resul
         exclude.is_empty(),
         "desktop_audio.exclude: per-application exclusions are not supported by Linux sink-monitor capture; use an empty list"
     );
-    // No Linux playback exists, so there is no own-process output to exclude.
-    start(None, None, sink)
+    // Sink-monitor capture currently includes our own playback too.
+    start(Target::Desktop, None, sink)
 }
 
-fn start(
-    device: Option<String>,
-    channels: Option<Vec<u32>>,
-    sink: AudioSink,
-) -> Result<(Capture, u32)> {
+pub fn application(app: &str, sink: AudioSink) -> Result<(Capture, u32)> {
+    validate_application(app)?;
+    start(Target::Application(app.to_owned()), None, sink)
+}
+
+pub fn probe_application(app: &str) -> Result<String> {
+    validate_application(app)?;
+    let app = app.to_owned();
+    thread::Builder::new()
+        .name("pipewire-application-probe".into())
+        .spawn(move || enumerate(&AtomicBool::new(false), true)?.apps.resolve(&app))?
+        .join()
+        .map_err(|_| anyhow!("PipeWire application probe panicked"))?
+}
+
+fn validate_application(app: &str) -> Result<()> {
+    ensure!(
+        !app.is_empty() && !app.contains('\0'),
+        "application_audio.app: expected a nonempty application ID or unambiguous name/binary without NUL"
+    );
+    Ok(())
+}
+
+enum Target {
+    Microphone(String),
+    Desktop,
+    Application(String),
+}
+
+fn start(target: Target, channels: Option<Vec<u32>>, sink: AudioSink) -> Result<(Capture, u32)> {
     let sink = Arc::new(sink);
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = cancel.clone();
@@ -84,7 +114,7 @@ fn start(
         .spawn(move || {
             let mut started = false;
             let result = capture_worker(
-                device.as_deref(),
+                &target,
                 channels.as_deref(),
                 &sink,
                 &worker_cancel,
@@ -117,6 +147,7 @@ fn start(
 #[derive(Default)]
 struct Inventory {
     nodes: BTreeMap<u32, Device>,
+    apps: Applications,
     input: Option<String>,
     output: Option<String>,
 }
@@ -157,12 +188,12 @@ impl Device {
     }
 }
 
-pub fn devices() -> Result<(Vec<Microphone>, Vec<AudioOutput>)> {
+pub fn devices() -> Result<(Vec<Microphone>, Vec<AudioOutput>, Vec<AudioApp>)> {
     // Registry proxies/listeners are !Send, and are created and destroyed here.
     thread::Builder::new()
         .name("pipewire-devices".into())
         .spawn(|| {
-            let inventory = enumerate(&AtomicBool::new(false))?;
+            let inventory = enumerate(&AtomicBool::new(false), true)?;
             let mut microphones = Vec::new();
             let mut outputs = Vec::new();
             for device in inventory.nodes.into_values() {
@@ -191,19 +222,22 @@ pub fn devices() -> Result<(Vec<Microphone>, Vec<AudioOutput>)> {
                     });
                 }
             }
-            Ok((microphones, outputs))
+            Ok((microphones, outputs, inventory.apps.list()))
         })
         .context("starting PipeWire device enumeration")?
         .join()
         .map_err(|_| anyhow!("PipeWire device worker panicked"))?
 }
 
-fn enumerate(cancel: &AtomicBool) -> Result<Inventory> {
+fn enumerate(cancel: &AtomicBool, include_apps: bool) -> Result<Inventory> {
     pw::init();
     let deadline = Instant::now() + TIMEOUT;
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None).context("connecting to PipeWire")?;
+    let apps = include_apps
+        .then(|| ApplicationWatch::new(&core, false, Rc::default()))
+        .transpose()?;
     let registry = core.get_registry_rc()?;
     let inventory = Rc::new(RefCell::new(Inventory::default()));
     let failure = Rc::new(RefCell::new(None));
@@ -353,8 +387,621 @@ fn enumerate(cancel: &AtomicBool) -> Result<Inventory> {
     if let Some(error) = failure.borrow_mut().take() {
         bail!("PipeWire enumeration: {error}");
     }
-    let result = std::mem::take(&mut *inventory.borrow_mut());
+    let mut result = std::mem::take(&mut *inventory.borrow_mut());
+    if let Some(apps) = apps {
+        result.apps = std::mem::take(&mut *apps.state.borrow_mut());
+    }
     Ok(result)
+}
+
+#[derive(Default)]
+struct AppProperties {
+    name: Option<String>,
+    id: Option<String>,
+    binary: Option<String>,
+    pid: Option<String>,
+}
+
+impl AppProperties {
+    fn update(&mut self, props: &spa::utils::dict::DictRef) {
+        for (key, dest) in [
+            ("application.name", &mut self.name),
+            ("application.id", &mut self.id),
+            ("application.process.binary", &mut self.binary),
+            ("application.process.id", &mut self.pid),
+        ] {
+            if let Some(value) = props.get(key) {
+                *dest = (!value.is_empty()).then(|| value.to_owned());
+            }
+        }
+    }
+
+    fn application(&self, client: Option<&Self>, playing: bool) -> Option<AudioApp> {
+        let id = self
+            .id
+            .as_ref()
+            .or_else(|| client.and_then(|p| p.id.as_ref()));
+        let binary = self
+            .binary
+            .as_ref()
+            .or_else(|| client.and_then(|p| p.binary.as_ref()));
+        let name = self
+            .name
+            .as_ref()
+            .or_else(|| client.and_then(|p| p.name.as_ref()));
+        let canonical = if let Some(id) = id {
+            format!("pipewire:application:{id}")
+        } else if let Some(binary) = binary {
+            format!("pipewire:binary:{binary}")
+        } else {
+            format!("pipewire:name:{}", name?)
+        };
+        Some(AudioApp {
+            id: canonical,
+            name: name.or(binary).or(id)?.clone(),
+            bundle_id: id.cloned(),
+            binary: binary.cloned(),
+            pid: self
+                .pid
+                .as_ref()
+                .or_else(|| client.and_then(|p| p.pid.as_ref()))
+                .and_then(|pid| pid.parse().ok())
+                .unwrap_or(0),
+            playing,
+        })
+    }
+}
+
+#[derive(Default)]
+struct AppNode {
+    generation: u64,
+    props: AppProperties,
+    client: Option<u32>,
+    informed: bool,
+    playing: bool,
+    output_count: u32,
+}
+
+#[derive(Default)]
+struct AppClient {
+    props: AppProperties,
+    informed: bool,
+}
+
+#[derive(Default)]
+struct AudioPort {
+    node: u32,
+    input: bool,
+    channel: String,
+    monitor: bool,
+}
+
+impl AudioPort {
+    fn update(&mut self, props: &spa::utils::dict::DictRef) {
+        if let Some(node) = props.get("node.id").and_then(|v| v.parse().ok()) {
+            self.node = node;
+        }
+        if let Some(direction) = props.get("port.direction") {
+            self.input = direction == "in";
+        }
+        if let Some(channel) = props.get("audio.channel") {
+            self.channel = channel.to_owned();
+        }
+        if let Some(monitor) = props.get("port.monitor") {
+            self.monitor = monitor == "true";
+        }
+    }
+}
+
+#[derive(Default)]
+struct Applications {
+    nodes: BTreeMap<u32, AppNode>,
+    clients: BTreeMap<u32, AppClient>,
+    ports: BTreeMap<u32, AudioPort>,
+}
+
+impl Applications {
+    fn ready(&self, identity: &str, capture: u32) -> bool {
+        if self
+            .ports
+            .values()
+            .filter(|port| port.node == capture && port.input)
+            .count()
+            != 2
+        {
+            return false;
+        }
+        self.nodes.iter().all(|(&id, node)| {
+            node.informed
+                && node.client.is_none_or(|client| {
+                    self.clients
+                        .get(&client)
+                        .is_some_and(|client| client.informed)
+                })
+                && (self.app(node).is_none_or(|app| app.id != identity)
+                    || self
+                        .ports
+                        .values()
+                        .filter(|port| port.node == id && !port.input)
+                        .count()
+                        == node.output_count as usize)
+        })
+    }
+
+    fn app(&self, node: &AppNode) -> Option<AudioApp> {
+        if !node.informed {
+            return None;
+        }
+        // Do not briefly link under a weaker identity before Client.info arrives.
+        let client = if let Some(id) = node.client {
+            let client = self.clients.get(&id)?;
+            if !client.informed {
+                return None;
+            }
+            Some(&client.props)
+        } else {
+            None
+        };
+        let app = node.props.application(client, node.playing)?;
+        // Monitoring is a playback stream too: never list or capture ourselves.
+        (app.pid != std::process::id()).then_some(app)
+    }
+
+    fn list(&self) -> Vec<AudioApp> {
+        let mut apps: BTreeMap<String, AudioApp> = BTreeMap::new();
+        for app in self.nodes.values().filter_map(|node| self.app(node)) {
+            apps.entry(app.id.clone())
+                .and_modify(|other| other.playing |= app.playing)
+                .or_insert(app);
+        }
+        let mut apps: Vec<_> = apps.into_values().collect();
+        apps.sort_by(|a, b| b.playing.cmp(&a.playing).then_with(|| a.id.cmp(&b.id)));
+        apps
+    }
+
+    fn resolve(&self, selector: &str) -> Result<String> {
+        let mut matches = BTreeSet::new();
+        for app in self.nodes.values().filter_map(|node| self.app(node)) {
+            let selected = if selector.starts_with("pipewire:") {
+                app.id == selector
+            } else {
+                app.name.eq_ignore_ascii_case(selector)
+                    || app
+                        .binary
+                        .as_deref()
+                        .is_some_and(|binary| binary.eq_ignore_ascii_case(selector))
+                    || app.bundle_id.as_deref() == Some(selector)
+            };
+            if selected {
+                matches.insert(app.id);
+            }
+        }
+        ensure!(
+            !matches.is_empty(),
+            "application_audio.app: {selector:?} not found; valid application IDs (up to 10): {} (the app must expose a playback stream)",
+            self.list()
+                .into_iter()
+                .take(10)
+                .map(|app| app.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        ensure!(
+            matches.len() == 1,
+            "application_audio.app: {selector:?} is ambiguous; use one of: {}",
+            matches.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+        matches
+            .into_iter()
+            .next()
+            .context("application_audio.app: no selected identity")
+    }
+
+    fn desired_links(
+        &self,
+        identity: &str,
+        capture: u32,
+        policy: &mut AppLinkPolicy,
+        started: bool,
+    ) -> Result<BTreeSet<AppLink>> {
+        policy.generations.retain(|id, generation| {
+            self.nodes
+                .get(id)
+                .is_some_and(|node| node.generation == *generation)
+        });
+        policy
+            .skipped
+            .retain(|id| policy.generations.contains_key(id));
+        policy
+            .failures
+            .retain(|id, _| policy.generations.contains_key(id));
+        policy
+            .generations
+            .extend(self.nodes.iter().map(|(&id, node)| (id, node.generation)));
+        let mut desired = BTreeSet::new();
+        if capture == u32::MAX {
+            return Ok(desired);
+        }
+        let inputs: Vec<_> = self
+            .ports
+            .iter()
+            .filter(|(_, p)| p.node == capture && p.input)
+            .collect();
+        for (&node_id, node) in &self.nodes {
+            if policy.skipped.contains(&node_id)
+                || self.app(node).is_none_or(|app| app.id != identity)
+            {
+                continue;
+            }
+            let outputs: Vec<_> = self
+                .ports
+                .iter()
+                .filter(|(_, p)| p.node == node_id && !p.input)
+                .collect();
+            // Node.info and Port globals arrive separately. Never mistake the
+            // first stereo port for mono, including when monitor ports follow.
+            if outputs.len() != node.output_count as usize {
+                continue;
+            }
+            let outputs: Vec<_> = outputs.into_iter().filter(|(_, p)| !p.monitor).collect();
+            if outputs.len() > 2 {
+                policy.reject(node_id, started, format!(
+                    "application_audio.app: {identity:?} has a {}-channel playback stream; Linux supports mono/stereo application streams only",
+                    outputs.len()
+                ))?;
+                continue;
+            }
+            let mut stream_links = BTreeSet::new();
+            for (index, &(input_id, input)) in inputs.iter().enumerate() {
+                // Mono feeds both stereo inputs. Otherwise match channel labels;
+                // only unlabeled stereo may fall back to stable port order.
+                let output = if outputs.len() == 1 {
+                    outputs.first().copied()
+                } else {
+                    outputs
+                        .iter()
+                        .copied()
+                        .find(|(_, p)| !p.channel.is_empty() && p.channel == input.channel)
+                        .or_else(|| {
+                            if outputs.len() == 2
+                                && outputs.iter().all(|(_, p)| p.channel.is_empty())
+                            {
+                                outputs.get(index).copied()
+                            } else {
+                                None
+                            }
+                        })
+                };
+                if outputs.len() == 2 && output.is_none() {
+                    policy.reject(node_id, started, format!(
+                        "application_audio.app: {identity:?} playback channels {:?} cannot be mapped to stereo FL/FR; Linux supports mono, FL/FR stereo or unlabeled stereo",
+                        outputs.iter().map(|(_, port)| port.channel.as_str()).collect::<Vec<_>>()
+                    ))?;
+                    stream_links.clear();
+                    break;
+                }
+                if let Some((&output_id, _)) = output {
+                    stream_links.insert(AppLink {
+                        output_node: node_id,
+                        output_port: output_id,
+                        input_node: capture,
+                        input_port: *input_id,
+                    });
+                }
+            }
+            desired.extend(stream_links);
+        }
+        Ok(desired)
+    }
+}
+
+// Separate from hardware/default metadata: the same watcher serves enumeration
+// and the live capture graph, including Node/Client info absent from globals.
+struct ApplicationWatch {
+    _listener: pw::registry::Listener,
+    _registry: pw::registry::RegistryRc,
+    state: Rc<RefCell<Applications>>,
+}
+
+impl ApplicationWatch {
+    fn new(
+        core: &pw::core::CoreRc,
+        include_ports: bool,
+        proxy_ids: Rc<RefCell<BTreeSet<u32>>>,
+    ) -> Result<Self> {
+        // Do not classify this registry as an owned application proxy: its
+        // errors still indicate a broken capture connection, not one bad app.
+        let registry = core.get_registry_rc()?;
+        let state = Rc::new(RefCell::new(Applications::default()));
+        let nodes = Rc::new(RefCell::new(BTreeMap::new()));
+        let clients = Rc::new(RefCell::new(BTreeMap::new()));
+        let weak_registry = registry.downgrade();
+        let added = state.clone();
+        let removed = state.clone();
+        let keep_nodes = nodes.clone();
+        let keep_clients = clients.clone();
+        // A local incarnation counter also works when object.serial is absent.
+        // Removal and ID reuse can arrive during the same loop iteration.
+        let generation = Cell::new(0_u64);
+        let listener = registry
+            .add_listener_local()
+            .global(move |global| {
+                let Some(registry) = weak_registry.upgrade() else {
+                    return;
+                };
+                let id = global.id;
+                if global.type_ == pw::types::ObjectType::Node
+                    && global.props.and_then(|p| p.get("media.class"))
+                        == Some("Stream/Output/Audio")
+                {
+                    let Ok(node) = registry.bind::<pw::node::Node, _>(global) else {
+                        return;
+                    };
+                    proxy_ids.borrow_mut().insert(node.upcast_ref().id());
+                    generation.set(generation.get().wrapping_add(1));
+                    let mut entry = AppNode {
+                        generation: generation.get(),
+                        ..AppNode::default()
+                    };
+                    if let Some(props) = global.props {
+                        entry.props.update(props);
+                        entry.client = props.get("client.id").and_then(|v| v.parse().ok());
+                    }
+                    added.borrow_mut().nodes.insert(id, entry);
+                    let state = added.clone();
+                    let listener = node
+                        .add_listener_local()
+                        .info(move |info| {
+                            if let Some(node) = state.borrow_mut().nodes.get_mut(&id) {
+                                if let Some(props) = info.props() {
+                                    node.props.update(props);
+                                    if let Some(client) = props.get("client.id") {
+                                        node.client = client.parse().ok();
+                                    }
+                                }
+                                node.informed = true;
+                                node.output_count = info.n_output_ports();
+                                node.playing = matches!(info.state(), pw::node::NodeState::Running);
+                            }
+                        })
+                        .register();
+                    keep_nodes.borrow_mut().insert(id, (listener, node));
+                } else if global.type_ == pw::types::ObjectType::Client {
+                    let Ok(client) = registry.bind::<pw::client::Client, _>(global) else {
+                        return;
+                    };
+                    proxy_ids.borrow_mut().insert(client.upcast_ref().id());
+                    let mut entry = AppClient::default();
+                    if let Some(props) = global.props {
+                        entry.props.update(props);
+                    }
+                    added.borrow_mut().clients.insert(id, entry);
+                    let state = added.clone();
+                    let listener = client
+                        .add_listener_local()
+                        .info(move |info| {
+                            if let Some(client) = state.borrow_mut().clients.get_mut(&id) {
+                                if let Some(props) = info.props() {
+                                    client.props.update(props);
+                                }
+                                client.informed = true;
+                            }
+                        })
+                        .register();
+                    keep_clients.borrow_mut().insert(id, (listener, client));
+                } else if include_ports && global.type_ == pw::types::ObjectType::Port {
+                    let mut entry = AudioPort::default();
+                    if let Some(props) = global.props {
+                        entry.update(props);
+                    }
+                    added.borrow_mut().ports.insert(id, entry);
+                }
+            })
+            .global_remove(move |id| {
+                let mut state = removed.borrow_mut();
+                state.nodes.remove(&id);
+                state.clients.remove(&id);
+                state.ports.remove(&id);
+                nodes.borrow_mut().remove(&id);
+                clients.borrow_mut().remove(&id);
+            })
+            .register();
+        Ok(Self {
+            _listener: listener,
+            _registry: registry,
+            state,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AppLink {
+    output_node: u32,
+    output_port: u32,
+    input_node: u32,
+    input_port: u32,
+}
+
+struct OwnedAppLink {
+    _proxy_listener: pw::proxy::ProxyListener,
+    _listener: pw::link::LinkListener,
+    _link: pw::link::Link,
+    failure: Rc<RefCell<Option<String>>>,
+    negotiated: Rc<Cell<bool>>,
+    created: Instant,
+}
+
+impl OwnedAppLink {
+    fn new(
+        core: &pw::core::CoreRc,
+        pair: AppLink,
+        proxy_ids: Rc<RefCell<BTreeSet<u32>>>,
+    ) -> Result<Self> {
+        let link = core.create_object::<pw::link::Link>(
+            "link-factory",
+            &properties! {
+                "link.output.node" => pair.output_node.to_string(),
+                "link.output.port" => pair.output_port.to_string(),
+                "link.input.node" => pair.input_node.to_string(),
+                "link.input.port" => pair.input_port.to_string(),
+                // Dropping this proxy destroys only our extra link, not playback's.
+                "object.linger" => "false",
+                "link.passive" => "true",
+            },
+        )?;
+        let failure = Rc::new(RefCell::new(None));
+        let failed = failure.clone();
+        let removed = failure.clone();
+        let proxy_listener = link
+            .upcast_ref()
+            .add_listener_local()
+            .error(move |_, _, message| *failed.borrow_mut() = Some(message.to_owned()))
+            .removed(move || *removed.borrow_mut() = Some("application link removed".into()))
+            .register();
+        let failed = failure.clone();
+        let negotiated = Rc::new(Cell::new(false));
+        let linked = negotiated.clone();
+        let listener = link
+            .add_listener_local()
+            .info(move |info| {
+                if let pw::link::LinkState::Error(error) = info.state() {
+                    *failed.borrow_mut() = Some(error.to_owned());
+                }
+                linked.set(matches!(
+                    info.state(),
+                    pw::link::LinkState::Paused | pw::link::LinkState::Active
+                ));
+            })
+            .register();
+        proxy_ids.borrow_mut().insert(link.upcast_ref().id());
+        Ok(Self {
+            _proxy_listener: proxy_listener,
+            _listener: listener,
+            _link: link,
+            failure,
+            negotiated,
+            created: Instant::now(),
+        })
+    }
+}
+
+#[derive(Default)]
+struct AppLinkPolicy {
+    // At most one entry per live playback node; pruned by desired_links.
+    generations: BTreeMap<u32, u64>,
+    skipped: BTreeSet<u32>,
+    failures: BTreeMap<u32, Instant>,
+    // Historical local IDs of owned Node/Client/Link proxies, including zombies
+    // awaiting remove_id. PipeWire recycles IDs, so this is bounded by the proxy
+    // allocator's high-water mark, not stream churn or capture duration.
+    // Invariant: create/connect all non-owned proxies before starting this
+    // watcher, and retain them through capture. Only owned proxies may later
+    // reuse IDs; never add the core, capture stream or either registry here.
+    proxy_ids: Rc<RefCell<BTreeSet<u32>>>,
+}
+
+impl AppLinkPolicy {
+    fn reject(&mut self, node: u32, started: bool, message: String) -> Result<()> {
+        ensure!(started, "{message}");
+        if self.skipped.insert(node) {
+            isocast_diagnostics::output::deferred(
+                "warn",
+                module_path!(),
+                format!("skipping application playback node {node}: {message}"),
+            );
+        }
+        self.failures.remove(&node);
+        Ok(())
+    }
+
+    fn failed(&mut self, node: u32, started: bool, now: Instant, message: &str) -> Result<()> {
+        let since = *self.failures.entry(node).or_insert(now);
+        if now.saturating_duration_since(since) >= TIMEOUT {
+            self.reject(node, started, format!("application_audio.link: {message}"))?;
+        }
+        Ok(())
+    }
+}
+
+fn reconcile_links(
+    core: &pw::core::CoreRc,
+    desired: &BTreeSet<AppLink>,
+    links: &mut BTreeMap<AppLink, OwnedAppLink>,
+    policy: &mut AppLinkPolicy,
+    started: bool,
+) -> Result<()> {
+    links.retain(|pair, _| desired.contains(pair) && !policy.skipped.contains(&pair.output_node));
+    // Only a fully negotiated stream resets its retry window. One good
+    // channel must not hide a persistently refused sibling channel.
+    policy.failures.retain(|node, _| {
+        desired.iter().any(|pair| {
+            pair.output_node == *node
+                && links
+                    .get(pair)
+                    .is_none_or(|link| !link.negotiated.get() || link.failure.borrow().is_some())
+        })
+    });
+    for &pair in desired {
+        if policy.skipped.contains(&pair.output_node) {
+            continue;
+        }
+        if let Some(link) = links.get(&pair) {
+            let failure = link.failure.borrow();
+            let Some(message) = failure.as_ref() else {
+                if !link.negotiated.get() {
+                    policy.failed(
+                        pair.output_node,
+                        started,
+                        Instant::now(),
+                        "link negotiation timed out",
+                    )?;
+                }
+                continue;
+            };
+            policy.failed(pair.output_node, started, Instant::now(), message)?;
+            // Node/port removal can race creation. Let registry removals arrive
+            // before retrying; a persistent linking failure still surfaces.
+            if policy.skipped.contains(&pair.output_node)
+                || link.created.elapsed() < Duration::from_millis(250)
+            {
+                continue;
+            }
+        }
+        links.remove(&pair);
+        match OwnedAppLink::new(core, pair, policy.proxy_ids.clone()) {
+            Ok(link) => {
+                links.insert(pair, link);
+            }
+            Err(error) => {
+                // A local factory/create failure has no proxy that can later
+                // negotiate. Surface it before the generic startup deadline.
+                ensure!(started, "application_audio.link: {error}");
+                policy.failed(
+                    pair.output_node,
+                    started,
+                    Instant::now(),
+                    &error.to_string(),
+                )?;
+            }
+        }
+    }
+    links.retain(|pair, _| !policy.skipped.contains(&pair.output_node));
+    Ok(())
+}
+
+fn fatal_capture_error(
+    application: bool,
+    id: u32,
+    result: i32,
+    owned_proxies: &BTreeSet<u32>,
+) -> bool {
+    // A vanished global can reject a pending bind on its new proxy ID; destroy
+    // of an already-removed proxy reports core ENOENT. Both are benign races.
+    // Node errors also fan out to all bound Node resources (impl-node), not
+    // just our links. Restrict other non-core exemptions to owned app proxies,
+    // retaining their IDs through the zombie interval until server remove_id.
+    !application
+        || (result != -libc::ENOENT && (id == pw::core::PW_ID_CORE || !owned_proxies.contains(&id)))
 }
 
 fn default_name(value: &str) -> Option<String> {
@@ -385,6 +1032,7 @@ struct Status {
 }
 
 struct StreamData {
+    application_clock: Option<ApplicationClock>,
     sink: Arc<AudioSink>,
     status: Rc<RefCell<Status>>,
     channels: u32,
@@ -392,8 +1040,9 @@ struct StreamData {
     samples: Vec<f32>,
     concealed_samples: u64,
     corrupted_chunks: u64,
+    bridged_frames: u64,
     clock_offset: i64,
-    microphone: bool,
+    sink_monitor: bool,
     links: Rc<RefCell<BTreeMap<u32, (u32, u32)>>>,
     position: *const spa::sys::spa_io_position,
 }
@@ -409,15 +1058,25 @@ struct GraphClock {
 
 impl StreamData {
     fn monitor_delay(&self, node: u32, graph: u64) -> u64 {
-        if self.microphone || self.position.is_null() {
+        if !self.sink_monitor || self.position.is_null() {
             return 0;
         }
         let Some(peer) = linked_peer(&self.links.borrow(), node) else {
             return 0;
         };
+        let Some(clock) = self.graph_clock() else {
+            return 0;
+        };
+        monitor_delay(false, Some(peer), clock, graph)
+    }
+
+    fn graph_clock(&self) -> Option<GraphClock> {
+        if self.position.is_null() {
+            return None;
+        }
         // The IO mapping belongs to PipeWire until io_changed replaces/removes
         // it on this main loop. Its clock is written by the external driver;
-        // access only its aligned scalar fields through atomic loads.
+        // access only aligned scalar fields through atomic loads.
         let read = || {
             // SAFETY: io_changed validated this native mapping's size/alignment.
             // Read only aligned atomic scalars, not a reference to the whole clock.
@@ -444,9 +1103,37 @@ impl StreamData {
             || clock.num != next.num
             || clock.denom != next.denom
         {
-            return 0;
+            return None;
         }
-        monitor_delay(false, Some(peer), next, graph)
+        Some(next)
+    }
+}
+
+#[derive(Default)]
+struct ApplicationClock {
+    previous: Option<(Option<u32>, Time, bool)>,
+}
+
+impl ApplicationClock {
+    fn silence(
+        &mut self,
+        driver: Option<u32>,
+        at: Time,
+        frames: u64,
+        silent: bool,
+    ) -> Option<(Time, usize)> {
+        let previous = self
+            .previous
+            .replace((driver, at.add_ticks(frames, RATE), silent));
+        let (previous_driver, end, was_silent) = previous?;
+        let (previous_driver, driver) = (previous_driver?, driver?);
+        let gap = at.ticks_since(end, RATE);
+        // An unlinked application runs silence on the fallback driver. Its
+        // phase can differ from the playback driver's by one quantum. Bridge
+        // only that silent clock handover, never missing active graph cycles,
+        // and never shift the timestamp of actual application samples.
+        (previous_driver != driver && (silent || was_silent) && gap > 0 && gap as u64 <= frames)
+            .then_some((end, gap as usize))
     }
 }
 
@@ -488,13 +1175,13 @@ fn monitor_delay(microphone: bool, peer: Option<u32>, clock: GraphClock, graph: 
 impl Drop for StreamData {
     fn drop(&mut self) {
         // One summary per capture, never a per-buffer log on the callback.
-        if self.concealed_samples > 0 || self.corrupted_chunks > 0 {
+        if self.concealed_samples > 0 || self.corrupted_chunks > 0 || self.bridged_frames > 0 {
             isocast_diagnostics::output::deferred(
                 "warn",
                 module_path!(),
                 format!(
-                    "replaced {} non-finite samples with silence; skipped {} corrupted chunks",
-                    self.concealed_samples, self.corrupted_chunks
+                    "replaced {} non-finite samples with silence; skipped {} corrupted chunks; bridged {} silent application frames",
+                    self.concealed_samples, self.corrupted_chunks, self.bridged_frames
                 ),
             );
         }
@@ -502,7 +1189,7 @@ impl Drop for StreamData {
 }
 
 fn capture_worker(
-    device: Option<&str>,
+    requested: &Target,
     channels: Option<&[u32]>,
     sink: &Arc<AudioSink>,
     cancel: &AtomicBool,
@@ -510,9 +1197,15 @@ fn capture_worker(
     started: &mut bool,
 ) -> Result<()> {
     require_buffer_timestamps()?;
-    let inventory = enumerate(cancel)?;
-    let microphone = device.is_some();
-    let target = if let Some(device) = device {
+    let inventory = enumerate(cancel, matches!(requested, Target::Application(_)))?;
+    let microphone = matches!(requested, Target::Microphone(_));
+    let application = match requested {
+        Target::Application(app) => Some(inventory.apps.resolve(app)?),
+        _ => None,
+    };
+    let is_application = application.is_some();
+    let target = if let Target::Microphone(device) = requested {
+        let device = device.as_str();
         let id = if matches!(device, "default" | "main") {
             inventory
                 .input
@@ -548,6 +1241,15 @@ fn capture_worker(
         props.insert("node.dont-reconnect", "true");
         // Capture native channels in their original order, not a stereo remix.
         props.insert("stream.dont-remix", "true");
+    } else if is_application {
+        // Let the session manager configure DSP ports, but never choose a
+        // hardware/default source. Competing adapter.auto-port-config races
+        // WirePlumber's PortConfig activation. We own only the extra links;
+        // PipeWire mixes them and keeps processing silence when none remain.
+        props.insert("node.autoconnect", "false");
+        props.insert("node.passive", "true");
+        props.insert("node.always-process", "true");
+        props.insert("stream.dont-remix", "true");
     } else {
         // With no target.object the session manager selects the default sink.
         props.insert("stream.capture.sink", "true");
@@ -560,10 +1262,16 @@ fn capture_worker(
         .context("connecting audio stream to PipeWire")?;
     let status = Rc::new(RefCell::new(Status::default()));
     let errors = status.clone();
+    let mut link_policy = AppLinkPolicy::default();
+    let proxy_ids = link_policy.proxy_ids.clone();
     let _core_listener = core
         .add_listener_local()
-        .error(move |_, _, _, message| {
-            errors.borrow_mut().error = Some(message.to_owned());
+        .error(move |id, _, result, message| {
+            // App-link errors/removals are handled by their owned proxies;
+            // racing removal of a playback node must not end the recording.
+            if fatal_capture_error(is_application, id, result, &proxy_ids.borrow()) {
+                errors.borrow_mut().error = Some(message.to_owned());
+            }
         })
         .register();
     let stream = pw::stream::StreamBox::new(&core, "Isocast audio capture", props)?;
@@ -601,6 +1309,7 @@ fn capture_worker(
     let clock_offset = clock_offset()?;
     // Share only the Send sink, never a PipeWire object.
     let data = StreamData {
+        application_clock: is_application.then(ApplicationClock::default),
         sink: sink.clone(),
         status: status.clone(),
         channels: 0,
@@ -608,8 +1317,9 @@ fn capture_worker(
         samples: Vec::new(),
         concealed_samples: 0,
         corrupted_chunks: 0,
+        bridged_frames: 0,
         clock_offset,
-        microphone,
+        sink_monitor: matches!(requested, Target::Desktop),
         links,
         position: std::ptr::null(),
     };
@@ -624,9 +1334,14 @@ fn capture_worker(
                 std::ptr::null()
             };
         })
-        .state_changed(|_, data, _, state| match state {
+        .state_changed(move |_, data, _, state| match state {
             StreamState::Error(error) => data.status.borrow_mut().error = Some(error),
             StreamState::Unconnected => data.status.borrow_mut().error = Some("audio stream disconnected".into()),
+            StreamState::Paused | StreamState::Streaming if is_application => {
+                // A known app may be paused or have lost its last stream while
+                // we connected. Start bounded; stay armed for future streams.
+                data.status.borrow_mut().ready = Some(count);
+            }
             _ => {}
         })
         .param_changed(move |_, data, id, param| {
@@ -680,17 +1395,51 @@ fn capture_worker(
     stream.connect(
         spa::utils::Direction::Input,
         None,
-        pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+        if is_application {
+            pw::stream::StreamFlags::MAP_BUFFERS
+        } else {
+            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS
+        },
         &mut [pod],
     )?;
+    // Declared after the stream: own link proxies/listeners drop before it and
+    // before the core, including on early errors/cancellation.
+    // Create the stream and registry before the watch can allocate owned proxy
+    // ids. Keep these non-owned proxies alive until capture has ended.
+    let app_watch = if is_application {
+        Some(ApplicationWatch::new(
+            &core,
+            true,
+            link_policy.proxy_ids.clone(),
+        )?)
+    } else {
+        None
+    };
+    let mut app_links = BTreeMap::new();
     while !cancel.load(Ordering::Acquire) {
         iterate(&mainloop)?;
+        let mut graph_ready = true;
+        if let (Some(identity), Some(watch)) = (&application, &app_watch) {
+            let desired = watch.state.borrow().desired_links(
+                identity,
+                stream.node_id(),
+                &mut link_policy,
+                *started,
+            )?;
+            reconcile_links(&core, &desired, &mut app_links, &mut link_policy, *started)?;
+            graph_ready = watch.state.borrow().ready(identity, stream.node_id())
+                && desired.iter().all(|pair| {
+                    app_links.get(pair).is_some_and(|link| {
+                        link.negotiated.get() && link.failure.borrow().is_none()
+                    })
+                });
+        }
         let mut state = status.borrow_mut();
         if let Some(error) = state.error.take() {
             bail!("{error}");
         }
         if !*started {
-            if let Some(count) = state.ready {
+            if let Some(count) = state.ready.filter(|_| graph_ready) {
                 ready
                     .send(Ok(count))
                     .context("PipeWire startup caller disconnected")?;
@@ -698,7 +1447,7 @@ fn capture_worker(
             } else {
                 ensure!(
                     Instant::now() < deadline,
-                    "PipeWire audio stream produced no samples within 5 seconds; check the session manager and selected device"
+                    "PipeWire audio stream or initial application links were not ready within 5 seconds; check the session manager and selected device"
                 );
             }
         }
@@ -801,6 +1550,27 @@ fn process(stream: &pw::stream::Stream, state: &mut StreamData) -> Result<()> {
             timing.buffered(),
             state.monitor_delay(stream.node_id(), raw.time),
         )?;
+        // Never attribute a queued buffer to a newer driver's shared clock.
+        // Every delivered buffer advances the timeline, even if its driver is
+        // unknown. Never bridge across that uncertainty using an older buffer.
+        if state.application_clock.is_some() {
+            let driver = state
+                .graph_clock()
+                .filter(|clock| clock.nsec == raw.time)
+                .map(|clock| clock.id);
+            if let Some(timeline) = &mut state.application_clock
+                && let Some((at, frames)) = timeline.silence(
+                    driver,
+                    timestamp,
+                    (state.samples.len() / state.pick.len()) as u64,
+                    state.samples.iter().all(|&sample| sample == 0.0),
+                )
+            {
+                let silence = vec![0.0; frames * state.pick.len()];
+                (state.sink.samples)(&silence, at);
+                state.bridged_frames = state.bridged_frames.saturating_add(frames as u64);
+            }
+        }
         (state.sink.samples)(&state.samples, timestamp);
         state.status.borrow_mut().ready = Some(state.pick.len() as u32);
     }
@@ -958,10 +1728,557 @@ fn timestamp(
 mod tests {
     use super::*;
 
+    fn app_node(id: Option<&str>, name: &str, binary: Option<&str>, pid: u32) -> AppNode {
+        AppNode {
+            props: AppProperties {
+                id: id.map(str::to_owned),
+                name: Some(name.to_owned()),
+                binary: binary.map(str::to_owned),
+                pid: Some(pid.to_string()),
+            },
+            informed: true,
+            playing: true,
+            output_count: 1,
+            ..AppNode::default()
+        }
+    }
+
+    fn audio_port(node: u32, input: bool, channel: &str) -> AudioPort {
+        AudioPort {
+            node,
+            input,
+            channel: channel.into(),
+            monitor: false,
+        }
+    }
+
+    #[test]
+    fn application_identity_prefers_real_id_then_binary_then_name_not_pid() {
+        let node = app_node(Some("org.example.Player"), "Player", Some("player"), 123);
+        let app = node.props.application(None, true).unwrap();
+        assert_eq!(app.id, "pipewire:application:org.example.Player");
+        assert_eq!(app.bundle_id.as_deref(), Some("org.example.Player"));
+        assert_eq!(app.binary.as_deref(), Some("player"));
+        assert_eq!(app.pid, 123);
+        let node = app_node(None, "Player", Some("player"), 987);
+        let app = node.props.application(None, false).unwrap();
+        assert_eq!(app.id, "pipewire:binary:player");
+        assert_eq!(app.bundle_id, None);
+        assert!(!app.playing);
+        let node = app_node(None, "Player", None, 999);
+        assert_eq!(
+            node.props.application(None, false).unwrap().id,
+            "pipewire:name:Player"
+        );
+        assert!(AppProperties::default().application(None, false).is_none());
+    }
+
+    #[test]
+    fn application_client_info_fallback_waits_for_complete_identity() {
+        let mut apps = Applications::default();
+        let mut node = app_node(None, "Stream title", None, 0);
+        node.props.pid = None;
+        node.client = Some(40);
+        apps.nodes.insert(20, node);
+        apps.clients.insert(40, AppClient::default());
+        assert!(apps.list().is_empty());
+        apps.clients.insert(
+            40,
+            AppClient {
+                props: AppProperties {
+                    id: Some("org.example.Player".into()),
+                    binary: Some("player".into()),
+                    pid: Some("4321".into()),
+                    ..AppProperties::default()
+                },
+                informed: true,
+            },
+        );
+        let list = apps.list();
+        assert_eq!(list[0].id, "pipewire:application:org.example.Player");
+        assert_eq!(list[0].name, "Stream title");
+        assert_eq!(list[0].pid, 4321);
+        assert_eq!(list[0].binary.as_deref(), Some("player"));
+    }
+
+    #[test]
+    fn selectors_are_exact_for_canonical_ids_and_aliases_must_be_unambiguous() {
+        let mut apps = Applications::default();
+        apps.nodes
+            .insert(1, app_node(Some("A"), "Player", Some("player"), 10));
+        apps.nodes
+            .insert(2, app_node(Some("A"), "Player tab", Some("player"), 20));
+        assert_eq!(apps.list().len(), 1);
+        assert_eq!(apps.resolve("PLAYER").unwrap(), "pipewire:application:A");
+        assert!(apps.resolve("pipewire:application:a").is_err());
+        apps.nodes
+            .insert(3, app_node(Some("B"), "Player", Some("player"), 30));
+        assert!(
+            apps.resolve("Player")
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+        assert!(apps.resolve("player").is_err());
+        assert_eq!(
+            apps.resolve("pipewire:application:A").unwrap(),
+            "pipewire:application:A"
+        );
+        assert!(apps.resolve("missing").is_err());
+        assert!(validate_application("").is_err());
+        assert!(validate_application("player\0other").is_err());
+    }
+
+    #[test]
+    fn desired_links_follow_all_streams_and_restarts_without_other_apps() {
+        let mut apps = Applications::default();
+        let mut policy = AppLinkPolicy::default();
+        apps.nodes
+            .insert(10, app_node(Some("A"), "Player", Some("player"), 100));
+        apps.nodes
+            .insert(20, app_node(Some("A"), "Player", Some("player"), 200));
+        apps.nodes
+            .insert(30, app_node(Some("B"), "Player", Some("player"), 300));
+        apps.nodes.get_mut(&10).unwrap().output_count = 2;
+        for (id, node, input, channel) in [
+            (11, 10, false, "FL"),
+            (12, 10, false, "FR"),
+            (21, 20, false, "MONO"),
+            (31, 30, false, "MONO"),
+            (91, 90, true, "FR"),
+            (92, 90, true, "FL"),
+        ] {
+            apps.ports.insert(id, audio_port(node, input, channel));
+        }
+        let links = apps
+            .desired_links("pipewire:application:A", 90, &mut policy, false)
+            .unwrap();
+        let pairs: BTreeSet<_> = links
+            .iter()
+            .map(|l| (l.output_port, l.input_port))
+            .collect();
+        assert_eq!(
+            pairs,
+            BTreeSet::from([(11, 92), (12, 91), (21, 91), (21, 92)])
+        );
+        // Pausing and losing every stream is not a source failure. The resolved
+        // identity is retained outside this changing graph, never a PID/node ID.
+        apps.nodes.get_mut(&10).unwrap().playing = false;
+        assert_eq!(
+            apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+                .unwrap(),
+            links
+        );
+        apps.nodes.clear();
+        assert!(
+            apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+                .unwrap()
+                .is_empty()
+        );
+        apps.nodes.insert(
+            50,
+            app_node(Some("A"), "Renamed player", Some("new-binary"), 999),
+        );
+        apps.ports.insert(51, audio_port(50, false, "MONO"));
+        let links = apps
+            .desired_links("pipewire:application:A", 90, &mut policy, true)
+            .unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(
+            links
+                .iter()
+                .all(|link| link.output_node == 50 && link.output_port == 51)
+        );
+        assert!(
+            apps.desired_links("pipewire:application:A", u32::MAX, &mut policy, true)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn desired_links_skip_monitor_ports_and_map_unlabeled_stereo() {
+        let mut apps = Applications::default();
+        let mut policy = AppLinkPolicy::default();
+        apps.nodes
+            .insert(10, app_node(None, "Player", Some("player"), 100));
+        apps.nodes.get_mut(&10).unwrap().output_count = 3;
+        apps.ports.insert(11, audio_port(10, false, ""));
+        apps.ports.insert(12, audio_port(10, false, ""));
+        apps.ports.insert(
+            13,
+            AudioPort {
+                monitor: true,
+                ..audio_port(10, false, "MONO")
+            },
+        );
+        apps.ports.insert(91, audio_port(90, true, "FL"));
+        apps.ports.insert(92, audio_port(90, true, "FR"));
+        let links = apps
+            .desired_links("pipewire:binary:player", 90, &mut policy, false)
+            .unwrap();
+        let pairs: BTreeSet<_> = links
+            .iter()
+            .map(|l| (l.output_port, l.input_port))
+            .collect();
+        assert_eq!(pairs, BTreeSet::from([(11, 91), (12, 92)]));
+        // Removing a port cannot retain links to that stale global ID.
+        apps.ports.remove(&12);
+        let links = apps
+            .desired_links("pipewire:binary:player", 90, &mut policy, true)
+            .unwrap();
+        assert!(links.is_empty());
+    }
+
     #[test]
     fn capture_handle_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<Capture>();
+    }
+
+    #[test]
+    fn app_metadata_updates_preserve_absent_fields_and_clear_empty_values() {
+        let mut props = AppProperties::default();
+        props
+            .update(properties! { "application.id" => "A", "application.name" => "Player" }.dict());
+        props.update(properties! { "application.name" => "New title" }.dict());
+        assert_eq!(
+            props.application(None, true).unwrap().id,
+            "pipewire:application:A"
+        );
+        assert_eq!(props.name.as_deref(), Some("New title"));
+        props.update(properties! { "application.id" => "" }.dict());
+        assert_eq!(
+            props.application(None, true).unwrap().id,
+            "pipewire:name:New title"
+        );
+    }
+
+    #[test]
+    fn application_streams_reject_surround_and_unmappable_stereo() {
+        let mut apps = Applications::default();
+        let mut policy = AppLinkPolicy::default();
+        apps.nodes
+            .insert(10, app_node(Some("A"), "Player", None, 100));
+        apps.nodes.get_mut(&10).unwrap().output_count = 3;
+        apps.ports.insert(91, audio_port(90, true, "FL"));
+        apps.ports.insert(92, audio_port(90, true, "FR"));
+        for (id, channel) in [(11, "FL"), (12, "FR"), (13, "FC")] {
+            apps.ports.insert(id, audio_port(10, false, channel));
+        }
+        assert!(
+            apps.desired_links("pipewire:application:A", 90, &mut policy, false)
+                .unwrap_err()
+                .to_string()
+                .contains("mono/stereo")
+        );
+        apps.ports.remove(&13);
+        apps.nodes.get_mut(&10).unwrap().output_count = 2;
+        apps.ports.get_mut(&12).unwrap().channel = "FC".into();
+        assert!(
+            apps.desired_links("pipewire:application:A", 90, &mut policy, false)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be mapped")
+        );
+    }
+
+    #[test]
+    fn incomplete_output_set_never_links_first_stereo_port_as_mono() {
+        let mut apps = Applications::default();
+        let mut policy = AppLinkPolicy::default();
+        let mut node = app_node(Some("A"), "Player", None, 100);
+        node.output_count = 3;
+        apps.nodes.insert(10, node);
+        apps.ports.insert(91, audio_port(90, true, "FL"));
+        apps.ports.insert(92, audio_port(90, true, "FR"));
+        apps.ports.insert(11, audio_port(10, false, "FL"));
+        assert!(
+            apps.desired_links("pipewire:application:A", 90, &mut policy, false)
+                .unwrap()
+                .is_empty()
+        );
+        apps.ports.insert(12, audio_port(10, false, "FR"));
+        // Count all output globals before excluding monitor ports.
+        assert!(
+            apps.desired_links("pipewire:application:A", 90, &mut policy, false)
+                .unwrap()
+                .is_empty()
+        );
+        apps.ports.insert(
+            13,
+            AudioPort {
+                monitor: true,
+                ..audio_port(10, false, "MONO")
+            },
+        );
+        let links = apps
+            .desired_links("pipewire:application:A", 90, &mut policy, false)
+            .unwrap();
+        assert_eq!(
+            links
+                .iter()
+                .map(|l| (l.output_port, l.input_port))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([(11, 91), (12, 92)])
+        );
+    }
+
+    #[test]
+    fn later_invalid_stream_is_skipped_without_removing_good_stream_links() {
+        for channels in [vec!["FL", "FR", "FC"], vec!["FL", "FC"]] {
+            let mut apps = Applications::default();
+            let mut policy = AppLinkPolicy::default();
+            apps.nodes
+                .insert(10, app_node(Some("A"), "Player", None, 100));
+            apps.ports.insert(11, audio_port(10, false, "MONO"));
+            apps.ports.insert(91, audio_port(90, true, "FL"));
+            apps.ports.insert(92, audio_port(90, true, "FR"));
+            let good = apps
+                .desired_links("pipewire:application:A", 90, &mut policy, false)
+                .unwrap();
+            let mut bad = app_node(Some("A"), "Player", None, 200);
+            bad.output_count = channels.len() as u32;
+            apps.nodes.insert(20, bad);
+            for (index, channel) in channels.iter().enumerate() {
+                apps.ports
+                    .insert(21 + index as u32, audio_port(20, false, channel));
+            }
+            assert!(
+                apps.desired_links("pipewire:application:A", 90, &mut policy, false)
+                    .is_err()
+            );
+            assert_eq!(
+                apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+                    .unwrap(),
+                good
+            );
+            assert_eq!(policy.skipped, BTreeSet::from([20]));
+            assert_eq!(
+                apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+                    .unwrap(),
+                good
+            );
+            apps.nodes.remove(&20);
+            apps.ports.retain(|_, port| port.node != 20);
+            apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+                .unwrap();
+            assert!(policy.skipped.is_empty());
+            // A fresh stream using the old global ID is eligible again.
+            apps.nodes
+                .insert(20, app_node(Some("A"), "Player", None, 200));
+            apps.ports.insert(21, audio_port(20, false, "MONO"));
+            assert_eq!(
+                apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+                    .unwrap()
+                    .len(),
+                4
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_link_refusal_fails_startup_but_skips_only_later_stream() {
+        let now = Instant::now();
+        let mut policy = AppLinkPolicy::default();
+        policy.generations.insert(20, 0);
+        policy.failed(20, false, now, "permission denied").unwrap();
+        policy
+            .failed(20, false, now + TIMEOUT - POLL, "permission denied")
+            .unwrap();
+        assert!(policy.skipped.is_empty());
+        assert!(
+            policy
+                .failed(20, false, now + TIMEOUT, "permission denied")
+                .is_err()
+        );
+        assert!(policy.skipped.is_empty());
+        policy
+            .failed(20, true, now + TIMEOUT, "permission denied")
+            .unwrap();
+        assert_eq!(policy.skipped, BTreeSet::from([20]));
+        assert!(policy.failures.is_empty());
+        let mut apps = Applications::default();
+        apps.nodes
+            .insert(10, app_node(Some("A"), "Player", None, 100));
+        apps.nodes
+            .insert(20, app_node(Some("A"), "Player", None, 200));
+        apps.ports.insert(11, audio_port(10, false, "MONO"));
+        apps.ports.insert(21, audio_port(20, false, "MONO"));
+        apps.ports.insert(91, audio_port(90, true, "FL"));
+        apps.ports.insert(92, audio_port(90, true, "FR"));
+        let links = apps
+            .desired_links("pipewire:application:A", 90, &mut policy, true)
+            .unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().all(|link| link.output_node == 10));
+        policy.failed(10, true, now, "temporary removal").unwrap();
+        apps.nodes.clear();
+        apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+            .unwrap();
+        assert!(policy.failures.is_empty());
+        assert!(policy.skipped.is_empty());
+    }
+
+    #[test]
+    fn reused_node_id_clears_old_skip_and_failure_without_an_intermediate_poll() {
+        for skip in [false, true] {
+            let mut apps = Applications::default();
+            let mut policy = AppLinkPolicy::default();
+            let mut node = app_node(Some("A"), "Player", None, 100);
+            node.generation = 1;
+            apps.nodes.insert(20, node);
+            apps.ports.insert(21, audio_port(20, false, "MONO"));
+            apps.ports.insert(91, audio_port(90, true, "FL"));
+            apps.ports.insert(92, audio_port(90, true, "FR"));
+            let good = apps
+                .desired_links("pipewire:application:A", 90, &mut policy, true)
+                .unwrap();
+            assert_eq!(good.len(), 2);
+            if skip {
+                policy.reject(20, true, "refused".into()).unwrap();
+            } else {
+                policy.failed(20, true, Instant::now(), "refused").unwrap();
+            }
+
+            // Simulate global_remove and global(new incarnation) in one iterate:
+            // desired_links never observes a snapshot with node 20 missing.
+            apps.nodes.remove(&20);
+            let mut replacement = app_node(Some("A"), "Player", None, 200);
+            replacement.generation = 2;
+            apps.nodes.insert(20, replacement);
+            assert_eq!(
+                apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+                    .unwrap(),
+                good
+            );
+            assert!(policy.skipped.is_empty());
+            assert!(policy.failures.is_empty());
+            assert_eq!(policy.generations, BTreeMap::from([(20, 2)]));
+            apps.nodes.clear();
+            apps.desired_links("pipewire:application:A", 90, &mut policy, true)
+                .unwrap();
+            assert!(policy.generations.is_empty());
+        }
+    }
+
+    #[test]
+    fn missing_application_lists_at_most_ten_valid_ids_and_excludes_own_process() {
+        let mut apps = Applications::default();
+        for index in 0..12 {
+            apps.nodes.insert(
+                index,
+                app_node(Some(&format!("App{index:02}")), "Player", None, 100),
+            );
+        }
+        apps.nodes.insert(
+            20,
+            app_node(Some("Own"), "Isocast", None, std::process::id()),
+        );
+        assert!(
+            apps.list()
+                .iter()
+                .all(|app| app.id != "pipewire:application:Own")
+        );
+        let message = apps.resolve("missing").unwrap_err().to_string();
+        assert!(message.contains("pipewire:application:App00"));
+        assert!(message.contains("pipewire:application:App09"));
+        assert!(!message.contains("pipewire:application:App10"));
+        assert_eq!(message.matches("pipewire:application:").count(), 10);
+    }
+
+    #[test]
+    fn application_clock_bridges_only_silent_driver_handover() {
+        let clock = GraphClock {
+            id: 10,
+            nsec: 1,
+            duration: 1024,
+            num: 1,
+            denom: RATE,
+        };
+        let start = Time::from_nanos(1_000_000_000);
+        let end = start.add_ticks(1024, RATE);
+        for (driver, before_silent, after_silent, gap, fill) in [
+            (20, true, false, 696, true),
+            (20, false, true, 328, true),
+            (10, true, true, 696, false),
+            (20, false, false, 696, false),
+            (20, true, true, 1720, false),
+            (20, true, true, -1024, false),
+            (20, true, true, 0, false),
+        ] {
+            let mut timeline = ApplicationClock::default();
+            assert_eq!(
+                timeline.silence(Some(clock.id), start, 1024, before_silent),
+                None
+            );
+            let at = Time::from_nanos(end.as_nanos() + gap * 1_000_000_000 / i64::from(RATE));
+            assert_eq!(
+                timeline.silence(Some(driver), at, 1024, after_silent),
+                fill.then_some((end, gap as usize))
+            );
+        }
+    }
+
+    #[test]
+    fn application_clock_records_buffers_with_unknown_driver() {
+        let mut timeline = ApplicationClock::default();
+        let start = Time::from_nanos(1_000_000_000);
+        assert_eq!(timeline.silence(Some(10), start, 1024, true), None);
+        let next = start.add_ticks(1024, RATE);
+        assert_eq!(timeline.silence(None, next, 1024, true), None);
+        assert_eq!(
+            timeline.previous,
+            Some((None, next.add_ticks(1024, RATE), true))
+        );
+        assert_eq!(
+            timeline.silence(Some(20), next.add_ticks(1200, RATE), 1024, false),
+            None
+        );
+        let end = next.add_ticks(2224, RATE);
+        assert_eq!(
+            timeline.silence(Some(30), end.add_ticks(128, RATE), 1024, true),
+            Some((end, 128))
+        );
+    }
+
+    #[test]
+    fn application_proxy_removal_is_not_a_core_disconnect() {
+        // Historical watcher Node/Client and Link IDs, including dropped proxies.
+        let owned = BTreeSet::from([38, 40, 41]);
+        assert!(!fatal_capture_error(
+            true,
+            pw::core::PW_ID_CORE,
+            -libc::ENOENT,
+            &owned
+        ));
+        assert!(!fatal_capture_error(true, 38, -libc::ENOENT, &owned));
+        assert!(!fatal_capture_error(true, 39, -libc::ENOENT, &owned));
+        assert!(!fatal_capture_error(true, 38, -libc::EIO, &owned));
+        assert!(!fatal_capture_error(true, 40, -libc::EACCES, &owned));
+        assert!(!fatal_capture_error(true, 41, -libc::EIO, &owned));
+        assert!(fatal_capture_error(true, 39, -libc::EACCES, &owned));
+        assert!(fatal_capture_error(true, 39, -libc::EIO, &owned));
+        assert!(fatal_capture_error(
+            true,
+            pw::core::PW_ID_CORE,
+            -libc::EPIPE,
+            &owned
+        ));
+        assert!(fatal_capture_error(
+            true,
+            pw::core::PW_ID_CORE,
+            -libc::EPROTO,
+            &owned
+        ));
+        assert!(fatal_capture_error(
+            false,
+            pw::core::PW_ID_CORE,
+            -libc::ENOENT,
+            &owned
+        ));
+        assert!(fatal_capture_error(false, 38, -libc::ENOENT, &owned));
+        assert!(fatal_capture_error(false, 38, -libc::EIO, &owned));
     }
 
     #[test]

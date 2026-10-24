@@ -85,9 +85,10 @@ impl Platform for LinuxPlatform {
             ..Default::default()
         };
         match pipewire_audio::devices() {
-            Ok((microphones, outputs)) => {
+            Ok((microphones, outputs, apps)) => {
                 devices.microphones = microphones;
                 devices.audio_outputs = outputs;
+                devices.audio_apps = apps;
             }
             Err(error) => devices
                 .notes
@@ -112,7 +113,9 @@ impl Platform for LinuxPlatform {
         std::time::Duration::from_secs(match source {
             SourceKind::Display(_) => 120,
             // PipeWire allows 5s enumeration then 5s for the first samples.
-            SourceKind::Microphone(_) | SourceKind::SystemAudio(_) => 12,
+            SourceKind::Microphone(_)
+            | SourceKind::SystemAudio(_)
+            | SourceKind::ApplicationAudio(_) => 12,
             _ => 8,
         })
     }
@@ -161,7 +164,7 @@ impl Platform for LinuxPlatform {
                 }))
             }
             SourceKind::Microphone(mic) => {
-                let (devices, _) = pipewire_audio::devices()?;
+                let (devices, _, _) = pipewire_audio::devices()?;
                 let device = devices.iter().find(|d| d.id == mic.device || d.name == mic.device)
                     .or_else(|| (mic.device == "default" || mic.device == "main")
                         .then(|| devices.iter().find(|device| device.default).or_else(|| devices.first())).flatten())
@@ -178,6 +181,11 @@ impl Platform for LinuxPlatform {
             }
             SourceKind::SystemAudio(_) => Ok(Some(Probe {
                 device: "default output monitor".into(),
+                video: None,
+                channels: Some(2),
+            })),
+            SourceKind::ApplicationAudio(app) => Ok(Some(Probe {
+                device: pipewire_audio::probe_application(&app.app)?,
                 video: None,
                 channels: Some(2),
             })),
@@ -310,8 +318,9 @@ impl Platform for LinuxPlatform {
         let (capture, channels) = pipewire_audio::desktop(exclude, sink, exclude_own)?;
         Ok((Capture::Audio(capture), channels))
     }
-    fn capture_application_audio(&self, _app: &str, _sink: AudioSink) -> Result<(Capture, u32)> {
-        Err(unsupported("application audio capture (PipeWire)"))
+    fn capture_application_audio(&self, app: &str, sink: AudioSink) -> Result<(Capture, u32)> {
+        let (capture, channels) = pipewire_audio::application(app, sink)?;
+        Ok((Capture::Audio(capture), channels))
     }
     fn play_audio(
         &self,

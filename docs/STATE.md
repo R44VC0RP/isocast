@@ -77,6 +77,14 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   (software Vulkan compositing in the VM). Held screen pictures come from the source (compositor cadence and
   frames never handed to PipeWire), not Isocast. Not covered: graph reconfiguration mid-take (driver, link or
   quantum changes), real speakers and scanout. Evidence: `/Volumes/IsocastBuild/linux-sync/scratch/REPORT.md`.
+- **Linux application audio (2026-10-24, ISO-35), experimental:** devices lists apps with playback streams (stable
+  ids, pid, binary); a chosen app is captured through owned passive PipeWire links (its own playback untouched), new
+  streams are followed, surround or unmappable stereo is refused at start and skipped with one warning mid-take.
+  Proven in a VM: the chosen app's tones in its ISO with others >100 dB down; restarts followed; 6-channel streams
+  skipped without ending the source. **Not loss-qualified:** each strict 30 s take has one app audio dropout (a
+  1024-sample gap in raw buffer time about 18 ms after one of the app's streams goes away; no latency, format or
+  state change explains it; counted, not hidden). Tested on PipeWire 1.0.5 only. Evidence:
+  `/Volumes/IsocastBuild/linux-app-audio/review/REPORT.md`.
 - **Desktop client on a remote server (R2) is on main (2026-10-23):** pairing in the app, engine picker, one window
   per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA), verified basebook <-> exon-desk both
   ways (`/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).
