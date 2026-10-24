@@ -8,9 +8,31 @@ Run it
 ------
     tar xzf isocast-linux-<arch>.tar.gz
     cd isocast-linux-<arch>
-    ./isocast-ui            # the app; it starts the engine (isocastd) beside it
-    ./install.sh            # optional: install for this user (app menu entry,
-                            # ~/.local/bin/isocast and isocast-ui)
+    ./install.sh            # install for this user (app menu entry,
+                            # ~/.local/bin/isocast and isocast-ui) and
+                            # download Cisco's OpenH264 (see below)
+    isocast-ui              # the app; it starts the engine (isocastd) beside it
+
+To run it from this folder without installing, get OpenH264 first:
+`./install.sh --openh264`, then `./isocast-ui`.
+
+H.264 (OpenH264, from Cisco)
+----------------------------
+Isocast records, streams and previews H.264 with OpenH264, which this
+download does not contain. install.sh downloads Cisco's own binary,
+libopenh264-2.6.0 for your architecture, from
+https://ciscobinary.openh264.org over HTTPS, checks its SHA-256 and puts
+it in ~/.local/lib/isocast. It is Cisco's binary, under Cisco's licence,
+reproduced in full in CISCO_H264_LICENSE.txt (and THIRD_PARTY_NOTICES).
+OpenH264 Video Codec provided by Cisco Systems, Inc.
+- You control it: `~/.local/lib/isocast/install.sh --remove-openh264`
+  turns it off (removes only Cisco's library) and `--openh264` turns it
+  on again (downloads it again); `install.sh --no-openh264` installs
+  Isocast without it.
+- Without it, Isocast still starts, but H.264 recording, streaming and
+  live previews are off; the error and `isocast doctor` say so and name
+  the command that fixes it (`~/.local/lib/isocast/install.sh --openh264`).
+- `install.sh --uninstall` removes it with Isocast.
 
 The CLI (`./isocast`, `isocast --help`) and `isocast mcp` control the same
 engine.
@@ -47,12 +69,13 @@ Where things go
 
 Known gaps in this preview
 --------------------------
-- Recording uses software encoding (OpenH264, H.264 only) and AAC; previews
-  are decoded in software. Hardware encoding (VA-API, NVENC) comes later.
-- Not on Linux yet: going live (the engine has no live AAC encoder there
-  yet), hearing sources through your speakers (monitoring), the virtual
-  camera and browser sources. Media files and images may be missing too.
+- Recording and streaming use software encoding (OpenH264, H.264 only) and
+  AAC; previews are decoded in software. Hardware encoding (VA-API, NVENC)
+  comes later.
+- Not on Linux yet: the virtual camera and browser sources. Media files and
+  images may be missing too.
 - Open and save dialogs use Isocast's own file browser.
 
 Licences: MIT or Apache-2.0 (LICENSE-MIT, LICENSE-APACHE); third-party
-notices in THIRD_PARTY_NOTICES. OpenH264 is Cisco's BSD-licensed codec.
+notices in THIRD_PARTY_NOTICES. OpenH264 is downloaded from Cisco, under
+Cisco's binary licence (see above).

@@ -64,6 +64,19 @@ impl Platform for LinuxPlatform {
     fn machine(&self) -> Machine {
         system::machine()
     }
+    fn missing_codecs(&self) -> Vec<isocast_engine::MissingCodec> {
+        match isocast_openh264::check() {
+            Ok(_) => Vec::new(),
+            Err(error) => vec![isocast_engine::MissingCodec {
+                name: "OpenH264".into(),
+                reason: format!(
+                    "{}: H.264 recording, streaming and previews are off",
+                    error.reason
+                ),
+                fix: error.fix,
+            }],
+        }
+    }
     fn video_encoders(&self) -> isocast_engine::VideoEncoders {
         isocast_engine::VideoEncoders {
             hardware: Vec::new(),

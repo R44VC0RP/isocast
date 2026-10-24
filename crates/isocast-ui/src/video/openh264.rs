@@ -1,5 +1,6 @@
-//! H.264 decoded in software with OpenH264 (Linux): the same BSD-2-Clause
-//! crate and bundled Cisco library the Linux engine encodes with. Each
+//! H.264 decoded in software with Cisco's OpenH264 binary (Linux), the one
+//! the installer downloads and the Linux engine encodes with, loaded by
+//! `isocast-openh264`. Each
 //! access unit (AVCC) goes in as Annex B, with the parameter sets in front
 //! of a keyframe whenever they changed; the decoded picture comes out as
 //! RGBA for the monitors, converted as Rec.709 limited range (what the
@@ -7,7 +8,8 @@
 //! is BT.601, which shifts colours).
 
 use anyhow::{Context, Result, bail};
-use openh264::decoder::{DecodeOptions, Decoder as Codec};
+use isocast_openh264::openh264;
+use openh264::decoder::{DecodeOptions, Decoder as Codec, DecoderConfig};
 use openh264::formats::YUVSource;
 
 use super::{AccessUnit, Decoded, Decoder, ParameterSets, Picture, nal_units};
@@ -65,7 +67,12 @@ impl OpenH264 {
             }
         }
         if self.codec.is_none() {
-            self.codec = Some(Codec::new().context("OpenH264 could not start a decoder")?);
+            let api =
+                isocast_openh264::api().map_err(|error| super::NoDecoder(error.to_string()))?;
+            self.codec = Some(
+                Codec::with_api_config(api, DecoderConfig::new())
+                    .context("OpenH264 could not start a decoder")?,
+            );
         }
         self.annex_b.clear();
         if fresh {
@@ -263,7 +270,7 @@ impl Bits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openh264::encoder::Encoder;
+    use openh264::encoder::{Encoder, EncoderConfig};
     use openh264::formats::YUVBuffer;
 
     /// A `width`×`height` frame of one Rec.709 limited colour.
@@ -277,7 +284,8 @@ mod tests {
 
     /// One encoded keyframe as the decoder's intake.
     fn encode(frame: &YUVBuffer) -> (ParameterSets, AccessUnit) {
-        let mut encoder = Encoder::new().unwrap();
+        let api = isocast_openh264::api().expect("Cisco's OpenH264 (set ISOCAST_OPENH264)");
+        let mut encoder = Encoder::with_api_config(api, EncoderConfig::new()).unwrap();
         let annex_b = encoder.encode(frame).unwrap().to_vec();
         let (sets, unit) = super::super::from_annex_b(&annex_b, 0);
         (sets.expect("a keyframe carries its parameter sets"), unit)

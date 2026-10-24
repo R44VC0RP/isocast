@@ -66,11 +66,11 @@ wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Linux: the engine's live video decoded in software (src/video/openh264.rs),
-# with the BSD-2-Clause wrapper and bundled Cisco OpenH264 the Linux engine
-# already encodes with (isocast-platform-linux), pinned the same.
+# Linux: the engine's live video decoded in software (src/video/openh264.rs)
+# by Cisco's OpenH264 binary, which the installer downloads and the Linux
+# engine encodes with too (isocast-openh264 loads it; none is compiled in).
 [target.'cfg(target_os = "linux")'.dependencies]
-openh264 = "=0.9.9"
+isocast-openh264 = { path = "../isocast-openh264" }
 
 [target.'cfg(windows)'.dependencies]
 i-slint-renderer-skia = { version = "=1.18.1", default-features = false, features = ["unstable-wgpu-30"] }

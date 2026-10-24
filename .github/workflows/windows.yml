@@ -117,6 +117,8 @@ jobs:
     timeout-minutes: 45
     env:
       XDG_RUNTIME_DIR: /tmp/isocast-runtime
+      # The OpenH264 load test fails, not skips, without the library.
+      ISOCAST_OPENH264_REQUIRED: 1
       # libxaac-sys 0.1 invokes CMake without CMAKE_BUILD_TYPE or Cargo's
       # optimization level, even in release builds. Optimize native AAC too.
       CFLAGS: -O2
@@ -144,10 +146,22 @@ jobs:
       - name: Build daemon and CLI
         run: cargo build --release --locked -p isocast-daemon -p isocast-cli
 
+      # Cisco's OpenH264 binary, as install.sh downloads it (pinned version
+      # and SHA-256; Isocast compiles none): the encoder and decoder tests
+      # and the e2e load it from ~/.local/lib/isocast.
+      - name: Cache Cisco's OpenH264
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.local/lib/isocast/libopenh264-2.6.0-*.so
+          key: openh264-2.6.0-${{ runner.arch }}
+
+      - name: Cisco's OpenH264
+        run: packaging/linux/install.sh --openh264
+
       - name: Linux platform checks
         run: |
-          cargo clippy --release --locked --all-targets -p isocast-platform-linux -p isocast-platform-credentials -p isocast-daemon -- -D warnings
-          cargo test --release --locked -p isocast-platform-linux -p isocast-platform-credentials
+          cargo clippy --release --locked --all-targets -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials -p isocast-daemon -- -D warnings
+          cargo test --release --locked -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials
           # The client's own tests on Linux too (the daemon's local and remote transports).
           cargo test --release --locked -p isocast-client
           cargo test --release --locked -p isocast-discovery
@@ -232,6 +246,16 @@ jobs:
         timeout-minutes: 30
         run: cargo build --release --locked -p isocast-daemon -p isocast-cli
 
+      # Cisco's OpenH264 (the recordings encode H.264 with it).
+      - name: Cache Cisco's OpenH264
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.local/lib/isocast/libopenh264-2.6.0-*.so
+          key: openh264-2.6.0-${{ runner.arch }}
+
+      - name: Cisco's OpenH264
+        run: packaging/linux/install.sh --openh264
+
       - name: Start the headless desktop (portal, PipeWire, virtual devices)
         timeout-minutes: 10
         run: scripts/linux-capture-fixture.sh start "$FIXTURE" 640x360
@@ -297,6 +321,8 @@ jobs:
             runner: ubuntu-24.04-arm
     env:
       XDG_RUNTIME_DIR: /tmp/isocast-runtime
+      # The OpenH264 load test fails, not skips, without the library.
+      ISOCAST_OPENH264_REQUIRED: 1
       CFLAGS: -O2
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -316,6 +342,18 @@ jobs:
         with:
           key: linux-app-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Cisco's OpenH264 binary, as install.sh downloads it (pinned version
+      # and SHA-256; Isocast compiles none): the encoder and decoder tests
+      # and the e2e load it from ~/.local/lib/isocast.
+      - name: Cache Cisco's OpenH264
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.local/lib/isocast/libopenh264-2.6.0-*.so
+          key: openh264-2.6.0-${{ runner.arch }}
+
+      - name: Cisco's OpenH264
+        run: packaging/linux/install.sh --openh264
 
       - name: Build app, engine and CLI
         run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
@@ -337,6 +375,24 @@ jobs:
 
       - name: Package
         run: scripts/package-linux.sh
+
+      - name: No OpenH264 in the tarball
+        run: |
+          set -o pipefail
+          tarball=dist/isocast-linux-${{ matrix.arch }}.tar.gz
+          # Listed first, so a broken tarball fails here, not as "no match".
+          listing=$(tar -tzf "$tarball")
+          if printf '%s\n' "$listing" | grep -i openh264; then
+            echo "the tarball contains OpenH264" >&2
+            exit 1
+          fi
+          for exe in dist/isocast-linux-${{ matrix.arch }}/isocast*; do
+            text=$(strings "$exe")
+            if printf '%s\n' "$text" | grep -E 'openh264 codec version|CWelsDecoder::'; then
+              echo "$exe contains OpenH264 code" >&2
+              exit 1
+            fi
+          done
 
       - name: Upload tarball
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

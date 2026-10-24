@@ -217,8 +217,13 @@ pub fn decoder() -> Result<Box<dyn Decoder>> {
     return Ok(Box::new(videotoolbox::VideoToolbox::default()));
     #[cfg(windows)]
     return Ok(Box::new(media_foundation::MediaFoundation::new()?));
+    // Cisco's library, as installed: without it the window shows the
+    // engine's stills, saying why (and how to install it).
     #[cfg(target_os = "linux")]
-    return Ok(Box::new(openh264::OpenH264::default()));
+    return match isocast_openh264::check() {
+        Ok(_) => Ok(Box::new(openh264::OpenH264::default())),
+        Err(error) => Err(NoDecoder(error.to_string()).into()),
+    };
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Err(NoDecoder("no H.264 decoder on this OS".into()).into())
 }

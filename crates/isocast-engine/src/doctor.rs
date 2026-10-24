@@ -145,6 +145,16 @@ pub fn doctor_writing<P: Platform>(
         ));
     }
 
+    // Codecs this machine should have but can't use (Linux's OpenH264).
+    for missing in platform.missing_codecs() {
+        checks.push(check(
+            &format!("codec: {}", missing.name),
+            CheckStatus::Problem,
+            missing.reason,
+            Some(&missing.fix),
+        ));
+    }
+
     // Hardware encoders.
     let has = |name: &str| machine.hardware_encoders.iter().any(|e| e.contains(name));
     checks.push(check(

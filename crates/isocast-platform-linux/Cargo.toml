@@ -25,7 +25,8 @@ serde_json = "1"
 futures-util = "0.3"
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
-# BSD-2-Clause wrapper and bundled OpenH264; no GPL codec.
-openh264 = "=0.9.9"
+# Cisco's OpenH264 binary, downloaded by the installer and loaded at run
+# time (BSD-2-Clause wrapper, no OpenH264 compiled in; no GPL codec).
+isocast-openh264 = { path = "../isocast-openh264" }
 # Apache-2.0 wrapper and bundled libxaac (AAC-LC); not FDK AAC.
 xaac-rs = "=0.2.0"
