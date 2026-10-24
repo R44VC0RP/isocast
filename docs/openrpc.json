@@ -7671,6 +7671,17 @@
               "null"
             ]
           },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/H264Profile"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The H.264 profile of the records: `high` if absent (as before), or\n`constrained_baseline` for decoders that take nothing else, like\nWebRTC peers that only offer `42e01f`."
+          },
           "target": {
             "default": "program",
             "description": "`program` (the default), `preview` (studio mode's preview scene),\n`vertical-program` (the vertical canvas's program, with a\n`[vertical]` canvas), `scene:ID` (a scene, drawn while watched, on\nair or not) or a video source's id.",
@@ -8160,6 +8171,21 @@
       "GridTracks": {
         "description": "A grid track list in CSS's syntax: sizes (`200px`, `25%`, `1fr`,\n`auto`, `min-content`, `max-content`, `minmax(MIN, MAX)`) and\n`repeat(N, ...)` (or `repeat(auto-fill, ...)`, `repeat(auto-fit,\n...)`), separated by spaces.",
         "type": "string"
+      },
+      "H264Profile": {
+        "description": "The H.264 profile a `frames` stream is encoded in.",
+        "oneOf": [
+          {
+            "const": "high",
+            "description": "High profile, the default.",
+            "type": "string"
+          },
+          {
+            "const": "constrained_baseline",
+            "description": "Constrained Baseline profile (`42e0..`): no B-frames or CABAC, for\ndecoders that take nothing else.",
+            "type": "string"
+          }
+        ]
       },
       "Hello": {
         "description": "[`Method::Hello`](crate::api::Method::Hello)'s answer.",
@@ -23165,7 +23191,7 @@
       }
     },
     {
-      "description": "Turn this connection into a live video stream of the program,\nstudio mode's preview or a source, for monitors: low-latency H.264\nfrom the hardware encoder, shared by everyone watching the same\ntarget at the same size, at the highest rate any of them wants,\nrunning only while someone watches. Returns [`FrameStream`] first;\nafter that line the connection carries binary [`frames`] records\nuntil either side closes it, and the client may send [`FrameRate`]\nlines to change its rate. Keeps the engine running, and starts it\nif needed.",
+      "description": "Turn this connection into a live video stream of the program,\nstudio mode's preview or a source, for monitors: low-latency H.264\nfrom the hardware encoder, shared by everyone watching the same\ntarget at the same size and H.264 profile, at the highest rate any of them wants,\nrunning only while someone watches. Returns [`FrameStream`] first;\nafter that line the connection carries binary [`frames`] records\nuntil either side closes it, and the client may send [`FrameRate`]\nlines to change its rate. Keeps the engine running, and starts it\nif needed.",
       "name": "frames",
       "paramStructure": "by-name",
       "params": [
@@ -23196,6 +23222,21 @@
           }
         },
         {
+          "description": "The H.264 profile of the records: `high` if absent (as before), or\n`constrained_baseline` for decoders that take nothing else, like\nWebRTC peers that only offer `42e01f`.",
+          "name": "profile",
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/H264Profile"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The H.264 profile of the records: `high` if absent (as before), or\n`constrained_baseline` for decoders that take nothing else, like\nWebRTC peers that only offer `42e01f`."
+          }
+        },
+        {
           "description": "`program` (the default), `preview` (studio mode's preview scene),\n`vertical-program` (the vertical canvas's program, with a\n`[vertical]` canvas), `scene:ID` (a scene, drawn while watched, on\nair or not) or a video source's id.",
           "name": "target",
           "schema": {
@@ -23211,7 +23252,7 @@
           "$ref": "#/components/schemas/FrameStream"
         }
       },
-      "summary": "Turn this connection into a live video stream of the program, studio mode's preview or a source, for monitors: low-latency H.264 from the hardware encoder, shared by everyone watching the same target at the same size, at the highest rate any of them wants, running only while someone watches.",
+      "summary": "Turn this connection into a live video stream of the program, studio mode's preview or a source, for monitors: low-latency H.264 from the hardware encoder, shared by everyone watching the same target at the same size and H.264 profile, at the highest rate any of them wants, running only while someone watches.",
       "x-isocast-params": {
         "$ref": "#/components/schemas/FramesParams"
       },

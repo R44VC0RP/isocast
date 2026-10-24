@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use isocast_engine::{EncodedVideo, ParameterSets, Time};
+use isocast_protocol::api::H264Profile;
 
 pub(crate) const MAX_PACKET: usize = 24 << 20;
 const MAX_NALS: usize = 1024;
@@ -131,9 +132,123 @@ pub(crate) fn parameters(nals: &[&[u8]]) -> ParameterSets {
     }
 }
 
+/// Fail unless the parameter sets really say the requested profile. High
+/// keeps whatever the encoder made (as before); Constrained Baseline needs
+/// every SPS at profile_idc 66 with constraint_set1_flag and every PPS on
+/// CAVLC, never a stream merely asked for as baseline (or quietly High).
+pub(crate) fn check_profile(sets: &ParameterSets, profile: H264Profile) -> Result<()> {
+    if profile == H264Profile::High {
+        return Ok(());
+    }
+    for set in &sets.sps {
+        match set.get(1..3) {
+            Some(&[66, flags]) if flags & 0x40 != 0 => {}
+            Some(&[idc, flags]) => bail!(
+                "video.profile: constrained_baseline was requested, but the encoder made \
+                 profile_idc {idc} with constraint flags {flags:#04x} (needs 66 with \
+                 constraint_set1); this encoder cannot make it, use high"
+            ),
+            _ => bail!("H.264 SPS is too short"),
+        }
+    }
+    for set in &sets.pps {
+        if pps_cabac(set).context("H.264 PPS is too short")? {
+            bail!(
+                "video.profile: constrained_baseline was requested, but the encoder made a \
+                 CABAC picture parameter set; this encoder cannot make it, use high"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A PPS's entropy_coding_mode_flag: after pic_parameter_set_id and
+/// seq_parameter_set_id (both ue(v)), with emulation prevention removed.
+fn pps_cabac(pps: &[u8]) -> Option<bool> {
+    let mut bits = Vec::with_capacity(8);
+    let mut zeros = 0;
+    for &byte in pps.get(1..)?.iter().take(16) {
+        if zeros >= 2 && byte == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+        bits.push(byte);
+    }
+    let bit = |n: usize| bits.get(n / 8).map(|byte| (byte >> (7 - n % 8)) & 1);
+    let mut at = 0;
+    for _ in 0..2 {
+        let mut leading = 0;
+        while bit(at)? == 0 {
+            leading += 1;
+            at += 1;
+            if leading > 31 {
+                return None;
+            }
+        }
+        at += 1 + leading;
+    }
+    Some(bit(at)? == 1)
+}
+
 fn write_set(data: &mut Vec<u8>, set: &[u8]) -> Result<()> {
     let len = u16::try_from(set.len()).context("H.264 parameter set is too large")?;
     data.extend_from_slice(&len.to_be_bytes());
     data.extend_from_slice(set);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constrained_baseline_needs_profile_66_with_constraint_set1() {
+        // NAL header, profile_idc, constraint flags, level_idc.
+        let constrained = vec![0x67, 66, 0xc0, 31];
+        let plain_baseline = vec![0x67, 66, 0x80, 31];
+        let high = vec![0x67, 100, 0x00, 31];
+        let sps = |sps: &[&Vec<u8>]| ParameterSets {
+            sps: sps.iter().map(|set| (*set).clone()).collect(),
+            pps: Vec::new(),
+        };
+        let profile = H264Profile::ConstrainedBaseline;
+        check_profile(&sps(&[&constrained]), profile).unwrap();
+        let error = check_profile(&sps(&[&plain_baseline]), profile).unwrap_err();
+        assert!(error.to_string().contains("video.profile"), "{error}");
+        assert!(check_profile(&sps(&[&high]), profile).is_err());
+        assert!(check_profile(&sps(&[&constrained, &high]), profile).is_err());
+        assert!(check_profile(&sps(&[&vec![0x67, 66]]), profile).is_err());
+        // High keeps whatever the encoder made, as before.
+        check_profile(&sps(&[&high, &plain_baseline]), H264Profile::High).unwrap();
+    }
+
+    #[test]
+    fn constrained_baseline_needs_cavlc_pictures() {
+        let with_pps = |pps: Vec<u8>| ParameterSets {
+            sps: vec![vec![0x67, 66, 0xc0, 31]],
+            pps: vec![pps],
+        };
+        let profile = H264Profile::ConstrainedBaseline;
+        // pps_id 0, sps_id 0 ("1", "1"), then entropy_coding_mode_flag.
+        check_profile(&with_pps(vec![0x68, 0b1100_0000]), profile).unwrap();
+        let error = check_profile(&with_pps(vec![0x68, 0b1110_0000]), profile).unwrap_err();
+        assert!(error.to_string().contains("CABAC"), "{error}");
+        // pps_id 1 ("010"), sps_id 2 ("011"), CABAC: 0100 1110 0000.
+        assert_eq!(pps_cabac(&[0x68, 0b0100_1110, 0]), Some(true));
+        assert_eq!(pps_cabac(&[0x68, 0b0100_1100, 0]), Some(false));
+        assert!(check_profile(&with_pps(vec![0x68]), profile).is_err());
+        check_profile(&with_pps(vec![0x68, 0b1110_0000]), H264Profile::High).unwrap();
+    }
+
+    #[test]
+    fn constrained_baseline_avcc_has_no_high_extension() {
+        let sets = ParameterSets {
+            sps: vec![vec![0x67, 66, 0xc0, 31, 0xaa]],
+            pps: vec![vec![0x68, 0xce]],
+        };
+        let config = config(&sets).unwrap();
+        assert_eq!(&config[..4], &[1, 66, 0xc0, 31]);
+        assert!(config.ends_with(&[1, 0, 2, 0x68, 0xce]));
+    }
 }

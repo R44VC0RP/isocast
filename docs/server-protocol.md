@@ -49,16 +49,32 @@ match its authenticated TCP peer address; multihomed clients bind accordingly.
    transceiver. Gather host candidates, then send
    `whep_offer {"sdp": "v=0…"}`. The target is program; the initial rung
    is at most 960 pixels wide and requests 30 fps. As on `frames`, viewers
-   at the same size share the highest requested encoder rate (up to 60 fps);
+   at the same size and profile share the highest requested encoder rate (up to 60 fps);
    actual cadence also follows the source and governor.
 2. The result is `{"sdp":"v=0…","session":"…"}`: a sendonly SDP answer,
    equivalent to WHEP's 201 answer and Location resource. Set it as the
    remote description. Native offers should give both tracks the same
    stream id (`program`); both tracks use the engine clock.
-3. Negotiate H.264 packetization-mode 1 with baseline/constrained-baseline
-   or constrained-high/High profile; **the SPS must agree with the SDP profile**.
-   Mac monitors prefer constrained-high, falling back to High if the encoder
-   refuses it; the answer always negotiates the actual SPS profile. Audio is Opus,
+3. Negotiate H.264 packetization-mode 1 with Constrained Baseline
+   (`42e01f`, including equivalent RFC 6184 constraint-bit patterns) or
+   constrained-high/High profile. The engine chooses High when offered,
+   otherwise Constrained Baseline, before opening the monitor encoder.
+   A Constrained High-only alternative (`640c..`) counts as supported High
+   only if the platform guarantees that output; current backends do not
+   (VT may fall back to plain High). Thus a `640c..` plus `42e0..` offer
+   goes directly to Baseline, without briefly opening/charging a High encoder.
+   Plain Baseline offers (`4200..`, `4280..`) accept the Constrained Baseline
+   subset and retain their offered profile-level-id in the answer.
+   When `profile-level-id` is omitted, use str0m's libWebRTC-compatible
+   Baseline Level 3.1 default, not RFC 6184's Level 1 default (too small for
+   the monitor). Keep it omitted in the answer and still enforce the level
+   bound; explicit profile-level-id values always retain their own bounds.
+   **The actual SPS must fit the offered profile and receive level**; the
+   answer retains an offered profile-level-id. Constrained High output can
+   satisfy a High offer, never the reverse. An unsupported profile, packetization
+   mode or insufficient receive level fails with supported capabilities listed.
+   Mac High monitors still prefer constrained-high, falling back to High if
+   the encoder refuses it. Audio is Opus,
    48 kHz stereo, initially 10 ms packets at 128 kb/s.
    RTP clocks are 90 kHz video and 48 kHz audio. str0m handles RTP/RTCP,
    DTLS-SRTP, retransmission, feedback and ICE consent.
@@ -137,10 +153,27 @@ its signaling connections and media; recordings remain independent.
 
 ### Monitor resolution and GPU ownership
 
-`frames` and WHEP use the same `frame_stream::Streams` entry keyed by target
-and requested width. Clients snapping to 480/640/960 share that rung's encoder;
+`frames` and WHEP use the same `frame_stream::Streams` entry keyed by target,
+requested width and H.264 profile. `frames` accepts optional `profile: "high"`
+or `"constrained_baseline"` (CLI `--profile`); omission preserves High. Clients
+snapping to 480/640/960 share that rung's encoder when their profiles match;
 WHEP's current program request is 960 wide. Rates are coalesced to the highest
 viewer demand, not encoded once per protocol or viewer.
+
+High and Constrained Baseline viewers hold separate monitor sessions only
+while both are watched. Baseline requests use CAVLC and are checked against
+the emitted parameter sets, not just encoder settings. Recording, replay and
+outgoing stream encoder profiles are unchanged.
+
+Constrained Baseline qualification (2026-10-24): native Mac VT and Windows
+NVENC answered `42e01f` with SPS profile 66 / constraint_set1, and their WHEP
+and frames output fully decoded with OpenH264 0.9.9. Windows MF software also
+produced `42c01e` and decoded. One-viewer engine CPU (960x540 at 30 fps,
+15-second samples, High/CB/CB/High order) averaged 21.55% / 22.24% of one core
+on the M2 and 6.46% / 4.53% on the Ryzen 7 5700. Simultaneous High/CB viewers
+kept each platform's program and two ISO recordings at High, 120 frames and
+4.000 seconds each, without loss. The native Linux encoder regression checks
+Baseline SPS/CAVLC and OpenH264 decoding while retaining default High.
 
 The monitor worker now resizes mismatched frames before handing them to a
 native encoder. Previously macOS delegated this to VideoToolbox, whereas

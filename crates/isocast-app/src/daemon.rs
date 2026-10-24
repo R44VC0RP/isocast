@@ -197,6 +197,7 @@ impl Daemon {
             target: target.to_string(),
             max_width: Some(max_width),
             fps: Some(fps),
+            profile: None,
         };
         client
             .frames(params)

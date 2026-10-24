@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_engine::{EncodedVideo, LiveVideoSpec, Time, VideoEncoder};
+use isocast_protocol::api::H264Profile;
 use parking_lot::Mutex;
 use windows::Win32::Foundation::{
     E_INVALIDARG, E_NOTIMPL, E_POINTER, S_OK, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -91,6 +92,11 @@ impl MfEncoder {
         quality: Option<u32>,
     ) -> Result<Self> {
         encoding.validate(input)?;
+        if spec.profile != H264Profile::High && encoding != VideoEncoding::H264 {
+            bail!(
+                "video.profile: constrained_baseline is an H.264 profile; valid for {encoding:?}: high"
+            );
+        }
         if let Some(quality) = quality {
             if quality > 100 {
                 bail!("video.quality: Media Foundation valid range is 0..=100");
@@ -555,10 +561,20 @@ impl Session {
             }
             set(&codec, &CODECAPI_AVLowLatencyMode, VARIANT::from(true))
                 .context("enable low-latency encoding")?;
+            let baseline = spec.profile == H264Profile::ConstrainedBaseline;
             if encoding == VideoEncoding::H264
                 && codec.IsSupported(&CODECAPI_AVEncH264CABACEnable).is_ok()
             {
-                set(&codec, &CODECAPI_AVEncH264CABACEnable, VARIANT::from(true))?;
+                set(
+                    &codec,
+                    &CODECAPI_AVEncH264CABACEnable,
+                    VARIANT::from(!baseline),
+                )
+                .context(if baseline {
+                    "disable CABAC for Constrained Baseline"
+                } else {
+                    "enable CABAC"
+                })?;
             }
             if let Some(quality) = quality {
                 set_required(
@@ -594,23 +610,44 @@ impl Session {
             } else {
                 None
             };
-            let output = media_type(spec, subtype(encoding))?;
-            if let Some(bits) = bits {
-                output.SetUINT32(&MF_MT_AVG_BITRATE, bits)?;
-            }
-            let profile = match encoding {
-                VideoEncoding::H264 => eAVEncH264VProfile_High.0 as u32,
-                VideoEncoding::Hevc => eAVEncH265VProfile_Main_420_8.0 as u32,
-                VideoEncoding::Hevc10 => eAVEncH265VProfile_Main_420_10.0 as u32,
+            // Constrained Baseline: the explicit value where the provider
+            // takes it, else plain Baseline. Either way the SPS and PPS it
+            // makes are checked (66 + constraint_set1, CAVLC); never High.
+            let profiles: &[u32] = match encoding {
+                VideoEncoding::H264 if baseline => &[
+                    eAVEncH264VProfile_ConstrainedBase.0 as u32,
+                    eAVEncH264VProfile_Base.0 as u32,
+                ],
+                VideoEncoding::H264 => &[eAVEncH264VProfile_High.0 as u32],
+                VideoEncoding::Hevc => &[eAVEncH265VProfile_Main_420_8.0 as u32],
+                VideoEncoding::Hevc10 => &[eAVEncH265VProfile_Main_420_10.0 as u32],
             };
-            output.SetUINT32(&MF_MT_VIDEO_PROFILE, profile)?;
-            transform
-                .SetOutputType(0, &output, 0)
-                .context(if quality.is_some() {
+            let mut output = None;
+            let mut refused = Vec::new();
+            for &profile in profiles {
+                let candidate = media_type(spec, subtype(encoding))?;
+                if let Some(bits) = bits {
+                    candidate.SetUINT32(&MF_MT_AVG_BITRATE, bits)?;
+                }
+                candidate.SetUINT32(&MF_MT_VIDEO_PROFILE, profile)?;
+                match transform.SetOutputType(0, &candidate, 0) {
+                    Ok(()) => {
+                        output = Some(candidate);
+                        break;
+                    }
+                    Err(error) => refused.push(format!("profile {profile}: {error}")),
+                }
+            }
+            let Some(output) = output else {
+                let what = if quality.is_some() {
                     "MF recording provider rejected quality output without MF_MT_AVG_BITRATE"
+                } else if baseline {
+                    "video.profile: this MF provider refused Constrained Baseline output"
                 } else {
                     "set MF output type"
-                })?;
+                };
+                bail!("{what} ({})", refused.join("; "));
+            };
             let bytes_per_pixel = if encoding.bit_depth() == 10 { 2 } else { 1 };
             let input = media_type(
                 spec,
@@ -683,7 +720,7 @@ impl Session {
                     quality: actual_quality,
                 },
                 output_info,
-                parameters: Parameters::new(encoding),
+                parameters: Parameters::new(encoding, spec.profile),
                 input: pixel_format,
                 size: (spec.width, spec.height),
                 fps: spec.fps,

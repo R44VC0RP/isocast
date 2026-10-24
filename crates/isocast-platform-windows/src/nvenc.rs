@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_engine::{EncodedVideo, LiveVideoSpec, Time, VideoEncoder, VideoTrackSpec};
 use isocast_protocol::Codec;
+use isocast_protocol::api::H264Profile;
 use parking_lot::{Condvar, Mutex};
 use windows::Win32::Foundation::{HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -623,6 +624,9 @@ struct Config {
     quality_qp: u32,
     input_format: u32,
     preset: u32,
+    /// 0 = High, 1 = Constrained Baseline (CAVLC, no 8x8 transform, no
+    /// FMO); matches native/nvenc.cpp. H.264 only.
+    profile: u32,
 }
 
 #[repr(C)]
@@ -634,7 +638,7 @@ struct Packet {
     keyframe: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<Config>() == 48);
+const _: () = assert!(std::mem::size_of::<Config>() == 52);
 const _: () = assert!(std::mem::size_of::<Packet>() == 24);
 
 unsafe extern "C" {
@@ -1094,7 +1098,7 @@ pub struct EncodeStats {
     pub last_receive_latency: Duration,
 }
 
-/// H.264 High by default, or HEVC Main/Main10; SDR Rec.709 limited range,
+/// H.264 High by default (Constrained Baseline when asked), or HEVC Main/Main10; SDR Rec.709 limited range,
 /// P5 low-latency, single pass, spatial AQ8, no temporal AQ/lookahead/B-frames.
 /// Shared input is copied on
 /// GPU into one of four private slots: NVENC forbids client access while
@@ -1178,6 +1182,11 @@ impl NvencEncoder {
             bail!("video.preset: NVENC valid presets are P1..=P7 (1..=7)");
         }
         encoding.validate(input)?;
+        if spec.profile != H264Profile::High && encoding != VideoEncoding::H264 {
+            bail!(
+                "video.profile: constrained_baseline is an H.264 profile; valid for {encoding:?}: high"
+            );
+        }
         let bitrate = if let Some(qp) = quality_qp {
             if qp > 51 {
                 bail!("video.quantizer: NVENC valid range is 0..=51");
@@ -1215,6 +1224,10 @@ impl NvencEncoder {
                 PixelFormat::Nv12 => 2,
             },
             preset,
+            profile: match spec.profile {
+                H264Profile::High => 0,
+                H264Profile::ConstrainedBaseline => 1,
+            },
         };
         let mut error = [0 as c_char; 512];
         let native = unsafe {
@@ -1231,7 +1244,9 @@ impl NvencEncoder {
                 unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy()
             )
         })?;
-        let mut parameters = Parameters::new(encoding);
+        // Checks the SPS NVENC really made: never a High stream labelled
+        // Constrained Baseline.
+        let mut parameters = Parameters::new(encoding, spec.profile);
         let mut size = 0;
         let data = unsafe { isocast_nvenc_headers(native.as_ptr(), &mut size) };
         let headers = (|| -> Result<()> {

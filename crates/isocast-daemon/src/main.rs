@@ -38,11 +38,11 @@ use isocast_protocol::api::InitParams;
 use isocast_protocol::api::{
     Applied, ApplyParams, CapacityEstimate, CapacityParams, EngineInfo, EngineState, Event,
     EventKind, EventKinds, Frame, FrameParams, FrameRate, FrameStream, FramesParams, GetParams,
-    ImportObsParams, Live, LiveStatus, Marked, Method, Notification, Overload, OverloadedFile,
-    Plan, Refreshed, Report, Request, Resolved, Response, RpcError, SharedFrameStream,
-    SharedFramesParams, Snapshot, SnapshotParams, StartParams, Started, Status, StopAccepted,
-    StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TakeCause, TuneParams, Tuning,
-    WatchParams, lock_path, shared, socket_path,
+    H264Profile, ImportObsParams, Live, LiveStatus, Marked, Method, Notification, Overload,
+    OverloadedFile, Plan, Refreshed, Report, Request, Resolved, Response, RpcError,
+    SharedFrameStream, SharedFramesParams, Snapshot, SnapshotParams, StartParams, Started, Status,
+    StopAccepted, StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TakeCause, TuneParams,
+    Tuning, WatchParams, lock_path, shared, socket_path,
 };
 use isocast_protocol::caller::Caller;
 use isocast_protocol::change::{Change, diff, merge_patch, missing_removals};
@@ -1193,8 +1193,15 @@ trait LiveEngine: Send + Sync {
         quality: f32,
         fps: Option<u32>,
     ) -> Result<Option<JpegFrame>, String>;
+    fn monitor_h264_constrained_high(&self) -> bool;
     /// `target`'s picture as low-latency H.264 for a monitor.
-    fn frames(&self, target: &str, max_width: Option<u32>, fps: u32) -> Result<FrameFeed, String>;
+    fn frames(
+        &self,
+        target: &str,
+        max_width: Option<u32>,
+        fps: u32,
+        profile: H264Profile,
+    ) -> Result<FrameFeed, String>;
     fn opus(&self) -> Result<isocast_engine::record::OpusFeed, String>;
     /// `target`'s picture in surfaces shared with a client on this machine.
     fn shared_frames(
@@ -1300,8 +1307,18 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
         LiveEngineOf::frame_jpeg(self, target, after, timeout, max_width, quality, fps)
     }
 
-    fn frames(&self, target: &str, max_width: Option<u32>, fps: u32) -> Result<FrameFeed, String> {
-        LiveEngineOf::frames(self, target, max_width, fps)
+    fn monitor_h264_constrained_high(&self) -> bool {
+        LiveEngineOf::monitor_h264_constrained_high(self)
+    }
+
+    fn frames(
+        &self,
+        target: &str,
+        max_width: Option<u32>,
+        fps: u32,
+        profile: H264Profile,
+    ) -> Result<FrameFeed, String> {
+        LiveEngineOf::frames(self, target, max_width, fps, profile)
     }
 
     fn opus(&self) -> Result<isocast_engine::record::OpusFeed, String> {
@@ -4172,7 +4189,12 @@ impl Daemon {
         let engine = self.ensure_engine()?;
         let fps = params.fps.unwrap_or(30).clamp(1, 60);
         let feed = engine
-            .frames(&params.target, params.max_width, fps)
+            .frames(
+                &params.target,
+                params.max_width,
+                fps,
+                params.profile.unwrap_or_default(),
+            )
             .map_err(|message| RpcError {
                 code: RpcError::FAILED,
                 message,

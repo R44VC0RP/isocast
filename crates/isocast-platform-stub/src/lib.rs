@@ -278,7 +278,11 @@ impl Platform for StubPlatform {
     type Importer = Unsupported;
     type Media = Unsupported;
     type Playback = Unsupported;
+    #[cfg(not(test))]
     type VideoEncoder = Unsupported;
+    /// Counted, so tests can see how many encoders the engine runs.
+    #[cfg(test)]
+    type VideoEncoder = tests::CountingEncoder;
     type AudioEncoder = Unsupported;
     type SharedSurface = isocast_surfaces::Surface;
 
@@ -376,6 +380,13 @@ impl Platform for StubPlatform {
         false
     }
 
+    /// The test encoder takes the BGRA frames as they are, so monitors
+    /// need no GPU conversion stage (which this platform can't run).
+    #[cfg(test)]
+    fn encoder_frame_format(&self) -> isocast_engine::EncoderFrameFormat {
+        isocast_engine::EncoderFrameFormat::Bgra
+    }
+
     fn shared_surface(
         &self,
         _gpu: &Gpu,
@@ -466,7 +477,10 @@ impl Platform for StubPlatform {
         Err(unsupported("application audio capture"))
     }
 
-    fn create_video_encoder(&self, _spec: &LiveVideoSpec) -> Result<Unsupported> {
+    fn create_video_encoder(&self, _spec: &LiveVideoSpec) -> Result<Self::VideoEncoder> {
+        #[cfg(test)]
+        return Ok(tests::CountingEncoder::new(_spec));
+        #[cfg(not(test))]
         Err(unsupported("H.264 encoding"))
     }
 
@@ -488,5 +502,140 @@ impl Platform for StubPlatform {
 
     fn delete_secret(&self, _service: &str, _account: &str) -> Result<bool> {
         Err(unsupported("the secret store"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use isocast_engine::record::Engine;
+    use isocast_protocol::Setup;
+    use isocast_protocol::api::H264Profile;
+
+    use super::*;
+
+    /// Encoders made, and the profile each was asked for.
+    static MADE: Mutex<Vec<H264Profile>> = Mutex::new(Vec::new());
+    /// Encoders not dropped yet.
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+    /// An encoder that takes frames and makes nothing, counted while it
+    /// lives.
+    pub struct CountingEncoder;
+
+    impl CountingEncoder {
+        pub fn new(spec: &LiveVideoSpec) -> Self {
+            RUNNING.fetch_add(1, Ordering::SeqCst);
+            // Publish construction only after the live count is observable.
+            MADE.lock().unwrap().push(spec.profile);
+            Self
+        }
+    }
+
+    impl Drop for CountingEncoder {
+        fn drop(&mut self) {
+            RUNNING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl VideoEncoder for CountingEncoder {
+        type Frame = Frame;
+
+        fn encode(&mut self, _frame: &Frame, _pts: Time, _keyframe: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn receive(&mut self) -> Result<Option<EncodedVideo>> {
+            Ok(None)
+        }
+
+        fn receive_timeout(&mut self, _timeout: Duration) -> Result<Option<EncodedVideo>> {
+            Ok(None)
+        }
+
+        fn dropped(&self) -> u64 {
+            0
+        }
+
+        fn set_rate(&mut self, _fps: u32, _bitrate_kbps: u32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn made() -> Vec<H264Profile> {
+        MADE.lock().unwrap().clone()
+    }
+
+    fn running() -> usize {
+        RUNNING.load(Ordering::SeqCst)
+    }
+
+    /// Wait up to five seconds for `done`.
+    fn eventually(what: &str, done: impl Fn() -> bool) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(
+                Instant::now() < until,
+                "{what}: made {:?}, {} running",
+                made(),
+                running()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn monitor_viewers_share_one_encoder_per_profile_until_the_last_leaves() {
+        let setup = Setup::quick(&["test-pattern:320x180@30".to_string()]).unwrap();
+        let engine = Engine::start(&StubPlatform, &setup, None, None).unwrap();
+        // The source opens in the background after the engine starts.
+        let watch = |profile| {
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                match engine.frames("test-pattern", None, 30, profile) {
+                    Ok(feed) => break feed,
+                    Err(err) if Instant::now() >= until => panic!("watching: {err}"),
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        };
+        // Long enough for a stream thread to make an encoder it shouldn't.
+        let settle = || std::thread::sleep(Duration::from_millis(300));
+
+        let high = watch(H264Profile::High);
+        eventually("the first High viewer starts an encoder", || {
+            made().len() == 1
+        });
+        let high_again = watch(H264Profile::High);
+        settle();
+        assert_eq!(
+            made(),
+            [H264Profile::High],
+            "same profile shares one encoder"
+        );
+        assert_eq!(running(), 1);
+
+        let baseline = watch(H264Profile::ConstrainedBaseline);
+        eventually("a Constrained Baseline viewer starts its own", || {
+            made().len() == 2
+        });
+        assert_eq!(
+            made(),
+            [H264Profile::High, H264Profile::ConstrainedBaseline]
+        );
+        assert_eq!(running(), 2);
+
+        drop(high);
+        settle();
+        assert_eq!(running(), 2, "a High viewer still watches");
+        drop(high_again);
+        eventually("the last High viewer's encoder stops", || running() == 1);
+        drop(baseline);
+        eventually("the last viewer's encoder stops", || running() == 0);
+        assert_eq!(made().len(), 2);
+        engine.stop();
     }
 }

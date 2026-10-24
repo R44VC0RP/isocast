@@ -636,6 +636,7 @@ fn live_cell<P: Platform>(
     let fps = cell.fps;
     let mut encoder = platform
         .create_video_encoder(&LiveVideoSpec {
+            profile: isocast_protocol::api::H264Profile::High,
             width: cell.width,
             height: cell.height,
             fps,

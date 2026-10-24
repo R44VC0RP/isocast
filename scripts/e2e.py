@@ -955,6 +955,124 @@ def scenario_scenes(e, cfg, evidence):
     evidence["switches"] = switches
 
 
+def check_constrained_baseline_file(path, label):
+    """The elementary stream is Constrained Baseline and fully decodes; OpenH264
+    decodes it too when this ffmpeg was built with libopenh264."""
+    stream = next(s for s in probe(path)["streams"] if s["codec_type"] == "video")
+    require(stream.get("profile") == "Constrained Baseline",
+            f"{label}: expected Constrained Baseline, ffprobe says {stream.get('profile')!r}")
+    decoded = ffmpeg("-xerror", "-i", path, "-f", "null", "-", timeout=30)
+    require(not decoded.stderr.strip(), f"{label}: FFmpeg decode failed: {decoded.stderr.decode()}")
+    result = {"file": str(path), "profile": stream["profile"], "level": stream.get("level"),
+              "frames": stream.get("nb_read_frames"), "ffmpeg_decode": True}
+    decoders = ffmpeg("-decoders", check=False).stdout.decode(errors="replace")
+    if re.search(r"^\s*V\S*\s+libopenh264\s", decoders, re.M):
+        decoded = ffmpeg("-xerror", "-c:v", "libopenh264", "-i", path, "-f", "null", "-",
+                         timeout=30, check=False)
+        require(decoded.returncode == 0, f"{label}: OpenH264 decode failed: {decoded.stderr.decode()}")
+        result["openh264_decode"] = True
+    else:
+        result["openh264_decode"] = "unavailable: ffmpeg has no libopenh264 decoder"
+    return result
+
+
+# ISOCAST_WEBRTC_H264_PROFILE offers of webrtc-receive -> (answer check, SPS
+# check, ffprobe profile). Every mode offers packetization-mode=1 only; the
+# engine prefers plain High (6400xx) and otherwise sends Constrained Baseline.
+def _answered_cb(f):
+    plid = f["profile_level_id"]
+    return plid is not None and plid[:2] == "42" and int(plid[2:4], 16) & 0x40
+
+
+def _sps_cb(s):
+    return s["profile_idc"] == 66 and s["constraint_set1"] == 1
+
+
+H264_VIEWER_MODES = {
+    "constrained_baseline": (_answered_cb, _sps_cb, "Constrained Baseline"),
+    # Constrained High alone isn't guaranteed by the platform encoders.
+    "constrained_high_and_baseline": (_answered_cb, _sps_cb, "Constrained Baseline"),
+    "plain_baseline": (lambda f: f["profile_level_id"] == "42001f", _sps_cb, "Constrained Baseline"),
+    "baseline_no_profile": (lambda f: f["profile_level_id"] is None, _sps_cb, "Constrained Baseline"),
+    # Plain High still wins when offered after Constrained Baseline.
+    "constrained_baseline_and_high": (lambda f: (f["profile_level_id"] or "")[:2] == "64",
+                                      lambda s: s["profile_idc"] == 100, "High"),
+}
+
+
+def start_h264_viewer(e, mode, output, seconds):
+    return subprocess.Popen([str(e.webrtc_receiver), str(seconds), str(output)],
+                            env=dict(e.env, ISOCAST_WEBRTC_H264_PROFILE=mode),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def collect_h264_viewer(process, output, timeout=20):
+    stdout, stderr = process.communicate(timeout=timeout)
+    output.with_suffix(".receiver.jsonl").write_text(stdout)
+    output.with_suffix(".receiver.log").write_text(stderr)
+    return process.returncode, stdout, stderr
+
+
+def check_h264_viewer(collected, mode, output, label):
+    """The answer and every received SPS match the offered profile and the
+    elementary stream fully decodes (with OpenH264 too for baseline)."""
+    returncode, stdout, stderr = collected
+    require(returncode == 0, f"{label} WebRTC receiver failed: {stderr}")
+    result = json.loads(stdout.splitlines()[0])
+    h264 = result["h264"]
+    answer_ok, sps_ok, profile = H264_VIEWER_MODES[mode]
+    require(result["video_frames"] > 30 and result["closed"],
+            f"insufficient {label} WebRTC media: {result}")
+    require(h264["offer_profile"] == mode and h264["answered"]
+            and all(answer_ok(f) and f["packetization_mode"] == 1 for f in h264["answered"]),
+            f"{label}: unexpected answer: {h264}")
+    require(h264["sps"] and all(sps_ok(s) for s in h264["sps"]),
+            f"{label}: received SPS does not match the offer: {h264}")
+    if profile == "Constrained Baseline":
+        result["file_check"] = check_constrained_baseline_file(output, f"WebRTC {label}")
+    else:
+        stream = next(s for s in probe(output)["streams"] if s["codec_type"] == "video")
+        require(stream.get("profile") == profile, f"{label}: expected {profile}, got {stream}")
+        decoded = ffmpeg("-xerror", "-i", output, "-f", "null", "-", timeout=30)
+        require(not decoded.stderr.strip(), f"{label}: FFmpeg decode failed: {decoded.stderr.decode()}")
+        result["file_check"] = {"file": str(output), "profile": stream["profile"], "ffmpeg_decode": True}
+    return result
+
+
+def check_webrtc_constrained_baseline(e, cli, evidence):
+    """Baseline-family offers (as a decoder limited to OpenH264 makes) must be
+    answered with a profile they offered and carry a matching, decodable SPS.
+    Batches stay within the governor's 3 viewer slots."""
+    evidence["h264_profile_viewers"] = {}
+    modes = list(H264_VIEWER_MODES)
+    for batch in (modes[:3], modes[3:]):
+        viewers = []
+        try:
+            for mode in batch:
+                output = e.root / f"viewer-{mode}.h264"
+                viewers.append((mode, output, start_h264_viewer(e, mode, output, 5)))
+            for mode, output, process in viewers:
+                evidence["h264_profile_viewers"][mode] = check_h264_viewer(
+                    collect_h264_viewer(process, output), mode, output, mode)
+        finally:
+            for _, _, process in viewers:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+    evidence["constrained_baseline_viewer"] = evidence["h264_profile_viewers"]["constrained_baseline"]
+    # The frames API must expose the same choice; a stale CLI is a failure.
+    output = e.root / "frames-constrained-baseline.h264"
+    received = subprocess.run([cli, "frames", "--width", "640", "--fps", "30", "--seconds", "2",
+                               "--profile", "constrained_baseline", "--json", "-o", str(output)],
+                              env=e.env, capture_output=True, timeout=15)
+    require(received.returncode == 0, f"constrained baseline frames failed: {received.stderr.decode()}")
+    frames = json.loads(received.stdout)
+    require(frames["frames"] > 15 and frames["ended"] is None,
+            f"constrained baseline frames did not sustain frames: {frames}")
+    frames["file_check"] = check_constrained_baseline_file(output, "frames constrained baseline")
+    evidence["constrained_baseline_frames"] = frames
+
+
 def scenario_webrtc(e, cfg, evidence):
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (H.264 WebRTC)")
@@ -1045,6 +1163,7 @@ def scenario_webrtc(e, cfg, evidence):
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=5)
+    check_webrtc_constrained_baseline(e, cli, evidence)
 
     # The same shared monitor encoder/scaler must not damage recording.
     # Keep WHEP audio/video running next to the take, but do not require it
@@ -1066,7 +1185,31 @@ def scenario_webrtc(e, cfg, evidence):
               and viewer_output.is_file() and viewer_output.stat().st_size > 0
               and e.rpc("status")["governor"]["remote_viewers"] == 1,
               seconds=5, description="WHEP media active before recording")
-        started = e.rpc("start", {"seconds": 4})
+        # Hosted pressure may legitimately shed new viewers to protect this
+        # zero-loss take. Require both new viewers on the native hardware run.
+        profile_modes = (() if evidence["capabilities"].get("hosted") else
+                         ("constrained_baseline", "constrained_high_and_baseline"))
+        started = e.rpc("start", {"seconds": 8 if profile_modes else 4})
+        # Baseline-only and Constrained High + Baseline viewers joining while
+        # the take runs must still get decodable Constrained Baseline.
+        baseline_viewers = []
+        try:
+            for mode in profile_modes:
+                baseline_output = e.root / f"recording-viewer-{mode}.h264"
+                baseline_viewers.append((mode, baseline_output,
+                                         start_h264_viewer(e, mode, baseline_output, 3)))
+            collected = [collect_h264_viewer(process, baseline_output)
+                         for _, baseline_output, process in baseline_viewers]
+            require(not baseline_viewers or finished(started["manifest"]) is None,
+                    "take ended before the baseline viewers finished; they did not overlap the recording")
+            evidence["recording_h264_profile_viewers"] = {
+                mode: check_h264_viewer(result, mode, baseline_output, f"{mode} while recording")
+                for (mode, baseline_output, _), result in zip(baseline_viewers, collected)}
+        finally:
+            for _, _, process in baseline_viewers:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
         manifest = until(lambda: finished(started["manifest"]), description="monitor take finalization")
         # This short protection take explicitly requires zero loss, including
         # on hosted runners; viewer eviction is allowed instead of a failure.

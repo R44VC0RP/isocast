@@ -24,8 +24,9 @@ enum InputFormat : uint32_t { bgra8 = 0, rgba10 = 1, nv12 = 2 };
 struct Config {
     uint32_t width, height, fps, bitrate, constant_bitrate, keyframe_interval;
     uint32_t codec, input_depth, output_depth, quality_qp, input_format, preset;
+    uint32_t profile; // 0 = H.264 High, 1 = H.264 Constrained Baseline
 };
-static_assert(sizeof(Config) == 48);
+static_assert(sizeof(Config) == 52);
 
 struct Packet {
     const uint8_t *data;
@@ -241,7 +242,8 @@ struct Encoder {
             || spec.input_format > nv12
             || spec.input_depth != (spec.input_format == rgba10 ? 10u : 8u)
             || spec.input_depth > spec.output_depth
-            || (spec.codec == 0 && spec.output_depth != 8)) {
+            || (spec.codec == 0 && spec.output_depth != 8)
+            || spec.profile > 1 || (spec.profile != 0 && spec.codec != 0)) {
             std::snprintf(error, sizeof(error), "unsupported codec/input format/input/output bit-depth combination");
             return internal_error;
         }
@@ -330,7 +332,9 @@ struct Encoder {
             preset_guid, NV_ENC_TUNING_INFO_LOW_LATENCY, &preset);
         if (status != NV_ENC_SUCCESS) return fail("query low-latency preset", status);
         config = preset.presetCfg;
-        config.profileGUID = spec.codec == 0 ? NV_ENC_H264_PROFILE_HIGH_GUID
+        const bool baseline = spec.profile == 1;
+        config.profileGUID = spec.codec == 0
+            ? (baseline ? NV_ENC_H264_PROFILE_BASELINE_GUID : NV_ENC_H264_PROFILE_HIGH_GUID)
             : spec.output_depth == 10 ? NV_ENC_HEVC_PROFILE_MAIN10_GUID : NV_ENC_HEVC_PROFILE_MAIN_GUID;
         config.gopLength = spec.keyframe_interval;
         config.frameIntervalP = 1;
@@ -365,6 +369,13 @@ struct Encoder {
             h264.enableFillerDataInsertion = !recording && spec.constant_bitrate != 0;
             h264.chromaFormatIDC = 1;
             h264.inputBitDepth = h264.outputBitDepth = NV_ENC_BIT_DEPTH_8;
+            if (baseline) {
+                // Constrained Baseline: CAVLC, 4x4 transform only, no slice
+                // groups. The Rust side checks the SPS says 66 + constraint_set1.
+                h264.entropyCodingMode = NV_ENC_H264_ENTROPY_CODING_MODE_CAVLC;
+                h264.adaptiveTransformMode = NV_ENC_H264_ADAPTIVE_TRANSFORM_DISABLE;
+                h264.fmoMode = NV_ENC_H264_FMO_DISABLE;
+            }
             colour = &h264.h264VUIParameters;
         } else {
             auto &hevc = config.encodeCodecConfig.hevcConfig;
