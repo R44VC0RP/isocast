@@ -30,6 +30,9 @@ use windows::core::{BOOL, BSTR, GUID, HRESULT, Interface, PCWSTR, PWSTR, impleme
 
 use crate::native::{Apartment, Event};
 
+mod application;
+pub use application::{capture_application_audio, probe_application_audio};
+
 const MAX_FRAMES: u32 = 48_000;
 const MAX_CHANNELS: u32 = 32;
 
@@ -81,6 +84,22 @@ struct State {
 }
 
 impl State {
+    fn new() -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            stop: Event::new()?,
+            data: Event::new()?,
+            stopping: AtomicBool::new(false),
+            invalidated: AtomicU32::new(0),
+            packets: AtomicU64::new(0),
+            delivered_frames: AtomicU64::new(0),
+            silent_frames: AtomicU64::new(0),
+            discontinuities: AtomicU64::new(0),
+            gap_frames: AtomicU64::new(0),
+            timestamp_errors: AtomicU64::new(0),
+            qpc_corrections: AtomicU64::new(0),
+        }))
+    }
+
     fn check_device(&self) -> Result<()> {
         match self.invalidated.load(Ordering::Acquire) {
             0 => Ok(()),
@@ -283,19 +302,7 @@ fn capture(
     sink: AudioSink,
     thread_start: fn(),
 ) -> Result<(AudioCapture, u32)> {
-    let state = Arc::new(State {
-        stop: Event::new()?,
-        data: Event::new()?,
-        stopping: AtomicBool::new(false),
-        invalidated: AtomicU32::new(0),
-        packets: AtomicU64::new(0),
-        delivered_frames: AtomicU64::new(0),
-        silent_frames: AtomicU64::new(0),
-        discontinuities: AtomicU64::new(0),
-        gap_frames: AtomicU64::new(0),
-        timestamp_errors: AtomicU64::new(0),
-        qpc_corrections: AtomicU64::new(0),
-    });
+    let state = State::new()?;
     let (started, ready) = mpsc::sync_channel(1);
     let query = query.to_owned();
     let worker = {
@@ -327,7 +334,7 @@ fn capture(
                             return Ok(());
                         }
                         running = true;
-                        capture.run(&state, &sink)
+                        capture.run(&state, &sink, None)
                     }));
                 let error = match result {
                     Ok(Ok(())) => return,
@@ -687,7 +694,7 @@ impl Drop for SessionNotifications {
 
 struct Session {
     // Unregister before releasing the client; callbacks retain only State.
-    _notifications: SessionNotifications,
+    _notifications: Option<SessionNotifications>,
     client: IAudioClient,
     capture: IAudioCaptureClient,
     channels: usize,
@@ -695,28 +702,14 @@ struct Session {
     frames: u32,
     native_rate: u32,
     microphone: bool,
+    process_loopback: bool,
 }
 
 impl Session {
     fn new(endpoint: &Endpoint, channels: Option<&[u32]>, state: &Arc<State>) -> Result<Self> {
         let input = endpoint.device.input;
         let (count, pick) = channel_selection(&endpoint.device, channels)?;
-        let format = WAVEFORMATEXTENSIBLE {
-            Format: WAVEFORMATEX {
-                wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
-                nChannels: count as u16,
-                nSamplesPerSec: SAMPLE_RATE,
-                nAvgBytesPerSec: SAMPLE_RATE * count * 4,
-                nBlockAlign: (count * 4) as u16,
-                wBitsPerSample: 32,
-                cbSize: 22,
-            },
-            Samples: WAVEFORMATEXTENSIBLE_0 {
-                wValidBitsPerSample: 32,
-            },
-            dwChannelMask: if input { endpoint.mask } else { 3 },
-            SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
-        };
+        let format = capture_format(count, if input { endpoint.mask } else { 3 });
         // Reuse the selected client's fresh mix-format query, not a listing
         // snapshot or a second activation that could observe a different mix.
         let client = endpoint.client.clone();
@@ -732,14 +725,16 @@ impl Session {
         // IsFormatSupported S_FALSE/closest native format for our PCM format.
         unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, &format.Format, None) }
             .with_context(|| format!("WASAPI Initialize {:?}: shared {count}-channel 48000 Hz float32 with OS conversion{}", endpoint.device.name, if input { "" } else { " and loopback" }))?;
-        let frames = unsafe { client.GetBufferSize() }?;
-        if !(1..=MAX_FRAMES).contains(&frames) {
-            bail!("WASAPI buffer size {frames}; supported frames: 1..={MAX_FRAMES}");
-        }
-        unsafe { client.SetEventHandle(state.data.handle()) }.context("WASAPI SetEventHandle")?;
-        let capture = unsafe { client.GetService() }.context("WASAPI capture service")?;
+        let mut session = Self::initialized(
+            client,
+            count,
+            pick,
+            endpoint.device.sample_rate,
+            input,
+            state,
+        )?;
         let notifications = SessionNotifications {
-            control: unsafe { client.GetService() }.context("WASAPI session control")?,
+            control: unsafe { session.client.GetService() }.context("WASAPI session control")?,
             events: SessionEvents {
                 state: state.clone(),
             }
@@ -751,39 +746,78 @@ impl Session {
                 .RegisterAudioSessionNotification(&notifications.events)
         }
         .context("WASAPI session-disconnection notifications")?;
+        session._notifications = Some(notifications);
+        Ok(session)
+    }
+
+    fn initialized(
+        client: IAudioClient,
+        count: u32,
+        pick: Vec<usize>,
+        native_rate: u32,
+        microphone: bool,
+        state: &Arc<State>,
+    ) -> Result<Self> {
+        let frames = unsafe { client.GetBufferSize() }?;
+        Self::with_buffer(client, count, pick, native_rate, microphone, frames, state)
+    }
+
+    fn with_buffer(
+        client: IAudioClient,
+        count: u32,
+        pick: Vec<usize>,
+        native_rate: u32,
+        microphone: bool,
+        frames: u32,
+        state: &Arc<State>,
+    ) -> Result<Self> {
+        if !(1..=MAX_FRAMES).contains(&frames) {
+            bail!("WASAPI buffer size {frames}; supported frames: 1..={MAX_FRAMES}");
+        }
+        unsafe { client.SetEventHandle(state.data.handle()) }.context("WASAPI SetEventHandle")?;
+        let capture = unsafe { client.GetService() }.context("WASAPI capture service")?;
         Ok(Self {
-            _notifications: notifications,
+            _notifications: None,
             client,
             capture,
             channels: count as usize,
             pick,
             frames,
-            native_rate: endpoint.device.sample_rate,
-            microphone: input,
+            native_rate,
+            microphone,
+            process_loopback: false,
         })
     }
 
-    fn run(&self, state: &State, sink: &AudioSink) -> Result<()> {
+    fn run(
+        &self,
+        state: &State,
+        sink: &AudioSink,
+        process: Option<windows::Win32::Foundation::HANDLE>,
+    ) -> Result<()> {
         let mut samples = Vec::with_capacity(self.frames as usize * self.pick.len());
         let mut clock = PacketClock::new(self.native_rate, self.frames, self.microphone);
+        let mut handles = vec![state.stop.handle(), state.data.handle()];
+        if let Some(process) = process {
+            handles.push(process);
+        }
         loop {
             if state.stopping.load(Ordering::Acquire) {
                 return Ok(());
             }
             state.check_device()?;
             // Windows 10 1703+ loopback and capture signal the event for data.
-            // Endpoint changes signal `data` too, and Drop signals `stop`;
-            // an idle render endpoint needs no periodic GetNextPacketSize.
-            let wait = unsafe {
-                WaitForMultipleObjects(&[state.stop.handle(), state.data.handle()], false, INFINITE)
-            };
+            // Endpoint changes signal `data` too, and Drop signals `stop`.
+            // Process loopback additionally wakes when its pinned process exits.
+            let wait = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
             if wait == WAIT_OBJECT_0 {
                 return Ok(());
             }
             if wait == WAIT_FAILED {
                 return Err(windows::core::Error::from_thread()).context("WASAPI wait");
             }
-            if wait.0 != WAIT_OBJECT_0.0 + 1 {
+            let exited = process.is_some() && wait.0 == WAIT_OBJECT_0.0 + 2;
+            if wait.0 != WAIT_OBJECT_0.0 + 1 && !exited {
                 bail!("unexpected WASAPI wait result: {}", wait.0);
             }
             loop {
@@ -794,6 +828,9 @@ impl Session {
                 let next = unsafe { self.capture.GetNextPacketSize() }
                     .context("WASAPI GetNextPacketSize")?;
                 if next == 0 {
+                    if exited {
+                        return Ok(());
+                    }
                     break;
                 }
                 if next > self.frames {
@@ -835,8 +872,12 @@ impl Session {
                         .silent_frames
                         .fetch_add(u64::from(frames), Ordering::Relaxed);
                 }
-                let (time, gap) = clock
-                    .timestamp(frames, position, qpc, flags)
+                let timestamp = if self.process_loopback {
+                    clock.process_timestamp(frames, qpc, flags)
+                } else {
+                    clock.timestamp(frames, position, qpc, flags)
+                };
+                let (time, gap) = timestamp
                     .inspect_err(|_| {
                         state.timestamp_errors.fetch_add(1, Ordering::Relaxed);
                     })
@@ -869,14 +910,7 @@ impl Session {
                     }
                     // WASAPI owns this checked, bounded region until ReleaseBuffer.
                     let source = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), length) };
-                    for frame in source.chunks_exact(self.channels) {
-                        if frame.iter().any(|sample| !sample.is_finite()) {
-                            bail!("WASAPI returned non-finite float32 samples");
-                        }
-                        for &channel in &self.pick {
-                            samples.push(frame[channel]);
-                        }
-                    }
+                    copy_float_samples(source, self.channels, &self.pick, &mut samples)?;
                 }
                 // Never hold the native packet while user code runs or stalls.
                 lease.release()?;
@@ -890,6 +924,42 @@ impl Session {
                     .fetch_add(u64::from(frames), Ordering::Relaxed);
             }
         }
+    }
+}
+
+fn copy_float_samples(
+    source: &[f32],
+    channels: usize,
+    pick: &[usize],
+    samples: &mut Vec<f32>,
+) -> Result<()> {
+    for frame in source.chunks_exact(channels) {
+        if frame.iter().any(|sample| !sample.is_finite()) {
+            bail!("WASAPI returned non-finite float32 samples");
+        }
+        for &channel in pick {
+            samples.push(frame[channel]);
+        }
+    }
+    Ok(())
+}
+
+fn capture_format(count: u32, mask: u32) -> WAVEFORMATEXTENSIBLE {
+    WAVEFORMATEXTENSIBLE {
+        Format: WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
+            nChannels: count as u16,
+            nSamplesPerSec: SAMPLE_RATE,
+            nAvgBytesPerSec: SAMPLE_RATE * count * 4,
+            nBlockAlign: (count * 4) as u16,
+            wBitsPerSample: 32,
+            cbSize: 22,
+        },
+        Samples: WAVEFORMATEXTENSIBLE_0 {
+            wValidBitsPerSample: 32,
+        },
+        dwChannelMask: mask,
+        SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
     }
 }
 
@@ -1115,6 +1185,50 @@ impl PacketClock {
         });
         Ok((Time::from_nanos(nanos), gap))
     }
+
+    /// The process-loopback virtual device on Windows 10 19045 reports zero
+    /// device positions even as its packet QPC advances. Use that QPC directly,
+    /// as endpoint loopback does, never a fabricated hardware sample counter.
+    /// A discontinuity without a measurable QPC gap has unknown loss and fails
+    /// closed. Timestamp gaps remain visible to the engine and our counters.
+    fn process_timestamp(&mut self, frames: u32, qpc: u64, flags: u32) -> Result<(Time, u64)> {
+        if qpc == 0 || flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0 {
+            bail!("WASAPI reported an invalid process-loopback timestamp; lost frames are unknown");
+        }
+        let nanos = qpc
+            .checked_mul(100)
+            .and_then(|v| i64::try_from(v).ok())
+            .context("WASAPI QPC timestamp overflow")?;
+        let gap = if let Some(previous) = self.previous {
+            let ticks = qpc
+                .checked_sub(previous.qpc)
+                .filter(|&v| v > 0)
+                .context("WASAPI process-loopback QPC did not advance")?;
+            let elapsed = (u128::from(ticks) * u128::from(SAMPLE_RATE) + 5_000_000) / 10_000_000;
+            let delta = i128::try_from(elapsed)? - i128::from(previous.frames);
+            if delta < -2 {
+                bail!(
+                    "WASAPI process-loopback packet timestamps overlap by {} frames",
+                    -delta
+                );
+            }
+            if delta <= 2 && flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 {
+                bail!(
+                    "WASAPI process-loopback discontinuity without a measurable QPC gap; lost frames are unknown"
+                );
+            }
+            if delta > 2 { u64::try_from(delta)? } else { 0 }
+        } else {
+            0
+        };
+        self.previous = Some(ClockPacket {
+            position: 0,
+            qpc,
+            nanos,
+            frames,
+        });
+        Ok((Time::from_nanos(nanos), gap))
+    }
 }
 
 struct Packet<'a> {
@@ -1239,6 +1353,20 @@ impl Drop for Notifications {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converted_float_packets_preserve_stereo_and_channel_selection() {
+        let source = [-1.0, 0.25, 0.5, 1.0];
+        let mut samples = Vec::with_capacity(source.len());
+        copy_float_samples(&source, 2, &[0, 1], &mut samples).unwrap();
+        assert_eq!(samples, source);
+        samples.clear();
+        copy_float_samples(&source, 2, &[1], &mut samples).unwrap();
+        assert_eq!(samples, [0.25, 1.0]);
+        samples.clear();
+        assert!(copy_float_samples(&[f32::NAN, 0.0], 2, &[0, 1], &mut samples).is_err());
+        assert!(copy_float_samples(&[0.0, f32::INFINITY], 2, &[0, 1], &mut samples).is_err());
+    }
 
     #[test]
     fn native_clock_rejects_short_phase_spikes_without_losing_samples() {

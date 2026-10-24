@@ -16,6 +16,15 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Windows gaps:** CPU and resident RAM are still above OBS. Ryan's targets: at most half OBS's CPU, RAM below OBS,
   faster first preview, stop under 20 ms, zero drops. Missing: scaled streaming, replay buffer, media files, NLE XML
   export (refused; OTIO works). Windows work is tracked in #105 and its follow-up issues.
+- **Windows application audio (2026-10-24, ISO-45):** process-loopback capture uses stable executable-path ids,
+  accepts listed names/binaries, and follows one independent process tree across restarts. Use a full path before
+  launch; multiple independent same-executable trees are refused. On exon-desk 19045, a strict 120 s app ISO plus
+  desktop program had zero drops/repeats/audio dropouts, including a live pause and PID restart; other-app tone
+  isolation exceeded 90 dB in the checked windows. Older than build 19041 is refused. Root-exit/orphan trees and
+  default-device changes remain unqualified. Evidence: `win-app-audio/scratch/REPORT.md` on IsocastBuild.
+- **Windows direct desktop-audio ISO (2026-10-24, ISO-49):** an extra ISO of the LG HDMI endpoint had two audio
+  dropouts at 49/98 s despite contiguous WASAPI packets; the simultaneous desktop program and app ISO had none.
+  Suspected device-clock/QPC drift is unverified; no loss tolerance or capture-clock behavior was changed.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
