@@ -18,6 +18,7 @@ mod frames;
 mod gpu;
 mod h264;
 mod hevc;
+mod media;
 mod mf;
 mod native;
 pub mod network;

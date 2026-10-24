@@ -17,8 +17,8 @@ use isocast_engine::gpu::Gpu;
 use isocast_engine::{
     AudioRender, AudioSink, BrowserControl, BrowserPage, CameraMetadataReader, CameraRequest,
     CaptureFormat, EncoderAdmission, EncoderAdmissionOutput, EncoderFrameFormat, FileWriter,
-    LiveAudioSpec, LiveVideoSpec, MediaInfo, MediaPart, MediaReader, Platform, Probe, ScreenTarget,
-    Time, VideoSink, Volume, WriterRequest, WriterSpec, encoder_calibration,
+    LiveAudioSpec, LiveVideoSpec, MediaInfo, MediaPart, Platform, Probe, ScreenTarget, Time,
+    VideoSink, Volume, WriterRequest, WriterSpec, encoder_calibration,
 };
 use isocast_protocol::api::Machine;
 use isocast_protocol::devices::{Devices, PermissionKind, PermissionsReport};
@@ -373,18 +373,6 @@ impl WindowsPlatform {
 #[derive(Debug, Clone)]
 pub enum Unsupported {}
 
-impl MediaReader for Unsupported {
-    type Frame = Frame;
-
-    fn next_video(&mut self) -> Result<Option<(Frame, Duration)>> {
-        match *self {}
-    }
-
-    fn next_audio(&mut self) -> Result<Option<(Vec<f32>, Duration)>> {
-        match *self {}
-    }
-}
-
 fn unsupported(what: &str) -> anyhow::Error {
     anyhow!("{what}: not implemented by the native Windows backend yet")
 }
@@ -395,7 +383,7 @@ impl Platform for WindowsPlatform {
     type Writer = VideoWriter;
     type Capture = Capture;
     type Importer = Dx12Importer;
-    type Media = Unsupported;
+    type Media = crate::media::Reader;
     type Playback = Unsupported;
     type VideoEncoder = WindowsVideoEncoder;
     type AudioEncoder = MfAacEncoder;
@@ -446,12 +434,17 @@ impl Platform for WindowsPlatform {
         crate::permissions::open(permission)
     }
 
-    fn media_info(&self, _path: &Path) -> Result<MediaInfo> {
-        Err(unsupported("reading media file information"))
+    fn media_info(&self, path: &Path) -> Result<MediaInfo> {
+        crate::media::media_info(path)
     }
 
-    fn open_media(&self, _path: &Path, _part: MediaPart) -> Result<Unsupported> {
-        Err(unsupported("decoding media files"))
+    fn open_media(&self, path: &Path, part: MediaPart) -> Result<crate::media::Reader> {
+        // Pictures go to the engine's device; sound needs none.
+        let device = match part {
+            MediaPart::Video => Some(self.graphics()?),
+            MediaPart::Audio => None,
+        };
+        crate::media::open(device, path, part)
     }
 
     fn frame_importer(&self, gpu: &Gpu) -> Result<Dx12Importer> {
@@ -488,7 +481,8 @@ impl Platform for WindowsPlatform {
             | SourceKind::Color(_)
             | SourceKind::Image(_)
             | SourceKind::Slideshow(_)
-            | SourceKind::Text(_) => Ok(None),
+            | SourceKind::Text(_)
+            | SourceKind::Media(_) => Ok(None),
             other => Err(unsupported(&format!("probing {} sources", other.label()))),
         }
     }
