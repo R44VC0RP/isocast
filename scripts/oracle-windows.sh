@@ -101,7 +101,8 @@ if [ "${1:-}" = --engine ]; then
     [ -d "$tree" ] || git worktree add --detach "$tree" "$sha" >/dev/null || exit 2
   fi
   lane="C:/isocast-dev/lanes/oracle"
-  export ISOCAST_WINDOWS_ROOT="$lane" ISOCAST_WINDOWS_OUT="$out/native" EXON_DESK_HOST="$host"
+  # Built and run on exon-desk itself (the run needs its GPU and that build).
+  export ISOCAST_WINDOWS_ROOT="$lane" ISOCAST_WINDOWS_OUT="$out/native" EXON_DESK_HOST="$host" ISOCAST_WINDOWS_HOST=desk
   echo "oracle-windows: building $ref ($(echo "$sha" | cut -c1-12)) in $lane"
   (cd "$tree" && ISOCAST_WINDOWS_TIMEOUT=3500 scripts/windows-remote.sh build isocastd isocast) >"$out/build.log" 2>&1 \
     || { tail -20 "$out/build.log"; echo "oracle-windows: the build failed (NOT VERIFIED)"; exit 2; }

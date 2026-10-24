@@ -1,12 +1,16 @@
 #!/bin/bash
-# Native Windows loop on exon-desk; everything generated lives in its lane root.
+# Native Windows loop; everything generated lives in its lane root.
 #
+#   scripts/windows-remote.sh [--host aws-win|desk] OP ...
 #   scripts/windows-remote.sh status
 #   scripts/windows-remote.sh sync
 #   scripts/windows-remote.sh cargo check --locked -p isocast-daemon
 #   scripts/windows-remote.sh build [isocastd isocast isocast-ui isocast-capture]
 #   scripts/windows-remote.sh run 'Get-ChildItem $env:ISOCAST_SCRATCH'
 #   scripts/windows-remote.sh fetch [isocastd isocast isocast-ui isocast-capture]
+#   scripts/windows-remote.sh --host desk push [BIN...]
+#                     copy fetched binaries (ISOCAST_WINDOWS_OUT/bin) into the
+#                     host's lane target\release, e.g. built on aws-win, run on desk
 #
 # Sync exports tracked WORKTREE bytes, including uncommitted changes, through
 # a temporary Git index and git archive (no commit or real-index mutation).
@@ -14,7 +18,13 @@
 # Remote src is a managed mirror, not a second editing checkout. Targets,
 # caches, logs, recordings and other outputs belong outside src.
 # Build/fetch copies release .exe files back; cargo/run fetch their logs/results.
-# EXON_DESK_HOST: exon-desk-lan (default) or exon-desk.
+# Hosts (--host, or ISOCAST_WINDOWS_HOST): aws-win (default), the AWS build
+# host isocast-win-build (c7i.4xlarge, no GPU, no devices), started on demand
+# and stopping itself after 45 idle minutes; or desk, exon-desk (Ryan's PC:
+# real devices, the RTX 5070, GUI). ISOCAST_WINDOWS_GPU_LOCK=1 means desk.
+# Starting aws-win needs AWS credentials (profile ISOCAST_AWS_PROFILE,
+# default anomaly; `aws sso login --profile anomaly` when they expire).
+# EXON_DESK_HOST: exon-desk-lan (default) or exon-desk, for desk.
 # ISOCAST_WINDOWS_OUT: local results root (default lane scratch/native).
 # ISOCAST_WINDOWS_TIMEOUT: command seconds (default 1800).
 # ISOCAST_WINDOWS_ROOT: C:/isocast-dev or a lane below it (default unchanged).
@@ -24,11 +34,28 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
-host="${EXON_DESK_HOST:-exon-desk-lan}"
+target_host="${ISOCAST_WINDOWS_HOST:-}"
+if [ "${1:-}" = --host ]; then
+    [ $# -ge 2 ] || { echo "windows-remote: --host takes aws-win or desk" >&2; exit 2; }
+    target_host="$2"
+    shift 2
+fi
 out="${ISOCAST_WINDOWS_OUT:-/Volumes/IsocastBuild/windows/scratch/native}"
 seconds="${ISOCAST_WINDOWS_TIMEOUT:-1800}"
 gpu_lock="${ISOCAST_WINDOWS_GPU_LOCK:-0}"
 case "$gpu_lock" in 0|1) ;; *) echo "windows-remote: GPU lock must be 0 or 1" >&2; exit 2 ;; esac
+# A GPU run needs exon-desk; everything else defaults to the AWS host.
+[ -n "$target_host" ] || { [ "$gpu_lock" = 1 ] && target_host=desk || target_host=aws-win; }
+case "$target_host" in
+    desk)
+        host="${EXON_DESK_HOST:-exon-desk-lan}"
+        # Only exon-desk itself: a stale EXON_DESK_HOST must never send a GPU run to aws-win.
+        case "$host" in exon-desk|exon-desk-lan) ;; *) echo "windows-remote: EXON_DESK_HOST must be exon-desk or exon-desk-lan for --host desk" >&2; exit 2 ;; esac ;;
+    aws-win)
+        [ "$gpu_lock" = 0 ] || { echo "windows-remote: aws-win has no GPU; use --host desk for a GPU run" >&2; exit 2; }
+        host=isocast-win-build ;;
+    *) echo "windows-remote: unknown host '$target_host' (aws-win, desk)" >&2; exit 2 ;;
+esac
 # Restricted to this development tree, with shell/PowerShell-safe components.
 # Normalize once: every staging, cancellation, fetch and worker path uses it.
 root="$(python3 - "${ISOCAST_WINDOWS_ROOT:-C:/isocast-dev}" <<'PY'
@@ -39,30 +66,76 @@ if not re.fullmatch(r'C:/isocast-dev(?:/lanes/[A-Za-z0-9_-]+)?', path, re.IGNORE
 print(path)
 PY
 )"
-case "$host" in exon-desk|exon-desk-lan) ;; *) echo "windows-remote: unsupported host" >&2; exit 2 ;; esac
+case "$host" in exon-desk|exon-desk-lan|isocast-win-build) ;; *) echo "windows-remote: unsupported host" >&2; exit 2 ;; esac
 case "$seconds" in ''|*[!0-9]*) echo "windows-remote: timeout must be positive seconds" >&2; exit 2 ;; esac
 [ "$seconds" -gt 0 ] || exit 2
 op="${1:---help}"
 case "$op" in
-    -h|--help) sed -n 2,18p "$0"; exit 0 ;;
+    -h|--help) sed -n 2,27p "$0"; exit 0 ;;
     status|sync) [ $# = 1 ] || exit 2 ;;
     cargo) [ $# -ge 2 ] || { echo "windows-remote: cargo needs arguments" >&2; exit 2; } ;;
     run) [ $# = 2 ] || { echo "windows-remote: run needs one PowerShell script argument" >&2; exit 2; } ;;
-    build|fetch) ;;
-    *) echo "windows-remote: expected status, sync, cargo, build, run or fetch" >&2; exit 2 ;;
+    build|fetch|push) ;;
+    *) echo "windows-remote: expected status, sync, cargo, build, run, fetch or push" >&2; exit 2 ;;
 esac
 shift
-if [ "$op" = build ] || [ "$op" = fetch ]; then
+explicit_bins=$#
+if [ "$op" = build ] || [ "$op" = fetch ] || [ "$op" = push ]; then
     [ $# -gt 0 ] || set -- isocastd isocast isocast-ui isocast-capture
     for bin in "$@"; do
         case "$bin" in ''|*[!a-zA-Z0-9_-]*) echo "windows-remote: use a binary name without .exe" >&2; exit 2 ;; esac
     done
+fi
+if [ "$op" = push ]; then
+    # Only what a build here fetched; each travels with its SHA-256.
+    names=()
+    for bin in "$@"; do
+        if [ ! -f "$out/bin/$bin.exe" ]; then
+            [ "$explicit_bins" = 0 ] && continue
+            echo "windows-remote: no $out/bin/$bin.exe to push (build or fetch it first)" >&2; exit 2
+        fi
+        names+=("$bin.exe=$(shasum -a 256 "$out/bin/$bin.exe" | cut -d' ' -f1)")
+    done
+    [ ${#names[@]} -gt 0 ] || { echo "windows-remote: nothing in $out/bin to push" >&2; exit 2; }
+    set -- "${names[@]}"
 fi
 command -v exon-desk-ps >/dev/null || { echo "windows-remote: exon-desk-ps is required" >&2; exit 2; }
 # Every remote transport gets a local wall-clock cap: SSH keepalives notice a
 # dead network, not a remote PowerShell that never starts the worker.
 tmo="$(command -v timeout || command -v gtimeout || true)"
 [ -n "$tmo" ] || { echo "windows-remote: GNU timeout is required (brew install coreutils)" >&2; exit 2; }
+# aws-win: answer over SSH, or start the instance (by its tags) and wait.
+ensure_up() {
+    [ "$host" = isocast-win-build ] || return 0
+    /usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" exit 2>/dev/null && return 0
+    command -v aws >/dev/null || { echo "windows-remote: the AWS CLI is required to start aws-win" >&2; exit 2; }
+    local aws_args=(--profile "${ISOCAST_AWS_PROFILE:-anomaly}" --region us-east-2) id state
+    local found
+    found="$("$tmo" 60 aws "${aws_args[@]}" ec2 describe-instances \
+        --filters Name=tag:Name,Values=isocast-win-build Name=tag:Project,Values=isocast \
+            Name=instance-state-name,Values=pending,running,stopping,stopped \
+        --query 'Reservations[].Instances[].[InstanceId,State.Name]' --output text)" ||
+        { echo "windows-remote: can't query aws-win (AWS credentials? aws sso login --profile ${ISOCAST_AWS_PROFILE:-anomaly})" >&2; exit 255; }
+    # Exactly one instance may carry these tags; never guess between several.
+    case "$(printf '%s\n' "$found" | grep -c .)" in
+        1) read -r id state <<<"$found" ;;
+        0) echo "windows-remote: no isocast-win-build instance" >&2; exit 255 ;;
+        *) echo "windows-remote: several instances are tagged isocast-win-build; refusing to start one" >&2; exit 255 ;;
+    esac
+    echo "windows-remote: aws-win ($id) is $state; starting it" >&2
+    if [ "$state" = stopping ]; then "$tmo" 600 aws "${aws_args[@]}" ec2 wait instance-stopped --instance-ids "$id"; fi
+    if [ "$state" != running ] && [ "$state" != pending ]; then
+        "$tmo" 120 aws "${aws_args[@]}" ec2 start-instances --instance-ids "$id" >/dev/null
+    fi
+    "$tmo" 600 aws "${aws_args[@]}" ec2 wait instance-running --instance-ids "$id"
+    local t0=$SECONDS
+    until /usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" exit 2>/dev/null; do
+        [ $((SECONDS - t0)) -lt 600 ] || { echo "windows-remote: aws-win runs but SSH doesn't answer after 10 min (its security group admits only one public IP: is this Mac's still $(curl -s -m 5 https://checkip.amazonaws.com)?)" >&2; exit 255; }
+        sleep 10
+    done
+    echo "windows-remote: aws-win is up ($((SECONDS - t0)) s after running)" >&2
+}
+ensure_up
 mkdir -p "$out"
 job="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 work="$(mktemp -d "$out/export.XXXXXX")"
@@ -119,12 +192,14 @@ head="$(git -C "$here" rev-parse HEAD)"
 lane="$(git -C "$here" symbolic-ref --short -q HEAD || basename "$here")"
 tree=
 if [ "$op" != status ] && [ "$op" != fetch ]; then
-    [ -z "$(git -C "$here" diff --name-only --diff-filter=U)" ] || {
-        echo "windows-remote: resolve merge conflicts before syncing" >&2; exit 1;
-    }
-    cp "$(git -C "$here" rev-parse --git-path index)" "$work/index"
-    GIT_INDEX_FILE="$work/index" git -C "$here" -c core.splitIndex=false add -u
-    tree="$(GIT_INDEX_FILE="$work/index" git -C "$here" write-tree)"
+    if [ "$op" != push ]; then
+        [ -z "$(git -C "$here" diff --name-only --diff-filter=U)" ] || {
+            echo "windows-remote: resolve merge conflicts before syncing" >&2; exit 1;
+        }
+        cp "$(git -C "$here" rev-parse --git-path index)" "$work/index"
+        GIT_INDEX_FILE="$work/index" git -C "$here" -c core.splitIndex=false add -u
+        tree="$(GIT_INDEX_FILE="$work/index" git -C "$here" write-tree)"
+    fi
     remote_ps <<PS
 \$ErrorActionPreference = 'Stop'
 \$paths = @()
@@ -142,7 +217,11 @@ foreach (\$path in \$paths) {
 }
 New-Item -ItemType Directory -Path '$root/staging/$job' | Out-Null
 PS
-    git -C "$here" archive "$tree" | "$tmo" --foreground -k 10 "$seconds" /usr/bin/ssh -T "$host" "tar.exe -xf - -C $root/staging/$job"
+    if [ "$op" = push ]; then
+        tar -cf - -C "$out/bin" "${@%%=*}" | "$tmo" --foreground -k 10 "$seconds" /usr/bin/ssh -T "$host" "tar.exe -xf - -C $root/staging/$job"
+    else
+        git -C "$here" archive "$tree" | "$tmo" --foreground -k 10 "$seconds" /usr/bin/ssh -T "$host" "tar.exe -xf - -C $root/staging/$job"
+    fi
 fi
 
 request="$(python3 - "$op" "$job" "$tree" "$head" "$seconds" "$root" "$gpu_lock" "$lane" "$@" <<'PY'
@@ -406,7 +485,19 @@ try:
             raise RuntimeError('less than 20 GiB free on the Windows build drive')
         if r['gpu_lock']:
             gpu_lock = Lock(pathlib.Path('C:/isocast-dev/gpu.lock'), 'shared GPU')
-        if r['op'] != 'fetch':
+        if r['op'] == 'push':
+            safe_dir(root/'target'/'release')
+            for item in r['args']:
+                name, expected = item.split('=', 1)
+                source = stage/name
+                if pathlib.PurePath(name).name != name or not name.endswith('.exe') or digest(source).hex() != expected:
+                    raise RuntimeError(f'pushed binary missing or changed in transit: {name}')
+                temp = root/'target'/'release'/(name+'.partial')
+                shutil.copyfile(source, temp)
+                temp.replace(root/'target'/'release'/name)
+                print(f'push: {name} -> {root}/target/release ({expected[:12]})', flush=True)
+            shutil.rmtree(stage)
+        elif r['op'] != 'fetch':
             sync()
             shutil.rmtree(stage)
         env = os.environ.copy()
