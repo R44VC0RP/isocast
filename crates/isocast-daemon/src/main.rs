@@ -1008,6 +1008,10 @@ struct Daemon {
     /// Held from a `start`'s first check until its session is reserved, so
     /// two starts (each maybe replacing the setup) can't interleave.
     start_admission: Mutex<()>,
+    /// Whether a take's software-adapter warning within the advisory
+    /// reference was said this run (#128): said once; above it, or with
+    /// unqualified outputs, it is said every take.
+    software_reference_warned: AtomicBool,
 }
 
 /// isocastd's processor use, as `status` reports it: the share of all the
@@ -3548,6 +3552,17 @@ impl Daemon {
             }
         };
 
+        // On a software graphics adapter the warning is said before the take
+        // begins (#128), with the adapter classified now if no preview did.
+        // Hardware estimates still wait for the sources' recorded formats.
+        let early = software_adapter();
+        if early && let Some(message) = self.capacity_warning(&*engine) {
+            self.publish(Event::Warning {
+                message: message.clone(),
+            });
+            notes.push(message);
+        }
+
         let daemon = self.clone();
         let recording = engine.clone();
         let session = token.clone();
@@ -3643,7 +3658,7 @@ impl Daemon {
                 // How the files' encoders were admitted (the platform's plan).
                 notes.extend(opened);
                 // Said up front, where OBS says "encoding overloaded" mid-take.
-                if let Some(message) = self.capacity_warning(&*recording) {
+                if !early && let Some(message) = self.capacity_warning(&*recording) {
                     self.publish(Event::Warning {
                         message: message.clone(),
                     });
@@ -3683,7 +3698,10 @@ impl Daemon {
             let memory = capacity::memory_path(state.file.legacy());
             (state.setup.clone()?, memory)
         };
-        if memory.exists() {
+        // A software adapter's warning skips `tune`'s hardware
+        // measurements, which don't describe CPU compositing (#128).
+        let software = software_adapter();
+        if !software && memory.exists() {
             // The ISO sources are running by now, at the formats they record.
             let info = engine.info();
             let measured = capacity::workload(&setup, |id| {
@@ -3714,12 +3732,25 @@ impl Daemon {
             &backends,
         )
         .ok()?;
-        if estimate.capacity != isocast_protocol::api::Capacity::CannotKeepUp {
+        if estimate.capacity != isocast_protocol::api::Capacity::CannotKeepUp && !software {
+            return None;
+        }
+        // Within the reference nothing changes from take to take: say it
+        // once a run, and where to read it again.
+        let within = software && isocast_engine::estimate::software_within_reference(&estimate);
+        if within && self.software_reference_warned.swap(true, Ordering::SeqCst) {
             return None;
         }
         let mut text = estimate.summary;
+        if within {
+            text.push_str("; said once while isocastd runs, `isocast capacity` shows it again");
+        }
         if let Some(fix) = estimate.suggestions.first() {
-            text.push_str(&format!("; to fit, {}", fix.description));
+            text.push_str(&format!(
+                "; {}, {}",
+                if software { "suggestion" } else { "to fit" },
+                fix.description
+            ));
             if let Some(change) = &fix.change {
                 text.push_str(&format!(
                     " (isocast plan --patch '{change}', after this take)"
@@ -3895,7 +3926,17 @@ impl Daemon {
         let at_capacity = estimate
             .as_ref()
             .is_none_or(|e| e.capacity != isocast_protocol::api::Capacity::Fits);
-        let mut reason = if at_capacity {
+        let software = estimate.as_ref().is_some_and(|e| {
+            e.resources
+                .iter()
+                .any(|r| r.resource == isocast_protocol::api::SOFTWARE_RENDERER_RESOURCE)
+        });
+        let mut reason = if software {
+            format!(
+                "software graphics and encoding share the CPU; {} {verb} dropping frames, and this machine's sustainable capacity is unmeasured",
+                names.join(", ")
+            )
+        } else if at_capacity {
             format!(
                 "this Mac's video encoders are at capacity, so {} {verb} dropping frames",
                 names.join(", ")
@@ -3910,9 +3951,15 @@ impl Daemon {
                 names.join(", ")
             )
         };
-        reason.push_str("; ISO encodes yield first, then other canvases' outputs to protect main; main can still lose frames if its own workload is too high");
+        if !software {
+            reason.push_str("; ISO encodes yield first, then other canvases' outputs to protect main; main can still lose frames if its own workload is too high");
+        }
         if let Some(fix) = estimate.as_ref().and_then(|e| e.suggestions.first()) {
-            reason.push_str(&format!("; to fit, {}", fix.description));
+            reason.push_str(&format!(
+                "; {}, {}",
+                if software { "suggestion" } else { "to fit" },
+                fix.description
+            ));
             if fix.after_take {
                 reason.push_str(" (applies once this take ends)");
             }
@@ -4095,11 +4142,13 @@ impl Daemon {
         let Some(frame) = frame else {
             return Err(RpcError {
                 code: RpcError::FAILED,
-                message: format!(
-                    "no new frame of {} within {} ms; ask again",
-                    params.target,
-                    timeout.as_millis()
-                ),
+                message: paused_preview(&params.target).unwrap_or_else(|| {
+                    format!(
+                        "no new frame of {} within {} ms; ask again",
+                        params.target,
+                        timeout.as_millis()
+                    )
+                }),
             });
         };
         Ok(Frame {
@@ -5473,7 +5522,14 @@ fn estimate_capacity(
     add_iso: Option<&str>,
     backends: &[(isocast_protocol::Codec, Option<bool>)],
 ) -> Result<CapacityEstimate, String> {
-    if !cfg!(target_os = "macos") {
+    // A software graphics adapter gets its own advisory estimate, never the
+    // hardware tables (#128).
+    let software = if cfg!(windows) {
+        isocast_engine::estimate::software_adapter(native())?
+    } else {
+        false
+    };
+    if !cfg!(target_os = "macos") && !software {
         // The table is measured for Apple's media engines, not a CPU-named
         // Windows GPU. Native encoder budgeting has a separate qualification.
         return Err("capacity estimates are only supported on macOS so far".into());
@@ -5495,6 +5551,20 @@ fn estimate_capacity(
         live.contains_key(id)
     });
     let formats = |id: &str| live.get(id).or_else(|| probed.get(id)).copied();
+    if software {
+        return isocast_engine::estimate::software(
+            &isocast_engine::estimate::Inputs {
+                machine,
+                setup,
+                formats: &formats,
+                streaming,
+                memory: None,
+                recording,
+                profile: None,
+            },
+            add_iso,
+        );
+    }
     let kept = capacity::Memory::load(memory);
     let mut profile = capacity::load_profile(
         &capacity::profile_path(memory),
@@ -5528,6 +5598,37 @@ fn estimate_capacity(
         },
         add_iso,
     )
+}
+
+/// Why no frame of a Studio Mode preview `target` comes: automatic quality
+/// paused previews on a software graphics adapter (#128), which only a
+/// preview target waits on; the canvas's program is still drawn while it
+/// records or streams.
+fn paused_preview(target: &str) -> Option<String> {
+    let (canvas, true) = CanvasId::from_target(target)? else {
+        return None;
+    };
+    let status = isocast_engine::governor::status();
+    if status.preview_fps != Some(0) || !isocast_engine::governor::is_software_renderer() {
+        return None;
+    }
+    let why = status
+        .reason
+        .find("previews paused to protect ")
+        .map_or("previews paused", |at| &status.reason[at..]);
+    Some(format!(
+        "no frame of {target}: automatic quality has {why} on this software graphics adapter; \
+         ask for `{}` (drawn while it records or streams), or pin preview.fps in automatic \
+         quality to keep previews running",
+        canvas.program_target()
+    ))
+}
+
+/// Whether this process's GPU is a software adapter (WARP, wgpu
+/// `DeviceType::Cpu`). Windows only (#128): the shared GPU opens here if no
+/// preview opened it yet, on the engine's own thread class.
+fn software_adapter() -> bool {
+    cfg!(windows) && isocast_engine::estimate::software_adapter(native()).unwrap_or(false)
 }
 
 /// Which machine and OS `tune`'s measurements here hold for.

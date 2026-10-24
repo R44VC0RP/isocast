@@ -1,6 +1,5 @@
 //! One sampler/decision owner, outside media callbacks and without disk I/O.
 use crate::{Daemon, streams::Output};
-#[cfg(target_os = "macos")]
 use isocast_engine::Platform;
 use isocast_engine::governor::canvas_slot;
 use isocast_engine::governor::{Controller, Sample};
@@ -125,13 +124,15 @@ pub(super) fn start(daemon: &Arc<Daemon>) {
                                 message: warning.message,
                             });
                         }
-                        pressure |=
-                            crate::platform::native()
-                                .governor_headroom()
-                                .is_some_and(|sample| {
-                                    sample.encoder_threatened || sample.memory_pressed()
-                                });
                     }
+                    pressure |= isocast_engine::governor::is_software_renderer()
+                        || crate::platform::native()
+                            .governor_headroom()
+                            .is_some_and(|sample| {
+                                sample.encoder_threatened
+                                    || sample.memory_pressed()
+                                    || sample.cpu_percent.is_some_and(|cpu| cpu >= 90.0)
+                            });
                 } else if last_activity.is_some_and(Activity::active) {
                     // Clear stale native warning/health once, not on idle ticks.
                     #[cfg(target_os = "macos")]
@@ -215,6 +216,7 @@ fn sample(
         .map(|s| s.governor.clone())
         .unwrap_or_default();
     let mut sample = Sample {
+        canvas_fps: setup.as_ref().map_or(30, |setup| setup.canvas.fps),
         has_monitors: monitors,
         ..Default::default()
     };
@@ -222,10 +224,7 @@ fn sample(
     sample.encoder_pressure = pressure > 0 || stalls != previous.stalls;
     sample.native_iso_percent = iso;
     previous.stalls = stalls;
-    #[cfg(target_os = "macos")]
-    {
-        sample.headroom = crate::platform::native().governor_headroom();
-    }
+    sample.headroom = crate::platform::native().governor_headroom();
     let pause = engine
         .as_ref()
         .and_then(|engine| engine.control().pause_status(crate::now()));
@@ -323,6 +322,7 @@ fn sample(
         }
     }
     sample.active = ready || sample.has_stream || replay.iter().any(|on| *on);
+    sample.live_stream = live_stream;
     sample.paused = (!ready || paused) && !live_stream && !replay.iter().any(|on| *on);
     sample.has_vertical = sample.vertical_protected;
     if let Some(live) = &live {

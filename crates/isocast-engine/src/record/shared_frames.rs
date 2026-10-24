@@ -307,7 +307,12 @@ fn run<P: Platform>(
             }
         }
         let fps = crate::governor::monitor_fps(control.0.fps.load(Ordering::Relaxed));
-        let Source { slot, grid, drawn } = source(fps, max_size)?;
+        if fps == 0 {
+            control.wait(WAIT);
+            continue;
+        }
+        let size_limit = crate::governor::monitor_size(max_size);
+        let Source { slot, grid, drawn } = source(fps, size_limit)?;
         let again = || ring.as_ref().is_none_or(|ring| ring.fresh);
         let Some((frame, at)) = pace.next(platform, &slot, grid, fps, again) else {
             continue;
@@ -334,7 +339,7 @@ fn run<P: Platform>(
             );
         }
         let input = (picture.width, picture.height);
-        let size = fitted(input, max_size);
+        let size = fitted(input, size_limit);
         if retired.is_none() && ring.as_ref().is_none_or(|ring| ring.size != size) {
             generation += 1;
             let mut surfaces = Vec::with_capacity(slots);

@@ -306,10 +306,11 @@ jobs:
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
 
       - name: Install recording recovery decoder
+        timeout-minutes: 10
         shell: pwsh
         run: |
           if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            choco install ffmpeg --yes --no-progress
+            choco install ffmpeg --version=9.0.2 --yes --no-progress
             if ($LASTEXITCODE -ne 0) { throw 'Could not install FFmpeg' }
           }
           ffmpeg -version
@@ -327,6 +328,26 @@ jobs:
           path: |
             windows-recovery.json
             ${{ runner.temp }}/windows-recovery
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Host-specific recording qualification uses optimized services, not the debug
+      # binaries used for recovery/contract checks above.
+      - name: Build recording qualification services
+        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli --bins
+
+      - name: Qualify headless profiles and protect recording by pausing previews
+        timeout-minutes: 9
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
+
+      - name: Keep preview recording evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-preview-recording
+          path: |
+            windows-preview.json
+            ${{ runner.temp }}/windows-preview
           if-no-files-found: warn
           retention-days: 14
 
