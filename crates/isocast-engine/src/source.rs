@@ -513,7 +513,7 @@ impl OpenHelp {
     }
 }
 
-/// Run a native open on its own thread for at most [`OPEN_TIMEOUT`],
+/// Run a native open on its own thread for the platform's bounded timeout,
 /// including time spent behind macOS prompts. `slot` names what is opened
 /// (a source and its device): a timed-out open is given up on and the next
 /// one starts afresh, while at most [`STUCK_PER_SOURCE`] given-up opens of
@@ -521,6 +521,7 @@ impl OpenHelp {
 fn bounded_open<T: Send + 'static>(
     slot: String,
     help: OpenHelp,
+    timeout: Duration,
     run: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     /// The opens still running, by slot: each one's token and when it
@@ -532,7 +533,7 @@ fn bounded_open<T: Send + 'static>(
     let context = help.context();
     let what = &help.what;
     let token = NEXT.fetch_add(1, Ordering::Relaxed);
-    let deadline = Instant::now() + OPEN_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     {
         let mut slots = pending.0.lock();
         // With too many stuck, wait (within the same time) for one to
@@ -639,11 +640,11 @@ fn bounded_open<T: Send + 'static>(
                 "warn",
                 "source",
                 "source open given up",
-                serde_json::json!({"source": what, "seconds": OPEN_TIMEOUT.as_secs()}),
+                serde_json::json!({"source": what, "seconds": timeout.as_secs()}),
             );
             bail!(
                 "{what} did not open within {} s; {context}",
-                OPEN_TIMEOUT.as_secs()
+                timeout.as_secs()
             )
         }
         Err(RecvTimeoutError::Disconnected) => bail!("opening {what} crashed"),
@@ -693,7 +694,8 @@ pub(crate) fn open<P: Platform>(
         data.clone(),
     );
     let (key, began) = (format!("source {id:?}"), std::time::Instant::now());
-    let opened = bounded_open(slot, help, move || {
+    let timeout = kind.map_or(OPEN_TIMEOUT, |kind| platform.source_open_timeout(kind));
+    let opened = bounded_open(slot, help, timeout, move || {
         open_native(&platform, &setup, &id, &timeline, &data)
     });
     isocast_diagnostics::debug!(
@@ -1777,9 +1779,12 @@ pub(crate) fn stinger<P: Platform>(
         permission,
         device: false,
     };
-    bounded_open(format!("stinger {id:?} {file:?}"), help, move || {
-        stinger_native(&platform, &setup, &id, &file, &timeline)
-    })
+    bounded_open(
+        format!("stinger {id:?} {file:?}"),
+        help,
+        OPEN_TIMEOUT,
+        move || stinger_native(&platform, &setup, &id, &file, &timeline),
+    )
 }
 
 fn stinger_native<P: Platform>(

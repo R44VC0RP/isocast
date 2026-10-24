@@ -165,6 +165,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
         None
     }
 
+    /// Native opens normally time out quickly. A desktop consent dialog can
+    /// need longer while the person chooses the screen to share.
+    fn source_open_timeout(&self, _source: &SourceKind) -> std::time::Duration {
+        std::time::Duration::from_secs(8)
+    }
+
     /// Ask the OS for screen recording, camera and microphone access where
     /// it hasn't been decided (only `only`, if given), showing its prompts,
     /// and wait a while for the answers. Returns the permissions afterwards.
