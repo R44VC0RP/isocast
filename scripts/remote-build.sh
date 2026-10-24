@@ -28,6 +28,22 @@
 #   scripts/remote-build.sh [--host H] prune [--days N | LANE…]
 #                                              delete lanes unused for N days
 #                                              (default 3), or the named ones
+#   scripts/remote-build.sh [--host H] tidy [--dry-run] [--days N]
+#                                              free space (every host unless
+#                                              --host): lane targets unused
+#                                              for N days (default 2; never
+#                                              main's or a building lane's),
+#                                              and in ~/isocast-scratch cargo
+#                                              target/ folders unused for 3
+#                                              days and recordings/traces
+#                                              (*.mov *.mp4 *.flv *.mkv *.h264
+#                                              *.trace) over 20 MB older than
+#                                              7 days; logs, JSON and reports
+#                                              stay. Nothing is tidied while
+#                                              a hardware job or benchmark
+#                                              holds the host.
+#                                              Never ~/.lima. --dry-run lists
+#                                              what and how much.
 #
 # Hosts (--host, or $ISOCAST_BUILD_HOST): exonbook (M4 Max, 14 cores),
 # m2-a and m2-b (isocast-m2-a/-b, the AWS M2 test Macs, 8 cores), or auto
@@ -63,7 +79,8 @@
 #
 # Build hosts stay usable: builds run at nice 15, one at a time per lane (a
 # second call waits up to 30 min for the lane's lock), and nothing starts
-# below $ISOCAST_BUILD_MIN_FREE_GB (default 40) GB free there. Ctrl-C or
+# below $ISOCAST_BUILD_MIN_FREE_GB (default 40) GB free there (a build
+# refused for space tidies the host once, as above, and retries). Ctrl-C or
 # SIGTERM stops the remote build too. The exit status is cargo's (255: host
 # unreachable; 3: disk guard; 75: lane lock timeout; 76: the host is
 # reserved by a hardware job; 69: auto found no free host).
@@ -128,15 +145,25 @@ for d, dirs, files in os.walk(root, topdown=False):
         # string) in the lane's source folder.
         lane="$1"
         shift
-        avail_gb=$(($(df -k "$HOME" | awk 'NR == 2 { print $4 }') / 1048576))
-        if [ "$avail_gb" -lt "$min_free_gb" ]; then
-            echo "remote-build: refusing: $avail_gb GB free on $(hostname -s), below $min_free_gb GB." >&2
-            echo "remote-build: free space with scripts/remote-build.sh prune (status lists lanes)." >&2
-            exit 3
-        fi
+        # A host a hardware job holds is neither built on nor tidied.
         if hw="$(hw_reserved)"; then
             echo "remote-build: refusing: $(hostname -s) is reserved by hardware job $hw; use another host (--host auto)." >&2
             exit 76
+        fi
+        avail_gb=$(($(df -k "$HOME" | awk 'NR == 2 { print $4 }') / 1048576))
+        if [ "$avail_gb" -lt "$min_free_gb" ]; then
+            # Once: tidy the host (never this lane: its last-used is fresh),
+            # then measure again.
+            echo "remote-build: $avail_gb GB free on $(hostname -s), below $min_free_gb GB; tidying" >&2
+            remote_main __tidy 2 0 >&2 || true
+            before_gb="$avail_gb"
+            avail_gb=$(($(df -k "$HOME" | awk 'NR == 2 { print $4 }') / 1048576))
+            echo "remote-build: tidying freed $((avail_gb - before_gb)) GB; $avail_gb GB free now" >&2
+        fi
+        if [ "$avail_gb" -lt "$min_free_gb" ]; then
+            echo "remote-build: refusing: $avail_gb GB free on $(hostname -s), below $min_free_gb GB." >&2
+            echo "remote-build: free space with scripts/remote-build.sh tidy or prune (status lists lanes)." >&2
+            exit 3
         fi
         lock="$root/$lane/lock"
         set +e
@@ -224,6 +251,167 @@ for d, dirs, files in os.walk(root, topdown=False):
             rm -rf "${dir:?}"
         done
         df -h "$HOME" | awk 'NR == 2 { print "free: " $4 }'
+        ;;
+    __tidy)
+        # __tidy DAYS DRY: see `tidy` in the header. DRY 1 lists only.
+        days="$1"
+        dry="$2"
+        busy=
+        if hw="$(hw_reserved)"; then
+            busy="hardware job $hw holds this host"
+        elif [ -f "$HOME/isocast-scratch/.bench.lock" ] &&
+            ! lockf -s -k -t 0 "$HOME/isocast-scratch/.bench.lock" true 2>/dev/null; then
+            busy="a benchmark holds ~/isocast-scratch/.bench.lock"
+        fi
+        if [ -n "$busy" ]; then
+            echo "remote-build: nothing tidied: $busy"
+            # return, not exit: __run calls this in-process and must go on to
+            # its disk check (exit would end the build as a false success).
+            return 0
+        fi
+        /usr/bin/python3 - "$root" "$HOME/isocast-scratch" "$days" "$dry" <<'PY'
+import os, shutil, subprocess, sys, time
+
+root, scratch, days, dry = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1"
+now = time.time()
+DAY = 86400
+MEDIA = (".mov", ".mp4", ".flv", ".mkv", ".h264", ".trace")
+BIG = 20 * 1024 * 1024
+home = os.path.expanduser("~")
+never = (os.path.realpath(os.path.join(home, ".lima")),)
+
+
+def stats(path):
+    """(bytes, newest modification time) of a file or a folder's tree,
+    folders included; files that vanish meanwhile are skipped. APFS clones
+    shared between lanes count in each."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0, 0
+    if not os.path.isdir(path) or os.path.islink(path):
+        return st.st_blocks * 512, st.st_mtime
+    total, newest = 0, st.st_mtime
+    for d, dirs, files in os.walk(path):
+        for name in dirs + files:
+            try:
+                st = os.lstat(os.path.join(d, name))
+            except OSError:
+                continue
+            newest = max(newest, st.st_mtime)
+            if name in files:
+                total += st.st_blocks * 512
+    return total, newest
+
+
+def gb(n):  # GiB, as df -k / 1048576 (the disk guard's GB); MiB below one
+    return f"{n / 2**30:.1f} GB" if n >= 2**30 else f"{n / 2**20:.0f} MB"
+
+
+def safe(path, inside):
+    """`path` is no symlink, really inside `inside`, and not under ~/.lima."""
+    real = os.path.realpath(path)
+    return (not os.path.islink(path) and real.startswith(os.path.realpath(inside) + os.sep)
+            and not any(real == n or real.startswith(n + os.sep) for n in never))
+
+
+def remove(path, inside, why, n, lock=None):
+    """Delete `path` (under `lock` if given); returns the bytes freed."""
+    if not safe(path, inside):
+        print(f"remote-build: kept {path} (a symlink, outside {inside}, or never touched)")
+        return 0
+    if dry:
+        print(f"remote-build: would delete {path} ({gb(n)}): {why}")
+        return n
+    if lock:
+        # Under the lane's lock, so a build that starts meanwhile waits
+        # for it (or this gives way: 75 is lockf's "held").
+        status = subprocess.run(["lockf", "-k", "-t", "0", lock, "/bin/rm", "-rf", path]).returncode
+        if status == 75:
+            print(f"remote-build: {path} kept: its lane started building")
+            return 0
+    else:
+        status = 0
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+        except OSError as error:
+            status = error.errno or 1
+    left = stats(path)[0] if os.path.lexists(path) else 0
+    if status or left:
+        print(f"remote-build: could not delete all of {path} (status {status}; {gb(left)} left): {why}")
+    else:
+        print(f"remote-build: deleted {path} ({gb(n)}): {why}")
+    return max(0, n - left)
+
+
+def held(lock):
+    """A build holds the lane's lock. A dry run creates no lock file: with
+    none, nothing can hold it."""
+    if not os.path.exists(lock):
+        return False
+    return subprocess.run(["lockf", "-k", "-t", "0", lock, "true"], capture_output=True).returncode != 0
+
+
+freed = 0
+# 1. Lane targets unused for DAYS (main's always stays: every new lane is
+#    seeded from the most recent target, and main's is the usual one).
+for lane in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+    d = os.path.join(root, lane)
+    target, used = os.path.join(d, "target"), os.path.join(d, "last-used")
+    try:
+        if lane == "main" or os.path.islink(d) or not os.path.isdir(target) or not os.path.isfile(used):
+            continue
+        age = (now - os.path.getmtime(used)) / DAY
+    except OSError:
+        continue
+    if age <= days:
+        continue
+    lock = os.path.join(d, "lock")
+    if held(lock):
+        print(f"remote-build: {lane} is building; kept")
+        continue
+    freed += remove(target, root, f"lane {lane} unused for {age:.1f} days", stats(target)[0], lock)
+
+# 2. ~/isocast-scratch: stale cargo targets and old recordings and traces
+#    (Instruments' .trace is a folder, other tools' a file).
+for d, dirs, files in os.walk(scratch) if os.path.isdir(scratch) else []:
+    for name in list(dirs):
+        p = os.path.join(d, name)
+        if os.path.islink(p):
+            dirs.remove(name)
+            continue
+        cargo = name == "target" and any(os.path.isfile(os.path.join(p, f))
+                                         for f in (".rustc_info.json", "CACHEDIR.TAG"))
+        trace = name.lower().endswith(".trace")
+        if not (cargo or trace):
+            continue
+        dirs.remove(name)
+        # Last use: the newest file or folder in it (a compile writes some).
+        n, newest = stats(p)
+        age = (now - newest) / DAY
+        if cargo and age > 3:
+            freed += remove(p, scratch, f"cargo target unused for {age:.1f} days", n)
+        elif trace and n > BIG and age > 7:
+            freed += remove(p, scratch, f"{n / 2**20:.0f} MB trace, {age:.0f} days old", n)
+    for name in files:
+        p = os.path.join(d, name)
+        if not name.lower().endswith(MEDIA):
+            continue
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        age = (now - st.st_mtime) / DAY
+        if os.path.islink(p) or st.st_size <= BIG or age <= 7:
+            continue
+        freed += remove(p, scratch, f"{st.st_size / 2**20:.0f} MB, {age:.0f} days old", st.st_blocks * 512)
+free = shutil.disk_usage(home).free
+print(f"remote-build: {'would free' if dry else 'freed'} about {gb(freed)} "
+      f"(clones shared between lanes count once each); {gb(free)} free now")
+PY
         ;;
     esac
 }
@@ -323,6 +511,41 @@ for p in sys.argv[1:]:
 ' $jobs
 }
 
+# Probe every build host into $probes and pick one into $host (auto; see
+# the header). Uses $busy, $sticky and $recent.
+pick_host() {
+    for h in $build_hosts; do
+        case " $busy " in *" $h "*) echo "hw-job" >"$probes/$h"; continue ;; esac
+        (
+            host="$h"
+            if install_remote 2>/dev/null; then
+                remote __probe >"$probes/$h" 2>/dev/null || echo unreachable >"$probes/$h"
+            else
+                echo unreachable >"$probes/$h"
+            fi
+        ) &
+    done
+    wait
+    host="$(
+        i=0
+        for h in $build_hosts; do
+            i=$((i + 1))
+            printf '%s %s %s\n' "$i" "$h" "$(cat "$probes/$h" 2>/dev/null || echo unreachable)"
+        done | awk -v min="$min_free_gb" -v sticky="$sticky" -v recent="$recent" '
+            BEGIN { n = split(recent, r, " "); for (k = 1; k <= n; k++) picked[r[k]]++ }
+            NF == 8 && $7 == "-" && $8 == "free" && $5 >= min {
+                score = $4 / $3 + $6 + picked[$2]
+                if ($2 == sticky) { pick = $2; found = 1 }
+                if (!found && (best == "" || score < best)) { best = score; pick = $2 }
+                printf "remote-build: %s load %s/%s cores, %s GB free, %s building, %d just picked\n", $2, $4, $3, $5, $6, picked[$2] > "/dev/stderr"
+                next
+            }
+            NF == 8 { printf "remote-build: %s not free (%s GB free, hw job %s, bench lock %s)\n", $2, $5, $7, $8 > "/dev/stderr"; next }
+            { printf "remote-build: %s not free (%s)\n", $2, $3 > "/dev/stderr" }
+            END { print pick }'
+    )"
+}
+
 # Pick the lane's host (sets $host): explicit, or auto (see the header).
 choose_host() {
     mkdir -p "$state_dir"
@@ -346,36 +569,28 @@ choose_host() {
         [ -n "$(find "$state_dir/$lane" -mmin -720 2>/dev/null)" ] || sticky=
         busy="$(hw_busy | sort -u | tr '\n' ' ')"
         probes="$(mktemp -d "${TMPDIR:-/tmp}/remote-build.XXXXXX")"
-        for h in $build_hosts; do
-            case " $busy " in *" $h "*) echo "hw-job" >"$probes/$h"; continue ;; esac
-            (
+        pick_host
+        if [ -z "$host" ]; then
+            # Hosts that are free but for disk space: tidy each once (see
+            # tidy) and look again.
+            low="$(for h in $build_hosts; do
+                # shellcheck disable=SC2046 # split the probe line into words
+                set -- $(cat "$probes/$h" 2>/dev/null || echo unreachable)
+                [ $# = 6 ] && [ "$5" = - ] && [ "$6" = free ] && [ "$3" -lt "$min_free_gb" ] && echo "$h"
+            done || true)"
+            if [ -n "${dry_run:-}" ]; then
+                # `hosts` is a query: say what a build would do.
+                for h in $low; do echo "remote-build: would tidy $h (low on disk) and look again" >&2; done
+                low=
+            fi
+            for h in $low; do
+                echo "remote-build: $h is low on disk; tidying it" >&2
                 host="$h"
-                if install_remote 2>/dev/null; then
-                    remote __probe >"$probes/$h" 2>/dev/null || echo unreachable >"$probes/$h"
-                else
-                    echo unreachable >"$probes/$h"
-                fi
-            ) &
-        done
-        wait
-        host="$(
-            i=0
-            for h in $build_hosts; do
-                i=$((i + 1))
-                printf '%s %s %s\n' "$i" "$h" "$(cat "$probes/$h" 2>/dev/null || echo unreachable)"
-            done | awk -v min="$min_free_gb" -v sticky="$sticky" -v recent="$recent" '
-                BEGIN { n = split(recent, r, " "); for (k = 1; k <= n; k++) picked[r[k]]++ }
-                NF == 8 && $7 == "-" && $8 == "free" && $5 >= min {
-                    score = $4 / $3 + $6 + picked[$2]
-                    if ($2 == sticky) { pick = $2; found = 1 }
-                    if (!found && (best == "" || score < best)) { best = score; pick = $2 }
-                    printf "remote-build: %s load %s/%s cores, %s GB free, %s building, %d just picked\n", $2, $4, $3, $5, $6, picked[$2] > "/dev/stderr"
-                    next
-                }
-                NF == 8 { printf "remote-build: %s not free (%s GB free, hw job %s, bench lock %s)\n", $2, $5, $7, $8 > "/dev/stderr"; next }
-                { printf "remote-build: %s not free (%s)\n", $2, $3 > "/dev/stderr" }
-                END { print pick }'
-        )"
+                remote __tidy 2 0 >&2 || true
+                host=
+            done
+            [ -z "$low" ] || pick_host
+        fi
         rm -rf "${probes:?}"
         if [ -z "$host" ]; then
             echo "remote-build: no free build host (all busy, unreachable or low on disk); retry later or pass --host" >&2
@@ -510,8 +725,26 @@ prune)
         { install_remote && remote __prune "$days" "$@"; } || echo "unreachable"
     done
     ;;
+tidy)
+    shift
+    days=2
+    dry=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --dry-run) dry=1; shift ;;
+        --days) [ $# -ge 2 ] || { echo "remote-build: --days takes a number" >&2; exit 2; }; days="$2"; shift 2 ;;
+        *) echo "remote-build: tidy takes --dry-run and --days N, not '$1'" >&2; exit 2 ;;
+        esac
+    done
+    case "$days" in *[!0-9]* | '' | 0) echo "remote-build: --days takes a number of days, at least 1" >&2; exit 2 ;; esac
+    [ "$host_arg" = auto ] && hosts="$build_hosts" || hosts="$host_arg"
+    for host in $hosts; do
+        echo "== $host"
+        { install_remote && remote __tidy "$days" "$dry"; } || echo "unreachable"
+    done
+    ;;
 *)
-    sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

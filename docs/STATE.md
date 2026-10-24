@@ -133,7 +133,7 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 **Build hosts** (`scripts/remote-build.sh`): exonbook (M4 Max, 14 cores), isocast-m2-a and isocast-m2-b (8 cores).
 - Build hosts need CMake for bundled libopus and aws-lc-sys (Homebrew on Macs; VS-bundled on exon-desk); no lane-private venv is needed. (2026-10-23)
 - Auto keeps a lane on its host and skips hosts running a hardware job. Lanes live in `~/isocast-builds/<lane>`; nice 15.
-- Nothing starts below 40 GB free (m2-a had 43 GB on 2026-10-22; use `remote-build.sh prune`).
+- Nothing starts below 40 GB free; a refused or low host is tidied once (`remote-build.sh tidy [--dry-run]`: lane targets idle 2 days except main, scratch `target/` idle 3 days, recordings/traces over 20 MB older than 7 days; never `~/.lima`, a building lane or a held hardware job). (2026-10-24)
 - Exit codes: 255 unreachable, 3 disk guard, 75 lane lock, 76 hardware job, 69 no free host.
 - Same Rust 1.99, SDK 27.0 and arm64 everywhere: binaries from any host run on every Mac here.
 - Linux lane (2026-10-23): Lima/vz VM `isocast-linux` on m2-b, Ubuntu 24.04 arm64, currently capped at
