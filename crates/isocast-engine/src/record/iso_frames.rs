@@ -36,6 +36,9 @@ pub(super) struct IsoFrames<P: Platform> {
     pool: P::FramePool,
     size: (u32, u32),
     scale_filter: ScaleFilter,
+    /// Monitor-only BGRA imports can borrow cached texture wrappers. Recording
+    /// stages retain their existing per-import resource leases.
+    cache_imports: bool,
     /// Every source's filters (which can change while recording), if the
     /// file records its source filtered.
     source_filters: Option<SourceFilters>,
@@ -114,11 +117,17 @@ impl<P: Platform> IsoFrames<P> {
             pool,
             size,
             scale_filter,
+            cache_imports: false,
             source_filters,
             drawing: None,
             epoch,
             in_flight: InFlight::default(),
         })
+    }
+
+    pub(super) fn with_cached_imports(mut self) -> Self {
+        self.cache_imports = true;
+        self
     }
 
     /// `frame`, taken for `at`, through the source's filters if the file
@@ -195,7 +204,19 @@ impl<P: Platform> IsoFrames<P> {
         filters: Option<Arc<[Filter]>>,
         at: Time,
     ) -> Result<Option<PendingFrame<P::Frame>>> {
-        let imported = self.importer.import(frame)?;
+        // The completion below retains the source frame through the GPU read.
+        // Reusing the native pooled surface must not reopen its shared handle
+        // and rebuild the wgpu texture wrapper on every monitor picture.
+        let cached = if self.cache_imports {
+            self.importer.import_cached(frame)?
+        } else {
+            None
+        };
+        let mut cache_draw = cached.is_some();
+        let imported = match cached {
+            Some(imported) => imported,
+            None => self.importer.import(frame)?,
+        };
         if filters.is_none()
             && matches!(imported.pixels, GpuPixels::Rgb(_))
             && (imported.width, imported.height) == self.size
@@ -207,13 +228,21 @@ impl<P: Platform> IsoFrames<P> {
         };
         let target = match self.importer.target_cached(&out)? {
             Some(target) => target,
-            None => self.importer.target(&out)?,
+            None => {
+                cache_draw = false;
+                self.importer.target(&out)?
+            }
         };
         let (gpu, size) = (&self.gpu, self.size);
         let epoch = self.epoch;
         let drawing = self
             .drawing
             .get_or_insert_with(|| Drawing::new(gpu, None, size, epoch));
+        // Fallback imports may carry frame leases, so never retain their
+        // bindings. Monitors have no source filters or intermediate pictures.
+        drawing
+            .renderer
+            .cache_pooled_frames(cache_draw && filters.is_none());
         let filtered = match &filters {
             Some(filters) => {
                 drawing

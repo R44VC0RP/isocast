@@ -11,6 +11,7 @@
 //! one-off list of [`Layer`]s the same way.
 
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -813,7 +814,22 @@ struct Immediate {
     /// Each record's mode, blend and (for pictures) layer.
     draws: Vec<(Mode, Blend, Option<usize>)>,
     buffer: Option<RecordBuffer>,
+    cached: Option<CachedFrames>,
 }
+
+/// Only for pooled imports that do not retain a frame lease. Recording's
+/// uncached imports must not be kept alive by their texture bindings.
+#[derive(Default)]
+struct CachedFrames {
+    uploaded: Option<Vec<u8>>,
+    uploaded_clips: Option<Vec<u8>>,
+    groups: HashMap<(wgpu::Texture, wgpu::Texture), wgpu::BindGroup>,
+    views: HashMap<wgpu::Texture, wgpu::TextureView>,
+    #[cfg(test)]
+    uploads: usize,
+}
+
+const CACHED_FRAMES: usize = 64;
 
 /// Storage buffers of draw records and clip records, and the bind group
 /// that reads them.
@@ -828,6 +844,17 @@ pub(crate) struct RecordBuffer {
 }
 
 impl Renderer {
+    /// Reuse monitor draw parameters and pooled texture bindings. The caller
+    /// must keep each source frame alive until its submitted GPU read finishes.
+    pub(crate) fn cache_pooled_frames(&mut self, enabled: bool) {
+        let cached = &mut self.immediate.get_mut().cached;
+        if enabled {
+            cached.get_or_insert_default();
+        } else {
+            *cached = None;
+        }
+    }
+
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> Self {
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1092,6 +1119,7 @@ impl Renderer {
             bytes,
             draws,
             buffer,
+            cached,
         } = &mut *immediate;
         records.clear();
         clips.clear();
@@ -1129,14 +1157,40 @@ impl Renderer {
                 .is_none_or(|b| b.capacity < records.len() || b.clip_capacity < clips.len())
             {
                 *buffer = Some(self.record_buffer(gpu, records.len(), clips.len()));
+                if let Some(cached) = cached {
+                    cached.uploaded = None;
+                    cached.uploaded_clips = None;
+                }
             }
             if let Some(buffer) = buffer.as_ref().filter(|_| !clips.is_empty()) {
                 record_bytes(clips, bytes);
-                gpu.queue.write_buffer(&buffer.clips, 0, bytes);
+                if cached
+                    .as_ref()
+                    .is_none_or(|c| c.uploaded_clips.as_deref() != Some(bytes.as_slice()))
+                {
+                    gpu.queue.write_buffer(&buffer.clips, 0, bytes);
+                    if let Some(cached) = cached {
+                        cached
+                            .uploaded_clips
+                            .get_or_insert_default()
+                            .clone_from(bytes);
+                    }
+                }
             }
             record_bytes(records, bytes);
         }
-        let view = target.create_view(&Default::default());
+        let view = if let Some(cached) = cached {
+            if cached.views.len() >= CACHED_FRAMES && !cached.views.contains_key(target) {
+                cached.views.clear();
+            }
+            cached
+                .views
+                .entry(target.clone())
+                .or_insert_with(|| target.create_view(&Default::default()))
+                .clone()
+        } else {
+            target.create_view(&Default::default())
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("layers"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1153,12 +1207,41 @@ impl Renderer {
         let Some(buffer) = buffer.as_ref().filter(|_| !records.is_empty()) else {
             return;
         };
-        gpu.queue.write_buffer(&buffer.buffer, 0, bytes);
+        if cached
+            .as_ref()
+            .is_none_or(|c| c.uploaded.as_deref() != Some(bytes.as_slice()))
+        {
+            gpu.queue.write_buffer(&buffer.buffer, 0, bytes);
+            if let Some(cached) = cached {
+                cached.uploaded.get_or_insert_default().clone_from(bytes);
+                #[cfg(test)]
+                {
+                    cached.uploads += 1;
+                }
+            }
+        }
         pass.set_bind_group(0, &buffer.group, &[]);
         for (record, &(mode, blend, frame)) in draws.iter().enumerate() {
             pass.set_pipeline(self.pipeline(mode, blend));
             match frame.and_then(|index| layers[index].frame) {
-                Some(frame) => pass.set_bind_group(1, &self.frame_group(gpu, frame), &[]),
+                Some(frame) => {
+                    let group = if let Some(cached) = cached {
+                        let (plane0, plane1) = frame.planes();
+                        let key = (plane0.clone(), plane1.clone());
+                        if cached.groups.len() >= CACHED_FRAMES && !cached.groups.contains_key(&key)
+                        {
+                            cached.groups.clear();
+                        }
+                        cached
+                            .groups
+                            .entry(key)
+                            .or_insert_with(|| self.frame_group(gpu, frame))
+                            .clone()
+                    } else {
+                        self.frame_group(gpu, frame)
+                    };
+                    pass.set_bind_group(1, &group, &[]);
+                }
                 None => pass.set_bind_group(1, &self.blank, &[]),
             }
             let record = record as u32;
@@ -1402,6 +1485,99 @@ fn to_rgb(coding: YCbCr) -> [[f32; 4]; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a native GPU; run under the hardware lock"]
+    fn pooled_monitor_draws_reuse_bindings_and_refresh_changed_parameters() -> Result<()> {
+        let gpu = Gpu::new()?;
+        let mut renderer = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm);
+        renderer.cache_pooled_frames(true);
+        let source = |size, color| {
+            let texture = crate::scene::canvas_texture(&gpu, renderer.format(), size);
+            let view = texture.create_view(&Default::default());
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(color),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            }
+            gpu.queue.submit([encoder.finish()]);
+            GpuFrame {
+                width: size.0,
+                height: size.1,
+                pixels: GpuPixels::Rgb(texture),
+            }
+        };
+        let red = source((16, 16), wgpu::Color::RED);
+        let blue = source((16, 16), wgpu::Color::BLUE);
+        let targets = [
+            renderer.png_target(&gpu, 8, 8)?,
+            renderer.png_target(&gpu, 8, 8)?,
+        ];
+        let draw = |frame: &GpuFrame, target: &wgpu::Texture, filter, expected| -> Result<()> {
+            let size = (target.width(), target.height());
+            let mut layer = Layer::full(frame, size.0, size.1);
+            layer.scale_filter = filter;
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            renderer.encode(
+                &gpu,
+                &mut encoder,
+                target,
+                &[layer],
+                size,
+                wgpu::Color::BLACK,
+            );
+            let png = read_png(&gpu, encoder, target)?;
+            let image = image::load_from_memory(&png)?.to_rgba8();
+            assert_eq!(image.get_pixel(size.0 / 2, size.1 / 2).0, expected);
+            Ok(())
+        };
+        for i in 0..32 {
+            let (frame, color) = if i % 2 == 0 {
+                (&red, [255, 0, 0, 255])
+            } else {
+                (&blue, [0, 0, 255, 255])
+            };
+            draw(frame, &targets[i % 2], ScaleFilter::Area, color)?;
+        }
+        {
+            let state = renderer.immediate.lock();
+            let cached = state.cached.as_ref().unwrap();
+            assert_eq!(cached.uploads, 1);
+            assert_eq!(cached.groups.len(), 2);
+            assert_eq!(cached.views.len(), 2);
+        }
+        let green = source((32, 16), wgpu::Color::GREEN);
+        draw(&green, &targets[0], ScaleFilter::Area, [0, 255, 0, 255])?;
+        // Stretching still uses the same normalized record; the new source
+        // gets its own binding and the shader reads its texture dimensions.
+        assert_eq!(
+            renderer.immediate.lock().cached.as_ref().unwrap().uploads,
+            1
+        );
+        let larger = renderer.png_target(&gpu, 16, 8)?;
+        draw(&green, &larger, ScaleFilter::Area, [0, 255, 0, 255])?;
+        draw(&green, &larger, ScaleFilter::Point, [0, 255, 0, 255])?;
+        // A replacement buffer must upload even when the record bytes match.
+        renderer.immediate.lock().buffer = None;
+        draw(&green, &larger, ScaleFilter::Point, [0, 255, 0, 255])?;
+        assert_eq!(
+            renderer.immediate.lock().cached.as_ref().unwrap().uploads,
+            4
+        );
+        renderer.cache_pooled_frames(false);
+        assert!(renderer.immediate.lock().cached.is_none());
+        Ok(())
+    }
 
     fn apply(t: Affine, x: f32, y: f32) -> (f32, f32) {
         let [a, b, tx, c, d, ty] = t.0;
