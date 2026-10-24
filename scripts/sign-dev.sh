@@ -5,7 +5,7 @@
 # identity, not to one build. Run it after every build of isocastd; the CLI
 # launches the daemon from this bundle when it exists.
 #
-# Usage: scripts/sign-dev.sh [path/to/isocastd]
+# Usage: scripts/sign-dev.sh [path/to/isocastd]   (default target/debug/isocastd)
 # Signs with $ISOCAST_SIGN_IDENTITY, or the first "Apple Development"
 # identity in the keychain. The bundle goes to $ISOCAST_DEV_APP, or
 # ~/Library/Application Support/Isocast/Isocast Dev.app (the internal disk).
