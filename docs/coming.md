@@ -11,9 +11,8 @@ be on the API, the CLI and MCP, as well as in the app.
   media playback, a faster start, the matched OBS comparison and an alpha.
 - **Faster.** More rounds of [benchmarks against OBS](benchmarks.md) and
   the fixes they point to.
-- **No in-app editor.** The editor window, timelines and `.isoprj` files
-  are removed; export a take to Final Cut Pro, Premiere Pro, Resolve or
-  OpenTimelineIO instead (`isocast project export-nle`).
+- **More remote control.** Live video for every monitor, not just the
+  program, and a choice of where its sound plays.
 - **Follow-ups** for canvases (a separate audio mix per canvas, importing
   OBS 31 canvases), masks and automatic quality.
 
@@ -28,6 +27,8 @@ be on the API, the CLI and MCP, as well as in the app.
   [plugins](plugins.md).
 - Later: SRT and WHIP streaming, NDI, Syphon, Audio Unit plugins, Linux.
 
+In 0.0.9: per-take NLE export replaces the in-app editor; remote control
+with program video and sound, OpenRPC and screen colour-depth settings.
 Shipped in 0.0.8: a canvas for every destination, advanced masks and
 automatic quality. Earlier: projectors and
 multiview, the vertical canvas, OBS import, the replay buffer,
