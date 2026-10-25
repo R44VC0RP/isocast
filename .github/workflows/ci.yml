@@ -22,8 +22,97 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Decides which jobs this change needs (.github/scripts/ci_gate.py): by
+  # the paths that changed, and not at all when the same tree already
+  # passed CI, Engine E2E and Windows. Its summary says why each job runs.
+  gate:
+    name: what to run
+    # Pull requests from this repo come from ci/<lane> (scripts/pr.sh), whose
+    # push already ran this workflow on the same snapshot: only fork pull
+    # requests run it here, so a candidate never takes the runners twice.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      portable: ${{ steps.gate.outputs.portable }}
+      check: ${{ steps.gate.outputs.check }}
+      motion: ${{ steps.gate.outputs.motion }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 2 }}
+          persist-credentials: false
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci_gate.py ci
+
+  # Everything that doesn't need a Mac, on ubuntu (macOS runners are the
+  # scarce ones): fmt, the scans, and clippy and tests for the crates with
+  # no macOS-specific code.
+  portable:
+    name: fmt, scans, portable crates (ubuntu)
+    needs: gate
+    if: needs.gate.outputs.portable != 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MODE: ${{ needs.gate.outputs.portable }}
+    steps:
+      - name: Gate mode
+        # Fail closed: a job that runs without a mode from the gate would
+        # skip every step and pass without checking anything.
+        run: |
+          case "$MODE" in
+            full|warm) ;;
+            *) echo "::error::the gate gave this job no valid mode ('$MODE'); not passing without running"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Cargo cache
+        id: cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ci-portable
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Format
+        if: env.MODE == 'full'
+        run: cargo fmt --all --check
+
+      - name: PR description checks (unit tests)
+        if: env.MODE == 'full'
+        run: python3 .github/scripts/pr_checks_test.py
+
+      - name: Third-party notices up to date
+        if: env.MODE == 'full'
+        run: scripts/third-party-notices.sh --check
+
+      - name: Clippy portable crates
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+        run: cargo clippy --locked --all-targets -p isocast-ipc -p isocast-mux -p isocast-obsws -p isocast-remote -- -D warnings
+
+      - name: Test portable crates
+        if: env.MODE == 'full'
+        run: cargo test --locked -p isocast-ipc -p isocast-mux -p isocast-obsws -p isocast-remote
+
   check:
-    name: fmt, clippy, test (macOS arm64)
+    name: clippy, test (macOS arm64)
+    needs: gate
+    if: needs.gate.outputs.check != 'skip'
     # GitHub-hosted only: pull requests from forks must never run on our own
     # machines, so no self-hosted runners here.
     runs-on: macos-15
@@ -31,7 +120,19 @@ jobs:
     # saves no cache) needs ~29 min of clippy and ~28 of tests before the
     # contract and docs steps: 60 cut one off at 61 min (2026-10-22).
     timeout-minutes: 90
+    env:
+      # full; docs (reference docs only); warm (main: build only on a cache miss).
+      MODE: ${{ needs.gate.outputs.check }}
     steps:
+      - name: Gate mode
+        # Fail closed: a job that runs without a mode from the gate would
+        # skip every step and pass without checking anything.
+        run: |
+          case "$MODE" in
+            full|docs|warm) ;;
+            *) echo "::error::the gate gave this job no valid mode ('$MODE'); not passing without running"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Rust toolchain
@@ -42,29 +143,24 @@ jobs:
           cargo --version
 
       - name: Cargo cache
+        id: cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          # Only main writes the cache; pull requests read it.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      # The quick checks first, so a candidate that fails one of them fails
-      # in minutes, not after the half hour of Clippy and tests.
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: PR description checks (unit tests)
-        run: python3 .github/scripts/pr_checks_test.py
-
-      - name: Third-party notices up to date
-        run: scripts/third-party-notices.sh --check
+          # Only main writes the cache; pull requests read it. Docs mode
+          # builds only the CLI: saving that would leave a thin cache.
+          save-if: ${{ github.ref == 'refs/heads/main' && env.MODE != 'docs' }}
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        if: env.MODE == 'full' || (env.MODE == 'warm' && steps.cache.outputs.cache-hit != 'true')
+        # The portable job lints and tests the excluded crates on ubuntu.
+        run: cargo clippy --locked --workspace --all-targets --exclude isocast-ipc --exclude isocast-mux --exclude isocast-obsws --exclude isocast-remote -- -D warnings
 
       - name: Test
-        run: cargo test --locked
+        if: env.MODE == 'full' || (env.MODE == 'warm' && steps.cache.outputs.cache-hit != 'true')
+        run: cargo test --locked --workspace --exclude isocast-ipc --exclude isocast-mux --exclude isocast-obsws --exclude isocast-remote ${{ env.MODE == 'warm' && '--no-run' || '' }}
 
       - name: Platform clock and pool contracts
+        if: env.MODE == 'full'
         run: |
           cargo clippy --locked --all-targets -p isocast-platform-contracts -- -D warnings
           cargo build --locked -p isocast-platform-contracts
@@ -72,6 +168,7 @@ jobs:
           python3 scripts/platform-contracts.py --bin target/debug/isocast-platform-contracts --backend native --suite core --work "$RUNNER_TEMP/platform-contracts"
 
       - name: CLI, setup and MCP references up to date
+        if: env.MODE == 'full' || env.MODE == 'docs'
         run: |
           cargo build --locked -p isocast-cli
           python3 scripts/reference-docs.py target/debug/isocast --check
@@ -82,62 +179,55 @@ jobs:
     # checked. Lockstep runs draw the same pixels on any machine, so this
     # is a pass/fail gate, not a benchmark: the harness's controls must
     # come out as expected, and the standard suite must match its baseline
-    # of known issues exactly (scripts/motion/suite.toml).
+    # of known issues exactly (scripts/motion/suite.toml). The gate runs it
+    # when the interface, the compositor or render paths, or the harness
+    # change.
     name: motion suite (headless, macOS arm64)
+    needs: gate
+    if: needs.gate.outputs.motion != 'skip'
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      MODE: ${{ needs.gate.outputs.motion }}
     steps:
+      - name: Gate mode
+        # Fail closed: a job that runs without a mode from the gate would
+        # skip every step and pass without checking anything.
+        run: |
+          case "$MODE" in
+            full|warm) ;;
+            *) echo "::error::the gate gave this job no valid mode ('$MODE'); not passing without running"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
           persist-credentials: false
 
-      # Pull requests: only when the interface or the harness changed (the
-      # job still reports success otherwise, so it can be required).
-      # Pushes to main and manual runs: always.
-      - name: Interface changed?
-        id: changes
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          run=true
-          if [ "$EVENT" = pull_request ]; then
-            base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-            if [ -z "$(git diff --name-only "$base" "$HEAD_SHA" -- crates/isocast-ui/ crates/isocast-ui-interface/ scripts/motion.sh scripts/motion/ .github/workflows/ci.yml)" ]; then
-              run=false
-            fi
-          fi
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "motion suite: run=$run"
-
       - name: Rust toolchain
-        if: steps.changes.outputs.run == 'true'
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
 
       - name: Cargo cache
-        if: steps.changes.outputs.run == 'true'
+        id: cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build release binaries
-        if: steps.changes.outputs.run == 'true'
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --locked --release -p isocast-ui -p isocast-daemon -p isocast-cli
 
       - name: Harness controls
-        if: steps.changes.outputs.run == 'true'
+        if: env.MODE == 'full'
         run: scripts/motion.sh --suite scripts/motion/controls.toml --no-timing --out "$RUNNER_TEMP/motion/controls"
 
       - name: Standard suite (lockstep)
-        if: steps.changes.outputs.run == 'true'
+        if: env.MODE == 'full'
         run: scripts/motion.sh --clock lockstep --no-timing --out "$RUNNER_TEMP/motion/suite"
 
       - name: Upload results
-        if: always() && steps.changes.outputs.run == 'true'
+        if: always() && env.MODE == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: motion-results

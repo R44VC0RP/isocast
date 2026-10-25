@@ -3,14 +3,23 @@
 # it merges: publish a snapshot of it to ci/<lane> on the public repo and
 # wait for every workflow to finish on that exact snapshot.
 #
-#   scripts/ci.sh [--dry-run] [--worktree] [--merge-main] [--lane NAME]
-#                 [--workflow NAME]… [--allow-workflow-changes]
+#   scripts/ci.sh [--dry-run] [--worktree | --source REF] [--include REF]…
+#                 [--merge-main] [--lane NAME] [--workflow NAME]…
+#                 [--allow-workflow-changes] [--no-wait]
+#   scripts/ci.sh --wait SNAPSHOT [--lane NAME] [--workflow NAME]…
 #
 #   --dry-run    build, check and scan the snapshot only (no commit or
 #                push); it stays in $ISOCAST_CI_DIR/<lane>/dry-run
 #   --worktree   publish this worktree as it is (tracked files with their
 #                uncommitted edits, plus untracked files git doesn't
 #                ignore) instead of the committed HEAD
+#   --source REF publish this commit (a branch of any worktree: refs are
+#                shared) instead of this checkout's HEAD; this worktree's
+#                state doesn't matter
+#   --include REF
+#                also merge these commits into the candidate (repeatable;
+#                a tree-only merge, in order, before main): one candidate
+#                for several branches (scripts/merge-pr.sh's batches)
 #   --merge-main publish the candidate merged with this repo's main (a
 #                tree-only merge; nothing changes here). Without it, a
 #                candidate that doesn't contain main is refused.
@@ -23,6 +32,10 @@
 #                publish even though the snapshot's .github/ differs from
 #                this repo's main (otherwise refused: a candidate's
 #                workflows run with the public repo's token and settings)
+#   --no-wait    push the snapshot and exit; CI runs from the push
+#   --wait SNAPSHOT
+#                publish nothing: wait for the workflows on SNAPSHOT, a
+#                commit already on ci/<lane>, and judge them as above
 #
 # The snapshot is `git archive` of the candidate's tree, so .gitattributes
 # export-ignore applies (also with --worktree, through a temporary index),
@@ -31,7 +44,13 @@
 # ONE commit whose parent is public main and pushed only to
 # refs/heads/ci/<lane> with an exact lease, never main or tags, so a
 # replaced snapshot is unreachable from any branch. Private history is never
-# pushed. Exit 0 only when every workflow succeeded on the pushed snapshot.
+# pushed. The snapshot's message ends in provenance trailers that
+# scripts/pr_flow.py reads: Isocast-Source (the commit published),
+# Isocast-Include (each --include), Isocast-Main (the private main it
+# contains), Isocast-Tree (the private tree before export-ignore) and, with
+# uncommitted edits, Isocast-Dirty. The pushed snapshot's id is written to
+# $ISOCAST_CI_DIR/<lane>/pushed. Exit 0 only when every workflow succeeded
+# on the pushed snapshot (with --no-wait, once it is pushed).
 # Evidence (run ids, summaries, failed logs) goes under
 # $ISOCAST_CI_DIR/<lane>/runs/<snapshot>. A lane's newer snapshot cancels
 # its older runs; lanes don't cancel each other. Needs git 2.40+, gh, tar
@@ -45,8 +64,12 @@ dry_run=0
 worktree=0
 merge_main=0
 allow_workflows=0
+no_wait=0
 lane=
+source_ref=
+wait_for=
 workflows=()
+includes=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
@@ -55,14 +78,34 @@ while [ $# -gt 0 ]; do
         --allow-workflow-changes) allow_workflows=1; shift ;;
         --lane) [ $# -ge 2 ] || { echo "ci: --lane needs a name" >&2; exit 2; }; lane="$2"; shift 2 ;;
         --workflow) [ $# -ge 2 ] || { echo "ci: --workflow needs a name" >&2; exit 2; }; workflows+=("$2"); shift 2 ;;
-        -h|--help) sed -n 2,37p "$0"; exit 0 ;;
-        *) echo "ci: unknown option $1 (valid: --dry-run, --worktree, --merge-main, --lane NAME," \
-                "--workflow NAME, --allow-workflow-changes)" >&2; exit 2 ;;
+        --source) [ $# -ge 2 ] || { echo "ci: --source needs a commit" >&2; exit 2; }; source_ref="$2"; shift 2 ;;
+        --include) [ $# -ge 2 ] || { echo "ci: --include needs a commit" >&2; exit 2; }; includes+=("$2"); shift 2 ;;
+        --no-wait) no_wait=1; shift ;;
+        --wait) [ $# -ge 2 ] || { echo "ci: --wait needs a snapshot commit" >&2; exit 2; }; wait_for="$2"; shift 2 ;;
+        -h|--help) sed -n 2,56p "$0"; exit 0 ;;
+        *) echo "ci: unknown option $1 (valid: --dry-run, --worktree, --source REF, --include REF, --merge-main," \
+                "--lane NAME, --workflow NAME, --allow-workflow-changes, --no-wait, --wait SNAPSHOT)" >&2; exit 2 ;;
     esac
 done
+if [ -n "$source_ref" ] && [ "$worktree" = 1 ]; then
+    echo "ci: --source and --worktree don't combine (--source publishes a commit)" >&2; exit 2
+fi
+if [ -n "$wait_for" ]; then
+    case "$wait_for" in
+        *[!0-9a-f]*|'') echo "ci: --wait needs a full snapshot commit id, not '$wait_for'" >&2; exit 2 ;;
+    esac
+    [ ${#wait_for} = 40 ] || { echo "ci: --wait needs a full 40-character snapshot id" >&2; exit 2; }
+    [ "$dry_run$worktree$merge_main$no_wait" = 0000 ] && [ -z "$source_ref" ] && [ ${#includes[@]} = 0 ] || {
+        echo "ci: --wait only combines with --lane and --workflow" >&2; exit 2;
+    }
+fi
 [ ${#workflows[@]} -gt 0 ] || workflows=("CI" "Engine E2E" "Windows")
 if [ -z "$lane" ]; then
-    lane="$(git -C "$here" branch --show-current)"
+    if [ -n "$source_ref" ]; then
+        lane="$source_ref"
+    else
+        lane="$(git -C "$here" branch --show-current)"
+    fi
     lane="${lane##*/}"
 fi
 case "$lane" in
@@ -74,14 +117,20 @@ branch="ci/$lane"
 scratch="${ISOCAST_CI_DIR:-/Volumes/IsocastBuild/ci}/$lane"
 g() { git -C "$here" "$@"; }
 
-source="$(g rev-parse HEAD)"
-if [ "$worktree" = 0 ] && [ -n "$(g status --porcelain)" ]; then
-    echo "ci: the worktree has changes; commit them, or pass --worktree to publish them as they are" >&2
-    exit 1
+if [ -n "$source_ref" ]; then
+    source="$(g rev-parse --verify --quiet "$source_ref^{commit}")" || {
+        echo "ci: --source $source_ref is not a commit here" >&2; exit 1;
+    }
+elif [ -z "$wait_for" ]; then
+    source="$(g rev-parse HEAD)"
+    if [ "$worktree" = 0 ] && [ -n "$(g status --porcelain)" ]; then
+        echo "ci: the worktree has changes; commit them, or pass --worktree to publish them as they are" >&2
+        exit 1
+    fi
 fi
 main_ref="$(g rev-parse --verify --quiet main || true)"
-if [ -n "$main_ref" ] && [ "$merge_main" = 0 ] && ! g merge-base --is-ancestor "$main_ref" HEAD; then
-    echo "ci: HEAD doesn't contain main (${main_ref:0:12}); merge main first, or pass --merge-main" >&2
+if [ -z "$wait_for" ] && [ -n "$main_ref" ] && [ "$merge_main" = 0 ] && ! g merge-base --is-ancestor "$main_ref" "$source"; then
+    echo "ci: ${source_ref:-HEAD} doesn't contain main (${main_ref:0:12}); merge main first, or pass --merge-main" >&2
     exit 1
 fi
 
@@ -115,26 +164,44 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# 1. The candidate's tree: HEAD's, or the worktree's through a temporary
-#    index (this checkout's own index is untouched).
+if [ -z "$wait_for" ]; then
+# 1. The candidate's tree: the source's, or the worktree's through a
+#    temporary index (this checkout's own index is untouched).
+dirty=0
 if [ "$worktree" = 1 ]; then
     export_tree="$(cd "$here" && GIT_INDEX_FILE="$tmp/index" git read-tree HEAD &&
         GIT_INDEX_FILE="$tmp/index" git add -A && GIT_INDEX_FILE="$tmp/index" git write-tree)"
     label="worktree of ${source:0:12}"
-    [ "$export_tree" = "$(g rev-parse 'HEAD^{tree}')" ] || label="$label + uncommitted"
+    [ "$export_tree" = "$(g rev-parse 'HEAD^{tree}')" ] || { label="$label + uncommitted"; dirty=1; }
     candidate="$(g commit-tree "$export_tree" -p HEAD -m "ci.sh worktree snapshot")"
 else
-    export_tree="$(g rev-parse 'HEAD^{tree}')"
+    export_tree="$(g rev-parse "$source^{tree}")"
     label="source ${source:0:12}"
     candidate="$source"
 fi
-if [ "$merge_main" = 1 ] && [ -n "$main_ref" ] && ! g merge-base --is-ancestor "$main_ref" "$candidate"; then
-    export_tree="$(g merge-tree --write-tree "$candidate" "$main_ref")" || {
-        echo "ci: the candidate conflicts with main; merge it by hand" >&2; exit 1;
+trailers="Isocast-Source: $source"
+# merge_into NAME COMMIT: merge COMMIT into the candidate, tree-only.
+merge_into() {
+    local merged
+    g merge-base --is-ancestor "$2" "$candidate" && return 0
+    merged="$(g merge-tree --write-tree "$candidate" "$2")" || {
+        echo "ci: the candidate conflicts with $1; merge it by hand" >&2; exit 1;
     }
-    export_tree="${export_tree%%$'\n'*}"
+    export_tree="${merged%%$'\n'*}"
+    candidate="$(g commit-tree "$export_tree" -p "$candidate" -p "$2" -m "ci.sh merge of $1")"
+}
+for ref in ${includes[@]+"${includes[@]}"}; do
+    inc="$(g rev-parse --verify --quiet "$ref^{commit}")" || { echo "ci: --include $ref is not a commit here" >&2; exit 1; }
+    merge_into "$ref" "$inc"
+    label="$label + $ref ${inc:0:12}"
+    trailers="$trailers"$'\n'"Isocast-Include: $inc"
+done
+if [ "$merge_main" = 1 ] && [ -n "$main_ref" ] && ! g merge-base --is-ancestor "$main_ref" "$candidate"; then
+    merge_into main "$main_ref"
     label="$label merged with main ${main_ref:0:12}"
 fi
+trailers="$trailers"$'\n'"Isocast-Main: $main_ref"$'\n'"Isocast-Tree: $export_tree"
+[ "$dirty" = 0 ] || trailers="$trailers"$'\n'"Isocast-Dirty: yes"
 
 # Workflows run with the public repo's token and settings: a candidate may
 # change them only on purpose. The baseline is this repo's main (what merges
@@ -210,15 +277,26 @@ expected="$(git ls-remote --heads "$remote" "refs/heads/$branch" |
     awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }')"
 snapshot="$(GIT_AUTHOR_NAME="$(g config user.name)" GIT_AUTHOR_EMAIL="$(g config user.email)" \
     GIT_COMMITTER_NAME="$(g config user.name)" GIT_COMMITTER_EMAIL="$(g config user.email)" \
-    pg commit-tree "$tree" -p "$public_main" -m "CI candidate ($lane): $label")"
+    pg commit-tree "$tree" -p "$public_main" -m "CI candidate ($lane): $label" -m "$trailers")"
 pg -c push.followTags=false push --porcelain --no-follow-tags \
     "--force-with-lease=refs/heads/$branch:$expected" "$remote" "$snapshot:refs/heads/$branch"
+printf '%s\n' "$snapshot" >"$scratch/pushed"
+if [ "$no_wait" = 1 ]; then
+    echo "ci: pushed $snapshot to $branch; not waiting (CI runs from the push)"
+    exit 0
+fi
+else
+    snapshot="$wait_for"
+    label="snapshot ${snapshot:0:12} (already pushed)"
+fi
 pushed_at=$SECONDS
 
 result="$scratch/runs/$snapshot"
 mkdir -p "$result"
 printf '%s\n' "$label" >"$result/source.txt"
-echo "ci: pushed $snapshot; waiting up to 5 minutes for ${workflows[*]}"
+verb=pushed
+[ -z "$wait_for" ] || verb=found
+echo "ci: $verb $snapshot; waiting up to 5 minutes for ${workflows[*]} to appear"
 declare -a runs=()
 deadline=$((SECONDS + 300))
 for w in "${workflows[@]}"; do

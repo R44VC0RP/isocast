@@ -260,7 +260,8 @@ Enterprise Evaluation (expires ~90 days after 2026-10-18), 8 vCPU, 32 GiB, no GP
 Users `isocast` (guest admin) and `packager` (standard, for installer tests). Checkpoints `clean` (72dfd346…) and
 `clean-prev` (0bb765b6…): keep only these when you finish, and leave the VM off.
 
-**Public repo and CI:** R44VC0RP/isocast has its own history. Only the delegator pushes; agents never write to GitHub.
+**Public repo and CI:** R44VC0RP/isocast has its own history; private history is never pushed. GitHub writes go only
+through `pr.sh` (implementers: ci/<lane> snapshots and their PRs) and `merge-pr.sh` (QA: main).
 - `scripts/publish-snapshot.sh [--push] "msg"` copies `git archive main` into `~/dev/isocast-public`, after scanning
   for secrets and AI attribution.
 - `scripts/ci.sh [--worktree] [--merge-main] [--lane NAME] [--allow-workflow-changes]` (2026-10-22) publishes a
@@ -270,6 +271,30 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   `--merge-main`) and a `.github/` that differs from private main (unless `--allow-workflow-changes`). ci, e2e and
   windows run on `ci/**` pushes; a lane's newer push cancels its older run, never another lane's.
   `scripts/windows-ci.sh` is `ci.sh --lane windows --workflow Windows`. Other workflows: release, nightly-soak, visual.
+- PR flow (2026-10-24, ISO-40): `scripts/pr.sh` = `ci.sh --source <tip> --merge-main --no-wait` plus a PR ci/<lane> ->
+  main built from REPORT.md (labels `area:*` and `needs:<none|windows-gpu|mac|linux-gpu>`, hidden marker
+  `<!-- isocast-pr {"session","branch","lane"} -->`). Snapshots carry `Isocast-Source/Include/Main/Tree` trailers;
+  `merge-pr.sh` merges only when the PR's snapshot is green, built from the branch's tip, contains current main
+  (else it re-publishes and waits), and the `--no-ff` merge's tree equals `Isocast-Tree`; then `cargo check` on a
+  build host (lane `merge-check`), ff main, `publish-snapshot.sh --push`, comment, close, delete ci/<lane>. Batches
+  publish ci/batch-<first PR>. Logic in `scripts/pr_flow.py`.
+- Same-repo PRs don't run CI, Engine E2E or bench (their gate / job `if:` checks the head repo): their ci/<lane> push
+  already ran CI on the identical snapshot; fork PRs still run them. Visual and PR checks run on every PR.
+- CI budget (2026-10-24, ISO-40): each workflow starts with an ubuntu `gate` job (`.github/scripts/ci_gate.py`; its
+  job summary says why each job runs). A push whose tree already passed CI, Engine E2E and Windows skips everything
+  (main: jobs only restore their Rust cache and build on a miss). Otherwise jobs run by changed paths (motion only for
+  UI/render/motion paths; E2E not for UI-only; Windows wording/installers for Windows/UI/shared; Linux app for
+  Linux/UI/shared/render; docs-only: fmt, scans, reference docs); unknown paths, .github/ and Cargo manifests run
+  everything. Paths decide only when the push's base is green (its three latest push runs, or an identical green
+  tree); otherwise everything runs, so don't cancel main's runs. Gated jobs fail closed on a missing mode.
+- Accepted risk (2026-10-24, review of ISO-40): the motion suite is skipped for shared-crate changes (protocol,
+  daemon, CLI…) that can still change what the app draws. Mitigation: before a release, run everything on main with
+  `gh workflow run CI --repo R44VC0RP/isocast --ref main` (manual runs ignore the gate) and check the motion suite.
+  `ci_gate.py WORKFLOW --paths P…` previews a plan offline. fmt, scans and ipc/mux/obsws/remote clippy+tests run on
+  ubuntu; platform-stub stays on macOS (its tests need a wgpu backend). Windows: win-build (~39 min) then recovery,
+  wording and package in parallel; win-release (release services, preview qualification) runs alongside.
+- GitHub won't let the account approve its own PRs, so QA verdicts are comments starting `QA: approved` / `QA: changes
+  requested` (prs.sh reads them).
 
 ## 4. Commands that matter
 
