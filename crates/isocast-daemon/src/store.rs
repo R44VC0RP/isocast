@@ -938,9 +938,9 @@ pub(crate) fn write_atomically(path: &Path, text: &[u8]) -> Result<()> {
         let partial = sibling(&backup, ".partial");
         fs::copy(path, &partial)
             .with_context(|| format!("could not back up {}", path.display()))?;
-        fs::rename(&partial, &backup)?;
+        isocast_protocol::fs::replace(&partial, &backup)?;
     }
-    fs::rename(&temporary, path)
+    isocast_protocol::fs::replace(&temporary, path)
         .with_context(|| format!("could not replace {}", path.display()))?;
     // Make the rename itself durable.
     if let Some(folder) = folder

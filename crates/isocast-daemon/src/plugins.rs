@@ -1856,7 +1856,7 @@ fn write_record(dir: &Path, record: &Record) -> io::Result<()> {
     let path = dir.join("install.toml");
     let temporary = dir.join("install.toml.new");
     std::fs::write(&temporary, text)?;
-    std::fs::rename(&temporary, &path)
+    isocast_protocol::fs::replace(&temporary, &path)
 }
 
 /// Copy a plugin's folder into `dir/plugin`, replacing what was there

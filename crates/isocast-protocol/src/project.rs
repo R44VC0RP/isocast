@@ -427,11 +427,11 @@ pub fn remember_root(root: &Path) -> std::io::Result<bool> {
             // Unreadable (not ours to judge): kept aside, not overwritten.
             std::fs::rename(&path, path.with_extension("json.unreadable"))?;
         }
-        std::fs::rename(&partial, &path)?;
+        crate::fs::replace(&partial, &path)?;
         // The last good list, for a registry later found unreadable.
         let bak_partial = partial.with_extension("bak.partial");
         std::fs::copy(&path, &bak_partial)
-            .and_then(|_| std::fs::rename(&bak_partial, path.with_extension("json.bak")))
+            .and_then(|_| crate::fs::replace(&bak_partial, path.with_extension("json.bak")))
             .inspect_err(|_| {
                 let _ = std::fs::remove_file(&bak_partial);
             })
