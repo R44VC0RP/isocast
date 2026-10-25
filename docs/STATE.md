@@ -36,6 +36,12 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   path. Intel and AMD are unverified. MP4/MOV edit lists are read by `isocast_protocol::mp4_edits` (fuzz target
   `mp4_edits`); Media Foundation ignores them on Windows 10 and Server 2022 and applies them on Server 2025, so the
   readers rebase only when MF's first sample isn't where the edit puts it.
+- **Windows media decoder samples (2026-10-25, #153):** readers give Media Foundation's decoder samples back as
+  soon as the pool copy is submitted. Its video processor allocates 10 samples and on a software GPU the copy
+  fences lag many frames, so holding samples to completion emptied the allocator (0xc00d4a3e, hosted run
+  40175602445). A full pool waits up to 2 s and an empty allocator up to 1 s before the source ends.
+- **aws-win (2026-10-25):** isocast-win-build (Microsoft Basic Display Adapter, SSH session) builds and runs unit
+  tests but not the engine e2e (`win_record` on main: "program delivered no frames"); use hosted CI or exon-desk.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
@@ -91,6 +97,15 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   e2e `linux_media`): looping 4 s H.264/AAC MP4 + test pattern, program and media ISO 1800 frames each,
   zero drops, 1800/1800 oracle frames across 15 loops, 60/60 bursts, max A/V skew 0.31 ms. Anamorphic
   (non-square PAR) files play at their stored size.
+- **Linux .deb packages (2026-10-25, #143):** `scripts/package-deb.sh BIN_DIR ubuntu24.04|debian12` builds
+  `isocast_<ver>-1~<distro>_<arch>.deb`: /usr/bin `isocast`, `isocastd`, `isocast-ui`, `isocast-browser` and the
+  per-user `isocast-openh264-install` (packaging/linux/install.sh); docs, notices and Cisco's licence in
+  /usr/share/doc/isocast; no OpenH264. Ubuntu 24.04 debs reuse the tarball's binaries; Debian 12 is built in
+  `debian:12` (24.04 builds need glibc 2.38; bookworm has 2.36) and needs PipeWire >= 1.0.5 from bookworm-backports.
+  Depends come from dpkg-shlibdeps (PipeWire raised to >= 1.0.5) plus the dlopen'd Vulkan, Wayland, X11 and
+  xkbcommon libraries. The only maintainer scripts load (postinst, where AppArmor is enabled) and unload (postrm
+  remove and purge) the conffile /etc/apparmor.d/isocast-browser. CI: `deb-*` jobs in windows.yml, gated as `deb`,
+  lint the packages and install them on clean machines without Recommends.
 - **Linux capture lane (2026-10-23), experimental/unreleased:** portal/SHM screens, PipeWire default-sink
   desktop audio and microphones, and V4L2 MJPEG/YUYV cameras are implemented. PipeWire headers/runtime
   >=1.0.5 are required. Restore tokens are private engine-adjacent `*.linux-capture.json` files; devices

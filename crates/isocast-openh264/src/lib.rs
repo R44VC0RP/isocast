@@ -29,8 +29,6 @@ pub use openh264::OpenH264API;
 pub const VERSION: &str = "2.6.0";
 /// Overrides where the library is looked for (a path to the `.so`).
 pub const ENV: &str = "ISOCAST_OPENH264";
-/// Cisco's licence for its binary.
-pub const LICENSE_URL: &str = "https://www.openh264.org/BINARY_LICENSE.txt";
 
 /// One of Cisco's builds: its file, where Cisco serves it (bzip2), and the
 /// SHA-256 of the download and of the library inside.
@@ -128,18 +126,33 @@ fn locate(
     Ok((install_dir(&home).join(build.file), false))
 }
 
-/// The command that (re)installs the library: the installer beside the
-/// running program (the unpacked download, or the installed copy), else
-/// the installed copy's place.
+/// The command that (re)installs the library: the Debian package's
+/// `isocast-openh264-install` beside the running program, else the
+/// installer beside it (the unpacked download, or the installed copy),
+/// else the installed copy's place.
 pub fn fix_command() -> String {
-    let beside = std::env::current_exe()
+    let dir = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("install.sh")))
-        .filter(|installer| installer.is_file());
-    let installer = beside.unwrap_or_else(|| {
-        install_dir(&home().unwrap_or_else(|| PathBuf::from("~"))).join("install.sh")
-    });
-    format!("{} --openh264", installer.display())
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    fix_command_in(dir.as_deref(), home())
+}
+
+fn fix_command_in(dir: Option<&Path>, home: Option<PathBuf>) -> String {
+    if let Some(dir) = dir {
+        let packaged = dir.join("isocast-openh264-install");
+        if packaged.is_file() {
+            return packaged.display().to_string();
+        }
+        let installer = dir.join("install.sh");
+        if installer.is_file() {
+            return format!("{} --openh264", installer.display());
+        }
+    }
+    let home = home.unwrap_or_else(|| PathBuf::from("~"));
+    format!(
+        "{} --openh264",
+        install_dir(&home).join("install.sh").display()
+    )
 }
 
 /// Check `bytes` (read from `path`) are `build`'s library.
@@ -231,8 +244,15 @@ pub fn api() -> Result<OpenH264API, Unavailable> {
     // generated for (and on the crate's own list of Cisco builds).
     let api = unsafe { OpenH264API::from_blob_path_unchecked(&held) };
     drop(file);
+    // The loader's message names the descriptor's path: name the file.
     api.map_err(|error| Unavailable {
-        reason: format!("could not load {}: {error}", path.display()),
+        reason: format!(
+            "could not load {}: {}",
+            path.display(),
+            error
+                .to_string()
+                .replace(&held, &path.display().to_string())
+        ),
         fix: fix_command(),
     })
 }
@@ -329,6 +349,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_fix_is_the_packaged_command_or_the_installer_beside_the_program() {
+        let dir = scratch("fix");
+        let home = Some(PathBuf::from("/home/me"));
+        assert_eq!(
+            fix_command_in(Some(&dir), home.clone()),
+            "/home/me/.local/lib/isocast/install.sh --openh264"
+        );
+        std::fs::write(dir.join("install.sh"), "").unwrap();
+        assert_eq!(
+            fix_command_in(Some(&dir), home.clone()),
+            format!("{} --openh264", dir.join("install.sh").display())
+        );
+        std::fs::write(dir.join("isocast-openh264-install"), "").unwrap();
+        assert_eq!(
+            fix_command_in(Some(&dir), home),
+            dir.join("isocast-openh264-install").display().to_string()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

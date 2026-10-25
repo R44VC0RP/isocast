@@ -1,0 +1,32 @@
+#!/bin/sh
+# Unload isocast-browser's AppArmor profile when the package is removed or
+# purged (an upgrade's new postinst reloads it instead). Only when AppArmor
+# is enabled; never fails the removal. Users' data is not touched.
+set -e
+profile=/etc/apparmor.d/isocast-browser
+
+apparmor_on() {
+  if command -v aa-enabled >/dev/null 2>&1; then
+    aa-enabled --quiet 2>/dev/null
+  else
+    [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = Y ]
+  fi
+}
+
+case "$1" in
+remove | purge)
+  if apparmor_on; then
+    if [ -f "$profile" ] && command -v apparmor_parser >/dev/null 2>&1; then
+      apparmor_parser -R "$profile" >/dev/null 2>&1 || true
+    elif [ -w /sys/kernel/security/apparmor/.remove ]; then
+      # Purged: dpkg has deleted the file, so unload it by name.
+      printf '%s' isocast-browser >/sys/kernel/security/apparmor/.remove 2>/dev/null || true
+    fi
+  fi
+  if [ "$1" = purge ]; then
+    # The compiled profile apparmor_parser -W cached.
+    find /var/cache/apparmor -name isocast-browser -type f -delete 2>/dev/null || true
+  fi
+  ;;
+esac
+exit 0
