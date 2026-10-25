@@ -589,7 +589,15 @@ impl<W: FileWriter> OpenFile<W> {
 
     fn video_mapped(&mut self, frame: Option<&W::Frame>, pts: Time, end: Time) -> Result<()> {
         self.last_video = Some(pts);
-        if pts >= end || self.start.is_some_and(|start| pts < start) {
+        // Once the file has started it ends on a frame boundary of its own
+        // (`file_end`), which can lie up to 1 ns before `end`: a picture at
+        // or after that boundary is past the file, so it is refused here
+        // rather than written and then cut off by `finish` (which a writer
+        // already holding it may refuse).
+        let limit = self
+            .start
+            .map_or(end, |start| file_end(start, end, self.fps()));
+        if pts >= limit || self.start.is_some_and(|start| pts < start) {
             return Ok(());
         }
         if self.start.is_none() {
@@ -832,16 +840,33 @@ impl<W: FileWriter> OpenFile<W> {
 
 /// Where a file starting at `start` ends when its take ends at `end`: on
 /// the next frame boundary, so its last frame lasts a whole frame.
+///
+/// `add_ticks` truncates to whole nanoseconds, so a boundary reached from a
+/// start that is itself a tick after the epoch can land up to 1 ns before
+/// the same boundary computed from the epoch. That is the same boundary, not
+/// a take that ends just after one: without the allowance a program that
+/// started late (on an epoch tick) would run one frame into the next take.
+///
+/// The bound rests on one premise: `start` and a split's `end` are both
+/// whole ticks from the same epoch (pictures and splits are clocked on the
+/// canvas's ticks; pause cuts map them exactly), so floor(a + b) − floor(a)
+/// − floor(b) ≤ 1 ns. A stop at an arbitrary host time can therefore end the
+/// file up to 1 ns before it: pictures are admitted against this boundary
+/// (`video_mapped`), never against the raw end, and writers that recompute
+/// the end from their start must round the same way.
 pub(super) fn file_end(start: Time, end: Time, fps: u32) -> Time {
     if end == Time::MAX {
         return end;
     }
     let mut frames = end.ticks_since(start, fps).max(0) as u64;
-    if start.add_ticks(frames, fps) < end {
+    if start.add_ticks(frames, fps).as_nanos() + TICK_ROUNDING_NS < end.as_nanos() {
         frames += 1;
     }
     start.add_ticks(frames, fps)
 }
+
+/// The most two truncated `add_ticks` steps can fall short of one.
+const TICK_ROUNDING_NS: i64 = 1;
 
 /// One audio track of a file, kept continuous and aligned with the video.
 struct AudioTrack {
@@ -985,6 +1010,108 @@ mod tests {
         fn cancel(self) {}
     }
 
+    /// A writer that, like the Windows one, refuses to end before a picture
+    /// it accepted.
+    #[derive(Default)]
+    struct Strict {
+        last: Option<Time>,
+    }
+
+    impl FileWriter for Strict {
+        type Frame = ();
+
+        fn start(&mut self, _: Time) -> Result<()> {
+            Ok(())
+        }
+
+        fn append_video(&mut self, _: &(), pts: Time) -> Result<bool> {
+            self.last = Some(pts);
+            Ok(true)
+        }
+
+        fn append_audio(&mut self, _: usize, _: &[f32], _: Time) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn finish(self, end: Time) -> Result<crate::Finished> {
+            if self.last.is_some_and(|last| end <= last) {
+                return Err(anyhow!("video.end: must be after every accepted picture"));
+            }
+            Ok(crate::Finished::default())
+        }
+
+        fn cancel(self) {}
+    }
+
+    /// A 30 fps file of `kind` in a take starting at `epoch`, without audio.
+    fn plan(kind: &'static str, epoch: Time) -> Arc<FilePlan> {
+        use std::sync::atomic::AtomicBool;
+        Arc::new(FilePlan {
+            recording: 1,
+            take: 1,
+            epoch: AtomicI64::new(epoch.as_nanos()),
+            source: kind.to_string(),
+            kind,
+            start: AtomicI64::new(i64::MIN),
+            frames: AtomicU64::new(0),
+            newest: AtomicI64::new(i64::MIN),
+            audio_dropouts: AtomicU64::new(0),
+            hardware_accelerated: AtomicI64::new(-1),
+            output_active: AtomicI64::new(-1),
+            crash_safe: AtomicBool::new(false),
+            committed: AtomicI64::new(-1),
+            commit_requested: AtomicU64::new(0),
+            commit_at: AtomicI64::new(i64::MIN),
+            commit_done: AtomicU64::new(0),
+            commit_failed: AtomicU64::new(0),
+            commit_error: Mutex::new(None),
+            failed_report: Mutex::new(None),
+            encoder: Mutex::new(None),
+            audio: Vec::new(),
+            audio_timing: Vec::new(),
+            spec: crate::WriterSpec {
+                path: format!("/nonexistent/{kind}.mov").into(),
+                container: Default::default(),
+                video: crate::VideoTrackSpec {
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                    encoder: Default::default(),
+                },
+                audio: Vec::new(),
+                created: std::time::SystemTime::UNIX_EPOCH,
+            },
+        })
+    }
+
+    /// #149 review: a stop at a host time in (B, B + 1 ns], B a picture's
+    /// tick, ends the file at B. That picture is refused when it arrives,
+    /// not accepted and then cut off where a strict writer can't drop it.
+    #[test]
+    fn a_stop_just_past_a_picture_refuses_that_picture() {
+        let epoch = Time::from_nanos(1_271_969_827_375);
+        for late in [0, 4] {
+            let start = epoch.add_ticks(late, 30);
+            let clock = Arc::new(RecordingClock::new(epoch, [30].into_iter()));
+            let mut file = OpenFile::new(Strict::default(), plan("program", epoch), clock);
+            let boundary = file_end(start, epoch.add_ticks(60, 30), 30);
+            let stop = boundary + std::time::Duration::from_nanos(1);
+            for tick in late..=60 {
+                file.video(Some(&()), epoch.add_ticks(tick, 30), stop)
+                    .unwrap();
+            }
+            let report = file
+                .finish(stop, Ok(()))
+                .expect("the writer holds nothing past its end");
+            assert_eq!(
+                (report.frames, report.dropped_frames),
+                (60 - late, 0),
+                "{late} late"
+            );
+            assert!((report.duration_seconds - (60 - late) as f64 / 30.0).abs() < 1e-6);
+        }
+    }
+
     const CHUNK: usize = 480;
     const ZERO: Time = Time::from_nanos(0);
 
@@ -1046,5 +1173,53 @@ mod tests {
             60,
         );
         assert_eq!(end, ZERO.add_ticks(11, 60));
+    }
+
+    /// CI run 40161187404: a 30 fps program that began 4 ticks into a take
+    /// split exactly 2 s after its epoch ended 61 ticks after the epoch, its
+    /// last picture a repeat lying in the next take. It ends on the split.
+    #[test]
+    fn a_late_file_ends_on_its_takes_boundary() {
+        let epoch = Time::from_nanos(1_271_969_827_375);
+        let split = epoch.add_ticks(60, 30);
+        assert_eq!(split.as_nanos() - epoch.as_nanos(), 2_000_000_000);
+        for late in 0..30 {
+            let start = epoch.add_ticks(late, 30);
+            let end = file_end(start, split, 30);
+            assert_eq!(end.ticks_since(start, 30), 60 - late as i64, "{late} late");
+            assert!(
+                end <= split && split.as_nanos() - end.as_nanos() <= 1,
+                "{late} late"
+            );
+        }
+        // Every rate the engine records, from any epoch tick.
+        for fps in [24, 25, 30, 48, 50, 60, 120] {
+            for late in 0..fps as u64 {
+                let start = epoch.add_ticks(late, fps);
+                let split = epoch.add_ticks(3 * fps as u64, fps);
+                assert_eq!(
+                    file_end(start, split, fps).ticks_since(start, fps),
+                    3 * fps as i64 - late as i64,
+                    "{late} late at {fps}"
+                );
+            }
+        }
+        // Take 2 of a split: its epoch is the split, itself a tick of take
+        // 1's epoch; a file starting late in it ends on take 2's next split.
+        let second = epoch.add_ticks(60, 30);
+        for late in 0..30 {
+            let start = second.add_ticks(late, 30);
+            let end = file_end(start, second.add_ticks(45, 30), 30);
+            assert_eq!(
+                end.ticks_since(start, 30),
+                45 - late as i64,
+                "take 2, {late} late"
+            );
+        }
+        // An end a microsecond past a boundary still completes its frame.
+        assert_eq!(
+            file_end(epoch, split + std::time::Duration::from_micros(1), 30),
+            epoch.add_ticks(61, 30)
+        );
     }
 }

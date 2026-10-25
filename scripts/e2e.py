@@ -560,6 +560,33 @@ def setup(root, codec="hevc", iso=False, width=1920, height=1080, fps=FPS):
                               "encoder": {"codec": codec}, "audio": ["tone"]}}}
 
 
+def split_slots(first, second, fps):
+    """Frame slots in a split's first take: the engine clock from its start
+    to the second take's (both manifests' host_time_ns). A file's own counts
+    leave out a late start and include any frame it ran past the split."""
+    nanos = second["host_time_ns"] - first["host_time_ns"]
+    slots = round(nanos * fps / 1e9)
+    require(slots > 0 and abs(nanos - slots * 1e9 / fps) < 1e3,
+            f"the split is {nanos} ns after the first take, not on a {fps} fps frame boundary")
+    return slots
+
+
+def check_split_end(path, manifest, slots, fps):
+    """Nothing in a split's first take runs past the split: every file ends
+    by `slots` frames from the take's start, and so does the take. `slots`
+    is engine-clock time; a pause in the take cuts its frames out of the
+    files' timeline, so the bound shrinks by them."""
+    slots -= sum(round((p["end_seconds"] - p["start_seconds"]) * fps)
+                 for p in manifest.get("pauses", []) if p.get("end_seconds") is not None)
+    for f in manifest["files"]:
+        end = round(((f.get("start_offset_seconds") or 0) + f["duration_seconds"]) * fps)
+        require(end <= slots, f"{path.name}: {f['source']} ends {end - slots} frame(s) after the split "
+                              f"(offset {f.get('start_offset_seconds') or 0:.4f} s + {f['duration_seconds']:.4f} s "
+                              f"against {slots} frames)")
+    require(round(manifest["duration_seconds"] * fps) <= slots,
+            f"{path.name}: the take lasts {manifest['duration_seconds']:.4f} s, past its split at {slots} frames")
+
+
 def finished(path):
     try:
         manifest = read_json(path)
@@ -2993,7 +3020,10 @@ def check_record_take(e, path, manifest, cfg, layout, count, evidence, vertical=
     speeds = {s["id"]: s.get("speed", 1) for s in cfg["sources"]}
     program, pf = manifest_file(path, manifest, "program")
     if t0 is None:
-        t0 = fit_anchor(oracle_decode(program, oracle_regions(layout), fps), "a", count)
+        # The fit counts from the program file's first picture; a program that
+        # began after the take (start_offset_seconds) shows a later slot there.
+        late = round((pf.get("start_offset_seconds") or 0) * fps)
+        t0 = (fit_anchor(oracle_decode(program, oracle_regions(layout), fps), "a", count) - late) % count
     pauses = [(round(p["time_seconds"] * fps), round((p["end_seconds"] - p["start_seconds"]) * fps))
               for p in manifest.get("pauses", []) if p.get("end_seconds") is not None]
 
@@ -3249,9 +3279,9 @@ def scenario_oracle_takes(e, cfg, evidence):
         takes.append((path, manifest))
     require(takes[1][1].get("pauses"), "the pause is missing from the second take's manifest")
     t0 = check_record_take(e, *takes[0], cfg, RECORD_LAYOUT, count, evidence, isos=("b",), label="take 1")
-    program = next(f for f in takes[0][1]["files"] if f["source"] == "program")
-    slots = program["frames"] + program["dropped_frames"] - (program.get("repeated_frames") or 0)
     # The second take begins where the first ended, on the same engine clock.
+    slots = split_slots(takes[0][1], takes[1][1], fps)
+    check_split_end(*takes[0], slots, fps)
     check_record_take(e, *takes[1], cfg, RECORD_LAYOUT, count, evidence, isos=("b",), t0=t0 + slots,
                       label="take 2 (split)")
     evidence.update(t0=t0, first_take_slots=slots, pauses=takes[1][1]["pauses"])
@@ -3719,6 +3749,35 @@ def oracle_rules_selftest(work):
         "hosted: a missing ISO": (take_rows([("program", 0), ("bars", 0)], ["program", "bars", "bars2"]), "fail"),
         "hosted: a file later than the late-start cap": (
             take_rows([("program", (HOSTED_LATE_START_CAP + 1) / 30)], ["program"]), "fail"),
+    })
+    # A split's first take (CI run 40161187404): the program began 4 slots
+    # late; take 2 began exactly 2 s (60 slots at 30 fps) after take 1.
+    def split_end(program_end, take_end=None):
+        first = {"host_time_ns": 1_271_969_827_375, "duration_seconds": take_end or program_end, "files": [
+            {"source": "b", "start_offset_seconds": 0.0, "duration_seconds": 2.0},
+            {"source": "program", "start_offset_seconds": 4 / 30, "duration_seconds": program_end - 4 / 30}]}
+        try:
+            slots = split_slots(first, {"host_time_ns": 1_273_969_827_375}, 30)
+            check_split_end(work / "take.session.json", first, slots, 30)
+            return f"pass {slots}"
+        except Failure:
+            return "fail"
+    def split_end_paused(program_end):
+        # 0.5 s of take 1 paused: its files hold 1.5 s of the 2 s to the split.
+        first = {"host_time_ns": 0, "duration_seconds": program_end,
+                 "pauses": [{"start_seconds": 1.0, "end_seconds": 1.5, "time_seconds": 1.0}],
+                 "files": [{"source": "program", "start_offset_seconds": 0.0, "duration_seconds": program_end}]}
+        try:
+            check_split_end(work / "take.session.json", first, split_slots(first, {"host_time_ns": 2_000_000_000}, 30), 30)
+            return "pass"
+        except Failure:
+            return "fail"
+    cases.update({
+        "split: a paused take ending on the split": (split_end_paused(1.5), "pass"),
+        "split: a paused take a frame past the split": (split_end_paused(1.5 + 1 / 30), "fail"),
+        "split: a late program ending on the split": (split_end(2.0), "pass 60"),
+        "split: a late program one frame past the split": (split_end(61 / 30), "fail"),
+        "split: a take lasting past its split": (split_end(2.0, take_end=61 / 30), "fail"),
     })
     # A stale picture at a pause's resume (#124 re-review B1): 43 frames cut
     # out after slot 99; picture 100 shows a frame 20 behind for every source.
@@ -4713,8 +4772,8 @@ def scenario_win_takes(e, cfg, evidence):
         takes.append((path, manifest))
     require(takes[1][1].get("pauses"), "the pause is missing from the second take's manifest")
     t0 = check_pattern_take(e, *takes[0], cfg, layout, evidence, label="take 1")
-    program = next(f for f in takes[0][1]["files"] if f["source"] == "program")
-    slots = program["frames"] + program["dropped_frames"] - (program.get("repeated_frames") or 0)
+    slots = split_slots(takes[0][1], takes[1][1], cfg["canvas"]["fps"])
+    check_split_end(*takes[0], slots, cfg["canvas"]["fps"])
     check_pattern_take(e, *takes[1], cfg, layout, evidence, t0=(t0 + slots) % pattern_period(cfg["canvas"]["fps"]),
                        label="take 2 (split)")
     evidence.update(t0=t0, first_take_slots=slots)
