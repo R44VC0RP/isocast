@@ -22,9 +22,32 @@ use isocast_client::shared::{SharedController, SharedFrame};
 use isocast_protocol::api::{FrameParams, FramesParams, Method, RpcError, SharedFramesParams};
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 
-/// Whether this OS's engine shares its GPU surfaces with a local window
-/// (`shared_frames`); elsewhere a local window shows its `frames` video.
-const SHARED_SURFACES: bool = cfg!(any(target_os = "macos", windows));
+/// Whether this OS's engine shares its pictures with a local window
+/// (`shared_frames`): GPU surfaces on macOS and Windows, shared memory on
+/// Linux; elsewhere a local window shows its `frames` video.
+const SHARED_SURFACES: bool = cfg!(any(target_os = "macos", windows, target_os = "linux"));
+
+/// Linux's shared frames are pictures in shared memory: copied out as
+/// pixels (the slot goes straight back) and shown as Slint images like the
+/// decoded video they replace, falling back to that video when they can't
+/// be had. Elsewhere they're GPU surfaces shown in place.
+const SHARED_IN_MEMORY: bool = cfg!(target_os = "linux");
+
+/// The size to ask shared frames for, for a monitor `width`×`height`
+/// pixels. GPU surfaces: that size (the daemon scales into them as it
+/// draws). Linux's frames in memory: a width on the video ladder
+/// ([`crate::video::width_step`]) and no height, as the H.264 stream asks,
+/// so the engine draws the picture at that size and copies it as it is
+/// (a scaling pass to the monitor's exact size cost a software GPU three
+/// times the CPU); the window scales it, and a resize changes the ring only
+/// when it crosses a step.
+fn shared_size(width: u32, height: u32) -> (Option<u32>, Option<u32>) {
+    if SHARED_IN_MEMORY {
+        (Some(crate::video::width_step(width)), None)
+    } else {
+        (Some(width.max(16)), Some(height.max(16)))
+    }
+}
 
 /// The most stills a second a remote window asks for (R2's interim
 /// previews: a few, at about 0.1 MB each on the network).
@@ -91,6 +114,23 @@ pub fn unsupported(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<isocast_client::DaemonError>()
         .is_some_and(|e| e.code() == isocast_protocol::api::RpcError::UNSUPPORTED)
+}
+
+/// This engine's shared frames can't be had here, and asking again won't
+/// change that: it doesn't know the method or refuses it, or their memory
+/// couldn't be handed over (another socket namespace, a sandbox). Not a
+/// lost connection or a daemon restarting, which are retried.
+fn shared_unavailable(error: &anyhow::Error) -> bool {
+    use isocast_protocol::api::RpcError;
+    let refused = error
+        .downcast_ref::<isocast_client::DaemonError>()
+        .is_some_and(|e| matches!(e.code(), RpcError::METHOD_NOT_FOUND | RpcError::UNSUPPORTED));
+    refused
+        || error.chain().any(|cause| {
+            let text = cause.to_string();
+            text.contains("could not fetch the shared surfaces")
+                || text.contains("isn't a Linux shared surface service")
+        })
 }
 
 /// What the window gets.
@@ -319,7 +359,8 @@ impl Feed {
         want.width = width;
         want.height = height;
         if let Some(control) = self.control.lock().unwrap().as_ref() {
-            let _ = control.set_size(Some(width), Some(height));
+            let (width, height) = shared_size(width, height);
+            let _ = control.set_size(width, height);
         }
     }
 
@@ -352,8 +393,8 @@ impl Feed {
             let stream = crate::daemon::connect().and_then(|client| {
                 client.shared_frames(SharedFramesParams {
                     target: target.clone(),
-                    max_width: Some(want.width.max(16)),
-                    max_height: Some(want.height.max(16)),
+                    max_width: shared_size(want.width, want.height).0,
+                    max_height: shared_size(want.width, want.height).1,
                     fps: Some(want.fps),
                     slots: None,
                     filtered: false,
@@ -365,7 +406,8 @@ impl Feed {
                 let now = self.want.lock().unwrap().clone();
                 if (now.width, now.height, now.fps) != (want.width, want.height, want.fps) {
                     let control = frames.controller();
-                    control.set_size(Some(now.width), Some(now.height))?;
+                    let (width, height) = shared_size(now.width, now.height);
+                    control.set_size(width, height)?;
                     control.set_fps(now.fps)?;
                 }
                 delay = Duration::from_millis(250);
@@ -376,6 +418,19 @@ impl Feed {
                     // The newest frame: older ones that arrived meanwhile
                     // go straight back to the daemon.
                     if let Some(frame) = frames.newest(Some(Duration::from_millis(250)))? {
+                        #[cfg(target_os = "linux")]
+                        {
+                            let pixels = SharedPixelBuffer::clone_from_slice(
+                                frame.surface().pixels(),
+                                frame.width(),
+                                frame.height(),
+                            );
+                            let revision = frame.revision;
+                            // Copied: the slot goes back now.
+                            drop(frame);
+                            deliver(Incoming::Still(Still { pixels, revision }));
+                        }
+                        #[cfg(not(target_os = "linux"))]
                         deliver(Incoming::Frame(frame));
                     }
                 }
@@ -384,6 +439,15 @@ impl Feed {
             match result {
                 // The target changed: the new one at once.
                 Ok(()) => continue,
+                // Linux: an engine without shared frames (an older one), or
+                // a hand-over that doesn't work here (a sandbox without the
+                // engine's socket namespace): its H.264 video, as before.
+                // Anything else (a daemon restarting, a lost connection) is
+                // retried below, so the new daemon's shared frames are used.
+                Err(error) if SHARED_IN_MEMORY && shared_unavailable(&error) => {
+                    isocast_diagnostics::diagnostic!("info"; "preview: no shared frames ({error:#}); using the engine's video stream");
+                    return self.receive_video(deliver);
+                }
                 Err(error) if unsupported(&error) => {
                     deliver(Incoming::Unavailable(format!("{error:#}")));
                     // Wait for another target (or the end) instead of

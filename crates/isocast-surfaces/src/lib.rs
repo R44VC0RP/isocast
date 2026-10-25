@@ -15,6 +15,11 @@
 //! authenticated named pipes. The client checks the adapter and acknowledges
 //! a frame only after its rendering queue's fence completes.
 //!
+//! Linux shares memory, not GPU memory: each surface is a sealed memfd the
+//! daemon reads its drawn picture back into, handed over once per ring as
+//! descriptors (`SCM_RIGHTS`) through a local socket in the abstract
+//! namespace; the client maps it read-only. No H.264, and no GPU needed.
+//!
 //! On other systems everything here returns an error saying so.
 
 use std::fmt;
@@ -34,17 +39,24 @@ pub use windows::{check_render_queue, dx12_adapter, dx12_adapter_luid};
 #[cfg(all(windows, feature = "wgpu"))]
 pub use windows::{retire, retirement_failed};
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{Exporter, Surface, fetch, host_now};
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod other;
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub use other::{Exporter, Surface, fetch, host_now};
 
 #[cfg(target_os = "macos")]
 pub const TRANSPORT: &str = "iosurface-mach";
 #[cfg(windows)]
 pub const TRANSPORT: &str = "d3d12-named-pipe";
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+pub const TRANSPORT: &str = "memfd-unix";
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub const TRANSPORT: &str = "unsupported";
 
 /// The most surfaces a ring may have.

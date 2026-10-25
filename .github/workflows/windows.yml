@@ -238,7 +238,7 @@ jobs:
       # the six-vCPU arm64 VM separately qualifies strict 720p30 zero drops.
       - name: Synthetic program, ISOs, a media file and a stream (hosted 360p30)
         if: env.MODE == 'full'
-        run: python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only linux_media --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
+        run: python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only linux_media --only linux_shared_frames --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
 
       - name: E2E summary
         if: (always()) && (env.MODE == 'full')

@@ -39,17 +39,17 @@ mod record;
 mod remote;
 mod replay;
 mod roots;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 mod shared_frames;
 mod virtual_camera;
 mod websocket;
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 fn shared_frames(options: shared_frames::Options) -> Result<ExitCode> {
     shared_frames::run(options)
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod shared_frames {
     #[expect(
         dead_code,
@@ -70,9 +70,9 @@ mod shared_frames {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 fn shared_frames(_options: shared_frames::Options) -> Result<ExitCode> {
-    bail!("--shared is available on macOS and Windows; leave it out to watch H.264")
+    bail!("--shared is available on macOS, Windows and Linux; leave it out to watch H.264")
 }
 
 /// Isocast: scene-based recording with per-source ISO files, controlled from

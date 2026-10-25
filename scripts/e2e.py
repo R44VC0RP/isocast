@@ -102,7 +102,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern; win_media plays a real file.
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture", "linux_browser") if sys.platform.startswith("linux") else ()) + (("win_media",) if sys.platform == "win32" else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture", "linux_browser", "linux_shared_frames") if sys.platform.startswith("linux") else ()) + (("win_media",) if sys.platform == "win32" else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -4242,6 +4242,50 @@ def scenario_linux_media(e, cfg, evidence):
             f"files: {[f['source'] for f in manifest['files']]}")
     evidence["clip"] = {"frames": count, "loops": round(seconds / clip_seconds, 2)}
     evidence["t0"] = check_record_take(e, path, manifest, cfg, layout, count, evidence, isos=("a",))
+
+
+def scenario_linux_shared_frames(e, cfg, evidence):
+    """Linux local previews through shared memory (`frames --shared`, memfd
+    slots handed over with SCM_RIGHTS): the engine's readback, direct copy
+    and slot release, checked from the client's own mapping. Two viewers at
+    once (the program as drawn, and scaled to another width), each must get
+    whole pictures, never black or undrawn, and keep getting them after
+    every slot was used (slots come back), on one ring each."""
+    cli = os.environ.get("ISOCAST_E2E_CLI")
+    if not cli:
+        raise Skip("no isocast CLI (--cli) to watch shared frames")
+    w = cfg["canvas"]["width"]
+    e.apply(cfg)
+    e.rpc("engine", {"running": True})
+    time.sleep(1)
+    seconds = 6
+    viewers = [(width, subprocess.Popen(
+        [cli, "frames", "program", "--shared", "--check", "--width", str(width), "--fps", "30",
+         "--seconds", str(seconds), "--json"],
+        env=e.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        for width in (w, max(160, w // 2))]
+    results = {}
+    for width, process in viewers:
+        out, err = process.communicate(timeout=seconds + 30)
+        require(process.returncode == 0, f"frames --shared --width {width} failed: {err.strip()[-400:]}")
+        got = json.loads(out)
+        check = got.get("check") or {}
+        slots = got["slots"]
+        results[width] = {k: got.get(k) for k in ("transport", "width", "height", "slots", "frames", "fps",
+                                                  "lag_ms", "rings", "problems")}
+        results[width]["check"] = {k: check.get(k) for k in ("frames_read_back", "black_frames", "undrawn_frames")}
+        require(got["transport"] == "memfd-unix", f"transport {got['transport']!r}, not memfd-unix")
+        require(got["ok"] and got["ended"] is None, f"width {width}: {got['problems']} (ended: {got['ended']})")
+        require(check.get("black_frames") == 0 and check.get("undrawn_frames") == 0
+                and check.get("frames_read_back") == got["frames"],
+                f"width {width}: pictures read back from shared memory: {check}")
+        # Several times as many frames as slots: each slot came back and
+        # was drawn again, and the stream never stalled on held slots.
+        require(got["frames"] >= max(4 * slots, seconds * 5),
+                f"width {width}: {got['frames']} frames through {slots} slots in {seconds} s")
+        require(len(got["rings"]) == 1 and got["rings"][0]["width"] <= width,
+                f"width {width}: rings {got['rings']}")
+    evidence["shared_frames"] = results
 
 
 LINUX_CAPTURE_SECONDS = 15

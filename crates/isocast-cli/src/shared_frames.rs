@@ -79,7 +79,18 @@ pub fn run(options: Options) -> Result<ExitCode> {
         client
     };
     let mut frames = client.shared_frames(params)?;
-    let gpu = if options.check {
+    // The engine's clock now, as of its reply: frames are timed on it.
+    // (Linux engines keep a clock of their own; elsewhere it's the host's.)
+    let (engine_time, connected) = (frames.info().host_time, Instant::now());
+    let engine_now = || {
+        if cfg!(target_os = "linux") {
+            engine_time + connected.elapsed().as_nanos() as u64
+        } else {
+            isocast_surfaces::host_now()
+        }
+    };
+    // Linux's shared frames are in memory: checked without a GPU.
+    let gpu = if options.check && !cfg!(target_os = "linux") {
         Some(Gpu::new().context("this process could not open the GPU to read frames back")?)
     } else {
         None
@@ -110,11 +121,17 @@ pub fn run(options: Options) -> Result<ExitCode> {
             }
         };
         let at = started.elapsed().as_secs_f64();
-        stats.frame(&frame, at);
+        stats.frame(&frame, at, engine_now());
         if let Some(gpu) = &gpu {
             let points = grid_points(frame.width(), frame.height(), &expected);
             let texture = frame.texture(&gpu.device)?;
             let pixels = read_pixels(gpu, &texture, &points)?;
+            stats.check(&frame, &pixels, &expected, at);
+        }
+        #[cfg(target_os = "linux")]
+        if gpu.is_none() && options.check {
+            let points = grid_points(frame.width(), frame.height(), &expected);
+            let pixels = read_memory(&frame, &points);
             stats.check(&frame, &pixels, &expected, at);
         }
         showing = Some(frame);
@@ -164,14 +181,13 @@ struct Stats {
 }
 
 impl Stats {
-    fn frame(&mut self, frame: &SharedFrame, at: f64) {
+    fn frame(&mut self, frame: &SharedFrame, at: f64, now: u64) {
         self.count += 1;
         self.first.get_or_insert(at);
         if let Some(last) = self.last {
             self.intervals.push((at - last) * 1000.0);
         }
         self.last = Some(at);
-        let now = isocast_surfaces::host_now();
         self.lags.push(now.saturating_sub(frame.time) as f64 / 1e6);
         let (generation, _) = frame.slot();
         if self.rings.last().is_none_or(|ring| ring.0 != generation) {
@@ -234,6 +250,22 @@ fn grid_points(width: u32, height: u32, expected: &[Expected]) -> Vec<(u32, u32)
     points.push(at(0.5, 0.5));
     points.extend(expected.iter().map(|e| at(e.at.0, e.at.1)));
     points
+}
+
+/// Single pixels of a frame in shared memory (Linux), as RGBA.
+#[cfg(target_os = "linux")]
+fn read_memory(frame: &SharedFrame, points: &[(u32, u32)]) -> Vec<[u8; 4]> {
+    let pixels = frame.surface().pixels();
+    let width = frame.width() as usize;
+    points
+        .iter()
+        .map(|&(x, y)| {
+            let at = (y as usize * width + x as usize) * 4;
+            pixels
+                .get(at..at + 4)
+                .map_or([0; 4], |p| [p[0], p[1], p[2], p[3]])
+        })
+        .collect()
 }
 
 /// Read single pixels of `texture` back through the GPU, as RGBA.
@@ -498,9 +530,13 @@ fn report(
         }
         if options.check {
             println!(
-                "Read back {} frames through this process's GPU ({} pixels each): {} black, {} \
-                 not drawn",
+                "Read back {} frames {} ({} pixels each): {} black, {} not drawn",
                 stats.checked,
+                if cfg!(target_os = "linux") {
+                    "from shared memory"
+                } else {
+                    "through this process's GPU"
+                },
                 GRID * GRID,
                 stats.black.len(),
                 stats.undrawn.len()
