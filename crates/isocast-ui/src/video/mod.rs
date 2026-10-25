@@ -36,6 +36,8 @@ mod dxva_frames;
 mod media_foundation;
 #[cfg(target_os = "linux")]
 mod openh264;
+#[cfg(target_os = "linux")]
+mod pw_loop;
 pub mod sound;
 pub mod sync;
 #[cfg(any(windows, target_os = "macos"))]
@@ -189,6 +191,11 @@ pub trait Decoder {
     /// could go in was still in use.
     fn take_skipped(&mut self) -> u32 {
         0
+    }
+    /// The H.264 profile to ask a `frames` stream for: none for the
+    /// engine's default (High), which hardware decoders take.
+    fn frames_profile(&self) -> Option<isocast_protocol::api::H264Profile> {
+        None
     }
 }
 

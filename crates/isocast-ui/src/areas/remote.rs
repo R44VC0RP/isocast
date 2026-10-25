@@ -1750,7 +1750,8 @@ pub fn is_remote(app: &App) -> bool {
 }
 
 /// Ask for files (or a folder) to use on the engine: the system's open
-/// panel for this machine's engine; the engine file browser for another
+/// panel for this machine's engine (on Linux the desktop portal's, else
+/// the engine file browser); the engine file browser for another
 /// computer's (its disk, inside the folders other computers can use).
 /// `done` gets the paths (empty if cancelled), or none where there is no
 /// panel, as [`crate::platform::choose`] answers.
@@ -1759,8 +1760,6 @@ pub fn choose(
     options: Choose,
     done: impl FnOnce(&Rc<App>, Option<Vec<String>>) + 'static,
 ) {
-    // Linux has no open panel of the app's own yet: its engine's file
-    // browser (files_roots, files_list), as for another computer's engine.
     if !is_remote(app) && !cfg!(target_os = "linux") {
         let chosen = crate::platform::choose(options);
         done(app, chosen);
@@ -1778,16 +1777,106 @@ pub fn choose(
     };
     let extensions: Vec<String> = options.types.iter().map(|t| t.to_string()).collect();
     let folders = options.folders;
+    // Linux, this machine's engine: the desktop's open panel (the portal's
+    // FileChooser, asked off the window's thread); without a portal, the
+    // engine's file browser as for another computer's engine.
+    #[cfg(target_os = "linux")]
+    if !is_remote(app) {
+        let fallback: Fallback = Box::new(move |app, done| {
+            browse_engine(app, &title, &prompt, folders, extensions, done)
+        });
+        ask_portal(app, &options, Box::new(done), fallback);
+        return;
+    }
+    browse_engine(app, &title, &prompt, folders, extensions, Box::new(done));
+}
+
+/// What `ask_portal` does without a portal: gets the `done` back.
+#[cfg(target_os = "linux")]
+type Fallback = Box<dyn FnOnce(&Rc<App>, Chosen)>;
+
+/// Linux: ask the desktop's open panel (the portal's FileChooser) on a
+/// thread of its own, then `done` with the paths on the window's thread;
+/// without a portal, `fallback`.
+#[cfg(target_os = "linux")]
+fn ask_portal(_app: &Rc<App>, options: &Choose, done: Chosen, fallback: Fallback) {
+    thread_local! {
+        /// What to do with each portal answer still to come, by ask.
+        static WAITING: std::cell::RefCell<std::collections::HashMap<u64, (Chosen, Fallback)>> =
+            Default::default();
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ask = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    WAITING.with(|waiting| waiting.borrow_mut().insert(ask, (done, fallback)));
+    let (folders, multiple) = (options.folders, options.multiple);
+    let title = if folders {
+        "Choose a Folder"
+    } else {
+        "Choose a File"
+    }
+    .to_string();
+    let prompt = match options.prompt {
+        "" => "Choose".to_string(),
+        prompt => prompt.to_string(),
+    };
+    let types: Vec<String> = options.types.iter().map(|t| t.to_string()).collect();
+    // The answer comes whenever the person closes the panel.
+    std::thread::spawn(move || {
+        let answer = crate::platform::portal_choose(folders, multiple, &title, &prompt, &types);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some((done, fallback)) = WAITING.with(|waiting| waiting.borrow_mut().remove(&ask))
+            else {
+                return;
+            };
+            crate::window::with_app(|app| match answer {
+                Some(paths) => done(app, Some(paths)),
+                None => fallback(app, done),
+            });
+        });
+    });
+}
+
+/// Ask for files on this computer (to read here, not on the engine): the
+/// system's open panel, the desktop portal's on Linux; `done` gets none
+/// where there is no panel, as [`crate::platform::choose`] answers.
+pub fn choose_here(
+    app: &Rc<App>,
+    options: Choose,
+    done: impl FnOnce(&Rc<App>, Option<Vec<String>>) + 'static,
+) {
+    #[cfg(target_os = "linux")]
+    {
+        ask_portal(
+            app,
+            &options,
+            Box::new(done),
+            Box::new(|app, done| done(app, None)),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    done(app, crate::platform::choose(options));
+}
+
+/// The engine file browser (its disk, inside the folders other computers
+/// can use), for `choose`.
+fn browse_engine(
+    app: &Rc<App>,
+    title: &str,
+    prompt: &str,
+    folders: bool,
+    extensions: Vec<String>,
+    done: Chosen,
+) {
     // Its roots first, then the first one listed.
     app.remote.open_browser(
         app,
-        &title,
-        &prompt,
+        title,
+        prompt,
         Vec::new(),
         "",
         folders,
         extensions,
-        Box::new(done),
+        done,
     );
     app.call_as::<FilesRoots>(Method::FilesRoots, |app, result| {
         let remote = &app.remote;

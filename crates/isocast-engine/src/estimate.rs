@@ -1670,8 +1670,9 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
 /// Conservative zero-loss reference across hosted Windows samples (#128).
 /// The highest single passing profile proved unstable across hosts/takes;
 /// this is a qualified workload reference, not this machine's capacity.
-/// Ten seconds headless and twenty with two paused previews: H.264 program
+/// Twenty seconds each headless and with two paused previews: H.264 program
 /// only, two same-sized test-pattern sources and a tone, no ISO or stream.
+/// The same controls also held 36 fps: tested frame-rate reserve, not capacity.
 const SOFTWARE_REFERENCE: (u32, u32, u32) = (320, 180, 30);
 const SOFTWARE_REFERENCE_HOST: &str = "four-vCPU hosted AMD EPYC and Intel Xeon runners, Windows Server 24H2, WARP and Media Foundation software H.264";
 
@@ -1730,8 +1731,9 @@ pub fn software(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
     let basis = format!(
         "assumed: software graphics adapter; advisory program-only reference {reference}, \
          tested on {SOFTWARE_REFERENCE_HOST} with two same-sized test-pattern sources and a tone, \
-         one H.264 program recording, no ISO or stream; zero drops for 10 seconds headless \
-         and 20 seconds with two previews paused. Local capacity is unmeasured; streams, \
+         one H.264 program recording, no ISO or stream; zero drops for 20 seconds headless \
+         and 20 seconds with two previews paused; the same controls also held 36 fps. \
+         Local capacity is unmeasured; streams, \
          ISO files, other codecs and other canvases are not qualified"
     );
     let mut summary = if above {

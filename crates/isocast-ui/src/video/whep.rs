@@ -69,21 +69,16 @@ impl WhepSource {
             .context("could not open a UDP port for the engine's video")?;
         receive_buffer(&socket);
         let local = socket.local_addr()?;
-        let mut config = RtcConfig::new()
+        let config = RtcConfig::new()
             .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
             .clear_codecs()
             .enable_opus(true, false)
-            .enable_h264(true)
             // Don't hold sound back waiting for a lost packet's
             // retransmission (str0m's default waits up to 15 packets, 150 ms:
             // the output then runs short). Opus conceals the gap instead
             // (`Viewer::sound`).
             .set_reordering_size_audio(SOUND_HOLD_BACK);
-        // Constrained High level 5.2 as well as str0m's defaults: the
-        // engine's Macs send it (the SPS agrees with the answer's profile).
-        config
-            .codec_config()
-            .add_h264(102.into(), Some(103.into()), true, 0x640c34);
+        let config = video_codecs(config, cfg!(target_os = "linux"));
         let mut rtc = config.build(Instant::now());
         rtc.add_local_candidate(Candidate::host(local, "udp")?);
         let mut change = rtc.sdp_api();
@@ -250,6 +245,26 @@ impl Source for WhepSource {
     fn set_fps(&mut self, _fps: u32) -> Result<()> {
         Ok(())
     }
+}
+
+/// The H.264 the offer asks for. `baseline_only` (Linux: OpenH264 can't
+/// decode High, whose CABAC with 8x8 transforms smears): Constrained
+/// Baseline 42e01f with packetization-mode 1 and nothing else, since an
+/// engine offered High too sends High. Else str0m's H.264 set plus
+/// Constrained High level 5.2, which the engine's Macs send (the SPS agrees
+/// with the answer's profile).
+fn video_codecs(mut config: RtcConfig, baseline_only: bool) -> RtcConfig {
+    if baseline_only {
+        config
+            .codec_config()
+            .add_h264(96.into(), Some(97.into()), true, 0x42e01f);
+        return config;
+    }
+    config = config.enable_h264(true);
+    config
+        .codec_config()
+        .add_h264(102.into(), Some(103.into()), true, 0x640c34);
+    config
 }
 
 /// Sound packets str0m may hold back for reordering: 30 ms at the engine's
@@ -622,6 +637,48 @@ impl Viewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The H.264 lines (rtpmap and fmtp) of an offer to receive video made
+    /// with `config`.
+    fn h264_lines(config: RtcConfig) -> Vec<String> {
+        let mut rtc = config.build(Instant::now());
+        let mut change = rtc.sdp_api();
+        change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+        let (offer, _) = change.apply().unwrap();
+        let sdp = offer.to_sdp_string();
+        let pts: Vec<String> = sdp
+            .lines()
+            .filter_map(|l| l.strip_prefix("a=rtpmap:"))
+            .filter(|l| l.contains("H264/"))
+            .filter_map(|l| l.split(' ').next().map(str::to_string))
+            .collect();
+        sdp.lines()
+            .filter(|l| pts.iter().any(|pt| l.starts_with(&format!("a=fmtp:{pt} "))))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn linux_offers_only_constrained_baseline() {
+        let lines = h264_lines(video_codecs(RtcConfig::new().clear_codecs(), true));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("profile-level-id=42e01f"), "{lines:?}");
+        assert!(lines[0].contains("packetization-mode=1"), "{lines:?}");
+    }
+
+    #[test]
+    fn macos_and_windows_offer_what_they_did() {
+        let before = {
+            let mut config = RtcConfig::new().clear_codecs().enable_h264(true);
+            config
+                .codec_config()
+                .add_h264(102.into(), Some(103.into()), true, 0x640c34);
+            h264_lines(config)
+        };
+        let lines = h264_lines(video_codecs(RtcConfig::new().clear_codecs(), false));
+        assert_eq!(lines, before);
+        assert!(lines.iter().any(|l| l.contains("640c34")), "{lines:?}");
+    }
 
     #[test]
     fn lost_sound_packets_are_counted_from_rtp_times() {

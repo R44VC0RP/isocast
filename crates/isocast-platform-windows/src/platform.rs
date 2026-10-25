@@ -39,6 +39,7 @@ use crate::{
 #[derive(Clone, Default)]
 pub struct WindowsPlatform {
     device: Arc<Mutex<Option<GraphicsDevice>>>,
+    outputs: Arc<crate::playback::Outputs>,
 }
 
 /// Dropping any native guard stops and joins its capture worker.
@@ -396,7 +397,7 @@ impl Platform for WindowsPlatform {
     type Capture = Capture;
     type Importer = Dx12Importer;
     type Media = Unsupported;
-    type Playback = Unsupported;
+    type Playback = crate::playback::Playback;
     type VideoEncoder = WindowsVideoEncoder;
     type AudioEncoder = MfAacEncoder;
     /// The portable surface type, so the daemon's bound holds; creating one
@@ -834,8 +835,8 @@ impl Platform for WindowsPlatform {
             .map(|(capture, channels)| (Capture::Audio(capture), channels))
     }
 
-    fn play_audio(&self, _device: &str, _render: AudioRender) -> Result<(Unsupported, String)> {
-        Err(unsupported("audio playback"))
+    fn play_audio(&self, device: &str, render: AudioRender) -> Result<(Self::Playback, String)> {
+        crate::playback::play(&self.outputs, device, render)
     }
 
     fn capture_browser(

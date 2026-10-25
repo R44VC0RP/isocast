@@ -61,8 +61,8 @@ fn reduce_motion() -> bool {
 /// What to ask for in the open panel.
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(
-    not(target_os = "macos"),
-    expect(dead_code, reason = "native file panels are not implemented yet")
+    windows,
+    expect(dead_code, reason = "Windows has no native file panel yet")
 )]
 pub struct Choose<'a> {
     /// A folder instead of files.
@@ -151,6 +151,122 @@ pub fn choose(options: Choose) -> Option<Vec<String>> {
 #[cfg(not(target_os = "macos"))]
 pub fn choose(_options: Choose) -> Option<Vec<String>> {
     None
+}
+
+/// Ask for files (or a folder) with the desktop's open panel, through the
+/// xdg-desktop-portal FileChooser: their paths (empty if cancelled), or
+/// none if there's no portal to ask (no xdg-desktop-portal, or one
+/// without a FileChooser). Blocks until the person answers: call it off
+/// the window's thread.
+#[cfg(target_os = "linux")]
+pub fn portal_choose(
+    folders: bool,
+    multiple: bool,
+    title: &str,
+    prompt: &str,
+    types: &[String],
+) -> Option<Vec<String>> {
+    use ashpd::desktop::file_chooser::{FileChooserProxy, FileFilter, SelectedFiles};
+
+    // One runtime for every ask: the portal binding keeps its D-Bus
+    // connection (and the tasks driving it) from the first, so a runtime
+    // per ask left the second waiting for ever.
+    static RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
+        std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("portal")
+            .enable_all()
+            .build()
+            .inspect_err(|error| {
+                isocast_diagnostics::diagnostic!("warn"; "open panel: no runtime for the portal: {error}");
+            })
+            .ok()
+    });
+    let runtime = runtime.as_ref()?;
+    // A portal that's there but stuck (its backend never starts) would
+    // leave the open panel waiting for ever: ask it its version first.
+    let probe = runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(3), FileChooserProxy::new()).await
+    });
+    match probe {
+        Ok(Ok(proxy)) if proxy.version() > 0 => {}
+        Ok(Ok(_)) => {
+            isocast_diagnostics::diagnostic!("info"; "open panel: the desktop portal has no file chooser; using the engine's file browser");
+            return None;
+        }
+        Ok(Err(error)) => {
+            isocast_diagnostics::diagnostic!("info"; "open panel: no desktop portal ({error}); using the engine's file browser");
+            return None;
+        }
+        Err(_) => {
+            isocast_diagnostics::diagnostic!("warn"; "open panel: the desktop portal didn't answer within 3 s; using the engine's file browser");
+            return None;
+        }
+    }
+    let result = runtime.block_on(async {
+        let mut request = SelectedFiles::open_file()
+            .title(title)
+            .accept_label(prompt)
+            .modal(true)
+            .multiple(multiple)
+            .directory(folders);
+        if !folders && !types.is_empty() {
+            // Globs match case as written: both cases of each extension.
+            let mut filter = FileFilter::new("Supported files");
+            for extension in types {
+                filter = filter
+                    .glob(&format!("*.{}", extension.to_lowercase()))
+                    .glob(&format!("*.{}", extension.to_uppercase()));
+            }
+            request = request.filter(filter);
+        }
+        request.send().await?.response()
+    });
+    match result {
+        Ok(files) => Some(
+            files
+                .uris()
+                .iter()
+                .filter_map(|uri| file_path(uri.as_str()))
+                .collect(),
+        ),
+        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => Some(Vec::new()),
+        Err(error) => {
+            isocast_diagnostics::diagnostic!("info"; "open panel: no desktop portal ({error}); using the engine's file browser");
+            None
+        }
+    }
+}
+
+/// A `file://` URI's path, percent-decoded (none for another scheme).
+#[cfg(any(target_os = "linux", test))]
+fn file_path(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    // An authority (normally empty, or localhost) before the path.
+    let path = &rest[rest.find('/')?..];
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (
+            bytes[i],
+            bytes.get(i + 1).copied().and_then(hex),
+            bytes.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(high), Some(low)) => {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            (byte, _, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Ask where to save a file with the system's save panel (`name`
@@ -399,5 +515,26 @@ pub(crate) unsafe fn rust_string(string: &objc2::runtime::AnyObject) -> String {
         std::ffi::CStr::from_ptr(utf8)
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn portal_uris_become_paths() {
+        assert_eq!(
+            super::file_path("file:///home/dax/My%20Videos/clip%C3%A9.mp4").as_deref(),
+            Some("/home/dax/My Videos/clipé.mp4")
+        );
+        assert_eq!(
+            super::file_path("file://localhost/tmp/a").as_deref(),
+            Some("/tmp/a")
+        );
+        assert_eq!(super::file_path("https://example.com/a"), None);
+        // A stray percent stays as it is.
+        assert_eq!(
+            super::file_path("file:///tmp/100%").as_deref(),
+            Some("/tmp/100%")
+        );
     }
 }

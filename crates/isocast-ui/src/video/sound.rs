@@ -7,7 +7,9 @@
 //!
 //! Core Audio's default output unit on macOS (its render timestamp's host
 //! time says when the buffer plays), WASAPI shared mode on Windows (the
-//! samples already queued plus the stream's latency).
+//! samples already queued plus the stream's latency), a PipeWire playback
+//! stream on Linux (the graph cycle's time plus the stream's delay to the
+//! device and what it has queued).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -294,26 +296,46 @@ impl Sound {
         self.lead.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6
     }
 
-    /// How the output has kept to the queue's times (for the log).
+    /// How the output has kept to the queue's times (for the log). The
+    /// queue is held only to copy its counts: formatting under the lock
+    /// made the output miss a buffer now and then.
     pub fn report(&self) -> String {
-        let mut queue = self.lock();
-        let peak = std::mem::take(&mut queue.peak);
+        let (
+            on_time,
+            resyncs,
+            slipped,
+            underruns,
+            last_short,
+            restarts,
+            last_restart,
+            queued,
+            peak,
+        ) = {
+            let mut queue = self.lock();
+            (
+                queue.on_time,
+                queue.resyncs,
+                queue.slipped,
+                queue.underruns,
+                queue.last_short,
+                queue.restarts,
+                queue.last_restart,
+                queue.samples.len(),
+                std::mem::take(&mut queue.peak),
+            )
+        };
         format!(
             "sound: {} buffers on time (within {:.0} ms), {} resynced, {} frames slipped for drift, {} ran short (last: {}), {} restarts (last {} ms off), {} missed while busy, {:.0} ms queued, peak {:.0} dBFS",
-            queue.on_time,
+            on_time,
             TOLERANCE * 1e3,
-            queue.resyncs,
-            queue.slipped,
-            queue.underruns,
-            queue
-                .last_short
-                .map_or_else(|| "none".to_string(), |short| short.to_string()),
-            queue.restarts,
-            queue
-                .last_restart
-                .map_or_else(|| "none".to_string(), |ms| format!("{ms:.1}")),
+            resyncs,
+            slipped,
+            underruns,
+            last_short.map_or_else(|| "none".to_string(), |short| short.to_string()),
+            restarts,
+            last_restart.map_or_else(|| "none".to_string(), |ms| format!("{ms:.1}")),
             self.misses.load(std::sync::atomic::Ordering::Relaxed),
-            (queue.samples.len() / CHANNELS) as f64 / f64::from(RATE) * 1e3,
+            (queued / CHANNELS) as f64 / f64::from(RATE) * 1e3,
             20.0 * peak.max(1e-6).log10()
         )
     }
@@ -721,7 +743,376 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+mod platform {
+    //! As isocast-platform-linux's monitoring (src/playback.rs): every
+    //! PipeWire object on one owned worker running its main loop, entered
+    //! for the worker's whole life ([`WorkerLoop`]: a loop entered and left
+    //! per iteration let PipeWire run the stream's callbacks on its data
+    //! thread in between, racing the worker's state); the stream has no
+    //! RT_PROCESS, so the render callback runs on that worker, without
+    //! allocating or waiting (the queue is only tried).
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Context, Result, anyhow, bail};
+    use pipewire as pw;
+    use pw::properties::properties;
+    use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
+    use pw::spa::pod::Pod;
+    use pw::{spa, stream::StreamState};
+
+    use super::super::pw_loop::WorkerLoop;
+    use super::{CHANNELS, RATE, Render};
+
+    const FRAME_BYTES: usize = CHANNELS * 4;
+    /// The most frames one buffer is filled with (PipeWire's largest
+    /// quantum).
+    const MAX_FRAMES: usize = 8192;
+    /// The quantum asked for: about 10 ms, as WASAPI's period.
+    const LATENCY: &str = "512/48000";
+    const POLL: Duration = Duration::from_millis(20);
+    /// How long without an output before saying so (once) and connecting
+    /// the stream again, so the session manager looks for one again (it
+    /// doesn't link a waiting stream when it starts later); it plays when
+    /// one comes.
+    const NO_OUTPUT: Duration = Duration::from_secs(5);
+
+    /// A PipeWire playback stream on the default output; dropping it stops
+    /// and joins its worker.
+    pub struct Output {
+        cancel: Arc<AtomicBool>,
+        /// Cleared when the worker ends on its own (the stream failed or
+        /// PipeWire went away).
+        alive: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for Output {
+        fn drop(&mut self) {
+            self.cancel.store(true, Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    impl Output {
+        pub fn alive(&self) -> bool {
+            self.alive.load(Ordering::Acquire)
+        }
+
+        /// Returns once the stream is made and connecting (no PipeWire at
+        /// all is an error); an output may come later.
+        pub fn start(render: Render) -> Result<Self> {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let alive = Arc::new(AtomicBool::new(true));
+            let (ready_tx, ready) = mpsc::sync_channel(1);
+            let worker = thread::Builder::new()
+                .name("remote sound".into())
+                .spawn({
+                    let (cancel, alive) = (cancel.clone(), alive.clone());
+                    move || {
+                        let mut started = false;
+                        let result = run(render, &cancel, &ready_tx, &mut started);
+                        alive.store(false, Ordering::Release);
+                        if let Err(error) = result {
+                            if started {
+                                if !cancel.load(Ordering::Acquire) {
+                                    isocast_diagnostics::diagnostic!("warn"; "video: the sound output stopped: {error:#}");
+                                }
+                            } else {
+                                let _ = ready_tx.send(Err(error));
+                            }
+                        }
+                    }
+                })
+                .context("could not start the sound thread")?;
+            let output = Self {
+                cancel,
+                alive,
+                worker: Some(worker),
+            };
+            match ready.recv_timeout(Duration::from_secs(10)) {
+                Ok(Ok(())) => Ok(output),
+                Ok(Err(error)) => Err(error),
+                Err(_) => bail!("PipeWire didn't start a sound stream within 10 seconds"),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Status {
+        streaming: bool,
+        /// Disconnected on purpose, to connect again.
+        reconnecting: bool,
+        /// Streamed since the last check (an output came, so losing it
+        /// again warns again).
+        played: bool,
+        error: Option<String>,
+    }
+
+    struct PlayData {
+        render: Render,
+        status: Rc<RefCell<Status>>,
+        /// Interleaved stereo, `MAX_FRAMES` long, made once.
+        scratch: Vec<f32>,
+    }
+
+    fn run(
+        render: Render,
+        cancel: &AtomicBool,
+        ready: &mpsc::SyncSender<Result<()>>,
+        started: &mut bool,
+    ) -> Result<()> {
+        pw::init();
+        let props = properties! {
+            "media.type" => "Audio",
+            "media.category" => "Playback",
+            "media.role" => "Movie",
+            "node.name" => "isocast.remote",
+            "node.description" => "Isocast remote program",
+            "node.latency" => LATENCY,
+        };
+        // First made, last dropped: everything below is freed while the
+        // loop is still entered.
+        let worker = WorkerLoop::new()?;
+        let context = pw::context::ContextRc::new(worker.main_loop(), None)?;
+        let core = context
+            .connect_rc(None)
+            .context("no PipeWire to play sound through")?;
+        let status = Rc::new(RefCell::new(Status::default()));
+        let errors = status.clone();
+        let _core_listener = core
+            .add_listener_local()
+            .error(move |_, _, _, message| {
+                errors.borrow_mut().error = Some(message.to_owned());
+            })
+            .register();
+        // Disconnected and drained before it's freed; its listener (made
+        // after it) goes first.
+        let stream = worker.stream(pw::stream::StreamBox::new(
+            &core,
+            "Isocast remote program",
+            props,
+        )?);
+        let data = PlayData {
+            render,
+            status: status.clone(),
+            scratch: vec![0.0; MAX_FRAMES * CHANNELS],
+        };
+        let _listener = stream
+            .add_local_listener_with_user_data(data)
+            .state_changed(|_, data, _, state| match state {
+                StreamState::Error(error) => data.status.borrow_mut().error = Some(error),
+                StreamState::Unconnected => {
+                    let mut status = data.status.borrow_mut();
+                    if !status.reconnecting {
+                        status.error = Some("the sound stream disconnected".into());
+                    }
+                }
+                StreamState::Streaming => {
+                    let mut status = data.status.borrow_mut();
+                    status.streaming = true;
+                    status.played = true;
+                    status.reconnecting = false;
+                }
+                // No output linked (none, or between devices).
+                StreamState::Paused => {
+                    let mut status = data.status.borrow_mut();
+                    status.streaming = false;
+                    status.reconnecting = false;
+                }
+                // Connected again (states come in order, after the
+                // disconnect's Unconnected).
+                StreamState::Connecting => data.status.borrow_mut().reconnecting = false,
+            })
+            .process(fill)
+            .register()?;
+        let mut format = AudioInfoRaw::new();
+        format.set_format(AudioFormat::F32LE);
+        format.set_rate(RATE);
+        format.set_channels(CHANNELS as u32);
+        let mut position = [0; spa::param::audio::MAX_CHANNELS];
+        position[0] = spa::sys::SPA_AUDIO_CHANNEL_FL;
+        position[1] = spa::sys::SPA_AUDIO_CHANNEL_FR;
+        format.set_position(position);
+        let object = spa::pod::Object {
+            type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+            id: spa::param::ParamType::EnumFormat.as_raw(),
+            properties: format.into(),
+        };
+        let bytes = spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &spa::pod::Value::Object(object),
+        )
+        .map_err(|error| anyhow!("serializing the PipeWire sound format: {error:?}"))?
+        .0
+        .into_inner();
+        let connect = || -> Result<()> {
+            let pod = Pod::from_bytes(&bytes).context("invalid PipeWire sound format")?;
+            stream.connect(
+                spa::utils::Direction::Output,
+                None,
+                pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+                &mut [pod],
+            )?;
+            Ok(())
+        };
+        connect()?;
+        ready.send(Ok(())).context("the sound's caller went away")?;
+        *started = true;
+        let mut since = Instant::now();
+        let mut said = false;
+        while !cancel.load(Ordering::Acquire) {
+            worker.iterate(POLL)?;
+            let mut state = status.borrow_mut();
+            if let Some(error) = state.error.take() {
+                bail!("{error}");
+            }
+            if std::mem::take(&mut state.played) {
+                said = false;
+            }
+            if state.streaming {
+                since = Instant::now();
+            }
+            if !state.streaming && since.elapsed() > NO_OUTPUT {
+                if !said {
+                    said = true;
+                    isocast_diagnostics::diagnostic!("warn"; "video: no sound output to play the engine's program through; it plays once one is there");
+                }
+                state.reconnecting = true;
+                drop(state);
+                stream.disconnect()?;
+                connect()?;
+                since = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
+    /// When the first sample of the buffer being filled reaches the
+    /// output: the graph cycle's time plus the stream's delay to the device
+    /// and what its resampler holds. Without RT_PROCESS this buffer likely
+    /// plays about a quantum (~10 ms) later than that, within the queue's
+    /// tolerance.
+    fn plays(stream: &pw::stream::Stream, frames_quantum: usize) -> Instant {
+        let now = Instant::now();
+        let fallback = now + Duration::from_secs_f64(frames_quantum as f64 / f64::from(RATE));
+        let Ok(time) = stream.time() else {
+            return fallback;
+        };
+        let rate = time.rate();
+        if time.now() <= 0 || rate.denom == 0 {
+            return fallback;
+        }
+        let mut clock = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a valid timespec; CLOCK_MONOTONIC is Instant's clock.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut clock) };
+        let mono = clock.tv_sec * 1_000_000_000 + clock.tv_nsec;
+        let delay = time.delay() as f64 * f64::from(rate.num) / f64::from(rate.denom);
+        let buffered = time.buffered() as f64 / f64::from(RATE);
+        let since_cycle = (mono - time.now()).max(0) as f64 / 1e9;
+        let ahead = (delay + buffered - since_cycle).clamp(0.0, 1.0);
+        now + Duration::from_secs_f64(ahead)
+    }
+
+    /// Fill one buffer: as many frames as PipeWire asks for (its quantum),
+    /// bounded by the buffer and the scratch.
+    fn fill(stream: &pw::stream::Stream, data: &mut PlayData) {
+        let Some(mut buffer) = stream.dequeue_buffer() else {
+            return;
+        };
+        let requested = usize::try_from(buffer.requested()).unwrap_or(usize::MAX);
+        let Some(first) = buffer.datas_mut().first_mut() else {
+            return;
+        };
+        let frames = 'fill: {
+            let Some(bytes) = first.data() else {
+                break 'fill 0;
+            };
+            let room = (bytes.len() / FRAME_BYTES).min(MAX_FRAMES);
+            let frames = if requested == 0 {
+                room
+            } else {
+                requested.min(room)
+            };
+            let samples = &mut data.scratch[..frames * CHANNELS];
+            (data.render)(samples, plays(stream, frames));
+            for (out, sample) in bytes[..frames * FRAME_BYTES]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(samples.iter())
+            {
+                let sample = if sample.is_finite() { *sample } else { 0.0 };
+                *out = sample.to_le_bytes();
+            }
+            frames
+        };
+        let chunk = first.chunk_mut();
+        *chunk.offset_mut() = 0;
+        *chunk.stride_mut() = FRAME_BYTES as i32;
+        *chunk.size_mut() = (frames * FRAME_BYTES) as u32;
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        /// The output for a second, with every render recording the name of
+        /// the thread it ran on.
+        fn render_threads() -> Vec<Option<String>> {
+            let threads = Arc::new(Mutex::new(Vec::new()));
+            let seen = threads.clone();
+            let output = super::Output::start(Box::new(move |out: &mut [f32], _plays: Instant| {
+                out.fill(0.0);
+                seen.lock()
+                    .unwrap()
+                    .push(std::thread::current().name().map(str::to_string));
+            }))
+            .expect("a running PipeWire");
+            std::thread::sleep(Duration::from_secs(1));
+            drop(output);
+            Arc::try_unwrap(threads).unwrap().into_inner().unwrap()
+        }
+
+        // Needs a running PipeWire with an output sink (the Linux VM):
+        // `cargo test -p isocast-ui -- --ignored sound_renders_on_the_worker_thread`.
+        #[test]
+        #[ignore = "needs a running PipeWire session with a sink"]
+        fn sound_renders_on_the_worker_thread() {
+            let threads = render_threads();
+            assert!(
+                threads.len() > 10,
+                "rendered {} times: needs a PipeWire sink to drive it",
+                threads.len()
+            );
+            let off: Vec<_> = threads
+                .iter()
+                .filter(|name| name.as_deref() != Some("remote sound"))
+                .collect();
+            assert!(
+                off.is_empty(),
+                "{} of {} renders ran off the worker thread: {:?}",
+                off.len(),
+                threads.len(),
+                off.first()
+            );
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod platform {
     pub struct Output;
 

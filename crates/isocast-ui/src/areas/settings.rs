@@ -2500,9 +2500,9 @@ impl Settings {
 
     /// Ask for a setup file (TOML or JSON) and make it the live setup.
     fn open_setup_file(&self, app: &Rc<App>) {
-        if let Some(path) = choose_file(app, &["toml", "json"], "Open") {
-            self.open_setup_path(app, &path);
-        }
+        choose_file(app, &["toml", "json"], "Open", |app, path| {
+            app.settings.open_setup_path(app, &path)
+        });
     }
 
     /// Make the setup file at `path` the live setup.
@@ -2525,9 +2525,9 @@ impl Settings {
             app.wizard.open_obs(app);
             return;
         }
-        if let Some(path) = choose_file(app, &["json"], "Import") {
-            self.import_obs_path(app, &path);
-        }
+        choose_file(app, &["json"], "Import", |app, path| {
+            app.settings.import_obs_path(app, &path)
+        });
     }
 
     /// Import the OBS scene collection at `path` as the live setup.
@@ -3177,13 +3177,24 @@ fn choose_folder(app: &Rc<App>, done: impl FnOnce(&Rc<App>, String) + 'static) {
     });
 }
 
-fn choose_file(app: &Rc<App>, types: &[&str], prompt: &str) -> Option<String> {
-    let chosen = platform::choose(Choose {
+/// Ask for a file on this computer (a setup to read here), then `done`
+/// with its path.
+fn choose_file(
+    app: &Rc<App>,
+    types: &[&str],
+    prompt: &str,
+    done: impl FnOnce(&Rc<App>, String) + 'static,
+) {
+    let options = Choose {
         types,
         prompt,
         ..Choose::default()
+    };
+    crate::areas::remote::choose_here(app, options, move |app, chosen| {
+        if let Some(path) = first_chosen(app, chosen) {
+            done(app, path);
+        }
     });
-    first_chosen(app, chosen)
 }
 
 fn first_chosen(app: &Rc<App>, chosen: Option<Vec<String>>) -> Option<String> {

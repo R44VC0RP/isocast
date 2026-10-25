@@ -16,6 +16,21 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Windows gaps:** CPU and resident RAM are still above OBS. Ryan's targets: at most half OBS's CPU, RAM below OBS,
   faster first preview, stop under 20 ms, zero drops. Missing: scaled streaming, replay buffer, media files, NLE XML
   export (refused; OTIO works). Windows work is tracked in #105 and its follow-up issues.
+- **Windows monitoring (2026-10-24):** WASAPI shared/event-driven output on a dedicated MMCSS Audio worker
+  (the same class as capture; monitoring must not outrank recording);
+  cached endpoint discovery keeps device startup off recording audio ingress. `devices.audio_outputs` lists outputs;
+  id/name selection and default following are supported. Exon-desk proof: 130 seconds of gap-free loopback,
+  mid-take enable and a second-output switch; 160-second program + two ISOs each retained 4,800 frames and
+  160 beeps with zero audio dropouts. Both outputs used 30 ms buffers. Hosted Windows verifies the explicit
+  no-output error before skipping playback. Physical unplug/default-change recovery is implemented but unqualified;
+  recovery diagnostics name the current endpoint, while monitor status retains the initially resolved name.
+  **System-audio caveat:** starting Windows endpoint-loopback capture while any source monitors is refused:
+  the error mentions `exclude_own=false`, but that is an internal argument, not a user setting. Turn off
+  source monitoring before starting system-audio capture and leave it off for the take. Enabling monitoring
+  mid-take does not reopen the existing loopback capture; monitoring on the captured default output is then
+  recorded too (duplicate audio/echo, potentially feedback). Today, use source monitoring without system-audio
+  capture, or capture system audio with monitoring off. Selecting another monitoring output does not bypass
+  the startup refusal. The earlier 130-second hardware proof predates the Audio-class/startup review fixes.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
@@ -313,10 +328,12 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   320×180@30 (2026-10-24), advisory rather than local capacity. The preview CI gate
   uses this fixed reference, not the highest single 10s passing profile: five hosted
   baseline samples lost frames at 270p twice and 240p once, while 180p headless passed
-  all five. Five fresh hosted samples (AMD EPYC and Intel Xeon) each passed 300/300
-  headless and 600/600 preview-take frames at 180p with zero loss. The earlier main
-  failure lost one of 600 preview-take frames at 240p. This is a bounded qualification,
-  not proof of a zero long-run flake rate.
+  all five. Matched-duration qualification on five fresh hosted AMD EPYC/Intel Xeon
+  runners passed 20s headless and 20s with two paused shared previews: 600/600 frames
+  per take at 180p30, then 720/720 at 180p36, with zero loss across all 13,200 frames.
+  That measures 20% additional frame-rate reserve, not resolution or machine capacity;
+  the reference stays 320×180@30. The earlier main failure lost one of 600 preview-take
+  frames at 240p. This is bounded qualification, not proof of a zero long-run flake rate.
   Zero drops/repeats/audio loss and pause/resume checks remain strict. Evidence:
   windows-preview-flake scratch/REPORT.md; earlier history: windows-perf scratch/issue128/REPORT.md.
 

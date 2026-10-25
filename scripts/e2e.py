@@ -97,7 +97,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern (Windows has no media files yet).
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery", "linux_media", "linux_capture") if sys.platform.startswith("linux") else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture") if sys.platform.startswith("linux") else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -4247,6 +4247,44 @@ def scenario_linux_recovery(e, cfg, evidence):
     fragment_recovery(e, cfg, evidence)
 
 
+def scenario_win_monitor(e, cfg, evidence):
+    """Open monitoring mid-take without interrupting recorded audio. Hosted
+    Windows has no audio endpoint: exercise the real open and require its
+    explicit no-output error before reporting the hardware portion skipped."""
+    if not WINDOWS:
+        raise Skip("Windows WASAPI monitoring")
+    outputs = e.rpc("devices")["audio_outputs"]
+    evidence["outputs"] = outputs
+    cfg = setup(e.root, "h264", width=320, height=180, fps=30)
+    e.apply(cfg)
+    started = e.rpc("start", {"seconds": 8})
+    time.sleep(1)
+    cfg["sources"][-1]["audio"] = {"monitor": "monitor_and_output"}
+    before = time.monotonic()
+    e.apply(cfg)
+    evidence["enable_ms"] = (time.monotonic() - before) * 1000
+    monitor = until(lambda: (e.rpc("status").get("live") or {}).get("monitor"),
+                    seconds=5, description="monitor open result")
+    evidence["monitor"] = monitor
+    if outputs:
+        require(not monitor.get("error"), f"monitor could not open: {monitor}")
+        monitor = until(lambda: (lambda m: m if m and m["frames"] > RATE else None)(
+            (e.rpc("status").get("live") or {}).get("monitor")),
+            seconds=5, description="WASAPI requesting monitor audio")
+        evidence["playing"] = monitor
+    else:
+        require("no output device" in (monitor.get("error") or ""),
+                f"missing explicit no-output error: {monitor}")
+    path = Path(started["manifest"])
+    manifest = until(lambda: finished(path), seconds=30, description="monitor take finalization")
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder after monitor take")
+    # Every whole-second beep remains in the recording, including the one
+    # during device startup; use the real decoded samples, not only counters.
+    evidence["files"] = check_take(path, manifest, sync=True, evidence=evidence)
+    if not outputs:
+        raise Skip("no output device: real WASAPI open returned the expected error; mid-take recording audio verified")
+
+
 def scenario_win_preview_recording(e, cfg, evidence):
     """Qualify the conservative reference, then protect it from previews.
     Zero losses even under --hosted; paused consumers must survive and resume.
@@ -4295,7 +4333,7 @@ def scenario_win_preview_recording(e, cfg, evidence):
         # Retain all counters before strict media validation can fail; never
         # turn an overloaded headless take into a pass.
         file, facts = manifest_file(path, manifest, "program")
-        result["files"] = [check_file(file, duration=seconds, fps=30,
+        result["files"] = [check_file(file, duration=seconds, fps=profile["fps"],
                                      dimensions=(profile["width"], profile["height"]))]
         require(facts["frames"] == result["files"][0]["frames"], "program manifest/decoded frame mismatch")
         check_loss(result["loss"][0], 0)
@@ -4309,17 +4347,19 @@ def scenario_win_preview_recording(e, cfg, evidence):
     reference_warning_seen = False
     for width, height in ((1280, 720), (960, 540), (640, 360), (480, 270), (426, 240), (320, 180)):
         cfg = setup(e.root, "h264", width=width, height=height, fps=30)
+        # The gated reference has matched-duration headless/preview controls.
+        seconds = 20 if (width, height) == reference else 10
         cfg["scenes"].append({"id": "standby", "name": "Standby", "items": [
             {"source": "bars2", "rect": {"x": 0, "y": 0, "width": width, "height": height}}]})
         e.apply(cfg)
-        case = {"profile": cfg["canvas"].copy(), "status": "RUNNING", "samples": []}
+        case = {"profile": cfg["canvas"].copy(), "seconds": seconds, "status": "RUNNING", "samples": []}
         profiles.append(case)
         within_reference = "not a capacity guarantee" in e.rpc("estimate_capacity", {})["summary"]
         require(within_reference == ((width, height) == reference),
                 "estimate reference disagrees with the gated profile")
         watch = Watch(e, ["warning", "started"], stop_after="started")
         try:
-            baseline_start = e.rpc("start", {"seconds": 10})
+            baseline_start = e.rpc("start", {"seconds": seconds})
             until(lambda: watch.of("started"), 10, "start event after capacity warning")
             events = list(watch.events)
             case["start_events"] = events
@@ -4351,7 +4391,7 @@ def scenario_win_preview_recording(e, cfg, evidence):
 
         baseline = until(baseline_finished, 45, "headless qualification take", interval=.25)
         try:
-            check_program(baseline_path, baseline, 10, case["profile"], case)
+            check_program(baseline_path, baseline, seconds, case["profile"], case)
         except Failure as exc:
             case.update(status="FAIL", reason=str(exc))
         else:
