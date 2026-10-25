@@ -1,0 +1,48 @@
+Isocast for Debian and Ubuntu
+=============================
+
+H.264 (OpenH264, from Cisco)
+----------------------------
+Isocast records, streams and previews H.264 with OpenH264, which this
+package does not contain: Cisco's patent licence covers only Cisco's own
+binary, downloaded by each user. Run, as yourself (not root):
+
+    isocast-openh264-install
+
+It downloads Cisco's OpenH264 2.6.0 for your architecture from
+https://ciscobinary.openh264.org over HTTPS, checks its SHA-256 and puts it
+in ~/.local/lib/isocast. It is Cisco's binary, under Cisco's licence
+(CISCO_H264_LICENSE.txt in this folder). OpenH264 Video Codec provided by
+Cisco Systems, Inc.
+
+You control it: `isocast-openh264-install --remove` turns it off (removes
+only Cisco's library) and `isocast-openh264-install` turns it on again.
+Without it, Isocast still starts, but H.264 recording, streaming and live
+previews are off; `isocast doctor` says so and names this command.
+
+Removing the package
+--------------------
+`apt remove isocast` and `apt purge isocast` leave every user's data alone:
+recordings (~/Videos/Isocast), settings (~/.local/share/isocast) and the
+OpenH264 each user installed (~/.local/lib/isocast; remove it with
+`isocast-openh264-install --remove` first, or delete that folder).
+
+Debian 12 (bookworm)
+--------------------
+Isocast's Linux capture needs PipeWire 1.0.5 or newer; bookworm has 0.3.65,
+so the Debian 12 package depends on PipeWire from bookworm-backports.
+Install that first, then the package:
+
+    echo 'deb http://deb.debian.org/debian bookworm-backports main' |
+      sudo tee /etc/apt/sources.list.d/backports.list
+    sudo apt update
+    sudo apt install -t bookworm-backports libpipewire-0.3-0 pipewire wireplumber
+    sudo apt install ./isocast_*_debian12_*.deb
+
+Coming from the tarball
+-----------------------
+If you installed Isocast from the isocast-linux tarball before, remove that
+copy first: its ~/.local/bin/isocast and isocast-ui come before /usr/bin on
+your PATH. `~/.local/lib/isocast/install.sh --uninstall` removes it (and its
+OpenH264; run isocast-openh264-install again afterwards). Recordings and
+settings stay.

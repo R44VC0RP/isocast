@@ -1,0 +1,27 @@
+#!/bin/sh
+# Load the AppArmor profile that lets isocast-browser (the browser source
+# helper) keep WebKit's sandbox where unprivileged user namespaces are
+# restricted (Ubuntu 24.04). Only when AppArmor is enabled; a failure to
+# load leaves browser sources working without the sandbox, never a failed
+# install. Safe to run again (upgrade, reinstall).
+set -e
+profile=/etc/apparmor.d/isocast-browser
+
+apparmor_on() {
+  command -v apparmor_parser >/dev/null 2>&1 || return 1
+  if command -v aa-enabled >/dev/null 2>&1; then
+    aa-enabled --quiet 2>/dev/null
+  else
+    [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = Y ]
+  fi
+}
+
+case "$1" in
+configure)
+  if [ -f "$profile" ] && apparmor_on; then
+    apparmor_parser -r -T -W "$profile" ||
+      echo "isocast: couldn't load the AppArmor profile $profile; browser sources run without WebKit's sandbox" >&2
+  fi
+  ;;
+esac
+exit 0

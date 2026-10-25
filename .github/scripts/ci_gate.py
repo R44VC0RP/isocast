@@ -64,8 +64,8 @@ PATH_RULES = [
      r"platform-credentials|platform-stub|openh264)/.*", {"shared"}, "shared crates"),
     (r"crates/isocast-platform-contracts/.*", {"shared", "contracts"}, "platform contracts"),
     (r"(examples|wit)/.*", {"shared"}, "plugins"),
-    (r"packaging/linux/.*", {"linux"}, "Linux packaging"),
-    (r"scripts/(package-linux\.sh|linux-[^/]*)", {"linux"}, "Linux scripts"),
+    (r"packaging/(linux|deb)/.*", {"linux"}, "Linux packaging"),
+    (r"scripts/(package-linux\.sh|package-deb\.sh|linux-[^/]*)", {"linux"}, "Linux scripts"),
     (r"scripts/windows/.*", {"windows"}, "Windows packaging"),
     (r"scripts/(windows-[^/]*|oracle-windows\.sh)", {"windows"}, "Windows scripts"),
     (r"scripts/(e2e\.py|pacing\.py|pacing-probe\.m)", {"e2e"}, "the e2e harness"),
@@ -106,6 +106,9 @@ JOB_RULES = {
         # The only job that compiles isocast-ui (and its dependencies' Linux
         # paths) on Linux: shared and render changes need it too.
         "linux_app": ({"all", "ui", "render", "shared", "linux"}, "Linux app and tarball"),
+        # Built from the same code as the app and tarball (Ubuntu's from the
+        # tarball itself), so the same changes need them.
+        "deb": ({"all", "ui", "render", "shared", "linux"}, "Linux .deb packages and their install tests"),
         "win_build": ({"all", "ui", "render", "shared", "windows", "e2e", "contracts"},
                       "Windows build, unit tests and contracts"),
         "win_release": ({"all", "render", "shared", "windows", "e2e"}, "Windows release qualification"),
@@ -120,7 +123,9 @@ JOB_RULES = {
 DOCS_MODE = {("ci", "check")}
 # Jobs with no Rust cache of their own (they run from the build job's
 # binaries): nothing to warm, so on main they skip instead.
-NO_CACHE = {("windows", "win_recovery"), ("windows", "win_wording"), ("windows", "win_package")}
+NO_CACHE = {("windows", "win_recovery"), ("windows", "win_wording"), ("windows", "win_package"),
+            # The Debian 12 build's cache is saved only by a full run on main.
+            ("windows", "deb")}
 
 
 def idle(workflow, job, on_main):

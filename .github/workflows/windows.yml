@@ -37,6 +37,7 @@ jobs:
       linux: ${{ steps.gate.outputs.linux }}
       linux_capture: ${{ steps.gate.outputs.linux_capture }}
       linux_app: ${{ steps.gate.outputs.linux_app }}
+      deb: ${{ steps.gate.outputs.deb }}
       win_build: ${{ steps.gate.outputs.win_build }}
       win_release: ${{ steps.gate.outputs.win_release }}
       win_recovery: ${{ steps.gate.outputs.win_recovery }}
@@ -409,8 +410,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pinned: these binaries become the ~ubuntu24.04 .debs (deb-ubuntu),
+          # whose Depends dpkg-shlibdeps reads on ubuntu-24.04.
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - arch: aarch64
             runner: ubuntu-24.04-arm
     env:
@@ -521,6 +524,249 @@ jobs:
           name: linux-app-snapshots-${{ matrix.arch }}
           path: ${{ runner.temp }}/linux-app/*.png
           retention-days: 7
+
+  deb-ubuntu:
+    # Ubuntu 24.04 .debs from the tarball's own binaries (linux-app):
+    # Depends from dpkg-shlibdeps here, lintian with no errors.
+    name: .deb Ubuntu 24.04 (${{ matrix.arch }})
+    needs: [gate, linux-app]
+    if: needs.gate.outputs.deb != 'skip'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      MODE: ${{ needs.gate.outputs.deb }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Gate mode
+        # Fail closed: a job that runs without a mode from the gate would
+        # skip every step and pass without checking anything. (deb is in
+        # NO_CACHE, so it is never warm.)
+        run: |
+          case "$MODE" in
+            full) ;;
+            *) echo "::error::the gate gave this job no valid mode ('$MODE'); not passing without running"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Packaging tools
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          # dpkg-shlibdeps reads the libraries the binaries link, so they
+          # must be installed (a stock runner has all but PipeWire's, and
+          # GStreamer's, and WebKitGTK 6 and GTK 4 for the browser helper).
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends dpkg-dev lintian binutils libpipewire-0.3-0t64 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libglib2.0-0t64 libwebkitgtk-6.0-4 libgtk-4-1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: isocast-linux-${{ matrix.arch }}
+          path: dist
+
+      - name: Package
+        run: |
+          tar -C dist -xzf dist/isocast-linux-${{ matrix.arch }}.tar.gz
+          scripts/package-deb.sh dist/isocast-linux-${{ matrix.arch }} ubuntu24.04
+          dpkg-deb --info dist/isocast_*.deb
+          dpkg-deb --contents dist/isocast_*.deb
+
+      - name: lintian
+        run: lintian --fail-on error --display-info dist/isocast_*.deb
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: isocast-deb-ubuntu24.04-${{ matrix.arch }}
+          path: dist/isocast_*.deb
+          retention-days: 30
+
+  deb-debian:
+    # Debian 12 .debs, built in debian:12: bookworm's glibc (2.36) is older
+    # than the tarball's build host, and its PipeWire comes from
+    # bookworm-backports (capture needs 1.0.5 or newer).
+    name: .deb Debian 12 (${{ matrix.arch }})
+    needs: gate
+    if: needs.gate.outputs.deb != 'skip'
+    runs-on: ${{ matrix.runner }}
+    container: debian:12
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      MODE: ${{ needs.gate.outputs.deb }}
+      CARGO_TERM_COLOR: always
+      CFLAGS: -O2
+    steps:
+      - name: Gate mode
+        # Fail closed: a job that runs without a mode from the gate would
+        # skip every step and pass without checking anything. (deb is in
+        # NO_CACHE, so it is never warm.)
+        run: |
+          case "$MODE" in
+            full) ;;
+            *) echo "::error::the gate gave this job no valid mode ('$MODE'); not passing without running"; exit 1 ;;
+          esac
+
+      - name: Build dependencies
+        run: |
+          echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/backports.list
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl git build-essential pkg-config cmake clang libclang-dev libssl-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libwebkitgtk-6.0-dev libgtk-4-dev python3 dpkg-dev lintian binutils xz-utils file
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends -t bookworm-backports libpipewire-0.3-dev
+          # rustup-init pinned by version and SHA-256 (not a piped script).
+          case "$(uname -m)" in
+          x86_64) target=x86_64-unknown-linux-gnu sum=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4 ;;
+          aarch64) target=aarch64-unknown-linux-gnu sum=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697 ;;
+          esac
+          curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/1.29.2/$target/rustup-init"
+          echo "$sum  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: deb-debian12-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build app, engine, CLI and browser helper
+        run: |
+          # The browser source helper, once its crate is on this branch.
+          helper=
+          if [ -d crates/isocast-browser ]; then helper="-p isocast-browser"; fi
+          cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli $helper
+
+      - name: Runs on bookworm's glibc
+        run: |
+          set -o pipefail
+          for exe in isocast isocastd isocast-ui isocast-browser; do
+            [ -e target/release/$exe ] || continue
+            symbols=$(objdump -T target/release/$exe)
+            # Weak references (Rust's std probes pidfd_*) don't bind.
+            if printf '%s\n' "$symbols" | grep -v ' w ' | grep -E 'GLIBC_2\.(3[7-9]|[4-9][0-9])'; then
+              echo "$exe needs a newer glibc than bookworm's 2.36" >&2
+              exit 1
+            fi
+          done
+
+      - name: Package
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          scripts/package-deb.sh target/release debian12
+          dpkg-deb --info dist/isocast_*.deb
+          dpkg-deb --contents dist/isocast_*.deb
+
+      - name: lintian
+        run: lintian --fail-on error --display-info dist/isocast_*.deb
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: isocast-deb-debian12-${{ matrix.arch }}
+          path: dist/isocast_*.deb
+          retention-days: 30
+
+  deb-ubuntu-test:
+    # The Ubuntu .deb on a clean runner (no build tools): apt resolves its
+    # Depends, doctor, per-user OpenH264, a 5 s CLI recording, purge.
+    name: .deb Ubuntu 24.04 install test (${{ matrix.arch }})
+    needs: deb-ubuntu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: isocast-deb-ubuntu24.04-${{ matrix.arch }}
+          path: deb
+
+      - name: Install
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          # Depends only (no Recommends): the app snapshot and the take must
+          # work from what the package requires.
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends ./deb/isocast_*.deb
+
+      - name: Doctor, OpenH264, record 5 s, purge
+        run: packaging/deb/test-installed.sh packaging/linux/test-setup.toml deb/isocast_*.deb
+
+  deb-debian-test:
+    # The Debian 12 .deb in a fresh debian:12 container, with backports.
+    name: .deb Debian 12 install test (${{ matrix.arch }})
+    needs: deb-debian
+    runs-on: ${{ matrix.runner }}
+    container: debian:12
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: isocast-deb-debian12-${{ matrix.arch }}
+          path: deb
+
+      - name: Install
+        run: |
+          echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/backports.list
+          apt-get -o Acquire::Retries=3 update
+          # As README.Debian says: PipeWire from backports first, then the package.
+          apt-get -o Acquire::Retries=3 install -y -t bookworm-backports libpipewire-0.3-0
+          # Depends only (no Recommends), as on Ubuntu.
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends ./deb/isocast_*.deb
+          # The test's own tools (not the package's).
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends python3
+
+      - name: Doctor, OpenH264, record 5 s, purge
+        # The container runs as root, which isocast-openh264-install
+        # refuses unless told that root is the user here.
+        env:
+          ISOCAST_OPENH264_AS_ROOT: 1
+        run: packaging/deb/test-installed.sh packaging/linux/test-setup.toml deb/isocast_*.deb
 
   win-build:
     # W.1e: UI/native services compile with explicit platform stubs, not a
