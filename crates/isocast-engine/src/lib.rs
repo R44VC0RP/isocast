@@ -278,10 +278,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
         false
     }
 
-    /// Finish a fresh program picture before choosing a recording's epoch.
+    /// Require a fresh program picture before choosing a recording's epoch.
     /// Software GPU drivers may compile their first draw lazily; preparing
-    /// that work must not consume the first slots of an already armed take.
-    /// Native desktop backends retain their existing startup policy.
+    /// that work must not consume the first slots of an already armed take,
+    /// so the recording fails if none arrives. Every other backend warms
+    /// its programs too, bounded by `PROGRAM_WARM_TIMEOUT` (record/mod.rs),
+    /// then starts anyway and counts the skipped head as dropped (#150).
     fn recording_needs_program_frame(&self) -> bool {
         false
     }

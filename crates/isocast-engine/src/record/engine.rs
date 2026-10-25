@@ -40,11 +40,11 @@ use super::timings::CompositorTimings;
 use super::{
     AUDIO_TAIL, COMMIT_TIMEOUT, CaptureReport, DiskReport, FIRST_FRAME_TIMEOUT, FilePlan,
     FolderLock, Formats, MIN_FREE_BYTES, MIN_FREE_SECONDS, MIN_TAKE, MIX_QUEUE_DEPTH, MONITOR_FPS,
-    OnAir, Output, Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN,
-    SPLIT_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL, SessionControl, Shared, Slots,
-    SourceFilters, SplitRefused, SplitTake, Take, WriterInputs, create_writers, expand_home,
-    interrupted_note, interrupted_sessions, is_program, live_status, next_recording, plan_take,
-    sidechain_sources, take_manifest, wait_for_frame,
+    OnAir, Output, PROGRAM_WARM_TIMEOUT, Packet, QUEUE_DEPTH, RecordOptions, Report,
+    SPACE_CHECK_INTERVAL, SPEED_MARGIN, SPLIT_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL,
+    SessionControl, Shared, Slots, SourceFilters, SplitRefused, SplitTake, Take, WriterInputs,
+    create_writers, expand_home, interrupted_note, interrupted_sessions, is_program, live_status,
+    next_recording, plan_take, sidechain_sources, take_manifest, wait_for_frame,
 };
 use super::{AudioStopped, audio_stop_errors, file_audio_stops};
 #[cfg(not(windows))]
@@ -4407,42 +4407,78 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             .collect(),
         false => WriterInputs::new(),
     };
-    if platform.recording_needs_program_frame() {
-        for plan in plans.iter().filter(|plan| is_program(plan)) {
-            let since = platform.now();
-            let deadline = std::time::Instant::now() + FIRST_FRAME_TIMEOUT;
-            loop {
-                if options.stop.load(Ordering::SeqCst) {
-                    bail!("the recording was stopped before it started, so nothing was recorded");
-                }
-                let left = deadline.saturating_duration_since(std::time::Instant::now());
-                if left.is_zero() {
-                    bail!(
-                        "{}: the program did not finish preparing a picture within {} seconds; no recording files were opened",
+    // Draw each recorded program before choosing the epoch, so its first
+    // draws (a canvas let go while nothing watched it, cold GPU pipelines)
+    // don't consume the take's first slots (#150). Software GPU drivers
+    // must finish one; elsewhere warming is bounded and the recording
+    // starts anyway, its program's skipped head counted as dropped.
+    let required = platform.recording_needs_program_frame();
+    let warm_started = std::time::Instant::now();
+    let warm_until = warm_started + PROGRAM_WARM_TIMEOUT;
+    let program_output = |plan: &FilePlan| {
+        if plan.source == PROGRAM {
+            &inner.main
+        } else {
+            extra_output(&plan.source).expect("recorded canvas output")
+        }
+    };
+    // Every program starts drawing at once, so several idle canvases warm
+    // together within the one bound rather than one after another.
+    for plan in plans.iter().filter(|plan| is_program(plan)) {
+        program_output(plan)
+            .protected_program_wanted
+            .fetch_max(plan.spec.video.fps, Ordering::Relaxed);
+    }
+    for plan in plans.iter().filter(|plan| is_program(plan)) {
+        // A picture from the last two ticks shows a program already drawing
+        // (a preview or monitor watching): no wait. Ticks publish a frame
+        // after they're due, so an idle canvas still has to draw one.
+        let since = platform.now() - Duration::from_secs(2) / plan.spec.video.fps;
+        let deadline = if required {
+            std::time::Instant::now() + FIRST_FRAME_TIMEOUT
+        } else {
+            warm_until
+        };
+        loop {
+            if options.stop.load(Ordering::SeqCst) {
+                bail!("the recording was stopped before it started, so nothing was recorded");
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                if !required {
+                    isocast_diagnostics::diagnostic!("warn";
+                        "recording: {} drew no picture within {} ms of warming; starting anyway",
                         plan.source,
-                        FIRST_FRAME_TIMEOUT.as_secs()
+                        PROGRAM_WARM_TIMEOUT.as_millis()
                     );
-                }
-                // Required preparation must keep drawing even when disposable
-                // previews are paused. The slot publishes after GPU completion.
-                let output = if plan.source == PROGRAM {
-                    &inner.main
-                } else {
-                    extra_output(&plan.source).expect("recorded canvas output")
-                };
-                output
-                    .protected_program_wanted
-                    .fetch_max(plan.spec.video.fps, Ordering::Relaxed);
-                let slot = slot_of(inner, &plan.source, plan.spec.video.fps)
-                    .map_err(anyhow::Error::msg)?;
-                if slot
-                    .wait_from(since, left.min(Duration::from_millis(100)))
-                    .is_some()
-                {
                     break;
                 }
+                bail!(
+                    "{}: the program did not finish preparing a picture within {} seconds; no recording files were opened",
+                    plan.source,
+                    FIRST_FRAME_TIMEOUT.as_secs()
+                );
+            }
+            // Required preparation must keep drawing even when disposable
+            // previews are paused. The slot publishes after GPU completion.
+            program_output(plan)
+                .protected_program_wanted
+                .fetch_max(plan.spec.video.fps, Ordering::Relaxed);
+            let slot =
+                slot_of(inner, &plan.source, plan.spec.video.fps).map_err(anyhow::Error::msg)?;
+            if slot
+                .wait_from(since, left.min(Duration::from_millis(100)))
+                .is_some()
+            {
+                break;
             }
         }
+    }
+    if plans.iter().any(|plan| is_program(plan)) {
+        isocast_diagnostics::diagnostic!("info";
+            "recording: program warm-up took {} ms",
+            warm_started.elapsed().as_millis()
+        );
     }
     let (writers, admission_notes) = create_writers(platform, plans, &writer_inputs)?;
 

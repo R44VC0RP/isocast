@@ -739,14 +739,19 @@ impl VideoWriter {
                 "video.end: must be after every accepted picture; complete packets will not be trimmed"
             );
         }
-        // Match the engine's file_end: round up to the next frame boundary,
-        // using a single division from the origin, not accumulated durations.
+        // Match the engine's file_end (record/file.rs) exactly: round up to
+        // the next frame boundary, using a single division from the origin,
+        // not accumulated durations, and treat an end within 1 ns of a
+        // boundary as that boundary (truncated tick arithmetic from another
+        // origin, such as the take's epoch, can land 1 ns past it). The
+        // engine passes ends it already snapped; this keeps an end computed
+        // on another grid from adding a frame here.
         let frames = u64::try_from(end.ticks_since(start, self.spec.video.fps))
             .context("video.end: precedes start")?;
         let mut ticks = frames
             .checked_mul(u64::from(FRAME_DURATION))
             .context("video end overflow")?;
-        if self.time_at(ticks)? < end {
+        if self.time_at(ticks)?.as_nanos() + 1 < end.as_nanos() {
             ticks = ticks
                 .checked_add(u64::from(FRAME_DURATION))
                 .context("video end overflow")?;
