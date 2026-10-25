@@ -177,6 +177,14 @@ pub fn doctor_writing<P: Platform>(
         None,
     ));
 
+    for reason in encoders.unavailable {
+        checks.push(check(
+            "hardware encoder unavailable",
+            CheckStatus::Warning,
+            reason,
+            None,
+        ));
+    }
     checks.extend(platform.doctor_checks());
 
     let Some(setup) = setup else {

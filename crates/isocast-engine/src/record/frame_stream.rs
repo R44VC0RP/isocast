@@ -60,7 +60,25 @@ pub(crate) struct Key {
 }
 
 /// The running streams.
-pub(crate) type Streams = Mutex<HashMap<Key, Arc<Shared>>>;
+#[derive(Default)]
+pub(crate) struct Streams {
+    running: Mutex<HashMap<Key, Arc<Shared>>>,
+    workers: Mutex<Vec<thread::JoinHandle<()>>>,
+    stopping: AtomicBool,
+}
+
+/// Native encoders must finish destruction before the daemon exits and runs
+/// driver-library finalizers. Removing a stream from the map is not completion:
+/// its worker still owns the encoder and GPU conversion stage at that point.
+pub(crate) fn stop(streams: &Streams) {
+    // Serialize shutdown with admission and other stop callers. Workers never
+    // take this lock, including while removing themselves from the map.
+    let mut workers = streams.workers.lock();
+    streams.stopping.store(true, Ordering::SeqCst);
+    for worker in workers.drain(..) {
+        let _ = worker.join();
+    }
+}
 
 /// Where a target's frames arrive and, for pictures drawn on the canvas's
 /// frame grid (the program and the preview), that grid (when it starts and
@@ -169,7 +187,7 @@ impl FeedRate {
 
 /// The highest rate any running stream's viewer asks for.
 pub(crate) fn highest_rate(streams: &Streams) -> Option<u32> {
-    let running = streams.lock();
+    let running = streams.running.lock();
     running
         .values()
         .flat_map(|shared| {
@@ -202,11 +220,18 @@ pub(crate) fn watch<P: Platform>(
     key: Key,
     fps: u32,
     source: impl Fn(u32) -> Result<Source<P::Frame>, String> + Send + 'static,
-) -> FrameFeed {
+) -> Result<FrameFeed, String> {
+    let mut workers = streams.workers.lock();
+    if streams.stopping.load(Ordering::SeqCst) {
+        return Err("engine stopped".into());
+    }
+    // Finished threads have already dropped their encoders; do not retain one
+    // handle for every monitor ever opened during a long-lived engine session.
+    workers.retain(|worker| !worker.is_finished());
     let (tx, records) = sync_channel(VIEWER_QUEUE);
     // Held while the viewer is added, so a stream whose last viewer just
     // left can't remove itself in between.
-    let mut running = streams.lock();
+    let mut running = streams.running.lock();
     let shared = match running.get(&key) {
         Some(shared) => shared.clone(),
         None => {
@@ -220,12 +245,13 @@ pub(crate) fn watch<P: Platform>(
             let (streams, stream, platform) = (streams.clone(), shared.clone(), platform.clone());
             let (failed_streams, failed_stream, failed_key) =
                 (streams.clone(), stream.clone(), key.clone());
-            isocast_diagnostics::spawn(
+            let worker = isocast_diagnostics::spawn(
                 format!("frames {}", key.target),
                 move || run(&streams, &stream, &key, &platform, source),
                 move |why| end(&failed_streams, &failed_key, &failed_stream, &why),
             )
             .expect("could not start a frame stream thread");
+            workers.push(worker);
             shared
         }
     };
@@ -239,12 +265,12 @@ pub(crate) fn watch<P: Platform>(
         revision: None,
     });
     shared.want_keyframe.store(true, Ordering::SeqCst);
-    FrameFeed {
+    Ok(FrameFeed {
         records,
         fps,
         shared,
         id,
-    }
+    })
 }
 
 /// The encoder for one input size.
@@ -285,6 +311,9 @@ fn run<P: Platform>(
     let mut pace = Pace::default();
     let mut effective_key = key.clone();
     loop {
+        if streams.stopping.load(Ordering::SeqCst) {
+            return end(streams, key, shared, "engine stopped");
+        }
         let fps = shared
             .viewers
             .lock()
@@ -292,7 +321,7 @@ fn run<P: Platform>(
             .map(|viewer| viewer.fps.load(Ordering::Relaxed))
             .max();
         let Some(fps) = fps else {
-            let mut running = streams.lock();
+            let mut running = streams.running.lock();
             if shared.viewers.lock().is_empty() {
                 remove(&mut running, key, shared);
                 return;
@@ -682,7 +711,7 @@ fn deliver<E>(shared: &Shared, encoding: &mut Encoding<E>, encoded: EncodedVideo
 
 /// Stop the stream: tell every viewer why, then close their channels.
 fn end(streams: &Streams, key: &Key, shared: &Arc<Shared>, why: &str) {
-    remove(&mut streams.lock(), key, shared);
+    remove(&mut streams.running.lock(), key, shared);
     let record: Record = frames::encode(frames::END, 0, 0, 0, why.as_bytes()).into();
     for viewer in shared.viewers.lock().drain(..) {
         let _ = viewer.tx.try_send(record.clone());
@@ -701,6 +730,34 @@ fn remove(running: &mut HashMap<Key, Arc<Shared>>, key: &Key, shared: &Arc<Share
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stop_waits_for_worker_resource_destruction() {
+        use super::*;
+
+        struct Resource(SyncSender<&'static str>);
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0.send("destroyed").unwrap();
+            }
+        }
+
+        let streams = Arc::new(Streams::default());
+        let worker_streams = streams.clone();
+        let (events, received) = sync_channel(2);
+        let finished = events.clone();
+        streams.workers.lock().push(thread::spawn(move || {
+            let _resource = Resource(events);
+            while !worker_streams.stopping.load(Ordering::SeqCst) {
+                thread::yield_now();
+            }
+        }));
+        stop(&streams);
+        finished.send("stopped").unwrap();
+        assert_eq!(received.recv().unwrap(), "destroyed");
+        assert_eq!(received.recv().unwrap(), "stopped");
+        stop(&streams);
+    }
+
     #[test]
     fn monitor_conversion_matches_encoder_size_and_format() {
         use super::{

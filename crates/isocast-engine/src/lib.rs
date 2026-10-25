@@ -68,6 +68,8 @@ pub struct VideoEncoders {
     pub hardware: Vec<String>,
     /// On the CPU: where recording falls back to without hardware.
     pub software: Vec<String>,
+    /// Reasons a hardware encoder could not be opened during discovery.
+    pub unavailable: Vec<String>,
 }
 
 /// Audio inside the engine is 48 kHz, 32-bit float, interleaved.
@@ -219,6 +221,7 @@ pub trait Platform: Clone + Send + Sync + 'static {
         VideoEncoders {
             hardware: self.machine().hardware_encoders,
             software: Vec::new(),
+            unavailable: Vec::new(),
         }
     }
 

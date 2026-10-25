@@ -1197,6 +1197,7 @@ impl<P: Platform> Engine<P> {
         let inner = &self.inner;
         inner.stopping.store(true, Ordering::SeqCst);
         inner.wake.notify_all();
+        frame_stream::stop(&inner.frame_streams);
         for thread in self.threads.lock().drain(..) {
             let _ = thread.join();
         }
@@ -1639,7 +1640,7 @@ impl<P: Platform> Engine<P> {
         };
         let inner = self.inner.clone();
         let target = target.to_string();
-        Ok(frame_stream::watch(
+        frame_stream::watch(
             &self.inner.frame_streams,
             &self.inner.platform,
             key,
@@ -1647,7 +1648,7 @@ impl<P: Platform> Engine<P> {
             // Called with the stream's rate now (the highest any of its
             // viewers wants), which the program is drawn at least at.
             move |fps| stream_source(&inner, &target, fps, false, (max_width, None)),
-        ))
+        )
     }
 
     /// `target`'s picture (see [`Engine::frame`]) for a monitor in a
@@ -5566,5 +5567,328 @@ iso = {iso}
         assert_eq!(changed(&ten, &disabled), ["screen", "other"]);
         let ten_own_eight = setup(", encoder = { bit_depth = 8 }", &iso(", bit_depth = 10"));
         assert_eq!(changed(&default, &ten_own_eight), ["other"]);
+    }
+
+    /// A platform that can't capture, composite or encode anything: enough
+    /// for an engine to start and run its program's monitor workers.
+    mod inert {
+        use std::path::Path;
+        use std::sync::{Arc, OnceLock};
+        use std::time::Instant;
+
+        use anyhow::{Result, bail};
+        use isocast_protocol::api::Machine;
+        use isocast_protocol::devices::{Devices, PermissionKind, PermissionsReport};
+        use isocast_protocol::{Canvas, SourceKind};
+
+        use crate::gpu::{FrameImporter, Gpu, GpuFrame};
+        use crate::{
+            AudioEncoder, AudioRender, AudioSink, BrowserControl, BrowserPage, CameraRequest,
+            CaptureFormat, EncodedVideo, FileWriter, Finished, FramePool, LiveAudioSpec,
+            LiveVideoSpec, MediaInfo, MediaPart, MediaReader, Platform, Probe, ScreenTarget, Time,
+            VideoEncoder, VideoSink, Volume, WriterSpec,
+        };
+
+        #[derive(Clone)]
+        pub(super) struct Inert;
+
+        /// A resource it never makes.
+        pub(super) enum Never {}
+
+        impl FramePool for Never {
+            type Frame = ();
+            fn draw(&mut self, _draw: &mut dyn FnMut(&mut [u8], usize)) -> Result<Option<()>> {
+                match *self {}
+            }
+            fn take(&mut self) -> Result<Option<()>> {
+                match *self {}
+            }
+        }
+
+        impl FileWriter for Never {
+            type Frame = ();
+            fn start(&mut self, _at: Time) -> Result<()> {
+                match *self {}
+            }
+            fn append_video(&mut self, _frame: &(), _pts: Time) -> Result<bool> {
+                match *self {}
+            }
+            fn append_audio(
+                &mut self,
+                _track: usize,
+                _samples: &[f32],
+                _pts: Time,
+            ) -> Result<bool> {
+                match *self {}
+            }
+            fn finish(self, _end: Time) -> Result<Finished> {
+                match self {}
+            }
+            fn cancel(self) {
+                match self {}
+            }
+        }
+
+        impl MediaReader for Never {
+            type Frame = ();
+            fn next_video(&mut self) -> Result<Option<((), std::time::Duration)>> {
+                match *self {}
+            }
+            fn next_audio(&mut self) -> Result<Option<(Vec<f32>, std::time::Duration)>> {
+                match *self {}
+            }
+        }
+
+        impl VideoEncoder for Never {
+            type Frame = ();
+            fn encode(&mut self, _frame: &(), _pts: Time, _keyframe: bool) -> Result<()> {
+                match *self {}
+            }
+            fn receive(&mut self) -> Result<Option<EncodedVideo>> {
+                match *self {}
+            }
+            fn receive_timeout(
+                &mut self,
+                _timeout: std::time::Duration,
+            ) -> Result<Option<EncodedVideo>> {
+                match *self {}
+            }
+            fn dropped(&self) -> u64 {
+                match *self {}
+            }
+            fn set_rate(&mut self, _fps: u32, _bitrate_kbps: u32) -> Result<()> {
+                match *self {}
+            }
+        }
+
+        impl AudioEncoder for Never {
+            fn encode(&mut self, _samples: &[f32]) -> Result<Vec<Vec<u8>>> {
+                match *self {}
+            }
+            fn delay(&self) -> u32 {
+                match *self {}
+            }
+        }
+
+        impl FrameImporter for Never {
+            type Frame = ();
+            fn import(&mut self, _frame: &()) -> Result<GpuFrame> {
+                match *self {}
+            }
+            fn target(&mut self, _frame: &()) -> Result<wgpu::Texture> {
+                match *self {}
+            }
+            fn ycbcr_target(&mut self, _frame: &()) -> Result<(wgpu::Texture, wgpu::Texture)> {
+                match *self {}
+            }
+        }
+
+        impl Platform for Inert {
+            type Frame = ();
+            type FramePool = Never;
+            type Writer = Never;
+            type Capture = Never;
+            type Importer = Never;
+            type Media = Never;
+            type Playback = Never;
+            type VideoEncoder = Never;
+            type AudioEncoder = Never;
+            type SharedSurface = ();
+
+            fn now(&self) -> Time {
+                static ORIGIN: OnceLock<Instant> = OnceLock::new();
+                let nanos = ORIGIN.get_or_init(Instant::now).elapsed().as_nanos();
+                Time::from_nanos(i64::try_from(nanos).unwrap_or(i64::MAX))
+            }
+            fn devices(&self) -> Result<Devices> {
+                bail!("inert")
+            }
+            fn permissions(&self) -> Result<PermissionsReport> {
+                bail!("inert")
+            }
+            fn request_permissions(
+                &self,
+                _only: Option<PermissionKind>,
+            ) -> Result<PermissionsReport> {
+                bail!("inert")
+            }
+            fn open_permission_settings(&self, _permission: PermissionKind) -> Result<String> {
+                bail!("inert")
+            }
+            fn media_info(&self, _path: &Path) -> Result<MediaInfo> {
+                bail!("inert")
+            }
+            fn open_media(&self, _path: &Path, _part: MediaPart) -> Result<Never> {
+                bail!("inert")
+            }
+            fn frame_importer(&self, _gpu: &Gpu) -> Result<Never> {
+                bail!("inert")
+            }
+            fn machine(&self) -> Machine {
+                Machine {
+                    chip: "inert".into(),
+                    memory_gb: 0.0,
+                    cores: 1,
+                    os: "inert".into(),
+                    hardware_encoders: Vec::new(),
+                }
+            }
+            fn probe(&self, _source: &SourceKind, _canvas: &Canvas) -> Result<Option<Probe>> {
+                bail!("inert")
+            }
+            fn volume(&self, _path: &Path) -> Result<Volume> {
+                bail!("inert")
+            }
+            fn frame_pool(&self, _width: u32, _height: u32) -> Result<Never> {
+                bail!("inert")
+            }
+            fn ycbcr_frame_pool(&self, _width: u32, _height: u32) -> Result<Never> {
+                bail!("inert")
+            }
+            fn frame_size(&self, _frame: &()) -> (u32, u32) {
+                (0, 0)
+            }
+            fn frame_is_ycbcr(&self, _frame: &()) -> bool {
+                false
+            }
+            fn shared_surface(
+                &self,
+                _gpu: &Gpu,
+                _width: u32,
+                _height: u32,
+            ) -> Result<((), wgpu::Texture)> {
+                bail!("inert")
+            }
+            fn encode_jpeg(
+                &self,
+                _frame: &(),
+                _max_width: Option<u32>,
+                _quality: f32,
+            ) -> Result<(Vec<u8>, u32, u32)> {
+                bail!("inert")
+            }
+            fn create_writer(&self, _spec: &WriterSpec) -> Result<Never> {
+                bail!("inert")
+            }
+            fn capture_screen(
+                &self,
+                _target: ScreenTarget<'_>,
+                _fps: u32,
+                _ten_bit: bool,
+                _cursor: bool,
+                _sink: VideoSink<()>,
+            ) -> Result<(Never, CaptureFormat)> {
+                bail!("inert")
+            }
+            fn capture_camera(
+                &self,
+                _device: &str,
+                _request: CameraRequest,
+                _canvas: &Canvas,
+                _sink: VideoSink<()>,
+            ) -> Result<(Never, CaptureFormat)> {
+                bail!("inert")
+            }
+            fn capture_microphone(
+                &self,
+                _device: &str,
+                _channels: Option<&[u32]>,
+                _sink: AudioSink,
+            ) -> Result<(Never, u32)> {
+                bail!("inert")
+            }
+            fn capture_system_audio(
+                &self,
+                _exclude: &[String],
+                _sink: AudioSink,
+                _exclude_own: bool,
+            ) -> Result<(Never, u32)> {
+                bail!("inert")
+            }
+            fn play_audio(&self, _device: &str, _render: AudioRender) -> Result<(Never, String)> {
+                bail!("inert")
+            }
+            fn capture_browser(
+                &self,
+                _page: &BrowserPage<'_>,
+                _video: VideoSink<()>,
+                _audio: Option<AudioSink>,
+            ) -> Result<(Never, CaptureFormat, Arc<dyn BrowserControl>)> {
+                bail!("inert")
+            }
+            fn capture_application_audio(
+                &self,
+                _app: &str,
+                _sink: AudioSink,
+            ) -> Result<(Never, u32)> {
+                bail!("inert")
+            }
+            fn create_video_encoder(&self, _spec: &LiveVideoSpec) -> Result<Never> {
+                bail!("inert")
+            }
+            fn create_audio_encoder(&self, _spec: &LiveAudioSpec) -> Result<Never> {
+                bail!("inert")
+            }
+            fn has_secret(&self, _service: &str, _account: &str) -> Result<bool> {
+                bail!("inert")
+            }
+            fn secret(&self, _service: &str, _account: &str) -> Result<Option<String>> {
+                bail!("inert")
+            }
+            fn set_secret(&self, _service: &str, _account: &str, _secret: &str) -> Result<()> {
+                bail!("inert")
+            }
+            fn delete_secret(&self, _service: &str, _account: &str) -> Result<bool> {
+                bail!("inert")
+            }
+        }
+    }
+
+    /// `stop` ends every monitor stream before it returns (its worker owns a
+    /// native encoder that must be gone before the process exits), and a
+    /// monitor asked for afterwards is refused rather than started on a
+    /// stopped engine.
+    #[test]
+    fn stop_ends_monitor_streams_and_refuses_new_ones() {
+        use isocast_protocol::api::{H264Profile, frames};
+
+        let setup = Setup::from_toml(
+            r##"
+version = 1
+name = "t"
+[canvas]
+width = 64
+height = 64
+fps = 30
+[[scenes]]
+id = "main"
+items = []
+[recording]
+folder = "/nonexistent/isocast-engine-test"
+[recording.program]
+encoder = { codec = "hevc", quality = 70 }
+"##,
+        )
+        .unwrap();
+        let engine = Engine::start(&inert::Inert, &setup, None, None).unwrap();
+        let feed = engine
+            .frames(PROGRAM, None, 30, H264Profile::High)
+            .expect("a running engine streams its program");
+
+        engine.stop();
+        // Already there: stop joined the worker that sent it.
+        let end = feed
+            .records
+            .try_iter()
+            .map(|record| frames::Record::read(&mut &record[..]).unwrap().unwrap())
+            .find(|record| record.kind == frames::END)
+            .expect("the monitor heard the stream end before stop returned");
+        let why = String::from_utf8(end.payload).unwrap();
+        assert!(why.contains("engine stopped"), "ended with {why:?}");
+
+        match engine.frames(PROGRAM, None, 30, H264Profile::High) {
+            Ok(_) => panic!("a monitor started on a stopped engine"),
+            Err(why) => assert_eq!(why, "engine stopped"),
+        }
     }
 }

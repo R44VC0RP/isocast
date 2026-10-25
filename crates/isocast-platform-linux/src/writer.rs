@@ -1,4 +1,4 @@
-//! Software H.264/AAC recording through the existing crash-safe packet mux.
+//! H.264/AAC recording through the existing crash-safe packet mux.
 
 use std::time::Duration;
 
@@ -8,8 +8,8 @@ use isocast_mux::{Config, Framing, Progress, VideoCodec, VideoConfig, VideoPacke
 use isocast_protocol::{Codec, Container};
 
 use crate::audio::{AudioTrack, BLOCK, MAX_BATCH, Packet, RATE};
-use crate::encoder::Encoder;
 use crate::frames::Frame;
+use crate::video_encoder::Encoder;
 
 const FRAME_DURATION: u64 = 2000;
 const MAX_FINISH_SILENCE: u64 = RATE as u64 * 10;
@@ -35,7 +35,7 @@ impl Writer {
         }
         if spec.video.encoder.codec != Codec::H264 || spec.video.encoder.effective_bit_depth() != 8
         {
-            bail!("video.encoder: Linux software recording supports h264 with bit_depth = 8 only");
+            bail!("video.encoder: Linux recording supports h264 with bit_depth = 8 only");
         }
         if spec.audio.len() > 16 {
             bail!("audio: at most 16 mono/stereo AAC tracks are supported");
@@ -377,7 +377,7 @@ impl FileWriter for Writer {
         Some(self.completed)
     }
     fn hardware_accelerated(&self) -> Option<bool> {
-        Some(false)
+        Some(self.encoder.hardware_accelerated())
     }
 
     fn on_first_video_packet(&mut self, notify: Box<dyn FnOnce() + Send>) -> bool {

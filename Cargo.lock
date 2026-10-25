@@ -4034,6 +4034,7 @@ version = "0.0.9"
 dependencies = [
  "anyhow",
  "ashpd",
+ "cc",
  "futures-util",
  "gstreamer",
  "gstreamer-app",

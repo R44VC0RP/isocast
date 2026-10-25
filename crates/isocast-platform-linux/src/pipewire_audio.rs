@@ -1193,7 +1193,7 @@ fn capture_worker(
     ready: &mpsc::SyncSender<Result<u32>>,
     started: &mut bool,
 ) -> Result<()> {
-    require_buffer_timestamps()?;
+    let version = require_buffer_timestamps()?;
     let inventory = enumerate(cancel, matches!(requested, Target::Application(_)))?;
     let microphone = matches!(requested, Target::Microphone(_));
     let application = match requested {
@@ -1253,7 +1253,7 @@ fn capture_worker(
     }
     let deadline = Instant::now() + TIMEOUT;
     let mainloop = WorkerLoop::new()?;
-    let context = pw::context::ContextRc::new(mainloop.main_loop(), None)?;
+    let context = capture_context(&mainloop, version)?;
     let core = context
         .connect_rc(None)
         .context("connecting audio stream to PipeWire")?;
@@ -1391,6 +1391,8 @@ fn capture_worker(
     .0
     .into_inner();
     let pod = Pod::from_bytes(&bytes).context("invalid serialized PipeWire audio format")?;
+    let buffers = capture_buffers()?;
+    let buffers = Pod::from_bytes(&buffers).context("invalid serialized PipeWire audio buffers")?;
     // No RT_PROCESS: callbacks and the engine sink run on this owned main-loop
     // worker, not PipeWire's realtime thread. This also keeps Rc state confined.
     stream.connect(
@@ -1401,7 +1403,7 @@ fn capture_worker(
         } else {
             pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS
         },
-        &mut [pod],
+        &mut [pod, buffers],
     )?;
     // Declared after the stream: own link proxies/listeners drop before it and
     // before the core, including on early errors/cancellation.
@@ -1417,8 +1419,24 @@ fn capture_worker(
         None
     };
     let mut app_links = BTreeMap::new();
+    let mut check_realtime = None;
     while !cancel.load(Ordering::Acquire) {
         iterate(&mainloop)?;
+        if check_realtime.is_some_and(|at: Instant| at.elapsed() >= Duration::from_secs(1)) {
+            // RTKit grants asynchronously and can silently deny a request.
+            // Observe the actual data thread, never mistake a request for a grant.
+            check_realtime = None;
+            if !capture_is_realtime(&context) {
+                static WARN_NOT_REALTIME: std::sync::Once = std::sync::Once::new();
+                WARN_NOT_REALTIME.call_once(|| {
+                    isocast_diagnostics::output::deferred(
+                        "warn",
+                        module_path!(),
+                        "PipeWire audio data loop is not realtime; short graph cycles may be lost under load. Allow RTKit realtime scheduling for this session or configure RLIMIT_RTPRIO for isocastd. Recording will continue.".into(),
+                    );
+                });
+            }
+        }
         let mut graph_ready = true;
         if let (Some(identity), Some(watch)) = (&application, &app_watch) {
             let desired = watch.state.borrow().desired_links(
@@ -1445,6 +1463,7 @@ fn capture_worker(
                     .send(Ok(count))
                     .context("PipeWire startup caller disconnected")?;
                 *started = true;
+                check_realtime = Some(Instant::now());
             } else {
                 ensure!(
                     Instant::now() < deadline,
@@ -1578,7 +1597,83 @@ fn process(stream: &pw::stream::Stream, state: &mut StreamData) -> Result<()> {
     Ok(())
 }
 
-fn require_buffer_timestamps() -> Result<()> {
+fn capture_context(
+    mainloop: &WorkerLoop,
+    version: (u32, u32, u32),
+) -> Result<pw::context::ContextRc> {
+    // Before 1.4 the ordinary client config omits module-rt. Newer PipeWire
+    // folds it into client.conf. Only capture needs a realtime data loop;
+    // device enumeration must not load another RTKit helper thread.
+    let props = (version < (1, 4, 0)).then(|| properties! { "config.name" => "client-rt.conf" });
+    Ok(pw::context::ContextRc::new(mainloop.main_loop(), props)?)
+}
+
+fn capture_buffers() -> Result<Vec<u8>> {
+    // Non-RT callbacks need a queue while their worker is descheduled. The
+    // converter otherwise fixates to two buffers (one plus the async reserve).
+    // Fix the count: a range's default is ignored when intersecting the
+    // converter's range. This queues delivery, not timestamps or extra silence.
+    let object = spa::pod::Object {
+        type_: spa::sys::SPA_TYPE_OBJECT_ParamBuffers,
+        id: spa::sys::SPA_PARAM_Buffers,
+        properties: vec![spa::pod::Property::new(
+            spa::sys::SPA_PARAM_BUFFERS_buffers,
+            spa::pod::Value::Int(16),
+        )],
+    };
+    Ok(spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(object),
+    )
+    .map_err(|error| anyhow!("serializing PipeWire audio buffers: {error:?}"))?
+    .0
+    .into_inner())
+}
+
+fn realtime_policy(policy: i32) -> bool {
+    matches!(
+        policy & !libc::SCHED_RESET_ON_FORK,
+        libc::SCHED_FIFO | libc::SCHED_RR
+    )
+}
+
+fn capture_is_realtime(context: &pw::context::Context) -> bool {
+    unsafe extern "C" fn policy(
+        _loop: *mut spa::sys::spa_loop,
+        _async: bool,
+        _seq: u32,
+        _data: *const std::ffi::c_void,
+        _size: usize,
+        _user_data: *mut std::ffi::c_void,
+    ) -> i32 {
+        // SAFETY: this queries the calling data thread, with no shared state.
+        // pthread_getschedparam caches SCHED_OTHER after RTKit changes the
+        // kernel policy externally; sched_getscheduler reads the kernel.
+        unsafe { libc::sched_getscheduler(0) }
+    }
+
+    // SAFETY: the context owns this live data loop. Its owning worker is the
+    // sole outside writer of the invoke queue (as for stream/node operations).
+    // The blocking invoke returns the callback result and borrows no data.
+    unsafe {
+        let data_loop = pw::sys::pw_context_get_data_loop(context.as_raw_ptr());
+        if data_loop.is_null() {
+            return false;
+        }
+        let policy = pw::sys::pw_data_loop_invoke(
+            data_loop,
+            Some(policy),
+            0,
+            std::ptr::null(),
+            0,
+            true,
+            std::ptr::null_mut(),
+        );
+        policy >= 0 && realtime_policy(policy)
+    }
+}
+
+fn require_buffer_timestamps() -> Result<(u32, u32, u32)> {
     // The time field was appended to pw_buffer in 1.0.5. Check the loaded
     // library before accessing it, even if built with more recent headers.
     // SAFETY: PipeWire returns a static, NUL-terminated library-version string.
@@ -1596,7 +1691,7 @@ fn require_buffer_timestamps() -> Result<()> {
         version_number >= (1, 0, 5),
         "PipeWire audio capture requires libpipewire >= 1.0.5 for per-buffer timestamps; loaded {version}"
     );
-    Ok(())
+    Ok(version_number)
 }
 
 fn selection(count: u32, channels: Option<&[u32]>) -> Result<Vec<usize>> {
@@ -1728,6 +1823,117 @@ fn timestamp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_buffer_pod_requests_a_fixed_queue() {
+        let bytes = capture_buffers().unwrap();
+        let (remaining, value) =
+            spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes).unwrap();
+        assert!(remaining.is_empty());
+        let spa::pod::Value::Object(object) = value else {
+            panic!("capture buffers must be an object");
+        };
+        assert_eq!(object.type_, spa::sys::SPA_TYPE_OBJECT_ParamBuffers);
+        assert_eq!(object.id, spa::sys::SPA_PARAM_Buffers);
+        assert_eq!(object.properties.len(), 1);
+        assert_eq!(
+            object.properties[0].key,
+            spa::sys::SPA_PARAM_BUFFERS_buffers
+        );
+        assert_eq!(object.properties[0].value, spa::pod::Value::Int(16));
+    }
+
+    #[test]
+    fn realtime_policies_exclude_ordinary_scheduling() {
+        assert!(!realtime_policy(libc::SCHED_OTHER));
+        assert!(!realtime_policy(libc::SCHED_BATCH));
+        assert!(!realtime_policy(libc::SCHED_IDLE));
+        for policy in [libc::SCHED_FIFO, libc::SCHED_RR] {
+            assert!(realtime_policy(policy));
+            assert!(realtime_policy(policy | libc::SCHED_RESET_ON_FORK));
+        }
+    }
+
+    // Run with ISOCAST_EXPECT_RT=1 for an authorized RTKit/direct-RT session,
+    // or =0 to require the denied path. No implicit skip of a failed grant.
+    #[test]
+    #[ignore = "needs a running PipeWire session with a default sink"]
+    fn capture_queue_and_data_loop_scheduling() {
+        let worker = WorkerLoop::new().unwrap();
+        let context = capture_context(&worker, require_buffer_timestamps().unwrap()).unwrap();
+        let core = context.connect_rc(None).unwrap();
+        let stream = worker.stream(
+            pw::stream::StreamBox::new(
+                &core,
+                "isocast capture queue test",
+                properties! {
+                    "media.type" => "Audio",
+                    "media.category" => "Capture",
+                    "stream.capture.sink" => "true",
+                    "node.name" => "isocast.capture-test",
+                },
+            )
+            .unwrap(),
+        );
+        let buffers = Rc::new(Cell::new(0));
+        let added = buffers.clone();
+        let processed = Rc::new(Cell::new(0));
+        let seen = processed.clone();
+        let owner = thread::current().id();
+        let _listener = stream
+            .add_local_listener_with_user_data(())
+            .add_buffer(move |_, _, _| added.set(added.get() + 1))
+            .process(move |stream, _| {
+                assert_eq!(thread::current().id(), owner);
+                while let Some(_buffer) = stream.dequeue_buffer() {
+                    seen.set(seen.get() + 1);
+                }
+            })
+            .register()
+            .unwrap();
+        let mut format = AudioInfoRaw::new();
+        format.set_format(AudioFormat::F32LE);
+        format.set_rate(RATE);
+        format.set_channels(2);
+        let format = spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &spa::pod::Value::Object(spa::pod::Object {
+                type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+                id: spa::param::ParamType::EnumFormat.as_raw(),
+                properties: format.into(),
+            }),
+        )
+        .unwrap()
+        .0
+        .into_inner();
+        let buffer_bytes = capture_buffers().unwrap();
+        stream
+            .connect(
+                spa::utils::Direction::Input,
+                None,
+                pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+                &mut [
+                    Pod::from_bytes(&format).unwrap(),
+                    Pod::from_bytes(&buffer_bytes).unwrap(),
+                ],
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            iterate(&worker).unwrap();
+        }
+        assert_eq!(buffers.get(), 16);
+        assert!(processed.get() > 10, "capture did not process audio");
+        let realtime = capture_is_realtime(&context);
+        eprintln!(
+            "capture buffers: {}, data loop realtime: {realtime}",
+            buffers.get()
+        );
+        if let Ok(expected) = std::env::var("ISOCAST_EXPECT_RT") {
+            assert!(matches!(expected.as_str(), "0" | "1"));
+            assert_eq!(realtime, expected == "1");
+        }
+    }
 
     fn app_node(id: Option<&str>, name: &str, binary: Option<&str>, pid: u32) -> AppNode {
         AppNode {

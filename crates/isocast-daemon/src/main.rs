@@ -989,6 +989,8 @@ struct Daemon {
     projects: Mutex<()>,
     hotkeys: hotkeys::HotkeyRuntime,
     shutting_down: AtomicBool,
+    /// Serialize process shutdown with idle engine teardown, including
+    /// native workers no longer reachable through `state.engine`.
     shutdown_lock: Mutex<()>,
     /// Read-held by every call that starts something (a take, a stream,
     /// the virtual camera); `shutdown_if_idle` write-holds it,
@@ -1494,8 +1496,7 @@ impl Daemon {
     /// Signals, quit Apple Events and the shutdown API share this path. A
     /// timeout is diagnostic, never permission to exit during an active take.
     fn graceful_shutdown(&self) {
-        self.shutting_down.store(true, Ordering::SeqCst);
-        let _shutdown = self.shutdown_lock.lock();
+        let _shutdown = self.begin_shutdown();
         let _ = self.cancel_calibration("Calibration cancelled by shutdown");
         loop {
             let result = self.stop(None);
@@ -1520,6 +1521,13 @@ impl Daemon {
         #[cfg(unix)]
         let _ = std::fs::remove_file(socket_path());
         isocast_diagnostics::clean_exit();
+    }
+
+    /// The start of `graceful_shutdown`: refuse new work, then wait for an
+    /// idle engine teardown already under way. Hold the guard to the end.
+    fn begin_shutdown(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.shutdown_lock.lock()
     }
 
     /// Agree to shut down only while nothing runs. Leaves `shutting_down`
@@ -4298,6 +4306,10 @@ impl Daemon {
     /// Stop the live engine if nothing needs it: no recording, no hold, and
     /// no client asking for frames lately.
     fn stop_idle_engine_now(&self) {
+        // Taking it out of state does not mean its native workers have
+        // finished. Shutdown must wait for this stop before process exit
+        // can run the GPU driver's finalizers on another thread.
+        let _shutdown = self.shutdown_lock.lock();
         let engine = {
             let mut state = self.state.lock();
             let idle = state.session.is_none()
@@ -5927,4 +5939,209 @@ fn refused(err: isocast_engine::data::Refused) -> RpcError {
 
 fn to_json(value: impl serde::Serialize) -> Result<serde_json::Value, RpcError> {
     serde_json::to_value(value).map_err(|err| failed(err.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// A live engine whose `stop` holds its native teardown open until the
+    /// test lets it finish, as a GPU encoder's destruction can.
+    struct SlowStop {
+        entered: mpsc::SyncSender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        finished: AtomicBool,
+    }
+
+    impl LiveEngine for SlowStop {
+        fn monitor_h264_constrained_high(&self) -> bool {
+            unreachable!()
+        }
+        fn update(&self, _setup: &Setup, _revision: u64) -> Result<(), String> {
+            unreachable!()
+        }
+        fn info(&self) -> EngineInfo {
+            unreachable!()
+        }
+        fn program_failure(&self) -> Option<String> {
+            unreachable!()
+        }
+        fn canvas_stopped(&self, _canvas: CanvasId) -> Option<String> {
+            unreachable!()
+        }
+        fn control(&self) -> Arc<SessionControl> {
+            unreachable!()
+        }
+        fn set_preview(&self, _scene: Option<String>) {
+            unreachable!()
+        }
+        fn frame_jpeg(
+            &self,
+            _target: &str,
+            _after: Option<u64>,
+            _timeout: Duration,
+            _max_width: Option<u32>,
+            _quality: f32,
+            _fps: Option<u32>,
+        ) -> Result<Option<JpegFrame>, String> {
+            unreachable!()
+        }
+        fn frames(
+            &self,
+            _target: &str,
+            _max_width: Option<u32>,
+            _fps: u32,
+            _profile: H264Profile,
+        ) -> Result<FrameFeed, String> {
+            unreachable!()
+        }
+        fn opus(&self) -> Result<isocast_engine::record::OpusFeed, String> {
+            unreachable!()
+        }
+        fn shared_frames(
+            &self,
+            _target: &str,
+            _max_size: (Option<u32>, Option<u32>),
+            _fps: u32,
+            _slots: u32,
+            _filtered: bool,
+        ) -> Result<SharedFeed<Surface>, String> {
+            unreachable!()
+        }
+        fn record(&self, _options: &RecordOptions) -> Result<Report> {
+            unreachable!()
+        }
+        fn resolved(&self) -> Option<Resolved> {
+            unreachable!()
+        }
+        fn canvas_refusal(&self, _canvas: &Canvas) -> Option<String> {
+            unreachable!()
+        }
+        fn stream(
+            &self,
+            _id: &str,
+            _settings: StreamSettings,
+            _key: String,
+            _on_change: OnChange,
+        ) -> Result<Stream> {
+            unreachable!()
+        }
+        fn stream_canvas(
+            &self,
+            _canvas: CanvasId,
+            _id: &str,
+            _settings: StreamSettings,
+            _key: String,
+            _on_change: OnChange,
+        ) -> Result<Stream> {
+            unreachable!()
+        }
+        fn switch_canvas_scene(
+            &self,
+            _canvas: CanvasId,
+            _at: Time,
+            _scene: String,
+            _transition: Transition,
+        ) -> Result<Option<(u32, f64)>, String> {
+            unreachable!()
+        }
+        fn canvas_scene(&self, _canvas: CanvasId) -> Option<String> {
+            unreachable!()
+        }
+        fn set_canvas_preview(
+            &self,
+            _canvas: CanvasId,
+            _scene: Option<String>,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+        fn resolved_canvas(&self, _canvas: CanvasId) -> Option<Resolved> {
+            unreachable!()
+        }
+        fn setup_refusal(&self, _setup: &Setup) -> Option<Issue> {
+            unreachable!()
+        }
+        fn virtual_camera(
+            &self,
+            _on_change: isocast_engine::record::OnCameraChange,
+        ) -> Result<isocast_engine::record::VirtualCamera> {
+            unreachable!()
+        }
+        fn replay(
+            &self,
+            _canvas: CanvasId,
+            _settings: &isocast_protocol::replay::ReplaySettings,
+            _stream: Option<&StreamSettings>,
+            _on_change: isocast_engine::replay::OnChange,
+        ) -> Result<isocast_engine::replay::ReplayBuffer> {
+            unreachable!()
+        }
+        fn stop(&self) {
+            let _ = self.entered.send(());
+            // A failed assertion drops the sender: finish rather than hang.
+            let _ = self.release.lock().recv();
+            self.finished.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The idle stop takes the engine out of `state` before its native
+    /// workers finish. Process shutdown must not get past its start (and on
+    /// to exit, where driver finalizers run) until that stop has returned.
+    #[test]
+    fn shutdown_waits_for_an_idle_engine_teardown_in_progress() {
+        let daemon = Arc::new(Daemon::default());
+        let (entered, stopping) = mpsc::sync_channel(1);
+        let (release, released) = mpsc::sync_channel(1);
+        let engine = Arc::new(SlowStop {
+            entered,
+            release: Mutex::new(released),
+            finished: AtomicBool::new(false),
+        });
+        daemon.state.lock().engine = Some(engine.clone());
+
+        // Nothing records, holds or asked for frames: the engine is idle.
+        let idle = thread::spawn({
+            let daemon = daemon.clone();
+            move || daemon.stop_idle_engine_now()
+        });
+        stopping
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the idle check stops an unused engine");
+        assert!(
+            daemon.state.read().engine.is_none(),
+            "the engine has left state while its stop is still running"
+        );
+        assert!(
+            daemon.shutdown_lock.try_lock().is_none(),
+            "idle teardown must exclude process shutdown until stop returns"
+        );
+
+        let (began, shutdown_began) = mpsc::channel();
+        let shutdown = thread::spawn({
+            let daemon = daemon.clone();
+            let engine = engine.clone();
+            move || {
+                let _shutdown = daemon.begin_shutdown();
+                let _ = began.send(engine.finished.load(Ordering::SeqCst));
+            }
+        });
+        // Wait for actual shutdown admission, not an assumed scheduling
+        // delay. The timeout is only a watchdog for a broken test.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !daemon.shutting_down.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "shutdown never started");
+            thread::yield_now();
+        }
+        assert_eq!(shutdown_began.try_recv(), Err(mpsc::TryRecvError::Empty));
+        release.send(()).unwrap();
+        assert_eq!(
+            shutdown_began.recv_timeout(Duration::from_secs(10)),
+            Ok(true),
+            "shutdown goes ahead once the engine's stop has finished"
+        );
+        idle.join().unwrap();
+        shutdown.join().unwrap();
+        assert!(daemon.shutting_down.load(Ordering::SeqCst));
+    }
 }
