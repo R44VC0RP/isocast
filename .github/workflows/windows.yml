@@ -485,6 +485,13 @@ jobs:
           ffmpeg -version
           ffprobe -version
 
+      # Media Foundation decoding of files ffmpeg makes at test time (H.264/AAC
+      # MP4, WAV, an FFV1 file no Windows decodes, and Store-extension codecs
+      # that must play or name their extension). Serial: one D3D11 device.
+      - name: Check media file decoding (Media Foundation)
+        timeout-minutes: 30
+        run: cargo test --locked -j 1 -p isocast-platform-windows --lib media::tests -- --test-threads=1 --nocapture
+
       - name: Recover recordings after engine and process-tree termination
         timeout-minutes: 10
         run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json
@@ -517,6 +524,22 @@ jobs:
           path: |
             windows-preview.json
             ${{ runner.temp }}/windows-preview
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Strict (zero drops) at the hosted no-GPU reference canvas, 320x180p30.
+      - name: Media file source (looping MP4 beside the test pattern)
+        timeout-minutes: 8
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_media --windows-profile 180p30 --codec h264 --timeout 300 --work "$RUNNER_TEMP/windows-media" --keep-failures --report windows-media.json
+
+      - name: Keep media source evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-media
+          path: |
+            windows-media.json
+            ${{ runner.temp }}/windows-media
           if-no-files-found: warn
           retention-days: 14
 

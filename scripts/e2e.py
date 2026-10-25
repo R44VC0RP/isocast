@@ -49,6 +49,11 @@ strict 720p30 qualification remains a separate run without --hosted.
 --only linux_media plays a looping H.264/AAC MP4 through GStreamer (needs
 gstreamer1.0-libav) beside a test pattern: 60 s strict, 15 s with --hosted.
 
+Windows media: --only win_media plays a looping H.264/AAC MP4 through Media
+Foundation beside the test pattern (program and media ISO, frame oracle and
+markers): strict at --windows-profile 180p30 for 18 s in hosted CI, 60 s from
+720p up (1080p30 on a GPU machine).
+
 Linux capture: --only linux_capture records the real capture paths (the
 ScreenCast portal over PipeWire, PipeWire desktop audio, a microphone and a
 V4L2 camera) on the headless desktop of scripts/linux-capture-fixture.sh
@@ -96,8 +101,8 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              # The frame oracle (#124), defined below.
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
-             # The same model on the engine's test pattern (Windows has no media files yet).
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery", "linux_media", "linux_capture") if sys.platform.startswith("linux") else ())
+             # The same model on the engine's test pattern; win_media plays a real file.
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording") + (("linux_record", "linux_recovery", "linux_media", "linux_capture") if sys.platform.startswith("linux") else ()) + (("win_media",) if sys.platform == "win32" else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -259,6 +264,10 @@ def keep_under(root, work, report):
 
 WINDOWS = sys.platform == "win32"
 LINUX = sys.platform.startswith("linux")
+# --windows-profile: the hosted no-GPU reference canvas (#128: 180p30; 270p30
+# held for win_media on one host but not for preview recording on all) and a
+# GPU machine's strict 1080p30.
+WINDOWS_PROFILES = {"180p30": (320, 180, 30), "270p30": (480, 270, 30), "1080p30": (1920, 1080, 30)}
 
 
 def windows_pipe(path):
@@ -2609,8 +2618,8 @@ def oracle_base(root, cfg, sources, fps):
     """`cfg` with fixture media sources {id: (tag name, restart, speed)}
     in place of the synthetic ones; returns (cfg, the clips' frame count)."""
     if WINDOWS:
-        raise Pending("media files (the block-code fixtures) don't play on Windows yet; the win_* scenarios "
-                      "check the same model on the engine's test pattern")
+        raise Pending("the block-code fixture scenarios aren't qualified on Windows yet; win_media checks a "
+                      "looping media file and the win_* scenarios the test pattern against the same model")
     folder = root.parent / "fixtures"
     cfg["sources"] = []
     for sid, (tag, restart, speed) in sources.items():
@@ -4613,6 +4622,34 @@ def fragment_recovery(e, cfg, evidence, kill_tree=False):
     evidence["retained_metadata_partials"] = [p.name for p in partials]
 
 
+def scenario_win_media(e, cfg, evidence):
+    """A looping H.264/AAC MP4 (the frame oracle's block-code clip, 4 s, a
+    marker burst each second) decoded by Media Foundation beside the
+    engine's test pattern: the program and the media ISO, every picture
+    against the oracle across the loops (the file's own rate, clean wraps),
+    each burst within a frame of its picture, under the run's loss policy
+    (zero drops without --hosted). 18 s below 720p (the hosted no-GPU
+    reference, --windows-profile 180p30), else 60 s."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    seconds, clip_seconds = (18 if h < 720 else 60), 4
+    clip = oracle_fixture(e.root.parent / "fixtures", ORACLE_TAGS["a"], fps, clip_seconds, mp4=True)
+    count = clip_seconds * fps
+    cfg["sources"] = [s for s in cfg["sources"] if s["id"] in ("bars", "tone")]
+    cfg["sources"].append({"id": "a", "name": "Clip", "kind": "media", "files": [str(clip)], "loop": True})
+    layout = [("a", (0, 0, 0.75, 0.75))]
+    cfg["scenes"] = [{"id": "main", "name": "Main",
+                      "items": [item("a", layout[0][1], (w, h)), item("bars", (0.75, 0.75, 0.25, 0.25), (w, h))]}]
+    cfg["recording"]["program"]["audio"] = ["a"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["a"], audio=["a"])
+    e.apply(cfg)
+    path, manifest = take(e, seconds)
+    evidence["files"] = check_take(path, manifest, seconds, evidence=evidence)
+    require(sorted(f["source"] for f in manifest["files"]) == ["a", "program"],
+            f"files: {[f['source'] for f in manifest['files']]}")
+    evidence["clip"] = {"frames": count, "loops": round(seconds / clip_seconds, 2)}
+    evidence["t0"] = check_record_take(e, path, manifest, cfg, layout, count, evidence, isos=("a",))
+
+
 def scenario_win_takes(e, cfg, evidence):
     """A split and a pause on the test pattern: the second take starts with
     the frame after the first's last; the pause cuts out exactly its frames."""
@@ -4947,6 +4984,9 @@ def main():
                         help="exercise a specific recording path (default: available hardware, else ProRes)")
     parser.add_argument("--linux-profile", choices=("720p30", "360p30"),
                         help="Linux synthetic profile: 720p30 by default; 360p30 for four-vCPU software-GPU CI")
+    parser.add_argument("--windows-profile", choices=tuple(WINDOWS_PROFILES),
+                        help="Windows canvas: 180p30 is the hosted no-GPU reference (strict, without --hosted); "
+                             "1080p30 a GPU machine's strict run")
     parser.add_argument("--capabilities", action="store_true", help="probe hardware and exit (JSON)")
     parser.add_argument("--quick", action="store_true",
                         help="the frame-oracle suite lanes run while they work (about 3 min on the VM "
@@ -4968,6 +5008,8 @@ def main():
     args = parser.parse_args()
     if args.linux_profile and not LINUX:
         parser.error("--linux-profile is only for Linux synthetic recording checks")
+    if args.windows_profile and not WINDOWS:
+        parser.error("--windows-profile is only for Windows")
     if args.summary:
         print(summary(read_json(args.summary)), end="")
         return 0
@@ -5037,6 +5079,9 @@ def main():
                     "width": 1920, "height": 1080, "fps": 60}
                 if args.linux_profile == "360p30":
                     caps["profile"] = {"width": 640, "height": 360, "fps": 30}
+                if args.windows_profile:
+                    width, height, fps = WINDOWS_PROFILES[args.windows_profile]
+                    caps["profile"] = {"width": width, "height": height, "fps": fps}
                 if args.codec:
                     caps["record_codec"] = args.codec
                 elif args.hosted and caps["h264"]:

@@ -485,16 +485,48 @@ impl TexturePool {
         {
             bail!("camera.frame: invalid NV12 dimensions, pitch or byte length");
         }
+        self.upload(PixelFormat::Nv12, width, height, bytes, pitch)
+    }
+
+    /// One upload of CPU-decoded BGRA8 pixels into a read-only frame.
+    /// Rows are top-down, `pitch` bytes apart.
+    pub(crate) fn upload_bgra(
+        &mut self,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+        pitch: u32,
+    ) -> Result<Option<Frame>> {
+        if width == 0
+            || height == 0
+            || width > 16384
+            || height > 16384
+            || u64::from(pitch) < u64::from(width) * 4
+            || u64::from(pitch) * u64::from(height) > bytes.len() as u64
+        {
+            bail!("media.frame: invalid BGRA dimensions, pitch or byte length");
+        }
+        self.upload(PixelFormat::Bgra8, width, height, bytes, pitch)
+    }
+
+    fn upload(
+        &mut self,
+        format: PixelFormat,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+        pitch: u32,
+    ) -> Result<Option<Frame>> {
         let completed = self.device.completed()?;
         self.slots.retain(|slot| {
-            (slot.width == width && slot.height == height && slot.format == PixelFormat::Nv12)
+            (slot.width == width && slot.height == height && slot.format == format)
                 || Arc::strong_count(slot) > 1
                 || slot.ready.load(Ordering::Acquire) > completed
         });
         let slot = self.slots.iter().find(|slot| {
             slot.width == width
                 && slot.height == height
-                && slot.format == PixelFormat::Nv12
+                && slot.format == format
                 && Arc::strong_count(slot) == 1
                 && slot.ready.load(Ordering::Acquire) <= completed
         });
@@ -502,7 +534,7 @@ impl TexturePool {
             Some(slot) => slot.clone(),
             None if self.slots.len() == MAX_POOL_FRAMES => return Ok(None),
             None => {
-                let slot = Slot::new(&self.device, width, height, PixelFormat::Nv12, false)?;
+                let slot = Slot::new(&self.device, width, height, format, false)?;
                 self.slots.push(slot.clone());
                 slot
             }
@@ -511,7 +543,7 @@ impl TexturePool {
         let value = submit.next;
         submit.next = value
             .checked_add(1)
-            .context("D3D11 camera upload fence exhausted")?;
+            .context("D3D11 upload fence exhausted")?;
         slot.ready.store(value, Ordering::Release);
         unsafe {
             submit.context.UpdateSubresource(
