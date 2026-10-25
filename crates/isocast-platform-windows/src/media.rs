@@ -33,8 +33,9 @@ use crate::{Frame, GraphicsDevice};
 /// so an offset never exceeds this and is never carried forward.
 const ALIGNMENT: Duration = Duration::from_millis(5);
 
-/// How long a read waits for the decoder's sample allocator to refill.
-const ALLOCATOR_WAIT: Duration = Duration::from_secs(1);
+/// Times a picture reader opens its file again after Media Foundation's
+/// sample allocator ran dry.
+const MAX_REOPENS: u32 = 3;
 
 /// The same, in Media Foundation's 100 ns units.
 const ALIGNMENT_HNS: i64 = 50_000;
@@ -78,8 +79,16 @@ pub struct Reader {
     /// AAC frame whole, past the edit's end).
     end: Option<Duration>,
     ended: bool,
-    /// The allocator ran empty once (reported once per reader).
-    allocator_waited: bool,
+    /// The last read failed with MF_E_SAMPLEALLOCATOR_EMPTY.
+    allocator_empty: bool,
+    /// How often the picture reader opened its file again, and Media
+    /// Foundation's own time of the last picture it gave (opened again, it
+    /// seeks there and goes on after that one).
+    reopens: u32,
+    last_raw: Option<i64>,
+    /// Tests: fail the next read as an empty allocator does.
+    #[cfg(test)]
+    fail_next_read: bool,
 }
 
 // SAFETY: the Source Reader is free-threaded and lives in the process MTA,
@@ -91,6 +100,7 @@ pub struct Reader {
 unsafe impl Send for Reader {}
 
 struct Video {
+    device: GraphicsDevice,
     pool: TexturePool,
     /// Decoded on the GPU (textures) or the CPU (system memory).
     gpu: bool,
@@ -586,7 +596,11 @@ pub fn open(device: Option<GraphicsDevice>, path: &Path, part: MediaPart) -> Res
                 rebase: None,
                 end,
                 ended: false,
-                allocator_waited: false,
+                allocator_empty: false,
+                reopens: 0,
+                last_raw: None,
+                #[cfg(test)]
+                fail_next_read: false,
             })
         }
         MediaPart::Video => {
@@ -659,6 +673,7 @@ fn open_video(device: &GraphicsDevice, path: &Path, shown: &str, gpu: bool) -> R
         path: shown.to_string(),
         file: path.to_path_buf(),
         video: Some(Video {
+            device: device.clone(),
             pool: TexturePool::new(device.clone()),
             gpu,
             size,
@@ -672,7 +687,11 @@ fn open_video(device: &GraphicsDevice, path: &Path, shown: &str, gpu: bool) -> R
         rebase: None,
         end,
         ended: false,
-        allocator_waited: false,
+        allocator_empty: false,
+        reopens: 0,
+        last_raw: None,
+        #[cfg(test)]
+        fail_next_read: false,
     };
     let first = reader.read_video()?;
     reader.video.as_mut().expect("video").first = first;
@@ -701,39 +720,28 @@ impl Reader {
         let mut flags = 0;
         let mut time = 0;
         let mut sample = None;
-        let started = Instant::now();
-        loop {
-            let read = unsafe {
-                self.reader.ReadSample(
-                    stream(self.part),
-                    0,
-                    None,
-                    Some(&mut flags),
-                    Some(&mut time),
-                    Some(&mut sample),
-                )
-            };
-            match read {
-                Ok(()) => break,
-                // The decoder's samples are all out (with something else
-                // holding them, or not yet back from the GPU): they come
-                // back, so wait a bounded time rather than end the source.
-                Err(error)
-                    if error.code() == MF_E_SAMPLEALLOCATOR_EMPTY
-                        && started.elapsed() < ALLOCATOR_WAIT =>
-                {
-                    if !self.allocator_waited {
-                        self.allocator_waited = true;
-                        isocast_diagnostics::diagnostic!("warn";
-                            "media {}: decoder sample allocator empty; waiting for samples to come back", self.path
-                        );
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                Err(error) => {
-                    bail!("could not read {}: {}", self.path, reason(&error))
-                }
-            }
+        let read = unsafe {
+            self.reader.ReadSample(
+                stream(self.part),
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut time),
+                Some(&mut sample),
+            )
+        };
+        #[cfg(test)]
+        let read = match std::mem::take(&mut self.fail_next_read) {
+            true => Err(MF_E_SAMPLEALLOCATOR_EMPTY.into()),
+            false => read,
+        };
+        if let Err(error) = read {
+            // Not retried: after this error the Source Reader is wedged,
+            // and every later ReadSample blocks even once all its samples
+            // are back (traced on WARP: trace_sample_allocator). Pictures
+            // open the file again instead (read_video).
+            self.allocator_empty = error.code() == MF_E_SAMPLEALLOCATOR_EMPTY;
+            bail!("could not read {}: {}", self.path, reason(&error));
         }
         if flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
             bail!("could not read {}: the decoder failed", self.path);
@@ -750,7 +758,16 @@ impl Reader {
 
     fn read_video(&mut self) -> Result<Option<(Frame, Duration)>> {
         while !self.ended {
-            let read = self.read()?;
+            let read = match self.read() {
+                Ok(read) => read,
+                Err(_)
+                    if std::mem::take(&mut self.allocator_empty) && self.reopens < MAX_REOPENS =>
+                {
+                    self.reopen()?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if read.flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
                 self.relayout()?;
             }
@@ -768,7 +785,11 @@ impl Reader {
                 }
             }
             let at = from_hns(time, &self.path)?;
-            if self.end.is_some_and(|end| at >= end) {
+            // Opened again, the file is decoded from a key frame up to
+            // the last picture given: those aren't given twice.
+            if self.end.is_some_and(|end| at >= end)
+                || self.last_raw.is_some_and(|last| read.time <= last)
+            {
                 continue;
             }
             let video = self.video.as_mut().expect("video reader");
@@ -780,9 +801,37 @@ impl Reader {
             } else {
                 video.upload(&sample)?
             };
+            self.last_raw = Some(read.time);
             return Ok(Some((frame, at)));
         }
         Ok(None)
+    }
+
+    /// Open the pictures again after Media Foundation's sample allocator
+    /// ran dry, and go on from the last picture given: the same decode
+    /// path and edit handling, a seek to that picture's time.
+    fn reopen(&mut self) -> Result<()> {
+        self.reopens += 1;
+        isocast_diagnostics::diagnostic!("warn";
+            "media {}: the decoder's sample allocator ran dry; opening the file again after {:?} (100 ns)", self.path, self.last_raw
+        );
+        let video = self.video.as_ref().expect("video reader");
+        let reader = source_reader(
+            &self.file,
+            &self.path,
+            &video_attributes(&video.device, video.gpu)?,
+        )?;
+        select(&reader, MediaPart::Video, &self.path)?;
+        set_output(&reader, MediaPart::Video, &self.path, video.gpu)?;
+        if let Some(raw) = self.last_raw {
+            // Media Foundation's own time for that picture, as it gave it
+            // (not the presentation time, which edits move).
+            let position = windows::Win32::System::Com::StructuredStorage::PROPVARIANT::from(raw);
+            unsafe { reader.SetCurrentPosition(&GUID::zeroed(), &position) }?;
+        }
+        self.reader = reader;
+        self.ended = false;
+        Ok(())
     }
 
     /// A sample's time from the file's start. Where Media Foundation
@@ -1021,7 +1070,9 @@ impl Video {
 
 /// A picture's pool slots are free again once the engine let go of them
 /// and the GPU finished with them; a busy software GPU can take a while.
-const SLOT_WAIT: Duration = Duration::from_secs(2);
+/// Bounded well below a second: the engine joins the reader's thread when
+/// a source stops, and this wait must not hold that up.
+const SLOT_WAIT: Duration = Duration::from_millis(500);
 
 /// Put a picture in the pool (`put` gives `None` while every slot is in
 /// use), waiting a bounded time for a slot rather than ending the source.
@@ -1036,8 +1087,8 @@ fn pooled(
         }
         if started.elapsed() >= SLOT_WAIT {
             bail!(
-                "media.frame: all {MAX_POOL_FRAMES} decoded pictures stayed in use for {} s (the GPU didn't finish its copies, or nothing released them)",
-                SLOT_WAIT.as_secs()
+                "media.frame: all {MAX_POOL_FRAMES} decoded pictures stayed in use for {} ms (the GPU didn't finish its copies, or nothing released them)",
+                SLOT_WAIT.as_millis()
             );
         }
         std::thread::sleep(Duration::from_millis(1));
