@@ -62,6 +62,12 @@ What it needs (install with your package manager)
 - Screen, microphone, desktop audio and camera capture (as it arrives):
   PipeWire, and xdg-desktop-portal with your desktop's backend
   (xdg-desktop-portal-gnome, -kde or -wlr) for choosing a screen.
+- Browser sources: WebKitGTK 6 and GTK 4's Broadway display daemon. Pages
+  render in a helper process (isocast-browser), on a private display that
+  never shows on your screen; without these, only browser sources fail.
+    Debian/Ubuntu: libwebkitgtk-6.0-4 libgtk-4-bin
+    Fedora:        webkitgtk6.0 gtk4
+    Arch:          webkitgtk-6.0 gtk4
 
 Built for glibc 2.39 (Ubuntu 24.04) or newer, x86_64 and arm64.
 
@@ -82,8 +88,8 @@ Known gaps in this preview
 - Recording and streaming use software encoding (OpenH264, H.264 only) and
   AAC; previews are decoded in software. Hardware encoding (VA-API, NVENC)
   comes later.
-- Not on Linux yet: the virtual camera and browser sources. Media files and
-  images may be missing too.
+- Not on Linux yet: the virtual camera. Media files and images may be
+  missing too.
 - Open and save dialogs use Isocast's own file browser.
 
 Licences: MIT or Apache-2.0 (LICENSE-MIT, LICENSE-APACHE); third-party

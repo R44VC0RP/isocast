@@ -91,6 +91,22 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   e2e `linux_media`): looping 4 s H.264/AAC MP4 + test pattern, program and media ISO 1800 frames each,
   zero drops, 1800/1800 oracle frames across 15 loops, 60/60 bursts, max A/V skew 0.31 ms. Anamorphic
   (non-square PAR) files play at their stored size.
+- **Linux .deb packages (2026-10-25, #143):** `scripts/package-deb.sh BIN_DIR ubuntu24.04|debian12` builds
+  `isocast_<ver>-1~<distro>_<arch>.deb`: /usr/bin `isocast`, `isocastd`, `isocast-ui`, `isocast-browser` and the
+  per-user `isocast-openh264-install` (packaging/linux/install.sh); docs, notices and Cisco's licence in
+  /usr/share/doc/isocast; no OpenH264. Ubuntu 24.04 debs reuse the tarball's binaries; Debian 12 is built in
+  `debian:12` (24.04 builds need glibc 2.38; bookworm has 2.36) and needs PipeWire >= 1.0.5 from bookworm-backports.
+  Depends come from dpkg-shlibdeps (PipeWire raised to >= 1.0.5) plus the dlopen'd Vulkan, Wayland, X11 and
+  xkbcommon libraries. The only maintainer scripts load (postinst, where AppArmor is enabled) and unload (postrm
+  remove and purge) the conffile /etc/apparmor.d/isocast-browser. CI: `deb-*` jobs in windows.yml, gated as `deb`,
+  lint the packages and install them on clean machines without Recommends.
+- **Linux browser sources (2026-10-25, #144):** each page runs in `isocast-browser` (WebKitGTK 6, private
+  `gtk4-broadwayd` display), found beside isocastd or via `ISOCAST_BROWSER_HELPER`. Runtime packages:
+  `libwebkitgtk-6.0-4 libgtk-4-bin` (Debian/Ubuntu), `webkitgtk6.0 gtk4` (Fedora), `webkitgtk-6.0 gtk4` (Arch).
+  Memory cap: `ISOCAST_BROWSER_MEMORY_MB` (default 1536). WebKit's sandbox is off on Ubuntu 24.04
+  (`kernel.apparmor_restrict_unprivileged_userns=1`) unless the helper runs under the AppArmor profile
+  `packaging/deb/apparmor/isocast-browser`, which attaches to `/usr/bin/isocast-browser` (the .deb installs both);
+  the helper logs it at warn, `doctor` reports it, and `isocast-browser --sandbox-status` prints its decision.
 - **Linux capture lane (2026-10-23), experimental/unreleased:** portal/SHM screens, PipeWire default-sink
   desktop audio and microphones, and V4L2 MJPEG/YUYV cameras are implemented. PipeWire headers/runtime
   >=1.0.5 are required. Restore tokens are private engine-adjacent `*.linux-capture.json` files; devices
@@ -345,6 +361,11 @@ through `pr.sh` (implementers: ci/<lane> snapshots and their PRs) and `merge-pr.
 - Windows packaging (Inno, WinSparkle) is in releasing.md. Authenticode and publication aren't set up yet.
 
 ## 6. Gotchas that still bite
+
+- 2026-10-25 (#144): on a 2-vCPU VM with llvmpipe, a 720p30 browser page plus program plus ISO is at the
+  edge (page about 0.6 core: helper 31%, WebKit 30%), and two full-canvas layers (a full colour under a full
+  test pattern) drop about 160 program frames from llvmpipe fill rate alone. e2e `linux_browser` puts its colour
+  under half the canvas; strict 720p numbers need more cores or the GPU host.
 
 - 2026-10-24: A Linux PipeWire worker's main loop must stay entered on its own thread
   (`isocast-platform-linux/src/pw_loop.rs` `WorkerLoop`). pipewire-rs `Loop::iterate` enters and

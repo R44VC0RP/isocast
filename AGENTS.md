@@ -57,8 +57,13 @@ read it front to back.
   and a `Checked:` line with what QA ran. Answer each point with a commit
   and `pr.sh`, not a reply.
 - **QA merges** with `scripts/merge-pr.sh N [N…]` (several PRs are tested as
-  one candidate, bisected if red; `--hw N="evidence"` for hardware PRs),
-  then applies the printed STATE notes in a follow-up commit.
+  one candidate, bisected if red; `--hw N="evidence"` for hardware PRs).
+  The PRs' STATE notes go in as `--notes REF` (a docs-only commit based on
+  main, not yet on it), in the same candidate and publish. Never commit to
+  main between merges: every open PR goes stale and needs a full CI rerun.
+  A hosted e2e or motion failure in a job no merged path can affect may be
+  accepted with `--known-flake N="e2e: exact failure line"`; it goes into
+  the merge message.
 - **Ask Ryan only through the board inbox, and only when you genuinely
   need him:** a taste call, a UI check, an approval, something only he can
   do. `board ask "…" --kind check --image shot.png --card ISO-6` (or

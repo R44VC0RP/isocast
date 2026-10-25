@@ -355,7 +355,8 @@ while [ ${#pending[@]} -gt 0 ]; do
         read -r state conclusion running_s < <(python3 -c '
 import datetime, json, sys
 r = json.load(open(sys.argv[1]))
-starts = [j.get("startedAt") or "" for j in r.get("jobs") or []]
+# Only jobs still running: a re-run keeps the old start times of its completed jobs.
+starts = [j.get("startedAt") or "" for j in r.get("jobs") or [] if j.get("status") != "completed"]
 starts = [datetime.datetime.fromisoformat(t.replace("Z", "+00:00")) for t in starts
           if t and not t.startswith("0001")]
 age = -1  # no job has started yet
