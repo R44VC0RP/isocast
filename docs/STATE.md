@@ -150,6 +150,9 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Desktop client on a remote server (R2) is on main (2026-10-23):** pairing in the app, engine picker, one window
   per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA), verified basebook <-> exon-desk both
   ways (`/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).
+- **Linux app remote-engine sound (2026-10-25, #148):** fills its PipeWire buffers on PipeWire's real-time data
+  loop (`RT_PROCESS`); only `Send` fill state lives there, stream state stays on the worker. m2-a VM against a Mac
+  engine, 5 minutes: 2-3 resyncs and 6-16 queue misses (3-8 and 17-40 before), 0 short buffers either way.
   - 2026-10-24: remote video stays on the GPU in the canvas monitors (native layers). Windows: DXVA NV12 → D3D11
     video processor → RGBA surfaces shared with the DX12 renderer (decoder device on the renderer's adapter LUID).
     macOS: VideoToolbox's BGRA IOSurfaces go straight into the layers, tagged sRGB like local frames (remote and
