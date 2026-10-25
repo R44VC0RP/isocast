@@ -5,9 +5,9 @@
 #   scripts/windows-remote.sh status
 #   scripts/windows-remote.sh sync
 #   scripts/windows-remote.sh cargo check --locked -p isocast-daemon
-#   scripts/windows-remote.sh build [isocastd isocast isocast-ui isocast-capture]
+#   scripts/windows-remote.sh build [isocastd isocast isocast-ui isocast-capture isocast-browser]
 #   scripts/windows-remote.sh run 'Get-ChildItem $env:ISOCAST_SCRATCH'
-#   scripts/windows-remote.sh fetch [isocastd isocast isocast-ui isocast-capture]
+#   scripts/windows-remote.sh fetch [isocastd isocast isocast-ui isocast-capture isocast-browser]
 #   scripts/windows-remote.sh --host desk push [BIN...]
 #                     copy fetched binaries (ISOCAST_WINDOWS_OUT/bin) into the
 #                     host's lane target\release, e.g. built on aws-win, run on desk
@@ -81,7 +81,7 @@ esac
 shift
 explicit_bins=$#
 if [ "$op" = build ] || [ "$op" = fetch ] || [ "$op" = push ]; then
-    [ $# -gt 0 ] || set -- isocastd isocast isocast-ui isocast-capture
+    [ $# -gt 0 ] || set -- isocastd isocast isocast-ui isocast-capture isocast-browser
     for bin in "$@"; do
         case "$bin" in ''|*[!a-zA-Z0-9_-]*) echo "windows-remote: use a binary name without .exe" >&2; exit 2 ;; esac
     done

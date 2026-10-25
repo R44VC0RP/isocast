@@ -1,6 +1,9 @@
-//! `isocast-browser`: renders one web page for an Isocast browser source on
-//! Linux, in a process of its own that isocastd starts and watches
-//! (crates/isocast-platform-linux/src/browser.rs).
+//! `isocast-browser`: renders one web page for an Isocast browser source,
+//! in a process of its own that isocastd starts and watches
+//! (crates/isocast-platform-linux/src/browser.rs on Linux,
+//! crates/isocast-platform-windows/src/browser.rs on Windows, where the page
+//! lives in a WebView2 composition controller captured offscreen: see
+//! win.rs). What follows describes Linux.
 //!
 //! The page lives in a WebKitGTK 6 view, in a window on a private GTK
 //! Broadway display (`gtk4-broadwayd`, started here): nothing shows on the
@@ -19,16 +22,25 @@
 //!
 //! Lines on stdin: `reload`, `unload`, `load`. stdin closing ends it.
 
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(windows)]
+mod win;
 
 #[cfg(target_os = "linux")]
 fn main() {
     std::process::exit(linux::main());
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
 fn main() {
-    eprintln!("isocast-browser: browser sources use this helper on Linux only");
+    std::process::exit(win::main());
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn main() {
+    eprintln!("isocast-browser: browser sources use this helper on Linux and Windows only");
     std::process::exit(2);
 }

@@ -58,6 +58,11 @@ Linux capture: --only linux_capture records the real capture paths (the
 ScreenCast portal over PipeWire, PipeWire desktop audio, a microphone and a
 V4L2 camera) on the headless desktop of scripts/linux-capture-fixture.sh
 (source its session.env first; without it the scenario is skipped).
+
+Windows browser source: --only win_browser records a local page through
+isocast-browser.exe (WebView2) next to the daemon, strictly (zero writer
+drops); --windows-profile picks the canvas (1080p30 for a GPU machine, 270p30
+or 180p30 for hosted WARP runners).
 """
 
 import argparse
@@ -102,7 +107,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern; win_media plays a real file.
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture", "linux_browser") if sys.platform.startswith("linux") else ()) + (("win_media",) if sys.platform == "win32" else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor", "win_browser") + (("linux_record", "linux_recovery", "linux_media", "linux_capture", "linux_browser") if sys.platform.startswith("linux") else ()) + (("win_media",) if sys.platform == "win32" else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -4445,9 +4450,38 @@ draw();
 </script></body></html>""")
 
 
+def software_graphics(e, cfg):
+    """Whether the engine composites on a software adapter, as the engine
+    itself reports it: its capacity estimate lists a `software_renderer`
+    resource there and refuses to estimate on a Windows hardware GPU. Any
+    other answer counts as hardware, so the strict rules apply."""
+    try:
+        estimate = e.rpc("estimate_capacity", {"setup": cfg})
+    except RpcError:
+        return False
+    return any(r.get("resource") == "software_renderer" for r in estimate.get("resources", []))
+
+
 def scenario_linux_browser(e, cfg, evidence):
     """A browser source on Linux (the isocast-browser helper next to the
-    daemon: WebKitGTK 6 on a private GTK Broadway display) over a green
+    daemon: WebKitGTK 6 on a private GTK Broadway display); see
+    browser_scenario."""
+    if not LINUX:
+        raise Skip("Linux only")
+    browser_scenario(e, cfg, evidence, e.binary.parent / "isocast-browser")
+
+
+def scenario_win_browser(e, cfg, evidence):
+    """A browser source on Windows (isocast-browser.exe next to the daemon:
+    a WebView2 composition controller captured offscreen); see
+    browser_scenario."""
+    if not WINDOWS:
+        raise Skip("Windows only")
+    browser_scenario(e, cfg, evidence, e.binary.parent / "isocast-browser.exe")
+
+
+def browser_scenario(e, cfg, evidence, helper):
+    """A browser source (the platform's isocast-browser helper) over a green
     color source: a local page draws the frame oracle's block code for its
     current frame and a 50% blue box moving on a transparent background,
     and plays a 660 Hz Web Audio tone, sent to the mixer (control_audio).
@@ -4456,9 +4490,6 @@ def scenario_linux_browser(e, cfg, evidence):
     the program, the page's transparent parts show the green beneath and
     the box blends with it; and no file dropped a frame (zero, also under
     --hosted)."""
-    if not LINUX:
-        raise Skip("Linux only")
-    helper = e.binary.parent / "isocast-browser"
     if not helper.is_file():
         raise Skip(f"no {helper.name} next to the daemon (cargo build --release -p isocast-browser)")
     w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
@@ -4521,6 +4552,10 @@ def scenario_linux_browser(e, cfg, evidence):
                 f"{f['source']}: the page's 660 Hz tone isn't its sound: {tones[f['source']]}")
     evidence["tones"] = {k: {str(f): round(a, 4) for f, a in v.items()} for k, v in tones.items()}
 
+    # Whether the engine's own graphics adapter is a software one (WARP):
+    # only there does WebView2 render the page in software (below).
+    software = WINDOWS and software_graphics(e, cfg)
+    evidence["graphics"] = "software" if software else "hardware"
     code_region = oracle_regions([("c", (0, 0, 0.5, 0.5))])
     for source in ("web", "program"):
         file, _ = manifest_file(path, manifest, source)
@@ -4532,8 +4567,19 @@ def scenario_linux_browser(e, cfg, evidence):
         good = [x[2] for x in ids]
         back = sum(1 for a, b in zip(good, good[1:]) if 0 < (a - b) % count < count // 2)
         require(back == 0, f"{file.name}: the page's frames went backwards {back} times")
-        require(len(set(good)) >= len(good) * 2 // 3,
-                f"{file.name}: only {len(set(good))} different page frames in {len(good)} pictures")
+        # Most pictures are a new page frame. A Windows runner without a GPU
+        # renders the page in software beside a software compositor and
+        # encoders on four vCPUs, and WebView2 then paints every second
+        # frame: the helper sent 289 pictures in 10 s, none dropped, but
+        # 151 of 300 were new (hosted runs 40138211826, 40142180703). That
+        # is how WebView2 behaves on such machines, not a loss in Isocast,
+        # so there (no hardware GPU) 2/5 must be new (delegator, 2026-10-24);
+        # every other check stays strict, and 2/3 everywhere else.
+        share = (2, 5) if software else (2, 3)
+        evidence["unique_share_required"] = f"{share[0]}/{share[1]}"
+        require(len(set(good)) >= len(good) * share[0] // share[1],
+                f"{file.name}: only {len(set(good))} different page frames in {len(good)} pictures "
+                f"(at least {share[0]}/{share[1]} required)")
         evidence[f"{source}_codes"] = {"pictures": len(rows), "unique": len(set(good)), "backwards": back}
 
     # Alpha in the program: the page's transparent parts show the green
