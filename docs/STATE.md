@@ -31,6 +31,11 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   recorded too (duplicate audio/echo, potentially feedback). Today, use source monitoring without system-audio
   capture, or capture system audio with monitoring off. Selecting another monitoring output does not bypass
   the startup refusal. The earlier 130-second hardware proof predates the Audio-class/startup review fixes.
+- **Windows media files (2026-10-25, #140):** decoding is hardware (DXVA) on the engine's D3D11 device without
+  `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`: 4K H.264 used 0.11 s of CPU per 4 s on exon-desk, against 9.7 s on the CPU
+  path. Intel and AMD are unverified. MP4/MOV edit lists are read by `isocast_protocol::mp4_edits` (fuzz target
+  `mp4_edits`); Media Foundation ignores them on Windows 10 and Server 2022 and applies them on Server 2025, so the
+  readers rebase only when MF's first sample isn't where the edit puts it.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
