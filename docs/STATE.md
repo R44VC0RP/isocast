@@ -286,13 +286,16 @@ through `pr.sh` (implementers: ci/<lane> snapshots and their PRs) and `merge-pr.
   UI/render/motion paths; E2E not for UI-only; Windows wording/installers for Windows/UI/shared; Linux app for
   Linux/UI/shared/render; docs-only: fmt, scans, reference docs); unknown paths, .github/ and Cargo manifests run
   everything. Paths decide only when the push's base is green (its three latest push runs, or an identical green
-  tree); otherwise everything runs, so don't cancel main's runs. Gated jobs fail closed on a missing mode.
-- Accepted risk (2026-10-24, review of ISO-40): the motion suite is skipped for shared-crate changes (protocol,
-  daemon, CLI…) that can still change what the app draws. Mitigation: before a release, run everything on main with
-  `gh workflow run CI --repo R44VC0RP/isocast --ref main` (manual runs ignore the gate) and check the motion suite.
+  tree); otherwise everything runs. Don't cancel main's push runs: that forfeits main's cache warm (every lane then
+  builds cold), and after a direct main commit (one not landed by merge-pr.sh, so no identical green tree) it
+  forces full runs on every candidate. `gh workflow run CI` dispatch runs never count as a green base (push runs
+  only). Gated jobs fail closed on a missing mode.
   `ci_gate.py WORKFLOW --paths P…` previews a plan offline. fmt, scans and ipc/mux/obsws/remote clippy+tests run on
   ubuntu; platform-stub stays on macOS (its tests need a wgpu backend). Windows: win-build (~39 min) then recovery,
   wording and package in parallel; win-release (release services, preview qualification) runs alongside.
+- Accepted risk (2026-10-24, review of ISO-40): the motion suite is skipped for shared-crate changes (protocol,
+  daemon, CLI…) that can still change what the app draws. Mitigation: before a release, run everything on main with
+  `gh workflow run CI --repo R44VC0RP/isocast --ref main` (manual runs ignore the gate) and check the motion suite.
 - GitHub won't let the account approve its own PRs, so QA verdicts are comments starting `QA: approved` / `QA: changes
   requested` (prs.sh reads them).
 
