@@ -21,14 +21,18 @@ Each job gets a mode, written to $GITHUB_OUTPUT as `<job>=<mode>`:
    public main; a pull request: against its merge base) are tagged by
    PATH_RULES, and a job runs when any path carries a tag in its
    JOB_RULES entry. A path no rule knows, and anything under .github/ or
-   the Cargo manifests, is tagged `all`: every job runs. A push whose base isn't green (its three workflows'
-   latest push runs, or an identical green tree) runs everything too, as
-   do manual runs and other events.
+   the Cargo manifests, is tagged `all`: every job runs. A push whose
+   base isn't green (its three workflows' latest push runs, or an
+   identical green tree) is compared with the newest green first-parent
+   ancestor within MAX_ANCESTORS instead (the diff then includes the
+   base's own changes); with none, everything runs, as do manual runs and
+   other events.
    On main, a job that doesn't need to run warms its cache instead.
 
 The job summary says, for every job, why it runs or not.
 """
 
+import functools
 import json
 import os
 import re
@@ -139,6 +143,7 @@ def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
+@functools.lru_cache(maxsize=None)
 def api(path):
     req = urllib.request.Request(f"https://api.github.com/{path}", headers={
         "Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"})
@@ -148,6 +153,9 @@ def api(path):
 
 # How many recent green commits identical_green compares trees with.
 MAX_CANDIDATES = 30
+# How far back (first parents) a push whose base isn't green looks for a
+# green ancestor to compare with; beyond it, everything runs.
+MAX_ANCESTORS = 10
 
 
 def identical_green(repo, sha, tree):
@@ -185,6 +193,24 @@ def base_green(repo, base):
     return False, f"base {base[:12]} isn't green ({', '.join(f'{n}: {s}' for n, s in states.items())})"
 
 
+def green_ancestor(repo, base):
+    """The newest first-parent ancestor of BASE (within MAX_ANCESTORS) that is
+    green by base_green: (sha, why), or None."""
+    try:
+        git("fetch", "--quiet", "--no-tags", f"--deepen={MAX_ANCESTORS}", "origin")
+    except subprocess.CalledProcessError:
+        pass  # a full clone, or not fetchable: walk what we have
+    try:
+        ancestors = git("rev-list", "--first-parent", f"--max-count={MAX_ANCESTORS}", f"{base}^").splitlines()
+    except subprocess.CalledProcessError:
+        return None
+    for ancestor in ancestors:
+        ok, why = base_green(repo, ancestor)
+        if ok:
+            return ancestor, why
+    return None
+
+
 def push_base(sha, on_main):
     """What a push is compared with: main's previous head (the event's
     `before`), or a ci/** snapshot's parent (public main). None if unknown."""
@@ -211,10 +237,17 @@ def changed_paths(event, sha, repo=None, on_main=False):
             return None, "no parent commit to compare with"
         try:
             ok, why = base_green(repo, base)
+            if not ok:
+                # A base that isn't green yet (its runs still queued, say):
+                # compare with the newest green ancestor instead. The diff
+                # then holds the base's own changes too, so every job they
+                # need runs as well.
+                found = green_ancestor(repo, base)
+                if not found:
+                    return None, f"{why}; no green ancestor within {MAX_ANCESTORS} commits"
+                base, why = found[0], f"{why}; compared with green ancestor {found[0][:12]}: {found[1]}"
         except Exception as e:  # can't tell: run everything rather than trust it
             return None, f"couldn't check that base {base[:12]} is green ({e})"
-        if not ok:
-            return None, why
         return git("diff", "--name-only", "--no-renames", base, sha).splitlines(), f"against {base[:12]} ({why})"
     if event == "pull_request":
         with open(os.environ["GITHUB_EVENT_PATH"]) as f:

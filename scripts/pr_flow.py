@@ -4,7 +4,7 @@
     scripts/pr.sh [--draft | --ready] [--report FILE] [--title T] [--hw H]
                   [--area A]… [--session ID] [--allow-workflow-changes]
     scripts/prs.sh [--json]
-    scripts/merge-pr.sh [--dry-run] [--hw N=EVIDENCE]… N [N…]
+    scripts/merge-pr.sh [--dry-run] [--hw N=EVIDENCE]… [--notes REF] N [N…]
 
 Implementers commit on their agent/<lane> branch and run pr.sh: it publishes
 the branch merged with main as one scanned snapshot on ci/<lane> (ci.sh
@@ -24,8 +24,10 @@ with --no-ff and a message built from its PR, checks that the result is
 exactly the tree CI tested, runs `cargo check --workspace --all-targets
 --locked` on a build host, fast-forwards main, publishes it
 (publish-snapshot.sh --push), comments with the published commit, closes
-the PR and deletes its ci/ branch. STATE notes from the PRs are printed for
-the merger to apply.
+the PR and deletes its ci/ branch. The merger writes the PRs' STATE notes
+as one docs-only commit and passes it as --notes: it rides in the same
+candidate and lands in the same publish, so main moves once per batch
+(a standalone commit on main would make every open PR stale).
 
 REPORT.md (default /Volumes/IsocastBuild/<lane>/scratch/REPORT.md):
 
@@ -198,7 +200,9 @@ def snapshot_runs(sha):
 
 
 def ci_state(runs):
-    """'green', 'red', 'pending' or 'missing' over WORKFLOWS, plus a per-workflow summary."""
+    """'green', 'red', 'pending', 'missing' or 'cancelled' over WORKFLOWS, plus a
+    per-workflow summary. A cancelled run is no verdict (a newer snapshot or a
+    batch candidate superseded it), never red."""
     marks, states = [], []
     for w in WORKFLOWS:
         r = runs.get(w)
@@ -208,9 +212,11 @@ def ci_state(runs):
             marks.append("●"); states.append("pending")
         elif r["conclusion"] == "success":
             marks.append("✓"); states.append("green")
+        elif r["conclusion"] == "cancelled":
+            marks.append("○"); states.append("cancelled")
         else:
             marks.append("✗"); states.append("red")
-    for s in ("red", "pending", "missing"):
+    for s in ("red", "pending", "missing", "cancelled"):
         if s in states:
             return s, "".join(marks)
     return "green", "".join(marks)
@@ -427,7 +433,7 @@ def cmd_prs(a):
         print(f"{r['number']:>4}  {r['ci_marks']:3}  {r['ci']:7}  {r['main']:5}  {r['review']:8}  "
               f"{r['hardware']:11}  {r['age']:5}  {(r['session'] or '-'):30}  {(r['branch'] or '-'):24}  "
               f"{'[draft] ' if r['draft'] else ''}{r['title']}")
-    print("CEW: CI, Engine E2E, Windows (✓ green, ✗ red, ● running, · none). main: ok, stale (older main), "
+    print("CEW: CI, Engine E2E, Windows (✓ green, ✗ red, ● running, ○ cancelled, · none). main: ok, stale (older main), "
           "moved (branch has commits since its snapshot).")
     return 0
 
@@ -487,9 +493,16 @@ def ci_wait(lane, snapshot):
     return subprocess.run([os.path.join(SCRIPTS, "ci.sh"), "--wait", snapshot, "--lane", lane]).returncode == 0
 
 
-def ci_publish(lane, source, includes=()):
-    """ci.sh --merge-main (waits): (green, snapshot)."""
-    cmd = [os.path.join(SCRIPTS, "ci.sh"), "--source", source, "--merge-main", "--lane", lane]
+# Set by merge-pr --allow-workflow-changes: QA reviewed the PRs' .github/ changes.
+ALLOW_WORKFLOWS = []
+
+
+def ci_publish(lane, source, includes=(), superseded=()):
+    """ci.sh --merge-main, then wait: (green, snapshot). Once the candidate is
+    pushed, the macOS runs still going on SUPERSEDED snapshots (PRs whose own
+    CI the candidate replaces) are cancelled: macOS runners are the budget."""
+    cmd = [os.path.join(SCRIPTS, "ci.sh"), "--source", source, "--merge-main", "--lane", lane,
+           "--no-wait"] + ALLOW_WORKFLOWS
     for inc in includes:
         cmd += ["--include", inc]
     log(f"merge: publishing ci/{lane}: {' '.join(cmd[1:])}")
@@ -498,18 +511,160 @@ def ci_publish(lane, source, includes=()):
         os.unlink(pushed)
     code = subprocess.run(cmd).returncode
     snapshot = open(pushed).read().strip() if os.path.exists(pushed) else None
-    return code == 0, snapshot
+    if code != 0 or not snapshot:
+        return False, snapshot
+    for sha in superseded:
+        for name, r in snapshot_runs(sha).items():
+            if name in MACOS_WORKFLOWS and r["status"] != "completed":
+                log(f"merge: cancelling {name} on superseded snapshot {sha[:12]} ({r['url']})")
+                gh("run", "cancel", str(r["databaseId"]), "--repo", REPO, check=False)
+    return ci_wait(lane, snapshot), snapshot
 
 
-def green(pr):
-    """The PR's own latest snapshot: True green, False red (waits while running)."""
-    state, marks = ci_state(snapshot_runs(pr["snapshot"]))
-    log(f"merge: #{pr['number']} snapshot {pr['snapshot'][:12]}: {state} {marks}")
-    if state == "green":
-        return True
-    if state == "red":
+# Snapshot -> what failed first and passed on a re-run, for merge messages.
+RERUN_NOTES = {}
+
+# --known-flake: hosted jobs whose failure QA may accept when the PR's paths
+# can't affect them. job -> (workflow, job name prefix, ci_gate workflow, ci_gate job).
+FLAKE_JOBS = {
+    "e2e": ("Engine E2E", "e2e", "e2e", "e2e"),
+    "motion": ("CI", "motion suite", "ci", "motion"),
+}
+# PR number -> (job, exact failure line), from --known-flake.
+KNOWN_FLAKES = {}
+# Snapshot -> the accepted flakes, for land_tested and the merge message.
+FLAKE_NOTES = {}
+
+
+def ci_gate_module():
+    import importlib.util
+    path = os.path.join(SCRIPTS, "..", ".github", "scripts", "ci_gate.py")
+    spec = importlib.util.spec_from_file_location("ci_gate", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def paths_affecting(pr, job):
+    """The PR's changed paths that the CI gate says run JOB (empty: it can't affect it)."""
+    gate = ci_gate_module()
+    _, _, workflow, key = FLAKE_JOBS[job]
+    wants = gate.JOB_RULES[workflow][key][0]
+    base = git("merge-base", "main", pr["tip"])
+    paths = git("diff", "--name-only", "--no-renames", base, pr["tip"]).splitlines()
+    return [p for p in paths if gate.tags_of(p)[0] & wants]
+
+
+def parse_known_flakes(items, numbers):
+    for item in items:
+        n, _, rest = item.partition("=")
+        job, _, line = rest.partition(":")
+        job, line = job.strip(), line.strip()
+        if not n.isdigit() or int(n) not in numbers or job not in FLAKE_JOBS or not line:
+            raise Refused(f"merge: --known-flake takes N=JOB: EXACT FAILURE LINE with N among the PRs and JOB one of "
+                          f"{', '.join(FLAKE_JOBS)}, not {item!r}")
+        KNOWN_FLAKES[int(n)] = (job, line)
+
+
+def accepted_flake(snapshot, runs, prs):
+    """A note if every red workflow on SNAPSHOT is a known flake of one of PRS: only
+    its JOB failed, the failed log holds the given line, and no PR's paths can affect
+    the job. Otherwise None."""
+    flakes = [(pr, KNOWN_FLAKES[pr["number"]]) for pr in prs if pr["number"] in KNOWN_FLAKES]
+    red = {name: r for name, r in runs.items()
+           if r["status"] == "completed" and r["conclusion"] not in ("success", "cancelled", "skipped")}
+    if not red or not flakes:
+        return None
+    notes = []
+    for name, r in red.items():
+        match = None
+        for pr, (job, line) in flakes:
+            workflow, prefix, _, _ = FLAKE_JOBS[job]
+            if workflow != name:
+                continue
+            jobs = gh_json("api", f"repos/{REPO}/actions/runs/{r['databaseId']}/jobs?per_page=100")["jobs"]
+            failed = [j["name"] for j in jobs if j["conclusion"] not in ("success", "skipped", None)]
+            if not failed or any(not f.startswith(prefix) for f in failed):
+                continue
+            logs = run(["gh", "run", "view", str(r["databaseId"]), "--repo", REPO, "--log-failed"], check=False)
+            if line not in logs:
+                continue
+            affecting = [p for other in prs for p in paths_affecting(other, job)]
+            if affecting:
+                raise Refused(f"--known-flake {pr['number']}={job}: the batch's paths can affect {job} "
+                              f"({', '.join(affecting[:5])})")
+            match = f"{job}: \"{line}\" ({r['url']}); no merged path can affect {job}"
+            break
+        if not match:
+            return None
+        notes.append(match)
+    return "; ".join(notes)
+
+
+def rerun_failed_once(lane, snapshot):
+    """A red candidate's failed jobs, re-run once (far cheaper than bisecting
+    into fresh candidates): True if every workflow then passes. The first
+    failure goes into the merge message."""
+    runs = snapshot_runs(snapshot)
+    failed = [(name, r) for name, r in runs.items()
+              if r["status"] == "completed" and r["conclusion"] not in ("success", "cancelled", "skipped")]
+    if not failed:
         return False
-    return ci_wait(pr["lane"], pr["snapshot"])
+    for name, r in failed:
+        log(f"merge: {name} failed on {snapshot[:12]} ({r['url']}); re-running its failed jobs once")
+        gh("run", "rerun", str(r["databaseId"]), "--failed", "--repo", REPO, check=False)
+    # Wait until the re-runs show as running, so the wait below can't read the old verdict.
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        now = snapshot_runs(snapshot)
+        if all(now.get(name, {}).get("status") != "completed" for name, _ in failed):
+            break
+        time.sleep(10)
+    if not ci_wait(lane, snapshot):
+        log(f"merge: {snapshot[:12]} failed again after the re-run")
+        return False
+    RERUN_NOTES[snapshot] = "; ".join(f"{name} failed first ({r['url']}), passed when its failed jobs were re-run"
+                                      for name, r in failed)
+    return True
+
+
+# The workflows that run on macOS runners (the scarce ones).
+MACOS_WORKFLOWS = ("CI", "Engine E2E")
+
+
+def green(pr, batch=False):
+    """The PR's own latest snapshot: True when it may merge, False red. Alone,
+    every workflow must pass (waits while running). In a batch, whose
+    candidate is tested anyway, only the Windows workflow (no macOS runners)
+    must pass; CI and Engine E2E may still be running, never red.
+    Sets pr["own_green"] to whether all three passed."""
+    runs = snapshot_runs(pr["snapshot"])
+    state, marks = ci_state(runs)
+    log(f"merge: #{pr['number']} snapshot {pr['snapshot'][:12]}: {state} {marks}")
+    pr["own_green"] = state == "green"
+    if state == "red" and pr["number"] in KNOWN_FLAKES:
+        note = accepted_flake(pr["snapshot"], runs, [pr])
+        if note:
+            log(f"merge: #{pr['number']}: its own red run is a known flake ({note}); a candidate tests it")
+            return True
+    if state in ("green", "red"):
+        return state == "green"
+    if state == "cancelled":
+        # Superseded, never judged: it may merge, through a fresh candidate.
+        log(f"merge: #{pr['number']}: its own runs were cancelled; a new candidate tests it")
+        return True
+    if not batch:
+        pr["own_green"] = ci_wait(pr["lane"], pr["snapshot"])
+        return pr["own_green"]
+    windows = runs.get("Windows")
+    if not windows or windows["status"] != "completed":
+        log(f"merge: #{pr['number']}: waiting for its Windows run (CI and Engine E2E are left to the candidate)")
+        ok = subprocess.run([os.path.join(SCRIPTS, "ci.sh"), "--wait", pr["snapshot"], "--lane", pr["lane"],
+                             "--workflow", "Windows"]).returncode == 0
+        if not ok:
+            return False
+        runs = snapshot_runs(pr["snapshot"])
+    return ci_state(runs)[0] != "red"
 
 
 def main_worktree():
@@ -528,6 +683,10 @@ def merge_message(pr, snapshot, runs, hw_evidence):
              "What and why:", pr["what"], "", "Verified:", pr["verified"]]
     lines += ["", f"CI green on snapshot {snapshot[:12]}: " +
               ", ".join(f"{w} {runs[w]['url']}" for w in WORKFLOWS)]
+    if snapshot in RERUN_NOTES:
+        lines += [f"Re-run: {RERUN_NOTES[snapshot]}"]
+    if snapshot in FLAKE_NOTES:
+        lines += [f"Known flake accepted by QA: {FLAKE_NOTES[snapshot]}"]
     if pr["hw"] != "none":
         lines += [f"Hardware ({pr['hw']}): {hw_evidence[pr['number']]}"]
     lines += ["", f"PR: {pr['url']}"]
@@ -570,12 +729,18 @@ def workspace_check(wt):
         raise Refused(f"the workspace check failed on the merged tree (remote-build exit {code})")
 
 
-def land_tested(group, snapshot, trail, hw_evidence, dry_run):
+def land_tested(group, snapshot, trail, hw_evidence, dry_run, notes=None):
     """Merge GROUP (green on SNAPSHOT, whose trailers are TRAIL) into main and publish.
+    NOTES: {"ref": commit or None}; a pending STATE-notes commit the snapshot
+    includes is merged last, in the same publish, and then cleared.
     Returns False when main moved since the snapshot (the caller re-publishes)."""
+    notes_ref = (notes or {}).get("ref")
+    if notes_ref and notes_ref not in trail.get("include", []) and notes_ref != trail.get("source"):
+        raise Refused(f"snapshot {snapshot[:12]} doesn't include the STATE notes {notes_ref[:12]}")
     runs = snapshot_runs(snapshot)
     if ci_state(runs)[0] != "green":
-        raise Refused(f"snapshot {snapshot[:12]} isn't green on {', '.join(WORKFLOWS)}")
+        if snapshot not in FLAKE_NOTES:
+            raise Refused(f"snapshot {snapshot[:12]} isn't green on {', '.join(WORKFLOWS)}")
     messages = [merge_message(pr, snapshot, runs, hw_evidence) for pr in group]
     if dry_run:
         for m in messages:
@@ -600,6 +765,11 @@ def land_tested(group, snapshot, trail, hw_evidence, dry_run):
                     git("merge", "--no-ff", "-F", f.name, sha, cwd=wt)
                 finally:
                     os.unlink(f.name)
+            if notes_ref:
+                numbers = ", ".join(f"#{pr['number']}" for pr in group)
+                git("merge", "--no-ff", "-m", f"STATE notes for {numbers}",
+                    "-m", f"Applied by the merger in the same publish (tested in snapshot {snapshot[:12]}).",
+                    notes_ref, cwd=wt)
             merged = rev("HEAD", cwd=wt)
             tree = git("rev-parse", f"{merged}^{{tree}}")
             if tree != trail["tree"]:
@@ -618,6 +788,8 @@ def land_tested(group, snapshot, trail, hw_evidence, dry_run):
                 public_msg = f"{group[0]['title']} (#{group[0]['number']})\n\n{group[0]['what']}\n"
             else:
                 public_msg = f"Merge {numbers}\n\n" + "".join(f"- {pr['title']} (#{pr['number']})\n" for pr in group)
+            if notes_ref:
+                public_msg += "\nWith their STATE notes.\n"
             scan_text(public_msg, "the public commit message")
             p = subprocess.run([os.path.join(wt, "scripts", "publish-snapshot.sh"), "--push", public_msg.strip()])
             if p.returncode != 0:
@@ -636,22 +808,36 @@ def land_tested(group, snapshot, trail, hw_evidence, dry_run):
                    ", ".join(f"[{w}]({runs[w]['url']})" for w in WORKFLOWS) + ".")
         gh("pr", "close", str(pr["number"]), "--repo", REPO, "--comment", comment, "--delete-branch")
         log(f"merge: closed #{pr['number']}")
-        if pr["state_notes"]:
-            print(f"STATE notes from #{pr['number']} (apply to docs/STATE.md):\n{pr['state_notes']}\n")
+        if pr["state_notes"] and not notes_ref:
+            print(f"STATE notes from #{pr['number']} (apply to docs/STATE.md with the next batch's --notes):\n"
+                  f"{pr['state_notes']}\n")
+    if notes_ref:
+        notes["ref"] = None
     print(f"merged {numbers} -> {url}")
     return True
 
 
-def land(group, hw_evidence, dry_run, refused):
-    """Land GROUP (each green on its own snapshot): one candidate, bisected when red."""
+def land(group, hw_evidence, dry_run, refused, notes=None):
+    """Land GROUP (each green on its own snapshot): one candidate, bisected when red.
+    A pending STATE-notes commit (NOTES["ref"]) rides in the candidate of
+    whichever group lands first."""
+    notes = notes if notes is not None else {"ref": None}
     for _attempt in range(3):
-        if len(group) == 1:
+        if len(group) == 1 and not notes["ref"]:
             pr = group[0]
-            if pr["trail"].get("main") != rev("main"):
+            if pr["trail"].get("main") != rev("main") or not pr.get("own_green", True):
                 if dry_run:
                     log(f"merge: dry run: #{pr['number']} is behind main; would re-publish it with --merge-main")
                     return
                 ok, snapshot = ci_publish(pr["lane"], pr["tip"])
+                if not ok and snapshot:
+                    ok = rerun_failed_once(pr["lane"], snapshot)
+                if not ok and snapshot:
+                    note = accepted_flake(snapshot, snapshot_runs(snapshot), [pr])
+                    if note:
+                        log(f"merge: {snapshot[:12]}: accepting a known flake: {note}")
+                        FLAKE_NOTES[snapshot] = note
+                        ok = True
                 if not snapshot:
                     refused.append(f"#{pr['number']}: conflicts with main, or ci.sh couldn't publish it (see above); "
                                    "the implementer merges main and runs pr.sh")
@@ -664,24 +850,60 @@ def land(group, hw_evidence, dry_run, refused):
                 return
             continue
         if dry_run:
-            log(f"merge: dry run: would test {', '.join('#%d' % p['number'] for p in group)} as one candidate")
+            log(f"merge: dry run: would test {', '.join('#%d' % p['number'] for p in group)} as one candidate"
+                + (f" with STATE notes {notes['ref'][:12]}" if notes["ref"] else ""))
             return
         lane = f"batch-{group[0]['number']}"
-        ok, snapshot = ci_publish(lane, group[0]["tip"], [p["tip"] for p in group[1:]])
+        includes = [p["tip"] for p in group[1:]] + ([notes["ref"]] if notes["ref"] else [])
+        ok, snapshot = ci_publish(lane, group[0]["tip"], includes,
+                                  superseded=[p["snapshot"] for p in group if not p.get("own_green", True)])
+        if not ok and snapshot:
+            ok = rerun_failed_once(lane, snapshot)
+        if not ok and snapshot:
+            note = accepted_flake(snapshot, snapshot_runs(snapshot), group)
+            if note:
+                log(f"merge: {snapshot[:12]}: accepting a known flake: {note}")
+                FLAKE_NOTES[snapshot] = note
+                ok = True
         if not ok:
+            if not snapshot:
+                refused.append(f"{[p['number'] for p in group]}: ci.sh couldn't publish the candidate (a conflict, "
+                               "or .github/ changes without --allow-workflow-changes; see ci.sh above)")
+                return
             gh("api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/ci/{lane}", check=False)
+            if len(group) == 1:
+                refused.append(f"#{group[0]['number']}: red when merged with current main"
+                               + (" and the STATE notes" if notes["ref"] else ""))
+                return
             half = len(group) // 2
             log(f"merge: the batch is red; bisecting {[p['number'] for p in group[:half]]} "
                 f"and {[p['number'] for p in group[half:]]}")
-            land(group[:half], hw_evidence, dry_run, refused)
-            land(group[half:], hw_evidence, dry_run, refused)
+            land(group[:half], hw_evidence, dry_run, refused, notes)
+            land(group[half:], hw_evidence, dry_run, refused, notes)
             return
         msg = gh_json("api", f"repos/{REPO}/commits/{snapshot}", "--jq", "{m: .commit.message}")["m"]
-        landed = land_tested(group, snapshot, trailers_of(msg), hw_evidence, dry_run)
+        landed = land_tested(group, snapshot, trailers_of(msg), hw_evidence, dry_run, notes)
         gh("api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/ci/{lane}", check=False)
         if landed:
             return
     refused.append(f"{[p['number'] for p in group]}: main kept moving; try again")
+
+
+def state_notes_ref(ref):
+    """The merger's STATE-notes commit: docs only, merging cleanly with main."""
+    sha = rev(ref)
+    if not sha:
+        raise Refused(f"merge: --notes {ref} is not a commit here")
+    base = git("merge-base", "main", sha)
+    if base == sha:
+        raise Refused(f"merge: --notes {ref} is already in main")
+    paths = git("diff", "--name-only", base, sha).splitlines()
+    if not paths or any(not p.startswith("docs/") for p in paths):
+        raise Refused(f"merge: --notes {ref} must change docs/ only (it changes {', '.join(paths) or 'nothing'})")
+    if subprocess.run(["git", "merge-tree", "--write-tree", "main", sha], cwd=SCRIPTS,
+                      capture_output=True).returncode != 0:
+        raise Refused(f"merge: --notes {ref} conflicts with main; rebase it onto main")
+    return sha
 
 
 def cmd_merge(a):
@@ -691,6 +913,10 @@ def cmd_merge(a):
         if not n.isdigit() or not text.strip():
             raise Refused(f"merge: --hw takes N=EVIDENCE (what hw-batch ran and found), not {item!r}")
         hw_evidence[int(n)] = text.strip()
+    notes = {"ref": state_notes_ref(a.notes) if a.notes else None}
+    parse_known_flakes(a.known_flake, set(a.numbers))
+    if a.allow_workflow_changes:
+        ALLOW_WORKFLOWS.append("--allow-workflow-changes")
     numbers = list(dict.fromkeys(a.numbers))
     prs, refused = [], []
     for n in numbers:
@@ -703,14 +929,16 @@ def cmd_merge(a):
         except Refused as e:
             refused.append(str(e))
     for pr in prs:
-        if not green(pr):
+        if not green(pr, batch=len(prs) > 1):
             refused.append(f"#{pr['number']}: its snapshot {pr['snapshot'][:12]} is red; "
                            "send it back to the implementer")
     if refused:
         for r in refused:
             log(f"merge: refused: {r}")
         return 1
-    land(prs, hw_evidence, a.dry_run, refused)
+    land(prs, hw_evidence, a.dry_run, refused, notes)
+    if notes["ref"] and not a.dry_run:
+        refused.append(f"the STATE notes {notes['ref'][:12]} didn't land (no group landed); pass them again")
     for r in refused:
         log(f"merge: refused: {r}")
     return 1 if refused else 0
@@ -737,6 +965,14 @@ def main():
     m.add_argument("numbers", nargs="+", type=int)
     m.add_argument("--hw", action="append", default=[], metavar="N=EVIDENCE",
                    help="hardware qualification evidence for a needs:<hw> PR")
+    m.add_argument("--known-flake", action="append", default=[], metavar="N=JOB: LINE",
+                   help="accept PR N's failure of a hosted JOB (e2e or motion) when the exact LINE is in the failed log "
+                        "and no merged path can affect JOB; written into the merge message")
+    m.add_argument("--notes", metavar="REF",
+                   help="a docs-only commit (the merger's STATE notes for these PRs), tested in the same candidate "
+                        "and merged in the same publish, so main moves once per batch")
+    m.add_argument("--allow-workflow-changes", action="store_true",
+                   help="the PRs change .github/ and QA reviewed it (passed to ci.sh when re-publishing)")
     m.add_argument("--dry-run", action="store_true", help="check and say what would happen; change nothing")
     a = p.parse_args()
     try:
