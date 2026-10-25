@@ -1000,9 +1000,9 @@ jobs:
           ffmpeg -version
           ffprobe -version
 
-      - name: Recover recordings after engine and process-tree termination
+      - name: Recover recordings and check isolated workspaces (hosted breakaway skip)
         timeout-minutes: 10
-        run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json
+        run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --only win_isolated --only win_machine_profile --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json
 
       - name: Keep recording recovery evidence
         if: ${{ !cancelled() }}
