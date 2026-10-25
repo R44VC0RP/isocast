@@ -2,8 +2,9 @@
 
 Isocast is an open-source Rust recorder in the style of OBS: scenes and
 sources, per-source ISO recording, and full control from a CLI and MCP.
-It's built by coding agents in **lanes**, coordinated by a delegator that
-assigns work, reviews, merges and releases.
+It's built by coding agents in **lanes**: implementers open pull requests,
+and one or two QA agents review, test and merge them; a coordinator assigns
+work and routes review comments back to implementers.
 
 ## Start here
 
@@ -25,29 +26,49 @@ read it front to back.
   file, `ffprobe`), and add tests that run in CI for anything that could
   regress: unit, integration, e2e scenarios in `scripts/e2e.py`, fuzz
   targets for parsers of untrusted input. Test behaviour, not source text.
-- **Done means CI green.** The hosted Mac CI, Engine E2E and Windows CI
-  must pass on your candidate before merge. The delegator runs them.
+- **Done means a green, ready pull request.** Commit focused commits on
+  your `agent/<lane>` branch, run `scripts/remote-build.sh gates`, write
+  your REPORT (below), then `scripts/pr.sh --ready`. It publishes your
+  branch merged with main to `ci/<lane>` and opens or updates the PR; CI,
+  Engine E2E and Windows run from that push; you needn't wait for them. The
+  coordinator sends red runs and review comments back to your session (the
+  PR carries its id). Rerun `pr.sh` after every new commit: a PR whose
+  branch moved since its snapshot can't merge.
+- **Never touch scarce hardware** (exon-desk, the test Macs, the GPU Linux
+  host). Say what your change needs in REPORT's "Hardware needed"; the QA
+  agent alone qualifies it through `scripts/hw-batch.py`.
 - **Keep your card on the board current** (Ryan reads the board, not
   chat): `~/dev/isocast-status/board`. Use `board mv` when you start,
   `board note` at each milestone (one line: what's proven, with numbers),
   `board set --blocked "reason"` when stuck, and `board mv … review` when
   handing back. `BOARD_BY=<model · lane>` names you.
-- **Leave work uncommitted** unless told otherwise, with `REPORT.md` in your
-  scratch folder: what changed, how it was verified, a suggested commit
-  message. The delegator commits and merges.
-- **Record durable facts** in `docs/STATE.md` (short, dated, only what's
-  still true) and decisions in the feature's design doc. Delete what stops
-  being true.
+- **REPORT.md** (`/Volumes/IsocastBuild/<lane>/scratch/REPORT.md`) becomes
+  the PR description: `# Title`, then `## What and why`, `## How it was
+  verified` (commands and what they printed), `## Hardware needed` (`none`,
+  `windows-gpu`, `mac` or `linux-gpu`, then what to run), and optionally
+  `## STATE notes`, `## Area`, `## Linked issue`, `## Screenshots`. No
+  placeholders, no AI attribution: both are refused.
+- **Don't edit `docs/STATE.md`** (every lane conflicts there). Put durable
+  facts in `## STATE notes`; the merger applies them. Decisions go in the
+  feature's design doc.
+- **Review comments** are PR comments starting `QA: approved` or `QA:
+  changes requested`, then one numbered line per point
+  (`path:line: what's wrong. Fix: what to do.`, `[nit]` for optional ones)
+  and a `Checked:` line with what QA ran. Answer each point with a commit
+  and `pr.sh`, not a reply.
+- **QA merges** with `scripts/merge-pr.sh N [N…]` (several PRs are tested as
+  one candidate, bisected if red; `--hw N="evidence"` for hardware PRs),
+  then applies the printed STATE notes in a follow-up commit.
 - **Ask Ryan only through the board inbox, and only when you genuinely
   need him:** a taste call, a UI check, an approval, something only he can
   do. `board ask "…" --kind check --image shot.png --card ISO-6` (or
   `decision` with `--option`s); keep working on whatever doesn't depend on
   the answer, and read it with `board inbox` or `board wait ASK-n`. Never
   ask in chat. Make ordinary design decisions yourself and record them.
-- **Never end your turn while your own builds, benchmarks or CI runs are
-  in flight.** Wait on them in the background and keep working on what
-  doesn't depend on them; ending the turn stops the lane until someone
-  notices.
+- **Never end your turn while your own builds or benchmarks are in
+  flight** (a PR's CI is tracked on the PR). Wait on them in the
+  background and keep working on what doesn't depend on them; ending the
+  turn stops the lane until someone notices.
 - **After three failed attempts** at the same problem, stop, write the most
   likely wrong assumption in REPORT, and hand back.
 
@@ -71,8 +92,8 @@ read it front to back.
 ## Machines
 
 - **Never build on Ryan's Mac;** use `scripts/remote-build.sh`.
-- **One lane owns each scarce machine** at a time: exon-desk (Windows) and
-  the test Mac. The delegator says which lane. Builds on exon-desk take
+- **Only the QA agent uses scarce machines** (exon-desk, the test Macs, the
+  GPU Linux host), through `scripts/hw-batch.py`. Builds on exon-desk take
   `C:\isocast-dev\build.lock`; measurements take `gpu.lock`.
 - Details: `docs/STATE.md`, "Machines".
 
@@ -83,16 +104,20 @@ scripts/remote-build.sh gates      # fmt, clippy --locked -D warnings, tests
 scripts/remote-build.sh build --to DIR isocastd isocast isocast-ui
 scripts/sign-dev.sh <isocastd>     # after building the daemon for real runs
 python3 scripts/reference-docs.py <isocast> --check
-scripts/windows-ci.sh              # hosted Windows CI on the committed HEAD
+scripts/pr.sh --ready              # publish the lane and open/update its PR
+scripts/prs.sh [--json]            # open PRs: CI, review, hardware, session
+scripts/merge-pr.sh N [N…]         # QA: land green PRs into main and publish
 ffprobe -v error -show_entries stream=codec_name,width,height,r_frame_rate,pix_fmt -of compact <file>
 ```
 
 Scratch recordings go in your scratch folder, never Ryan's recordings
 folder.
 
-## Commits (delegator)
+## Commits
 
 One focused commit per verified piece. The message says what changed, why,
 and what was verified, and calls out removed or replaced behaviour. Never
-commit recordings, credentials or private logs and screenshots. No
-push, amend or history rewrite unless Ryan asks.
+commit recordings, credentials or private logs and screenshots. GitHub
+writes go only through `pr.sh`, `ci.sh` (a lane's ci/<lane> snapshot) and
+`merge-pr.sh` (snapshots, never private history). No other push, amend
+or history rewrite unless Ryan asks.
