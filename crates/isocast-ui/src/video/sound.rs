@@ -745,13 +745,16 @@ mod platform {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    //! As isocast-platform-linux's monitoring (src/playback.rs): every
-    //! PipeWire object on one owned worker running its main loop, entered
-    //! for the worker's whole life ([`WorkerLoop`]: a loop entered and left
-    //! per iteration let PipeWire run the stream's callbacks on its data
-    //! thread in between, racing the worker's state); the stream has no
-    //! RT_PROCESS, so the render callback runs on that worker, without
-    //! allocating or waiting (the queue is only tried).
+    //! Every PipeWire object lives on one owned worker running its main
+    //! loop, entered for the worker's whole life ([`WorkerLoop`]: a loop
+    //! entered and left per iteration let PipeWire run callbacks on its
+    //! data thread in between, racing the worker's state). The stream is
+    //! RT_PROCESS: its `process` callback fills each buffer on PipeWire's
+    //! real-time data loop, in the graph cycle that plays it, so the
+    //! worker's scheduling never makes a buffer late. That callback owns
+    //! only [`Fill`] (the render and its scratch, `Send`); state changes go
+    //! to a second listener on the worker with the `Rc<RefCell<Status>>`.
+    //! The fill neither allocates nor waits (the queue is only tried).
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -857,11 +860,28 @@ mod platform {
         error: Option<String>,
     }
 
-    struct PlayData {
+    /// What the real-time `process` callback owns: nothing else is touched
+    /// on PipeWire's data loop.
+    struct Fill {
         render: Render,
-        status: Rc<RefCell<Status>>,
         /// Interleaved stereo, `MAX_FRAMES` long, made once.
         scratch: Vec<f32>,
+    }
+
+    const _: () = {
+        const fn send<T: Send>() {}
+        send::<Fill>()
+    };
+
+    /// Disconnects the stream when dropped, before the listeners declared
+    /// ahead of it: an RT stream's `process` must have stopped on the data
+    /// loop before its listener is removed.
+    struct StopFirst<'a, 'b>(&'a super::super::pw_loop::WorkerStream<'b>);
+
+    impl Drop for StopFirst<'_, '_> {
+        fn drop(&mut self) {
+            let _ = self.0.disconnect();
+        }
     }
 
     fn run(
@@ -901,39 +921,45 @@ mod platform {
             "Isocast remote program",
             props,
         )?);
-        let data = PlayData {
+        let fill = Fill {
             render,
-            status: status.clone(),
             scratch: vec![0.0; MAX_FRAMES * CHANNELS],
         };
-        let _listener = stream
-            .add_local_listener_with_user_data(data)
-            .state_changed(|_, data, _, state| match state {
-                StreamState::Error(error) => data.status.borrow_mut().error = Some(error),
+        // Runs on PipeWire's data loop (RT_PROCESS).
+        let _fill_listener = stream
+            .add_local_listener_with_user_data(fill)
+            .process(fill_buffer)
+            .register()?;
+        // Runs on this worker, in `iterate`.
+        let _state_listener = stream
+            .add_local_listener_with_user_data(status.clone())
+            .state_changed(|_, status, _, state| match state {
+                StreamState::Error(error) => status.borrow_mut().error = Some(error),
                 StreamState::Unconnected => {
-                    let mut status = data.status.borrow_mut();
+                    let mut status = status.borrow_mut();
                     if !status.reconnecting {
                         status.error = Some("the sound stream disconnected".into());
                     }
                 }
                 StreamState::Streaming => {
-                    let mut status = data.status.borrow_mut();
+                    let mut status = status.borrow_mut();
                     status.streaming = true;
                     status.played = true;
                     status.reconnecting = false;
                 }
                 // No output linked (none, or between devices).
                 StreamState::Paused => {
-                    let mut status = data.status.borrow_mut();
+                    let mut status = status.borrow_mut();
                     status.streaming = false;
                     status.reconnecting = false;
                 }
                 // Connected again (states come in order, after the
                 // disconnect's Unconnected).
-                StreamState::Connecting => data.status.borrow_mut().reconnecting = false,
+                StreamState::Connecting => status.borrow_mut().reconnecting = false,
             })
-            .process(fill)
             .register()?;
+        // Dropped first, however this returns.
+        let _stop = StopFirst(&stream);
         let mut format = AudioInfoRaw::new();
         format.set_format(AudioFormat::F32LE);
         format.set_rate(RATE);
@@ -959,7 +985,9 @@ mod platform {
             stream.connect(
                 spa::utils::Direction::Output,
                 None,
-                pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+                pw::stream::StreamFlags::AUTOCONNECT
+                    | pw::stream::StreamFlags::MAP_BUFFERS
+                    | pw::stream::StreamFlags::RT_PROCESS,
                 &mut [pod],
             )?;
             Ok(())
@@ -997,19 +1025,17 @@ mod platform {
     }
 
     /// When the first sample of the buffer being filled reaches the
-    /// output: the graph cycle's time plus the stream's delay to the device
-    /// and what its resampler holds. Without RT_PROCESS this buffer likely
-    /// plays about a quantum (~10 ms) later than that, within the queue's
-    /// tolerance.
-    fn plays(stream: &pw::stream::Stream, frames_quantum: usize) -> Instant {
+    /// output. Filled in the graph cycle that plays it (RT_PROCESS), it
+    /// plays at the cycle's time plus the stream's delay to the device
+    /// (and what a resampler holds, normally nothing): no extra quantum.
+    fn plays(stream: &pw::stream::Stream) -> Instant {
         let now = Instant::now();
-        let fallback = now + Duration::from_secs_f64(frames_quantum as f64 / f64::from(RATE));
         let Ok(time) = stream.time() else {
-            return fallback;
+            return now;
         };
         let rate = time.rate();
         if time.now() <= 0 || rate.denom == 0 {
-            return fallback;
+            return now;
         }
         let mut clock = libc::timespec {
             tv_sec: 0,
@@ -1025,9 +1051,9 @@ mod platform {
         now + Duration::from_secs_f64(ahead)
     }
 
-    /// Fill one buffer: as many frames as PipeWire asks for (its quantum),
-    /// bounded by the buffer and the scratch.
-    fn fill(stream: &pw::stream::Stream, data: &mut PlayData) {
+    /// Fill one buffer, on PipeWire's data loop: as many frames as PipeWire
+    /// asks for (its quantum), bounded by the buffer and the scratch.
+    fn fill_buffer(stream: &pw::stream::Stream, data: &mut Fill) {
         let Some(mut buffer) = stream.dequeue_buffer() else {
             return;
         };
@@ -1046,7 +1072,7 @@ mod platform {
                 requested.min(room)
             };
             let samples = &mut data.scratch[..frames * CHANNELS];
-            (data.render)(samples, plays(stream, frames));
+            (data.render)(samples, plays(stream));
             for (out, sample) in bytes[..frames * FRAME_BYTES]
                 .as_chunks_mut::<4>()
                 .0
@@ -1087,26 +1113,28 @@ mod platform {
         }
 
         // Needs a running PipeWire with an output sink (the Linux VM):
-        // `cargo test -p isocast-ui -- --ignored sound_renders_on_the_worker_thread`.
+        // `cargo test -p isocast-ui -- --ignored sound_renders_on_the_data_loop`.
         #[test]
         #[ignore = "needs a running PipeWire session with a sink"]
-        fn sound_renders_on_the_worker_thread() {
+        fn sound_renders_on_the_data_loop() {
             let threads = render_threads();
             assert!(
                 threads.len() > 10,
                 "rendered {} times: needs a PipeWire sink to drive it",
                 threads.len()
             );
-            let off: Vec<_> = threads
+            // RT_PROCESS: every buffer is filled on PipeWire's data loop,
+            // never on the worker.
+            let on_worker = threads
                 .iter()
-                .filter(|name| name.as_deref() != Some("remote sound"))
-                .collect();
-            assert!(
-                off.is_empty(),
-                "{} of {} renders ran off the worker thread: {:?}",
-                off.len(),
+                .filter(|name| name.as_deref() == Some("remote sound"))
+                .count();
+            assert_eq!(
+                on_worker,
+                0,
+                "{on_worker} of {} renders ran on the worker, not PipeWire's data loop ({:?})",
                 threads.len(),
-                off.first()
+                threads.first()
             );
         }
     }
