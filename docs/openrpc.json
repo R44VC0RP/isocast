@@ -7845,12 +7845,18 @@
             "type": "integer"
           },
           "preview_fps": {
+            "description": "The most frames a second monitors get while automatic quality\nlimits them (15, 5), or 0 while it has paused them; absent at the\nrate they ask for.",
             "format": "uint32",
             "minimum": 0,
             "type": [
               "integer",
               "null"
             ]
+          },
+          "previews_paused": {
+            "default": false,
+            "description": "Monitors are paused (`preview_fps` 0): to protect a recording or a\nlive stream on a software graphics adapter, or until the program\nkeeps up after missing frames while an output runs. `reason` ends\nwith why ([`GovernorStatus::previews_paused_why`]). Show that rather\nthan the last frame.",
+            "type": "boolean"
           },
           "reason": {
             "type": "string"
@@ -7895,6 +7901,7 @@
           "reason",
           "steps",
           "preview_fps",
+          "previews_paused",
           "iso_percent",
           "vertical_percent",
           "stream_bitrate_percent",
@@ -15021,7 +15028,7 @@
             "description": "Which canvas's buffer saved it: absent for the main one."
           },
           "dropped_frames": {
-            "description": "Frame slots in it with no picture of their own (the buffer missed\nthem; the previous picture shows longer).",
+            "description": "Frame slots in it with no picture of their own (the program or the\nbuffer missed them; the previous picture shows longer).",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
@@ -15224,6 +15231,13 @@
             "description": "The memory limit has cut the buffer below `seconds` since it\nstarted: a save will be shorter. Lower the bitrate or raise\n`recording.replay.max_memory_mb`.",
             "type": "boolean"
           },
+          "program_missed_frames": {
+            "default": 0,
+            "description": "Program ticks the compositor missed since it started (it was too\nbusy to draw them): saved replays show the picture before longer\nthere, as the program itself does. Previews give way while it\nhappens (the governor's preview limit).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "saves": {
             "default": 0,
             "description": "Files saved since it started.",
@@ -15280,6 +15294,7 @@
           "keyframe_interval_seconds",
           "shared_encoder",
           "dropped_frames",
+          "program_missed_frames",
           "audio_dropouts",
           "saves"
         ],

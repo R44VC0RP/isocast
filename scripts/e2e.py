@@ -2460,6 +2460,22 @@ def scenario_replay(e, cfg, evidence):
             f"the buffer should run on after the stream: {status}")
     require(status["memory_bytes"] > 0 and (status["dropped_frames"] == 0 or loss_limit(evidence)),
             f"replay status: {status}")
+    # Program ticks the compositor missed while it ran show in saved replays
+    # too: counted, and the CLI shows the count (at most the engine's own).
+    missed = status.get("program_missed_frames")
+    require(isinstance(missed, int) and (missed == 0 or loss_limit(evidence)),
+            f"replay status program_missed_frames: {status}")
+    cli = os.environ.get("ISOCAST_E2E_CLI")
+    if cli:
+        shown = subprocess.run([cli, "replay", "status", "--json"], env=e.env, capture_output=True, timeout=15)
+        require(shown.returncode == 0, f"isocast replay status --json failed: {shown.stderr.decode()}")
+        shown = json.loads(shown.stdout)
+        engine_missed = (e.rpc("status").get("engine") or {}).get("missed_frames", 0)
+        require(isinstance(shown.get("program_missed_frames"), int)
+                and missed <= shown["program_missed_frames"] <= engine_missed,
+                f"replay status --json program_missed_frames {shown.get('program_missed_frames')} "
+                f"(RPC {missed}, engine {engine_missed})")
+    evidence["replay_program_missed_frames"] = missed
     final = e.rpc("replay_stop")
     require(final["state"] == "off" and final["saves"] == 3, f"replay stop: {final}")
     evidence.update(passes=passes, replay=final)

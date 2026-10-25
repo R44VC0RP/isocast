@@ -161,6 +161,13 @@ pub fn print(status: &ReplayStatus) {
             status.dropped_frames, status.audio_dropouts
         );
     }
+    if status.program_missed_frames > 0 {
+        println!(
+            "  the program missed {} frame(s) since it started (too busy to draw them); saved \
+             replays show the picture before longer there",
+            status.program_missed_frames
+        );
+    }
     if let Some(saved) = &status.last_saved {
         print!("  last save ({} so far): ", status.saves);
         print_saved(saved);

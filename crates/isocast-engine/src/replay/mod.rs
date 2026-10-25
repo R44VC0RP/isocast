@@ -120,6 +120,9 @@ fn own_spec(settings: &ReplaySettings, width: u32, height: u32, fps: u32) -> Enc
 /// A running replay buffer. Dropping it stops it.
 pub struct ReplayBuffer {
     shared: Arc<Shared>,
+    /// Its canvas's count of missed program ticks, and its value when the
+    /// buffer started.
+    program_misses: Option<(Arc<AtomicU64>, u64)>,
     now: Arc<dyn Fn() -> Time + Send + Sync>,
     /// One save at a time.
     saving: Mutex<()>,
@@ -360,8 +363,13 @@ pub fn start_canvas<P: Platform>(
     };
     *shared.subscription.lock() = Some(subscription);
     let platform = engine.platform().clone();
+    let program_misses = engine.program_misses(canvas).map(|misses| {
+        let at_start = misses.load(Ordering::Relaxed);
+        (misses, at_start)
+    });
     let replay = ReplayBuffer {
         shared,
+        program_misses,
         now: Arc::new(move || platform.now()),
         saving: Mutex::new(()),
     };
@@ -382,6 +390,9 @@ impl ReplayBuffer {
         }
         status.dropped_frames =
             shared.missed.load(Ordering::Relaxed) + shared.encoder_dropped.load(Ordering::Relaxed);
+        if let Some((misses, at_start)) = &self.program_misses {
+            status.program_missed_frames = misses.load(Ordering::Relaxed).saturating_sub(*at_start);
+        }
         if let Some(subscription) = shared.subscription.lock().as_ref() {
             status.audio_dropouts = subscription.tap_audio_dropped();
             status.shared_encoder = subscription.shared();

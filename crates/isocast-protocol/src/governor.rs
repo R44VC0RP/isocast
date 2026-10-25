@@ -83,7 +83,17 @@ pub struct GovernorStatus {
     pub reason: String,
     /// Actual policy changes, not polls or ordinary native ISO shedding.
     pub steps: u64,
+    /// The most frames a second monitors get while automatic quality
+    /// limits them (15, 5), or 0 while it has paused them; absent at the
+    /// rate they ask for.
     pub preview_fps: Option<u32>,
+    /// Monitors are paused (`preview_fps` 0): to protect a recording or a
+    /// live stream on a software graphics adapter, or until the program
+    /// keeps up after missing frames while an output runs. `reason` ends
+    /// with why ([`GovernorStatus::previews_paused_why`]). Show that rather
+    /// than the last frame.
+    #[serde(default)]
+    pub previews_paused: bool,
     /// Governor ceilings. Pinned sources retain 100%; native pressure may
     /// admit fewer pictures independently. Audio and file clocks do not change.
     pub iso_percent: u32,
@@ -100,6 +110,22 @@ pub struct GovernorStatus {
     pub error: Option<String>,
 }
 
+/// How a [`GovernorStatus::reason`] says previews are paused: this, then
+/// why ("to protect recording", "until the program keeps up").
+pub const PREVIEWS_PAUSED: &str = "previews paused";
+
+impl GovernorStatus {
+    /// Why monitors are paused ("to protect recording", "until the program
+    /// keeps up"), while they are.
+    pub fn previews_paused_why(&self) -> Option<&str> {
+        if !self.previews_paused {
+            return None;
+        }
+        let at = self.reason.find(PREVIEWS_PAUSED)?;
+        Some(self.reason[at + PREVIEWS_PAUSED.len()..].trim())
+    }
+}
+
 impl Default for GovernorStatus {
     fn default() -> Self {
         Self {
@@ -109,6 +135,7 @@ impl Default for GovernorStatus {
             reason: "At requested quality".into(),
             steps: 0,
             preview_fps: None,
+            previews_paused: false,
             iso_percent: 100,
             vertical_percent: 100,
             stream_bitrate_percent: 100,

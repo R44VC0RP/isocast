@@ -718,7 +718,9 @@ struct CanvasOutput<P: Platform> {
     /// frame shows.
     drawn: Arc<frame_stream::Drawn>,
     frames_drawn: AtomicU64,
-    frames_missed: AtomicU64,
+    /// Shared with replay buffers, which count the program's misses while
+    /// they run.
+    frames_missed: Arc<AtomicU64>,
     /// Program frames drawn per second over the last second (`f64` bits).
     program_fps: AtomicU64,
     /// What the compositor's recent ticks cost.
@@ -852,7 +854,7 @@ impl<P: Platform> CanvasOutput<P> {
             program_video: Arc::default(),
             drawn: Arc::default(),
             frames_drawn: AtomicU64::new(0),
-            frames_missed: AtomicU64::new(0),
+            frames_missed: Arc::default(),
             program_fps: AtomicU64::new(0),
             timings: Mutex::default(),
             encoders: Default::default(),
@@ -1838,6 +1840,14 @@ impl<P: Platform> Engine<P> {
     /// The program's shared encoders, for outputs that take it compressed.
     pub(crate) fn encoders(&self) -> &crate::stream::encoder::Encoders {
         &self.inner.main.encoders
+    }
+
+    /// The count of ticks `canvas`'s program missed, live (for replay
+    /// buffers' status); None while that canvas is off.
+    pub(crate) fn program_misses(&self, canvas: CanvasId) -> Option<Arc<AtomicU64>> {
+        self.inner
+            .output(canvas)
+            .map(|output| output.frames_missed.clone())
     }
 
     pub(crate) fn canvas_encoders(
@@ -3215,7 +3225,7 @@ fn run_program<P: Platform>(
         if compositor.device_lost() {
             output.frames_missed.fetch_add(1, Ordering::Relaxed);
             if !output.program_video.is_empty() {
-                crate::governor::protected_loss(canvas, 1);
+                crate::governor::program_missed(canvas, 1);
             }
             if std::time::Instant::now() < retry_gpu {
                 continue;
@@ -3313,7 +3323,7 @@ fn run_program<P: Platform>(
             if outputs || monitored {
                 output.frames_missed.fetch_add(1, Ordering::Relaxed);
                 if outputs {
-                    crate::governor::protected_loss(canvas, 1);
+                    crate::governor::program_missed(canvas, 1);
                 }
             }
             continue;
@@ -3383,13 +3393,13 @@ fn run_program<P: Platform>(
                 Ok(None) => {
                     output.frames_missed.fetch_add(1, Ordering::Relaxed);
                     if outputs {
-                        crate::governor::protected_loss(canvas, 1);
+                        crate::governor::program_missed(canvas, 1);
                     }
                 }
                 Err(err) => {
                     output.frames_missed.fetch_add(1, Ordering::Relaxed);
                     if outputs {
-                        crate::governor::protected_loss(canvas, 1);
+                        crate::governor::program_missed(canvas, 1);
                     }
                     if !std::mem::replace(&mut warned, true) {
                         inner.event(EngineEvent::Warning(format!(

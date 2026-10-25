@@ -173,6 +173,12 @@ pub struct ReplayStatus {
     /// don't lose them.
     #[serde(default)]
     pub dropped_frames: u64,
+    /// Program ticks the compositor missed since it started (it was too
+    /// busy to draw them): saved replays show the picture before longer
+    /// there, as the program itself does. Previews give way while it
+    /// happens (the governor's preview limit).
+    #[serde(default)]
+    pub program_missed_frames: u64,
     /// Program mix chunks lost before encoding, since it started.
     #[serde(default)]
     pub audio_dropouts: u64,
@@ -204,8 +210,8 @@ pub struct ReplaySaved {
     /// at that moment of the program.
     pub requested_at: String,
     pub frames: u64,
-    /// Frame slots in it with no picture of their own (the buffer missed
-    /// them; the previous picture shows longer).
+    /// Frame slots in it with no picture of their own (the program or the
+    /// buffer missed them; the previous picture shows longer).
     pub dropped_frames: u64,
     pub bytes: u64,
     /// The file is shorter than `recording.replay.seconds`: the buffer
