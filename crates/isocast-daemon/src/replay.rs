@@ -55,6 +55,7 @@ static NO_SLOT: ReplaySlot = ReplaySlot {
     buffer: None,
     starting: false,
     drops_reported: 0,
+    program_misses_reported: 0,
 };
 
 /// One canvas's replay buffer: the running one, or the last (kept for its
@@ -66,6 +67,8 @@ pub(super) struct ReplaySlot {
     pub(super) starting: bool,
     /// Losses already warned about.
     pub(super) drops_reported: u64,
+    /// Missed program ticks already warned about.
+    pub(super) program_misses_reported: u64,
 }
 
 impl ReplaySlot {
@@ -253,6 +256,7 @@ impl Daemon {
         let slot = state.replay.slot_mut(canvas);
         slot.buffer = Some(buffer.clone());
         slot.drops_reported = 0;
+        slot.program_misses_reported = 0;
         drop(state);
         Ok(buffer.status())
     }
@@ -375,7 +379,9 @@ impl Daemon {
         Ok(saved)
     }
 
-    /// Warn once per new loss, like the stream's, for each canvas's buffer.
+    /// Warn once per new loss, like the stream's, for each canvas's buffer:
+    /// frames it never got, and program ticks the compositor missed while
+    /// it ran (saved replays show those too).
     pub(super) fn warn_replay_drops(&self) {
         for canvas in [CanvasId::Main, CanvasId::Vertical] {
             let mut state = self.state.lock();
@@ -383,25 +389,54 @@ impl Daemon {
             let Some(status) = slot.buffer.as_ref().map(|b| b.status()) else {
                 continue;
             };
-            if status.state != ReplayState::Running || status.dropped_frames <= slot.drops_reported
-            {
+            if status.state != ReplayState::Running {
                 continue;
             }
-            let new = status.dropped_frames - slot.drops_reported;
-            slot.drops_reported = status.dropped_frames;
+            let dropped = status.dropped_frames.saturating_sub(slot.drops_reported);
+            let missed = status
+                .program_missed_frames
+                .saturating_sub(slot.program_misses_reported);
+            slot.drops_reported = slot.drops_reported.max(status.dropped_frames);
+            slot.program_misses_reported = slot
+                .program_misses_reported
+                .max(status.program_missed_frames);
             drop(state);
-            let unaffected = match canvas {
-                CanvasId::Main => "The program, recordings and stream are unaffected",
-                _ => "The programs, recordings and streams are unaffected",
-            };
-            self.publish(Event::Warning {
-                message: format!(
-                    "{} missed {new} frame(s) ({} so far); saved replays show the picture before \
-                     longer there. {unaffected}",
-                    what(canvas),
-                    status.dropped_frames
-                ),
-            });
+            if dropped > 0 {
+                let unaffected = match canvas {
+                    CanvasId::Main => "The program, recordings and stream are unaffected",
+                    _ => "The programs, recordings and streams are unaffected",
+                };
+                self.publish(Event::Warning {
+                    message: format!(
+                        "{} missed {dropped} frame(s) ({} so far); saved replays show the picture \
+                         before longer there. {unaffected}",
+                        what(canvas),
+                        status.dropped_frames
+                    ),
+                });
+            }
+            if missed > 0 {
+                let program = match canvas {
+                    CanvasId::Main => "The program",
+                    _ => "The vertical program",
+                };
+                // Only when automatic quality is limiting them (not when
+                // previews are pinned, closed or it is off).
+                let previews = if isocast_engine::governor::status().preview_fps.is_some() {
+                    " Previews give way until it keeps up."
+                } else {
+                    ""
+                };
+                self.publish(Event::Warning {
+                    message: format!(
+                        "{program} missed {missed} frame(s) while {} ran ({} since it started: \
+                         the compositor was too busy to draw them); saved replays show the \
+                         picture before longer there.{previews}",
+                        what(canvas),
+                        status.program_missed_frames
+                    ),
+                });
+            }
         }
     }
 }

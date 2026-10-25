@@ -412,6 +412,15 @@ through `pr.sh` (implementers: ci/<lane> snapshots and their PRs) and `merge-pr.
   `thread == 0`), so non-RT stream callbacks ran on the data thread beside our `Rc`/`RefCell` state.
   Own streams through `WorkerLoop::stream` (disconnect, then flush queued callbacks, before free).
 
+- 2026-10-25 (#155): while any output runs (recording, stream or replay buffer) and the program misses ticks
+  (at least 2 in 5 s, after the outputs' first frames) with previews open, previews step 30 -> 15 -> 5 fps ->
+  paused, one step a second, on any renderer; `monitor_fps` returns 0 while paused and the governor's reason
+  ends "previews paused <why>". They come back a step per 30 s without misses; a miss after a restore holds the
+  next one for 120 s. No output, or a pinned `preview.fps`, changes nothing. Hardware renderers can still step
+  to 15 fps on frame-budget/encoder pressure without misses (unchanged). `ReplayStatus.program_missed_frames`
+  counts the compositor's missed program ticks since the buffer started; `dropped_frames` stays the buffer's own.
+  VM replay-only with two monitors: 21-28 missed per 30 s on main (70 with shared previews), 0 with #155.
+
 - #128: Software adapters (`wgpu::DeviceType::Cpu`: WARP, llvmpipe/lavapipe) pause
   disposable previews during recordings (including paused takes) and live streams, not
   replay alone; the reason names the protected output. Pins/off remain respected.

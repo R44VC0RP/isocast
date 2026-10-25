@@ -1,13 +1,13 @@
 //! Runtime quality ceilings. The existing encoder-pressure controller stays
 //! authoritative; these slower limits never change file formats or audio.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use isocast_protocol::{
     CanvasId,
-    governor::{GovernorSettings, GovernorStatus},
+    governor::{GovernorSettings, GovernorStatus, PREVIEWS_PAUSED},
 };
 use parking_lot::Mutex;
 
@@ -250,6 +250,9 @@ pub fn canvas_slot(canvas: CanvasId) -> usize {
 static ISO_PINNED: AtomicBool = AtomicBool::new(false);
 static UNPINNED_ISO: AtomicBool = AtomicBool::new(false);
 static LOSSES: AtomicU64 = AtomicU64::new(0);
+/// Program ticks the compositor missed while an output (a recording, a
+/// stream or a replay buffer) took that canvas's program.
+static PROGRAM_MISSES: AtomicU64 = AtomicU64::new(0);
 static NOTICES: AtomicU64 = AtomicU64::new(0);
 static FRAME_PRESSURE: AtomicU64 = AtomicU64::new(0);
 static FULL_FRAME_BUDGETS: AtomicU32 = AtomicU32::new(0);
@@ -292,7 +295,10 @@ pub fn status() -> GovernorStatus {
     status.native_iso_percent = crate::record::pressure::snapshot().1;
     if previews_paused() {
         status.preview_fps = Some(0);
-        say_preview_pause(&mut status.reason);
+        status.previews_paused = true;
+        if let Some(output) = preview_protection() {
+            say_preview_pause(&mut status.reason, &format!("to protect {output}"));
+        }
     }
     status
 }
@@ -315,7 +321,10 @@ pub fn monitor_fps(requested: u32) -> u32 {
         return 0;
     }
     let cap = PREVIEW.load(Ordering::Relaxed);
-    if cap > 0 {
+    if cap == PREVIEW_PAUSED {
+        // Paused while the program misses frames (any output, any renderer).
+        0
+    } else if cap > 0 {
         requested.min(cap)
     } else {
         requested
@@ -345,15 +354,23 @@ fn preview_output(recording: bool, live_stream: bool) -> Option<&'static str> {
     }
 }
 
-fn say_preview_pause(reason: &mut String) {
-    if let Some(output) = preview_protection() {
-        if let Some(at) = reason.find("previews paused to protect ") {
-            reason.truncate(at);
-        } else if !reason.is_empty() {
-            reason.push_str("; ");
+/// End `reason` with why previews are paused (`why`: "to protect
+/// recording", "until the program keeps up"), once: it replaces an earlier
+/// pause clause, so a reason set by another step in between never hides the
+/// pause. [`GovernorStatus::previews_paused_why`] reads it back.
+fn say_preview_pause(reason: &mut String, why: &str) {
+    if let Some(at) = reason.find(PREVIEWS_PAUSED) {
+        reason.truncate(at);
+        if reason.ends_with("; ") {
+            reason.truncate(reason.len() - 2);
         }
-        reason.push_str(&format!("previews paused to protect {output}"));
     }
+    if !reason.is_empty() {
+        reason.push_str("; ");
+    }
+    reason.push_str(PREVIEWS_PAUSED);
+    reason.push(' ');
+    reason.push_str(why);
 }
 
 /// Shed software previews before opening writers, not on the first sampler
@@ -591,6 +608,17 @@ impl Drop for PreviewRate {
     }
 }
 
+/// `canvas`'s program missed `count` ticks while an output took it: a
+/// protected loss for a recording (see [`protected_loss`]), and for any
+/// output a reason for previews to give way ([`Controller::tick`]): the
+/// program comes first, whether it's recorded, streamed or kept for replay.
+/// Every canvas counts: a vertical (or other extra) canvas's misses also
+/// slow main's previews, which share its compositor and GPU.
+pub fn program_missed(canvas: CanvasId, count: u64) {
+    PROGRAM_MISSES.fetch_add(count, Ordering::Relaxed);
+    protected_loss(canvas, count);
+}
+
 /// Immediate three-second hold, once per pressure episode. This is not a
 /// permanent quality step; native admission takes over when the hold ends.
 pub fn protected_loss(canvas: CanvasId, count: u64) {
@@ -771,7 +799,25 @@ pub struct Controller {
     steps: u64,
     notices: u64,
     recovering: bool,
+    /// [`PROGRAM_MISSES`] as last seen.
+    program_misses: u64,
+    /// When previews last gave way to a program that missed frames.
+    last_shed: Option<Instant>,
+    /// The preview limit is that giving way's (not the software pause).
+    loss_shed: bool,
+    /// Program misses counted toward giving way: when, and how many, over
+    /// the last [`MISS_WINDOW`].
+    misses: VecDeque<(Instant, u64)>,
+    /// Since its outputs started, the program has delivered: misses before
+    /// that (an output opening) don't count.
+    delivering: bool,
 }
+
+/// Previews give way only to a program missing ticks at a rate: at least
+/// [`MISS_RATE`] misses within this window. One hiccup doesn't cost 30 s
+/// of slower previews.
+const MISS_WINDOW: Duration = Duration::from_secs(5);
+const MISS_RATE: u64 = 2;
 impl Default for Controller {
     fn default() -> Self {
         let now = Instant::now();
@@ -794,6 +840,11 @@ impl Default for Controller {
             steps: 0,
             notices: NOTICES.load(Ordering::Acquire),
             recovering: false,
+            program_misses: PROGRAM_MISSES.load(Ordering::Relaxed),
+            last_shed: None,
+            loss_shed: false,
+            misses: VecDeque::new(),
+            delivering: false,
         }
     }
 }
@@ -822,6 +873,7 @@ impl Controller {
     pub fn needs_poll(&self) -> bool {
         self.recovering
             || LOSSES.load(Ordering::Relaxed) != self.losses
+            || PROGRAM_MISSES.load(Ordering::Relaxed) != self.program_misses
             || NOTICES.load(Ordering::Acquire) != self.notices
     }
 
@@ -842,7 +894,16 @@ impl Controller {
     }
 
     pub fn tick(&mut self, settings: &GovernorSettings, sample: &Sample) -> Option<GovernorStatus> {
-        let now = Instant::now();
+        self.tick_at(settings, sample, Instant::now())
+    }
+
+    /// [`Self::tick`] at `now` (tests step a synthetic clock).
+    pub fn tick_at(
+        &mut self,
+        settings: &GovernorSettings,
+        sample: &Sample,
+        now: Instant,
+    ) -> Option<GovernorStatus> {
         self.notices = NOTICES.load(Ordering::Acquire);
         // One observation for both admission-pressure classification and
         // recovery. The five-second tail precedes the normal 30 s quiet hold.
@@ -921,6 +982,29 @@ impl Controller {
             self.last_loss = Some(now);
         }
         self.losses = losses;
+        // Missed program ticks, once the outputs' first frames went out
+        // (an output opening may miss a few), at MISS_RATE or more within
+        // MISS_WINDOW.
+        let program_misses = PROGRAM_MISSES.load(Ordering::Relaxed);
+        let new_misses = program_misses.saturating_sub(self.program_misses);
+        self.program_misses = program_misses;
+        if !sample.active || sample.paused {
+            self.delivering = false;
+            self.misses.clear();
+        } else {
+            if self.delivering && new_misses > 0 {
+                self.misses.push_back((now, new_misses));
+            }
+            self.delivering |= sample.progressed;
+        }
+        while self
+            .misses
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) > MISS_WINDOW)
+        {
+            self.misses.pop_front();
+        }
+        let program_loss = self.misses.iter().map(|(_, count)| count).sum::<u64>() >= MISS_RATE;
         let recent_loss = self
             .last_loss
             .is_some_and(|at| now.duration_since(at) < Duration::from_secs(5));
@@ -932,7 +1016,8 @@ impl Controller {
         });
         let software_protected = is_software_renderer() && preview_protection().is_some();
         let software_preview = sample.active && sample.has_monitors && software_protected;
-        let released_preview = limits.preview == PREVIEW_PAUSED && !software_protected;
+        let released_preview =
+            limits.preview == PREVIEW_PAUSED && !software_protected && !self.loss_shed;
         if released_preview {
             limits.preview = 0;
         }
@@ -1014,6 +1099,8 @@ impl Controller {
             self.last_loss = None;
             self.episode_quiet = None;
             self.disk_bad = false;
+            self.loss_shed = false;
+            self.last_shed = None;
             HOLD_UNTIL.store(0, Ordering::Relaxed);
             HOLD_ARMED.store(true, Ordering::Relaxed);
             STREAM_TARGETS.store(0, Ordering::Relaxed);
@@ -1175,6 +1262,46 @@ impl Controller {
         } else {
             self.pressure_since = None;
         }
+        // The program comes first: while an output takes it (a recording,
+        // a stream or a replay buffer) and it misses ticks, previews give
+        // way a step a second (30, 15, 5 fps, then paused), on any renderer
+        // and whatever the cause. They come back a step per 30 s without
+        // losses (below). With no output, previews are all the program
+        // feeds, and nothing changes. Not on top of a step taken above.
+        if settings.enabled
+            && sample.active
+            && !sample.paused
+            && sample.has_monitors
+            && program_loss
+            && !software_preview
+            && !settings.pinned("preview.fps")
+            && limits.preview == self.previous.preview
+            && self
+                .last_shed
+                .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(1))
+        {
+            let requested = if self.monitor_fps > 0 {
+                self.monitor_fps
+            } else {
+                sample.canvas_fps
+            };
+            if let Some(step) = preview_step(limits.preview, requested, sample.canvas_fps, true) {
+                limits.preview = step;
+                self.loss_shed = true;
+                self.last_shed = Some(now);
+                if self.last_restore.take().is_some() {
+                    self.restore_after = now + Duration::from_secs(120);
+                }
+                // A pause says so below (say_preview_pause).
+                reason = if step == PREVIEW_PAUSED {
+                    "Automatic quality: the program missed frames".into()
+                } else {
+                    format!(
+                        "Automatic quality: the program missed frames; previews limited to {step} fps"
+                    )
+                };
+            }
+        }
         // Upload-only congestion must not prevent video-work ceilings from
         // recovering. A single native stall event is not a new 30 s blackout:
         // require actual production loss or an unhealthy measured budget.
@@ -1186,6 +1313,7 @@ impl Controller {
         let healthy = !held
             && !frame_pressure
             && !production_loss
+            && !program_loss
             && !self.disk_bad
             && sample.progressed
             && sample.gpu_headroom
@@ -1302,8 +1430,15 @@ impl Controller {
         if settings.enabled && software_preview && !settings.pinned("preview.fps") {
             limits.preview = PREVIEW_PAUSED;
         }
+        if limits.preview == 0 {
+            self.loss_shed = false;
+        }
         if limits.preview == PREVIEW_PAUSED {
-            say_preview_pause(&mut reason);
+            if let Some(output) = preview_protection().filter(|_| software_preview) {
+                say_preview_pause(&mut reason, &format!("to protect {output}"));
+            } else {
+                say_preview_pause(&mut reason, "until the program keeps up");
+            }
         }
         limits.apply();
         if limits != self.previous || held != self.held || targets_changed {
@@ -1323,6 +1458,7 @@ impl Controller {
             } else {
                 limits.preview
             }),
+            previews_paused: limits.preview == PREVIEW_PAUSED,
             iso_percent: if held { 0 } else { limits.iso },
             vertical_percent: limits.vertical,
             stream_bitrate_percent: if sample.has_stream {

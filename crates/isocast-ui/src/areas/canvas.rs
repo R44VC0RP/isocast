@@ -964,7 +964,7 @@ impl Canvas {
             } else if name.is_empty() {
                 "Nothing on air.".into()
             } else {
-                String::new()
+                previews_paused(&s).unwrap_or_default()
             }
             .into(),
         );
@@ -1872,7 +1872,7 @@ impl Area for Canvas {
         ) {
             self.show_extra(app, window);
         }
-        if changed.any(Changed::SETUP | Changed::SCENES) {
+        if changed.any(Changed::SETUP | Changed::SCENES | Changed::STATUS) {
             let canvas = window.global::<CanvasArea>();
             let s = app.session.borrow();
             // The canvas whose scenes are switched (an extra one's own
@@ -1883,12 +1883,15 @@ impl Area for Canvas {
                     .unwrap_or_default()
             };
             let no_scenes = s.setup.as_ref().is_none_or(|x| x.scenes.is_empty());
+            // Automatic quality paused the monitors: say so over the last
+            // frame rather than leave it frozen.
+            let paused = previews_paused(&s);
             let program_empty = if no_scenes {
                 "Add a scene with + under Scenes."
             } else if name(s.on_air()).is_empty() {
                 "Nothing on air."
             } else {
-                ""
+                paused.as_deref().unwrap_or("")
             };
             canvas.set_program_name(name(s.on_air()).into());
             canvas.set_preview_name(name(s.staged()).into());
@@ -1898,7 +1901,7 @@ impl Area for Canvas {
                     if name(s.staged()).is_empty() {
                         "Click a scene to put it in preview."
                     } else {
-                        ""
+                        paused.as_deref().unwrap_or("")
                     }
                 } else {
                     program_empty
@@ -2286,6 +2289,24 @@ fn layout(setup: &Setup, scene: &str) -> HashMap<String, BoxShape> {
         walk(&scene.items, "", (0.0, 0.0), &mut out);
     }
     out
+}
+
+/// What the monitors say while automatic quality has paused them (on a
+/// software graphics adapter while recording or streaming, or until the
+/// program keeps up after missing frames), instead of a frozen frame.
+fn previews_paused(s: &crate::session::Session) -> Option<String> {
+    let governor = s.status.as_ref()?.governor.as_ref()?;
+    let why = governor.previews_paused_why()?;
+    Some(if why.starts_with("to protect ") {
+        format!(
+            "Automatic quality paused previews {why} on this {}’s software graphics.",
+            crate::engine::words().machine
+        )
+    } else {
+        "Automatic quality paused previews until the program keeps up; they come back on their \
+         own."
+            .to_string()
+    })
 }
 
 #[cfg(test)]

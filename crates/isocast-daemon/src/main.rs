@@ -5635,25 +5635,36 @@ fn estimate_capacity(
 }
 
 /// Why no frame of a Studio Mode preview `target` comes: automatic quality
-/// paused previews on a software graphics adapter (#128), which only a
-/// preview target waits on; the canvas's program is still drawn while it
-/// records or streams.
+/// paused previews, on a software graphics adapter while it records or
+/// streams (#128), or on any adapter until the program keeps up after
+/// missing frames while an output runs. Only a preview target waits on
+/// that; the canvas's program is still drawn for its outputs.
 fn paused_preview(target: &str) -> Option<String> {
     let (canvas, true) = CanvasId::from_target(target)? else {
         return None;
     };
     let status = isocast_engine::governor::status();
-    if status.preview_fps != Some(0) || !isocast_engine::governor::is_software_renderer() {
-        return None;
-    }
-    let why = status
-        .reason
-        .find("previews paused to protect ")
-        .map_or("previews paused", |at| &status.reason[at..]);
+    let why = status.previews_paused_why()?;
+    // "previews paused <why>" as the governor's reason says it (clients
+    // and e2e match that phrase).
+    let (paused, resumes) = if why.starts_with("to protect ") {
+        (
+            format!("previews paused {why} on this software graphics adapter"),
+            "when it stops",
+        )
+    } else {
+        (
+            format!(
+                "previews paused {why} (it missed frames while a recording, stream or replay \
+                 buffer runs)"
+            ),
+            "a step per 30 s once the program keeps up",
+        )
+    };
     Some(format!(
-        "no frame of {target}: automatic quality has {why} on this software graphics adapter; \
-         ask for `{}` (drawn while it records or streams), or pin preview.fps in automatic \
-         quality to keep previews running",
+        "no frame of {target}: automatic quality has {paused}; they come back {resumes}. Ask \
+         for `{}` (drawn while it records, streams or keeps a replay), or pin preview.fps in \
+         automatic quality to keep previews running",
         canvas.program_target()
     ))
 }
