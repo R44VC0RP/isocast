@@ -18,6 +18,7 @@ mod frames;
 mod gpu;
 mod h264;
 mod hevc;
+mod media;
 mod mf;
 mod native;
 pub mod network;
@@ -55,5 +56,5 @@ pub use nvenc::{
     NvencReservation,
 };
 pub use output::OutputPool;
-pub use platform::{Capture, Unsupported, WindowsPlatform};
+pub use platform::{Capture, WindowsPlatform};
 pub use writer::VideoWriter;

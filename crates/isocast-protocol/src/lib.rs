@@ -28,6 +28,7 @@ pub mod located;
 pub mod machine;
 pub mod manifest;
 mod mask;
+pub mod mp4_edits;
 pub mod nle;
 pub mod obs;
 pub mod openrpc;

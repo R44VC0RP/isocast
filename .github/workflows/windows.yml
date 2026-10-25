@@ -603,6 +603,26 @@ jobs:
           cargo clippy --locked --all-targets -j 1 -p isocast-platform-windows -- -D warnings
           cargo test --locked -j 1 -p isocast-platform-windows --lib playback::tests
 
+      - name: Install FFmpeg for the media fixtures
+        if: env.MODE == 'full'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --version=9.0.2 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install FFmpeg' }
+          }
+          ffmpeg -version
+
+      # Media Foundation decoding of files ffmpeg makes at test time (H.264/AAC
+      # MP4 and MOV timing with edit lists and late tracks, WAV, an FFV1 file
+      # no Windows decodes, and Store-extension codecs that must play or name
+      # their extension). Serial: one D3D11 device.
+      - name: Check media file decoding (Media Foundation)
+        if: env.MODE == 'full'
+        timeout-minutes: 30
+        run: cargo test --locked -j 1 -p isocast-platform-windows --lib media::tests -- --test-threads=1 --nocapture
+
       # Slint compiles the whole interface into one generated Rust module
       # (the isocast-ui-interface crate, built once and shared by the app
       # and its tests); rustc needs 13.6 GiB for it (15.1 GiB committed),
@@ -1067,6 +1087,23 @@ jobs:
         if: env.MODE == 'full'
         timeout-minutes: 5
         run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_monitor --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-monitor" --keep --report windows-monitor.json
+
+      # Strict (zero drops) at the hosted no-GPU reference canvas, 320x180p30.
+      - name: Media file source (looping MP4 beside the test pattern)
+        if: env.MODE == 'full'
+        timeout-minutes: 8
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_media --windows-profile 180p30 --codec h264 --timeout 300 --work "$RUNNER_TEMP/windows-media" --keep-failures --report windows-media.json
+
+      - name: Keep media source evidence
+        if: (!cancelled()) && (env.MODE == 'full')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-media
+          path: |
+            windows-media.json
+            ${{ runner.temp }}/windows-media
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Keep monitoring hardware qualification binaries
         if: env.MODE == 'full'

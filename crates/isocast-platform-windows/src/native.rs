@@ -46,18 +46,26 @@ pub(crate) struct Apartment;
 
 impl Apartment {
     pub(crate) fn new() -> Result<Self> {
-        // windows-rs caches agile WinRT activation factories for the process.
-        // Ending the LAST MTA after a capture unloads their implementation on
-        // Windows 10: reopening then calls an unmapped IsSupported vtable.
-        // Keep one MTA reference for exactly that process-lifetime cache;
-        // individual workers still balance their own RoInitialize below.
-        static MTA: OnceLock<windows::core::Result<usize>> = OnceLock::new();
-        MTA.get_or_init(|| unsafe { CoIncrementMTAUsage() }.map(|cookie| cookie.0 as usize))
-            .as_ref()
-            .map_err(|error| anyhow!("could not keep the capture MTA alive: {error}"))?;
+        process_mta()?;
         unsafe { RoInitialize(RO_INIT_MULTITHREADED) }?;
         Ok(Self)
     }
+}
+
+/// Keep the process MTA alive for the rest of the process. Threads that
+/// never initialize COM then use MTA-agile objects (Media Foundation's
+/// Source Reader among them) as implicit members of it.
+pub(crate) fn process_mta() -> Result<()> {
+    // windows-rs caches agile WinRT activation factories for the process.
+    // Ending the LAST MTA after a capture unloads their implementation on
+    // Windows 10: reopening then calls an unmapped IsSupported vtable.
+    // Keep one MTA reference for exactly that process-lifetime cache;
+    // individual workers still balance their own RoInitialize.
+    static MTA: OnceLock<windows::core::Result<usize>> = OnceLock::new();
+    MTA.get_or_init(|| unsafe { CoIncrementMTAUsage() }.map(|cookie| cookie.0 as usize))
+        .as_ref()
+        .map_err(|error| anyhow!("could not keep the capture MTA alive: {error}"))?;
+    Ok(())
 }
 
 impl Drop for Apartment {
