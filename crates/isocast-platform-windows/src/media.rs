@@ -10,9 +10,9 @@
 //! resampler. Looping and restarts stay in the engine: it opens a reader
 //! for each play.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_engine::{MediaInfo, MediaPart, SAMPLE_RATE};
@@ -23,7 +23,7 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::core::{GUID, HSTRING, Interface};
 
-use crate::frames::TexturePool;
+use crate::frames::{MAX_POOL_FRAMES, TexturePool};
 use crate::mf::Runtime;
 use crate::{Frame, GraphicsDevice};
 
@@ -32,6 +32,9 @@ use crate::{Frame, GraphicsDevice};
 /// a gap of a few samples would be heard. A real jump keeps its own time,
 /// so an offset never exceeds this and is never carried forward.
 const ALIGNMENT: Duration = Duration::from_millis(5);
+
+/// How long a read waits for the decoder's sample allocator to refill.
+const ALLOCATOR_WAIT: Duration = Duration::from_secs(1);
 
 /// The same, in Media Foundation's 100 ns units.
 const ALIGNMENT_HNS: i64 = 50_000;
@@ -75,6 +78,8 @@ pub struct Reader {
     /// AAC frame whole, past the edit's end).
     end: Option<Duration>,
     ended: bool,
+    /// The allocator ran empty once (reported once per reader).
+    allocator_waited: bool,
 }
 
 // SAFETY: the Source Reader is free-threaded and lives in the process MTA,
@@ -86,7 +91,6 @@ pub struct Reader {
 unsafe impl Send for Reader {}
 
 struct Video {
-    device: GraphicsDevice,
     pool: TexturePool,
     /// Decoded on the GPU (textures) or the CPU (system memory).
     gpu: bool,
@@ -95,8 +99,6 @@ struct Video {
     /// The rows' stride of a CPU picture in a plain buffer (negative:
     /// bottom-up).
     stride: i32,
-    /// GPU samples whose texture a pool copy may still read.
-    retained: VecDeque<(IMFSample, Frame)>,
     /// CPU pictures, with opaque alpha, before their upload.
     pixels: Vec<u8>,
     /// The first picture, read while opening.
@@ -584,6 +586,7 @@ pub fn open(device: Option<GraphicsDevice>, path: &Path, part: MediaPart) -> Res
                 rebase: None,
                 end,
                 ended: false,
+                allocator_waited: false,
             })
         }
         MediaPart::Video => {
@@ -656,12 +659,10 @@ fn open_video(device: &GraphicsDevice, path: &Path, shown: &str, gpu: bool) -> R
         path: shown.to_string(),
         file: path.to_path_buf(),
         video: Some(Video {
-            device: device.clone(),
             pool: TexturePool::new(device.clone()),
             gpu,
             size,
             stride,
-            retained: VecDeque::new(),
             pixels: Vec::new(),
             first: None,
         }),
@@ -671,6 +672,7 @@ fn open_video(device: &GraphicsDevice, path: &Path, shown: &str, gpu: bool) -> R
         rebase: None,
         end,
         ended: false,
+        allocator_waited: false,
     };
     let first = reader.read_video()?;
     reader.video.as_mut().expect("video").first = first;
@@ -699,17 +701,40 @@ impl Reader {
         let mut flags = 0;
         let mut time = 0;
         let mut sample = None;
-        unsafe {
-            self.reader.ReadSample(
-                stream(self.part),
-                0,
-                None,
-                Some(&mut flags),
-                Some(&mut time),
-                Some(&mut sample),
-            )
+        let started = Instant::now();
+        loop {
+            let read = unsafe {
+                self.reader.ReadSample(
+                    stream(self.part),
+                    0,
+                    None,
+                    Some(&mut flags),
+                    Some(&mut time),
+                    Some(&mut sample),
+                )
+            };
+            match read {
+                Ok(()) => break,
+                // The decoder's samples are all out (with something else
+                // holding them, or not yet back from the GPU): they come
+                // back, so wait a bounded time rather than end the source.
+                Err(error)
+                    if error.code() == MF_E_SAMPLEALLOCATOR_EMPTY
+                        && started.elapsed() < ALLOCATOR_WAIT =>
+                {
+                    if !self.allocator_waited {
+                        self.allocator_waited = true;
+                        isocast_diagnostics::diagnostic!("warn";
+                            "media {}: decoder sample allocator empty; waiting for samples to come back", self.path
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => {
+                    bail!("could not read {}: {}", self.path, reason(&error))
+                }
+            }
         }
-        .map_err(|error| anyhow!("could not read {}: {}", self.path, reason(&error)))?;
         if flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
             bail!("could not read {}: the decoder failed", self.path);
         }
@@ -922,22 +947,13 @@ impl Reader {
 }
 
 impl Video {
-    /// Drop GPU samples whose pool copy has finished reading them.
-    fn release(&mut self) -> Result<()> {
-        let completed = self.device.completed()?;
-        while self
-            .retained
-            .front()
-            .is_some_and(|(_, frame)| frame.ready_value() <= completed)
-        {
-            self.retained.pop_front();
-        }
-        Ok(())
-    }
-
-    /// Copy a GPU-decoded picture into the pool.
+    /// Copy a GPU-decoded picture into the pool, then give the decoder its
+    /// sample back at once. Holding it until the copy finished ran Media
+    /// Foundation's ten-sample allocator dry on a busy software GPU
+    /// (MF_E_SAMPLEALLOCATOR_EMPTY). Letting go is safe: the decoder and the
+    /// video processor write its texture on the same D3D11 immediate
+    /// context, so any later write runs after this copy.
     fn copy(&mut self, sample: IMFSample) -> Result<Frame> {
-        self.release()?;
         let buffer = unsafe { sample.GetBufferByIndex(0) }?;
         let Ok(dxgi) = buffer.cast::<IMFDXGIBuffer>() else {
             // A decoder may give some pictures in system memory.
@@ -951,13 +967,9 @@ impl Video {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
         let (width, height) = (self.size.0.min(desc.Width), self.size.1.min(desc.Height));
-        let frame = self
-            .pool
-            .copy_subresource(&texture, subresource, width, height)?
-            .context("media.frame: all decoded pictures are still in use")?;
-        // Keep the decoder's texture until the copy has read it.
-        self.retained.push_back((sample, frame.clone()));
-        Ok(frame)
+        pooled(&mut self.pool, |pool| {
+            pool.copy_subresource(&texture, subresource, width, height)
+        })
     }
 
     /// Upload a CPU-decoded picture, its alpha made opaque (RGB32 leaves
@@ -1000,9 +1012,35 @@ impl Video {
             }
         }
         drop(lock);
-        self.pool
-            .upload_bgra(width, height, &self.pixels, row as u32)?
-            .context("media.frame: all decoded pictures are still in use")
+        let pixels = &self.pixels;
+        pooled(&mut self.pool, |pool| {
+            pool.upload_bgra(width, height, pixels, row as u32)
+        })
+    }
+}
+
+/// A picture's pool slots are free again once the engine let go of them
+/// and the GPU finished with them; a busy software GPU can take a while.
+const SLOT_WAIT: Duration = Duration::from_secs(2);
+
+/// Put a picture in the pool (`put` gives `None` while every slot is in
+/// use), waiting a bounded time for a slot rather than ending the source.
+fn pooled(
+    pool: &mut TexturePool,
+    mut put: impl FnMut(&mut TexturePool) -> Result<Option<Frame>>,
+) -> Result<Frame> {
+    let started = Instant::now();
+    loop {
+        if let Some(frame) = put(pool)? {
+            return Ok(frame);
+        }
+        if started.elapsed() >= SLOT_WAIT {
+            bail!(
+                "media.frame: all {MAX_POOL_FRAMES} decoded pictures stayed in use for {} s (the GPU didn't finish its copies, or nothing released them)",
+                SLOT_WAIT.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 

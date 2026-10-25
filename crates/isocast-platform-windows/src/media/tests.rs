@@ -1,6 +1,7 @@
 //! Real Media Foundation decoding of files ffmpeg makes at test time
 //! (ffmpeg must be on PATH, as in the Windows CI job).
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -892,5 +893,109 @@ fn trace_decoders() {
             wall.elapsed().as_secs_f64(),
             crate::system::process_cpu_seconds().unwrap_or(0.0) - cpu
         );
+    }
+}
+
+/// A slow consumer on a busy GPU (hosted CI's software adapter, where the
+/// engine's encoders share the D3D11 queue): pictures are held as the
+/// engine's slots hold them while every copy waits behind other GPU work.
+/// The reader must neither run Media Foundation's sample allocator dry
+/// (MF_E_SAMPLEALLOCATOR_EMPTY ended a hosted take 0.28 s in) nor give up
+/// while its pool waits for the GPU.
+#[test]
+fn a_slow_consumer_on_a_busy_gpu_gets_every_picture() {
+    let fixtures = Fixtures::new("busy");
+    let file = fixtures.require(
+        "busy.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            // Picture n is one flat gray of eight, 27 luma steps apart, so a
+            // copy that read a texture the decoder already reused shows.
+            "color=c=black:s=1280x720:r=30:d=4,format=yuv420p,geq=lum='16+mod(N\\,8)*27':cb=128:cr=128",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "10",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    );
+    let device = device();
+    // Two large textures to copy back and forth on the shared queue.
+    let busy = |_: ()| unsafe {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 4096,
+            Height: 4096,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        let mut texture = None;
+        device
+            .raw()
+            .CreateTexture2D(&desc, None, Some(&mut texture))
+            .unwrap();
+        texture.unwrap()
+    };
+    let (a, b) = (busy(()), busy(()));
+    start().unwrap();
+    let context = unsafe { device.raw().GetImmediateContext() }.unwrap();
+    for gpu in [true, false] {
+        let check = |n: usize, frame: &Frame| {
+            let [b, g, r, _] = pixel(frame, 640, 360);
+            let want = (n % 8) as f64 * 27.0 * 255.0 / 219.0;
+            assert!(
+                [b, g, r]
+                    .iter()
+                    .all(|v| (f64::from(*v) - want).abs() <= 10.0),
+                "gpu={gpu}: picture {n} is {:?}, not gray {want:.0}",
+                [b, g, r]
+            );
+        };
+        let mut reader = open_video(&device, &file, &file.display().to_string(), gpu).unwrap();
+        let mut held = VecDeque::new();
+        let mut count = 0;
+        loop {
+            for _ in 0..6 {
+                unsafe {
+                    context.CopyResource(&a, &b);
+                    context.CopyResource(&b, &a);
+                }
+            }
+            unsafe { context.Flush() };
+            match reader.next_video() {
+                Ok(Some((frame, _))) => {
+                    held.push_back((count, frame));
+                    count += 1;
+                    // The engine holds up to five delivered and two
+                    // decoded-ahead pictures per source, two readers at a
+                    // loop's end: 14 here, more than it ever does. The one
+                    // let go is checked after 14 later pictures were
+                    // decoded, reusing the decoder's textures.
+                    if held.len() > 14 {
+                        let (n, frame) = held.pop_front().unwrap();
+                        check(n, &frame);
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => panic!("gpu={gpu}: picture {count}: {error:#}"),
+            }
+        }
+        for (n, frame) in held {
+            check(n, &frame);
+        }
+        assert_eq!(count, 120, "gpu={gpu}");
+        eprintln!("gpu={gpu}: {count} pictures with 14 held on a busy queue");
     }
 }
