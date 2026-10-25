@@ -1191,7 +1191,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
         });
     written
         .and_then(|()| {
-            std::fs::rename(&partial, path).inspect_err(|_| {
+            isocast_protocol::fs::replace(&partial, path).inspect_err(|_| {
                 let _ = std::fs::remove_file(&partial);
             })
         })

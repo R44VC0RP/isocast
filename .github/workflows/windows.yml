@@ -843,6 +843,12 @@ jobs:
         timeout-minutes: 30
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
 
+      # #157: a final manifest a reader holds open is retried, not lost.
+      - name: Check final recording metadata publication
+        if: env.MODE == 'full'
+        timeout-minutes: 30
+        run: cargo test --locked -j 1 -p isocast-engine --lib metadata_finalization
+
       - name: Check monitoring channel mapping and conversion
         if: env.MODE == 'full'
         run: |
@@ -1339,6 +1345,23 @@ jobs:
         if: env.MODE == 'full'
         timeout-minutes: 8
         run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_media --windows-profile 180p30 --codec h264 --timeout 300 --work "$RUNNER_TEMP/windows-media" --keep-failures --report windows-media.json
+
+      # #157: readers that block final manifest publication, at 320x180p30.
+      - name: Recording metadata held open by a reader (split and final take)
+        if: env.MODE == 'full'
+        timeout-minutes: 5
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_metadata --windows-profile 180p30 --codec h264 --timeout 240 --work "$RUNNER_TEMP/windows-metadata" --keep-failures --report windows-metadata.json
+
+      - name: Keep metadata publication evidence
+        if: (!cancelled()) && (env.MODE == 'full')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-metadata
+          path: |
+            windows-metadata.json
+            ${{ runner.temp }}/windows-metadata
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Keep media source evidence
         if: (!cancelled()) && (env.MODE == 'full')
