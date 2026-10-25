@@ -192,6 +192,56 @@ fn fixtures() -> &'static Path {
             ],
             "raw.mjpeg",
         );
+        // Recorded live: WebM written to a pipe stores no length or index.
+        let live = |args: &[&str], out: &str| {
+            let mut child = Command::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error", "-y"])
+                .args(args)
+                .args(["-f", "webm", "-"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("ffmpeg must be installed to make media fixtures");
+            let mut file = std::fs::File::create(dir.join(out)).unwrap();
+            std::io::copy(child.stdout.as_mut().unwrap(), &mut file).unwrap();
+            assert!(
+                child.wait().unwrap().success(),
+                "ffmpeg failed making {out}"
+            );
+        };
+        live(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=0x0000FF:s=256x144:r=30:d=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=f=1000:r=48000:d=3",
+                "-c:v",
+                "libvpx-vp9",
+                "-deadline",
+                "realtime",
+                "-cpu-used",
+                "8",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "libopus",
+            ],
+            "live.webm",
+        );
+        live(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=f=440:r=48000:d=1",
+                "-c:a",
+                "libopus",
+            ],
+            "live-sound.webm",
+        );
         std::fs::write(dir.join("garbage.mp4"), vec![0x5au8; 64 * 1024]).unwrap();
         dir
     })
@@ -483,24 +533,48 @@ fn a_real_jump_in_sound_keeps_its_time() {
     assert!(samples.len() / 2 > 46_000);
 }
 
+/// Whether GStreamer would autoplug `parser` here (the bad plugins).
+fn has_parser(parser: &str) -> bool {
+    init().unwrap();
+    gst::Registry::get()
+        .lookup_feature(parser)
+        .is_some_and(|feature| feature.rank() > gst::Rank::NONE)
+}
+
 #[test]
-fn elementary_streams_without_a_length_are_refused() {
-    // Motion JPEG has no container and no bitrate to estimate a length from.
-    let err = media_info(&fixture("raw.mjpeg")).unwrap_err();
-    let text = format!("{err:#}");
-    assert!(
-        text.contains("raw.mjpeg") && text.contains("duration unknown"),
-        "{text}"
-    );
-    // Raw H.264 needs h264parse (bad plugins): refused for its length
-    // where that is installed, else for the missing parser.
-    let err = media_info(&fixture("raw.h264")).unwrap_err();
-    let text = format!("{err:#}");
-    assert!(
-        text.contains("raw.h264")
-            && (text.contains("duration unknown") || text.contains("no parser")),
-        "{text}"
-    );
+fn elementary_streams_play_with_a_parser_or_are_refused() {
+    // No container: only a parser (gstreamer1.0-plugins-bad) estimates a
+    // length. With it the stream plays at that length; without it the
+    // file is refused, never played at length zero.
+    for (name, parser, refused) in [
+        ("raw.mjpeg", "jpegparse", &["duration unknown"][..]),
+        (
+            "raw.h264",
+            "h264parse",
+            &["duration unknown", "no parser"][..],
+        ),
+    ] {
+        let result = media_info(&fixture(name));
+        if has_parser(parser) {
+            let info = result.unwrap_or_else(|err| panic!("{name} with {parser}: {err:#}"));
+            assert_eq!(info.video, Some((160, 120)), "{name}");
+            assert!(
+                close(
+                    info.duration,
+                    Duration::from_secs(1),
+                    Duration::from_millis(60)
+                ),
+                "{name}: {:?}",
+                info.duration
+            );
+        } else {
+            let text = format!("{:#}", result.unwrap_err());
+            assert!(
+                text.contains(name) && refused.iter().any(|r| text.contains(r)),
+                "{name} without {parser}: {text}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -520,4 +594,96 @@ fn streams_whose_parser_estimates_a_length_play() {
             info.duration
         );
     }
+}
+
+#[test]
+fn live_recorded_webm_has_its_real_length() {
+    // Picture and sound: the demuxer first says about 2 s of 3.
+    let path = fixture("live.webm");
+    let info = media_info(&path).unwrap();
+    assert_eq!(info.video, Some((256, 144)));
+    assert!(info.audio);
+    assert!(
+        close(
+            info.duration,
+            Duration::from_secs(3),
+            Duration::from_millis(60)
+        ),
+        "{:?}",
+        info.duration
+    );
+    let pictures = pictures(&path);
+    assert_pictures(&pictures, (256, 144), 30, 90);
+    assert!(pictures.last().unwrap().2 < info.duration);
+    let (samples, chunks) = sound(&path);
+    assert_contiguous(&chunks);
+    assert!((samples.len() / 2).abs_diff(144_000) < 1_000);
+
+    // Sound only: the demuxer says 121 ms of 1 s and never that it changed.
+    let info = media_info(&fixture("live-sound.webm")).unwrap();
+    assert!(
+        close(
+            info.duration,
+            Duration::from_secs(1),
+            Duration::from_millis(60)
+        ),
+        "{:?}",
+        info.duration
+    );
+}
+
+#[test]
+fn matroska_header_says_whether_its_length_is_stored() {
+    assert!(!matroska_lacks_duration(&fixture("vp9-opus.webm")));
+    assert!(matroska_lacks_duration(&fixture("live.webm")));
+    assert!(matroska_lacks_duration(&fixture("live-sound.webm")));
+    assert!(!matroska_lacks_duration(&fixture("h264-aac.mp4")));
+    // Truncated or hostile headers never panic.
+    let header = [0x1A, 0x45, 0xDF, 0xA3, 0x80];
+    let segment = [
+        0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    ];
+    let with = |rest: &[u8]| [&header[..], &segment, rest].concat();
+    // A SeekHead naming Info's ID as data, then Info with a Duration.
+    let seek = [0x11, 0x4D, 0x9B, 0x74, 0x84, 0x15, 0x49, 0xA9, 0x66];
+    let info = [0x15, 0x49, 0xA9, 0x66, 0x84, 0x44, 0x89, 0x81, 0x00];
+    assert_eq!(
+        ebml_info_lacks_duration(&with(&[&seek[..], &info].concat())),
+        Some(false)
+    );
+    assert_eq!(
+        ebml_info_lacks_duration(&with(&[0x15, 0x49, 0xA9, 0x66, 0x80])),
+        Some(true)
+    );
+    assert_eq!(ebml_info_lacks_duration(&with(&seek)), None);
+    assert_eq!(
+        ebml_info_lacks_duration(&with(&[0x15, 0x49, 0xA9, 0x66, 0xFF, 0x00])),
+        None
+    );
+    assert_eq!(ebml_info_lacks_duration(&[0x1A, 0x45, 0xDF]), None);
+    assert_eq!(ebml_info_lacks_duration(&[0; 64]), None);
+}
+
+#[test]
+fn a_live_recording_too_long_to_read_through_is_refused() {
+    // No time to read it through: the length read so far is never used.
+    let path = fixture("live.webm");
+    let so_far = Some(Duration::from_millis(121));
+    let err = scan_length(&path, so_far, true, Duration::ZERO).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("live.webm") && text.contains("-c copy"),
+        "{text}"
+    );
+    // A length that is only an estimate is kept instead.
+    assert_eq!(
+        scan_length(&path, so_far, false, Duration::ZERO).unwrap(),
+        so_far
+    );
+    // With time, the whole file is read.
+    let read = scan_length(&path, so_far, true, SCAN).unwrap().unwrap();
+    assert!(
+        close(read, Duration::from_secs(3), Duration::from_millis(60)),
+        "{read:?}"
+    );
 }

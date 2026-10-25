@@ -26,6 +26,8 @@ const STALL: Duration = Duration::from_secs(10);
 /// How long a file without a known length gets, playing, to report one
 /// before it is refused.
 const DURATION_WAIT: Duration = Duration::from_secs(1);
+/// How long reading a Matroska file through for its length may take.
+const SCAN: Duration = Duration::from_secs(2);
 /// At most this many threads convert one file's pictures.
 const CONVERT_THREADS: u32 = 4;
 /// A frame pool exhausted for this long means frames are being kept.
@@ -149,6 +151,9 @@ fn has_decoder(caps: &gst::CapsRef) -> bool {
 enum Want {
     Info,
     Part(MediaPart),
+    /// Demux only (every stream left encoded), to read through a file
+    /// fast for its real length.
+    Scan,
 }
 
 /// What the file showed while its pipeline prerolled.
@@ -163,6 +168,8 @@ struct Opened {
     pipeline: gst::Pipeline,
     found: Found,
     missing: Vec<Missing>,
+    /// The length changed while prerolling: it was provisional.
+    duration_changed: bool,
 }
 
 impl Drop for Opened {
@@ -251,13 +258,25 @@ fn open(path: &Path, want: Want) -> Result<Opened> {
     pipeline.add_many([&source, &decode])?;
     source.link(&decode)?;
 
-    if let Want::Part(part) = want {
+    match want {
         // Left encoded: reading the sound never decodes the picture.
-        decode.connect("autoplug-continue", false, move |values| {
-            let caps = values.get(2).and_then(|v| v.get::<gst::Caps>().ok());
-            let expose = caps.is_some_and(|caps| other_part(&caps, part));
-            Some((!expose).to_value())
-        });
+        Want::Part(part) => {
+            decode.connect("autoplug-continue", false, move |values| {
+                let caps = values.get(2).and_then(|v| v.get::<gst::Caps>().ok());
+                let expose = caps.is_some_and(|caps| other_part(&caps, part));
+                Some((!expose).to_value())
+            });
+        }
+        Want::Scan => {
+            decode.connect("autoplug-continue", false, |values| {
+                let caps = values.get(2).and_then(|v| v.get::<gst::Caps>().ok());
+                let expose = caps.is_some_and(|caps| {
+                    other_part(&caps, MediaPart::Video) || other_part(&caps, MediaPart::Audio)
+                });
+                Some((!expose).to_value())
+            });
+        }
+        Want::Info => {}
     }
     let found = Arc::new(Mutex::new(Found::default()));
     let failed = Arc::new(Mutex::new(None::<String>));
@@ -347,6 +366,7 @@ fn open(path: &Path, want: Want) -> Result<Opened> {
         pipeline,
         found: Found::default(),
         missing: Vec::new(),
+        duration_changed: false,
     };
     let mut error = None;
     if opened.pipeline.set_state(gst::State::Paused).is_err() {
@@ -365,12 +385,14 @@ fn open(path: &Path, want: Want) -> Result<Opened> {
                 gst::MessageType::AsyncDone,
                 gst::MessageType::Error,
                 gst::MessageType::Element,
+                gst::MessageType::DurationChanged,
             ],
         ) else {
             continue;
         };
         match message.view() {
             gst::MessageView::AsyncDone(_) => break,
+            gst::MessageView::DurationChanged(_) => opened.duration_changed = true,
             gst::MessageView::Error(err) => error = Some(err.error().to_string()),
             _ => {
                 if let Some(missing) = Missing::from_message(&message) {
@@ -406,7 +428,7 @@ fn open(path: &Path, want: Want) -> Result<Opened> {
             .pipeline
             .set_state(gst::State::Playing)
             .with_context(|| format!("could not play {shown}"))?;
-    } else if opened.found.video.is_none() && !opened.found.audio {
+    } else if want == Want::Info && opened.found.video.is_none() && !opened.found.audio {
         bail!("{shown} has no video or audio GStreamer can play");
     }
     Ok(opened)
@@ -433,6 +455,18 @@ pub fn media_info(path: &Path) -> Result<MediaInfo> {
             duration = length();
         }
     }
+    // A Matroska/WebM file recorded live (written to a pipe) stores no
+    // length: its demuxer reports what it has read so far (121 ms of a
+    // 1 s file), and only sometimes says the length changed. Read such
+    // files through, demuxing only, for the real length. Only Matroska:
+    // other parsers (plain MP3, ADTS AAC) announce changed estimates too,
+    // and a second pipeline would cost each of their opens up to 2 s.
+    let matroska = contains(&opened.pipeline, "matroskademux");
+    let unstored = matroska && matroska_lacks_duration(path);
+    if matroska && (opened.duration_changed || unstored) {
+        let _ = opened.pipeline.set_state(gst::State::Null);
+        duration = scan_length(path, duration, unstored, SCAN)?;
+    }
     let duration = duration.with_context(|| {
         format!(
             "{}: duration unknown; media sources need a seekable file with a known length",
@@ -444,6 +478,151 @@ pub fn media_info(path: &Path) -> Result<MediaInfo> {
         audio: opened.found.audio,
         duration,
     })
+}
+
+/// Whether a Matroska file's segment information has no Duration element,
+/// as when it was written to a pipe. Reads the header only; `false` when
+/// the information isn't found near the start.
+fn matroska_lacks_duration(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = Vec::new();
+    let read =
+        std::fs::File::open(path).and_then(|file| file.take(256 * 1024).read_to_end(&mut head));
+    read.is_ok() && ebml_info_lacks_duration(&head) == Some(true)
+}
+
+/// An EBML variable-length number at `at`: (value, length). Element IDs
+/// keep their length marker; sizes don't.
+fn vint(data: &[u8], at: usize, keep_marker: bool) -> Option<(u64, usize)> {
+    let first = *data.get(at)?;
+    let len = first.leading_zeros() as usize + 1;
+    if len > 8 {
+        return None;
+    }
+    let mut value = if keep_marker {
+        u64::from(first)
+    } else {
+        u64::from(first) & (0xFF >> len)
+    };
+    for i in 1..len {
+        value = value << 8 | u64::from(*data.get(at + i)?);
+    }
+    Some((value, len))
+}
+
+/// In the start of a Matroska file, whether the Segment's Info element
+/// lacks a Duration; `None` if Info isn't there (or the start isn't
+/// Matroska). Elements are walked, never searched for: a SeekHead holds
+/// Info's ID as data.
+fn ebml_info_lacks_duration(data: &[u8]) -> Option<bool> {
+    const EBML: u64 = 0x1A45_DFA3;
+    const SEGMENT: u64 = 0x1853_8067;
+    const INFO: u64 = 0x1549_A966;
+    const DURATION: u64 = 0x4489;
+    // (id, body start, body end), the end clamped to what was read.
+    let element = |at: usize| -> Option<(u64, usize, usize)> {
+        let (id, id_len) = vint(data, at, true)?;
+        let (size, size_len) = vint(data, at + id_len, false)?;
+        let body = at + id_len + size_len;
+        let end = body.saturating_add(usize::try_from(size).unwrap_or(usize::MAX));
+        Some((id, body, end.min(data.len())))
+    };
+    let (id, _, header_end) = element(0)?;
+    if id != EBML {
+        return None;
+    }
+    let (id, mut at, segment_end) = element(header_end)?;
+    if id != SEGMENT {
+        return None;
+    }
+    while at < segment_end {
+        let (id, body, end) = element(at)?;
+        if id == INFO {
+            let mut child = body;
+            while child < end {
+                let (id, _, next) = element(child)?;
+                if id == DURATION {
+                    return Some(false);
+                }
+                child = next;
+            }
+            return Some(true);
+        }
+        at = end;
+    }
+    None
+}
+
+/// Whether `pipeline` holds an element made by `factory`.
+fn contains(pipeline: &gst::Pipeline, factory: &str) -> bool {
+    pipeline
+        .iterate_recurse()
+        .into_iter()
+        .any(|element| element.is_ok_and(|e| e.factory().is_some_and(|f| f.name() == factory)))
+}
+
+/// The real length of a file whose length so far (`stored`) may be
+/// provisional: read through it at demuxing speed, within `bound`. A file
+/// too long to read through in time keeps `stored`, unless it stores no
+/// length at all (`unstored`, a live Matroska recording, whose `stored` is
+/// only what was read): that is refused, with how to fix the file. (Other
+/// formats estimate from the bitrate, and keep their estimate.)
+fn scan_length(
+    path: &Path,
+    stored: Option<Duration>,
+    unstored: bool,
+    bound: Duration,
+) -> Result<Option<Duration>> {
+    let opened = open(path, Want::Scan)?;
+    let length = || {
+        opened
+            .pipeline
+            .query_duration::<gst::ClockTime>()
+            .filter(|d| *d > gst::ClockTime::ZERO)
+            .map(|d| Duration::from_nanos(d.nseconds()))
+    };
+    let bus = opened
+        .pipeline
+        .bus()
+        .context("GStreamer pipeline without a bus")?;
+    opened
+        .pipeline
+        .set_state(gst::State::Playing)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    let deadline = Instant::now() + bound;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let Some(message) = bus.timed_pop_filtered(
+            gst::ClockTime::from_nseconds(left.as_nanos() as u64),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        ) else {
+            continue;
+        };
+        match message.view() {
+            gst::MessageView::Eos(_) => return Ok(length().max(stored)),
+            // The decoding pipeline read it; keep what it said, unless
+            // that is only the length read so far.
+            _ if !unstored => return Ok(stored),
+            gst::MessageView::Error(err) => bail!(
+                "{}: its length isn't stored in the file (a live recording?) and reading it \
+                 through failed: {}; remux it to store the length, e.g. `ffmpeg -i IN -c copy OUT.mkv`",
+                path.display(),
+                err.error()
+            ),
+            _ => break,
+        }
+    }
+    if !unstored {
+        return Ok(stored);
+    }
+    bail!(
+        "{}: its length isn't stored in the file (a live recording?) and it couldn't be \
+         read through within {bound:?}; remux it to store the length, e.g. `ffmpeg -i IN -c copy OUT.mkv`",
+        path.display()
+    )
 }
 
 pub fn open_media(path: &Path, part: MediaPart) -> Result<Reader> {
