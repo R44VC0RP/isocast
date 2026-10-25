@@ -896,6 +896,80 @@ fn trace_decoders() {
     }
 }
 
+/// 4 s at 30 fps, 1280x720, a key frame each second: picture n's left half is one of eight grays
+/// (n mod 8), 27 luma steps apart, its right half another (n / 8 mod 8),
+/// so a wrong picture shows at any distance below 64.
+fn grays(fixtures: &Fixtures) -> PathBuf {
+    fixtures.require(
+        "grays.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            // Picture n's left half is one of eight grays (n mod 8), 27 luma
+            // steps apart, its right half another (n / 8 mod 8): a copy that
+            // read a texture the decoder already reused shows, at any
+            // distance below 64 pictures.
+            "color=c=black:s=1280x720:r=30:d=4,format=yuv420p,geq=lum='if(lt(X\\,W/2)\\,16+mod(N\\,8)*27\\,16+mod(trunc(N/8)\\,8)*27)':cb=128:cr=128",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "10",
+            "-g",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    )
+}
+
+/// Whether `frame` is picture `n` of `grays`.
+fn assert_gray(n: usize, frame: &Frame, label: &str) {
+    for (x, level) in [(320, n % 8), (960, n / 8 % 8)] {
+        let [b, g, r, _] = pixel(frame, x, 360);
+        let want = level as f64 * 27.0 * 255.0 / 219.0;
+        assert!(
+            [b, g, r]
+                .iter()
+                .all(|v| (f64::from(*v) - want).abs() <= 10.0),
+            "{label}: picture {n} at x {x} is {:?}, not gray {want:.0}",
+            [b, g, r]
+        );
+    }
+}
+
+/// After Media Foundation's sample allocator runs dry (a wedged Source
+/// Reader), the picture reader opens the file again and goes on from the
+/// picture after the last one it gave: none lost, none twice.
+#[test]
+fn pictures_go_on_after_the_allocator_runs_dry() {
+    let fixtures = Fixtures::new("reopen");
+    let file = grays(&fixtures);
+    let device = device();
+    start().unwrap();
+    for gpu in [true, false] {
+        let mut reader = open_video(&device, &file, &file.display().to_string(), gpu).unwrap();
+        let mut count = 0;
+        while let Some((frame, at)) = reader.next_video().unwrap() {
+            let want = Duration::from_secs_f64(count as f64 / 30.0);
+            assert!(
+                at.abs_diff(want) <= Duration::from_millis(2),
+                "gpu={gpu}: picture {count} at {at:?}"
+            );
+            assert_gray(count, &frame, &format!("gpu={gpu}"));
+            count += 1;
+            // Twice: mid-group of pictures, and right after a key frame.
+            if count == 37 || count == 61 {
+                reader.fail_next_read = true;
+            }
+        }
+        assert_eq!(count, 120, "gpu={gpu}");
+        assert_eq!(reader.reopens, 2, "gpu={gpu}");
+    }
+}
+
 /// A slow consumer on a busy GPU (hosted CI's software adapter, where the
 /// engine's encoders share the D3D11 queue): pictures are held as the
 /// engine's slots hold them while every copy waits behind other GPU work.
@@ -905,31 +979,14 @@ fn trace_decoders() {
 #[test]
 fn a_slow_consumer_on_a_busy_gpu_gets_every_picture() {
     let fixtures = Fixtures::new("busy");
-    let file = fixtures.require(
-        "busy.mp4",
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            // Picture n is one flat gray of eight, 27 luma steps apart, so a
-            // copy that read a texture the decoder already reused shows.
-            "color=c=black:s=1280x720:r=30:d=4,format=yuv420p,geq=lum='16+mod(N\\,8)*27':cb=128:cr=128",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "10",
-            "-pix_fmt",
-            "yuv420p",
-        ],
-    );
+    let file = grays(&fixtures);
     let device = device();
+    let started = std::time::Instant::now();
     // Two large textures to copy back and forth on the shared queue.
     let busy = |_: ()| unsafe {
         let desc = D3D11_TEXTURE2D_DESC {
-            Width: 4096,
-            Height: 4096,
+            Width: SIDE,
+            Height: SIDE,
             MipLevels: 1,
             ArraySize: 1,
             Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -952,20 +1009,10 @@ fn a_slow_consumer_on_a_busy_gpu_gets_every_picture() {
     start().unwrap();
     let context = unsafe { device.raw().GetImmediateContext() }.unwrap();
     for gpu in [true, false] {
-        let check = |n: usize, frame: &Frame| {
-            let [b, g, r, _] = pixel(frame, 640, 360);
-            let want = (n % 8) as f64 * 27.0 * 255.0 / 219.0;
-            assert!(
-                [b, g, r]
-                    .iter()
-                    .all(|v| (f64::from(*v) - want).abs() <= 10.0),
-                "gpu={gpu}: picture {n} is {:?}, not gray {want:.0}",
-                [b, g, r]
-            );
-        };
+        let check = |n: usize, frame: &Frame| assert_gray(n, frame, &format!("gpu={gpu}"));
         let mut reader = open_video(&device, &file, &file.display().to_string(), gpu).unwrap();
         let mut held = VecDeque::new();
-        let mut count = 0;
+        let (mut count, mut pending) = (0, 0);
         loop {
             for _ in 0..6 {
                 unsafe {
@@ -976,6 +1023,11 @@ fn a_slow_consumer_on_a_busy_gpu_gets_every_picture() {
             unsafe { context.Flush() };
             match reader.next_video() {
                 Ok(Some((frame, _))) => {
+                    // The copy still queued behind the busy work: the case
+                    // where holding decoder samples ran the allocator dry.
+                    if frame.ready_value() > device.completed().unwrap() {
+                        pending += 1;
+                    }
                     held.push_back((count, frame));
                     count += 1;
                     // The engine holds up to five delivered and two
@@ -996,6 +1048,223 @@ fn a_slow_consumer_on_a_busy_gpu_gets_every_picture() {
             check(n, &frame);
         }
         assert_eq!(count, 120, "gpu={gpu}");
-        eprintln!("gpu={gpu}: {count} pictures with 14 held on a busy queue");
+        if gpu {
+            assert!(
+                pending > 0,
+                "no copy was ever still queued: the test proves nothing"
+            );
+        }
+        eprintln!(
+            "gpu={gpu}: {count} pictures with 14 held on a busy queue, {pending} returned with their copy still queued"
+        );
+    }
+    eprintln!(
+        "{SIDE}x{SIDE} busy work: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// The busy work's texture side.
+const SIDE: u32 = 2048;
+
+/// Diagnostic, run by hand: Media Foundation's sample allocator run dry
+/// on purpose. Every decoder sample is held, and each read runs on a worker
+/// thread so a read that blocks shows. It prints how many samples could be
+/// held, what the next read did (an error, or blocking), and what happened
+/// once one sample came back.
+#[test]
+#[ignore]
+fn trace_sample_allocator() {
+    use std::sync::mpsc;
+    let fixtures = Fixtures::new("allocator");
+    let file = fixtures.require(
+        "count.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=30:d=4",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    );
+    let device = device();
+    start().unwrap();
+    let shown = file.display().to_string();
+    let reader = source_reader(&file, &shown, &video_attributes(&device, true).unwrap()).unwrap();
+    select(&reader, MediaPart::Video, &shown).unwrap();
+    set_output(&reader, MediaPart::Video, &shown, true).unwrap();
+    struct Shared(IMFSourceReader);
+    // SAFETY: free-threaded, used by one thread at a time here.
+    unsafe impl Send for Shared {}
+    struct Held(#[allow(dead_code)] IMFSample);
+    // SAFETY: the same.
+    unsafe impl Send for Held {}
+    let (ask, asked) = mpsc::channel::<()>();
+    let (tell, told) = mpsc::channel::<windows::core::Result<(i64, Option<Held>)>>();
+    let shared = Shared(reader);
+    std::thread::spawn(move || {
+        let shared = shared;
+        while asked.recv().is_ok() {
+            let (mut flags, mut time, mut sample) = (0, 0, None);
+            let read = unsafe {
+                shared.0.ReadSample(
+                    stream(MediaPart::Video),
+                    0,
+                    None,
+                    Some(&mut flags),
+                    Some(&mut time),
+                    Some(&mut sample),
+                )
+            };
+            let _ = tell.send(read.map(|()| (time, sample.map(Held))));
+        }
+    });
+    let mut held: Vec<(i64, Held)> = Vec::new();
+    loop {
+        ask.send(()).unwrap();
+        match told.recv_timeout(Duration::from_secs(3)) {
+            Ok(Ok((time, Some(sample)))) => held.push((time, sample)),
+            Ok(Ok((_, None))) => {}
+            Ok(Err(error)) => {
+                let last = held.last().map(|h| h.0);
+                eprintln!(
+                    "with {} held (last at {last:?}), the next read failed: {error}",
+                    held.len()
+                );
+                // Give samples back one at a time until a read answers.
+                ask.send(()).unwrap();
+                while !held.is_empty() {
+                    held.remove(0);
+                    match told.recv_timeout(Duration::from_secs(2)) {
+                        Ok(after) => {
+                            eprintln!(
+                                "with {} still held, the read gave {:?}",
+                                held.len(),
+                                after.map(|(time, s)| (time, s.is_some()))
+                            );
+                            return;
+                        }
+                        Err(_) => {
+                            eprintln!("with {} still held, the read still blocks", held.len())
+                        }
+                    }
+                }
+                let after = told.recv_timeout(Duration::from_secs(5));
+                eprintln!(
+                    "with none held, the read gave {:?}",
+                    after.map(|r| r.map(|(time, s)| (time, s.is_some())))
+                );
+                return;
+            }
+            Err(_) => {
+                eprintln!("with {} held, the next read blocked for 3 s", held.len());
+                held.remove(0);
+                let after = told.recv_timeout(Duration::from_secs(3));
+                eprintln!(
+                    "after one came back, the blocked read gave {:?} (last held at {:?})",
+                    after.map(|r| r.map(|(time, s)| (time, s.is_some()))),
+                    held.last().map(|h| h.0)
+                );
+                return;
+            }
+        }
+        assert!(
+            held.len() < 64,
+            "64 samples held and the allocator never ran dry"
+        );
+    }
+}
+
+/// Diagnostic, run by hand: the real wedged case. A picture reader gives a
+/// few pictures; then every decoder sample of its Source Reader is held
+/// until ReadSample fails with MF_E_SAMPLEALLOCATOR_EMPTY (after which
+/// that reader blocks every read). With those samples still held, the
+/// reader opens its file again on a worker thread, which drops the wedged
+/// reader: it must come back promptly (the engine joins this thread on
+/// stop), and the next pictures must follow the last one given.
+#[test]
+#[ignore]
+fn trace_reopen_of_a_wedged_reader() {
+    use std::sync::mpsc;
+    let fixtures = Fixtures::new("wedged");
+    let file = grays(&fixtures);
+    let device = device();
+    start().unwrap();
+    for gpu in [true, false] {
+        let mut reader = open_video(&device, &file, &file.display().to_string(), gpu).unwrap();
+        let mut given = 0;
+        while given < 5 {
+            let (frame, at) = reader.next_video().unwrap().unwrap();
+            assert_gray(given, &frame, "before");
+            assert!(
+                at.abs_diff(Duration::from_secs_f64(given as f64 / 30.0))
+                    <= Duration::from_millis(2)
+            );
+            given += 1;
+        }
+        // Hold Media Foundation's samples until its allocator runs dry.
+        let mut held = Vec::new();
+        let error = loop {
+            let (mut flags, mut time, mut sample) = (0, 0, None);
+            match unsafe {
+                reader.reader.ReadSample(
+                    stream(MediaPart::Video),
+                    0,
+                    None,
+                    Some(&mut flags),
+                    Some(&mut time),
+                    Some(&mut sample),
+                )
+            } {
+                Ok(()) => held.extend(sample),
+                Err(error) => break error,
+            }
+            if held.len() >= 64 {
+                eprintln!("gpu={gpu}: 64 samples held and the allocator never ran dry");
+                break windows::core::Error::empty();
+            }
+        };
+        eprintln!("gpu={gpu}: {} samples held, then: {error}", held.len());
+        // Reopen (dropping the wedged reader) on a worker thread, timed.
+        let (tell, told) = mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let reopened = reader.reopen();
+            let _ = tell.send((reader, reopened, started.elapsed()));
+        });
+        let (mut reader, reopened, took) = told
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "gpu={gpu}: reopening blocked for 10 s with {} samples held",
+                    held.len()
+                )
+            });
+        reopened.unwrap();
+        eprintln!(
+            "gpu={gpu}: reopened (wedged reader dropped) in {took:?} with {} samples still held",
+            held.len()
+        );
+        // The next pictures follow the last one given, the old samples
+        // still held.
+        for n in given..given + 10 {
+            let (frame, at) = reader.next_video().unwrap().unwrap();
+            assert_gray(n, &frame, &format!("gpu={gpu} after"));
+            assert!(
+                at.abs_diff(Duration::from_secs_f64(n as f64 / 30.0)) <= Duration::from_millis(2),
+                "gpu={gpu}: picture {n} at {at:?}"
+            );
+        }
+        let started = std::time::Instant::now();
+        drop(held);
+        drop(reader);
+        eprintln!(
+            "gpu={gpu}: pictures {given}..{} followed in order; samples and reader released in {:?}",
+            given + 10,
+            started.elapsed()
+        );
     }
 }

@@ -67,6 +67,11 @@ const START_DELAY: Duration = Duration::from_millis(200);
 /// clock starts. Cameras can take a moment to warm up; waiting lets every
 /// file start together.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a recording waits for each program to draw a picture before
+/// choosing its epoch, on platforms that don't require one (#150). Past it
+/// the recording starts anyway, and the program's late head counts as
+/// dropped.
+const PROGRAM_WARM_TIMEOUT: Duration = Duration::from_secs(1);
 /// The shortest a recording stopped just after it started gets, so every
 /// file it announced holds something.
 const MIN_TAKE: Duration = Duration::from_secs(1);
@@ -1347,6 +1352,30 @@ fn is_program(plan: &FilePlan) -> bool {
     plan.kind == PROGRAM
 }
 
+/// Frame slots between a take's `epoch` and its program file's first
+/// picture at `start`: ticks the program skipped (drawn too late, or never
+/// drawn while it warmed up), so dropped (#150). An ISO file whose source
+/// had no picture yet keeps its start offset instead: nothing was lost.
+///
+/// Only whole slots count: an extra canvas at its own rate ticks on the
+/// engine's grid while the take's epoch is on the main canvas's, so its
+/// first picture can come half a slot after the epoch without any lost.
+fn head_dropped(plan: &FilePlan, epoch: Time, start: Time) -> u64 {
+    if !is_program(plan) || start <= epoch {
+        return 0;
+    }
+    let fps = plan.spec.video.fps;
+    let mut slots = start.ticks_since(epoch, fps).max(0) as u64;
+    // Truncated tick arithmetic: a slot reached from the epoch may lie 1 ns
+    // past a picture on it (see `file::file_end`).
+    if slots > 0
+        && epoch.add_ticks(slots, fps).as_nanos() > start.as_nanos() + file::TICK_ROUNDING_NS
+    {
+        slots -= 1;
+    }
+    slots
+}
+
 /// The canvas whose program `plan` writes, if it writes one.
 fn program_canvas(plan: &FilePlan) -> Option<CanvasId> {
     if !is_program(plan) {
@@ -1386,13 +1415,27 @@ fn live_status(
                 // The newest frame first: the count is at least up to it.
                 let newest = Time::from_nanos(plan.newest.load(Ordering::Acquire));
                 let frames = plan.frames.load(Ordering::Relaxed);
+                let epoch = plan.epoch.load(Ordering::SeqCst);
+                let fps = plan.spec.video.fps;
                 let due = if start == i64::MIN {
-                    0
+                    // A program owes its frames from the take's start even
+                    // before its first one arrives (#150).
+                    if is_program(plan) && epoch != i64::MIN {
+                        overdue
+                            .ticks_since(cuts.map(Time::from_nanos(epoch)), fps)
+                            .max(0) as u64
+                    } else {
+                        0
+                    }
                 } else {
                     let start = Time::from_nanos(start);
-                    let fps = plan.spec.video.fps;
                     let seen = newest.ticks_since(start, fps) + 1;
-                    seen.max(overdue.ticks_since(start, fps)).max(0) as u64
+                    let head = if epoch == i64::MIN {
+                        0
+                    } else {
+                        head_dropped(plan, cuts.map(Time::from_nanos(epoch)), start)
+                    };
+                    seen.max(overdue.ticks_since(start, fps)).max(0) as u64 + head
                 };
                 let committed = plan.committed.load(Ordering::Relaxed);
                 LiveFile {
@@ -1448,7 +1491,8 @@ fn take_manifest<P: Platform>(
                 let start = Time::from_nanos(start);
                 let fps = plan.spec.video.fps;
                 let end = file::file_end(start, mapped(end).max(start), fps);
-                let expected = end.ticks_since(start, fps).max(0) as u64;
+                let expected = end.ticks_since(start, fps).max(0) as u64
+                    + head_dropped(plan, mapped(take.epoch), start);
                 report.dropped_frames = report.dropped_frames.max(
                     expected.saturating_sub(report.frames.saturating_sub(report.repeated_frames)),
                 );
@@ -1489,7 +1533,9 @@ fn take_manifest<P: Platform>(
                 duration_seconds: duration.as_secs_f64(),
                 frames,
                 repeated_frames: 0,
-                dropped_frames: (end.ticks_since(start, fps).max(0) as u64).saturating_sub(frames),
+                dropped_frames: (end.ticks_since(start, fps).max(0) as u64
+                    + head_dropped(plan, mapped(take.epoch), start))
+                .saturating_sub(frames),
                 audio_dropouts: plan.audio_dropouts.load(Ordering::Relaxed),
                 audio_stops: Vec::new(),
             }

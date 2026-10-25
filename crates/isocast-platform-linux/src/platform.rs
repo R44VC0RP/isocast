@@ -14,9 +14,9 @@ use isocast_protocol::devices::{
 };
 use isocast_protocol::{Canvas, SourceKind};
 
-use crate::encoder::Encoder;
 use crate::frames::{Frame, FramePool, Importer};
 use crate::system;
+use crate::video_encoder::Encoder;
 use crate::writer::Writer;
 use crate::{browser, camera, pipewire_audio, portal};
 
@@ -70,9 +70,20 @@ impl Platform for LinuxPlatform {
         browser::doctor_warning()
     }
     fn video_encoders(&self) -> isocast_engine::VideoEncoders {
+        let availability = crate::nvenc::availability();
         isocast_engine::VideoEncoders {
-            hardware: Vec::new(),
+            hardware: if availability.is_ok() {
+                vec!["NVIDIA NVENC (H.264)".into()]
+            } else {
+                Vec::new()
+            },
             software: vec!["OpenH264 (software)".into()],
+            unavailable: availability
+                .as_ref()
+                .err()
+                .map(|reason| format!("NVIDIA NVENC (H.264): {reason}"))
+                .into_iter()
+                .collect(),
         }
     }
     fn volume(&self, path: &Path) -> Result<Volume> {

@@ -76,6 +76,8 @@ pub struct VideoEncoders {
     pub hardware: Vec<String>,
     /// On the CPU: where recording falls back to without hardware.
     pub software: Vec<String>,
+    /// Reasons a hardware encoder could not be opened during discovery.
+    pub unavailable: Vec<String>,
 }
 
 /// Audio inside the engine is 48 kHz, 32-bit float, interleaved.
@@ -235,6 +237,7 @@ pub trait Platform: Clone + Send + Sync + 'static {
         VideoEncoders {
             hardware: self.machine().hardware_encoders,
             software: Vec::new(),
+            unavailable: Vec::new(),
         }
     }
 
@@ -294,10 +297,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
         false
     }
 
-    /// Finish a fresh program picture before choosing a recording's epoch.
+    /// Require a fresh program picture before choosing a recording's epoch.
     /// Software GPU drivers may compile their first draw lazily; preparing
-    /// that work must not consume the first slots of an already armed take.
-    /// Native desktop backends retain their existing startup policy.
+    /// that work must not consume the first slots of an already armed take,
+    /// so the recording fails if none arrives. Every other backend warms
+    /// its programs too, bounded by `PROGRAM_WARM_TIMEOUT` (record/mod.rs),
+    /// then starts anyway and counts the skipped head as dropped (#150).
     fn recording_needs_program_frame(&self) -> bool {
         false
     }

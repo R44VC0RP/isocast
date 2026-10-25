@@ -40,11 +40,11 @@ use super::timings::CompositorTimings;
 use super::{
     AUDIO_TAIL, COMMIT_TIMEOUT, CaptureReport, DiskReport, FIRST_FRAME_TIMEOUT, FilePlan,
     FolderLock, Formats, MIN_FREE_BYTES, MIN_FREE_SECONDS, MIN_TAKE, MIX_QUEUE_DEPTH, MONITOR_FPS,
-    OnAir, Output, Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN,
-    SPLIT_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL, SessionControl, Shared, Slots,
-    SourceFilters, SplitRefused, SplitTake, Take, WriterInputs, create_writers, expand_home,
-    interrupted_note, interrupted_sessions, is_program, live_status, next_recording, plan_take,
-    sidechain_sources, take_manifest, wait_for_frame,
+    OnAir, Output, PROGRAM_WARM_TIMEOUT, Packet, QUEUE_DEPTH, RecordOptions, Report,
+    SPACE_CHECK_INTERVAL, SPEED_MARGIN, SPLIT_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL,
+    SessionControl, Shared, Slots, SourceFilters, SplitRefused, SplitTake, Take, WriterInputs,
+    create_writers, expand_home, interrupted_note, interrupted_sessions, is_program, live_status,
+    next_recording, plan_take, sidechain_sources, take_manifest, wait_for_frame,
 };
 use super::{AudioStopped, audio_stop_errors, file_audio_stops};
 #[cfg(not(windows))]
@@ -1197,6 +1197,7 @@ impl<P: Platform> Engine<P> {
         let inner = &self.inner;
         inner.stopping.store(true, Ordering::SeqCst);
         inner.wake.notify_all();
+        frame_stream::stop(&inner.frame_streams);
         for thread in self.threads.lock().drain(..) {
             let _ = thread.join();
         }
@@ -1639,7 +1640,7 @@ impl<P: Platform> Engine<P> {
         };
         let inner = self.inner.clone();
         let target = target.to_string();
-        Ok(frame_stream::watch(
+        frame_stream::watch(
             &self.inner.frame_streams,
             &self.inner.platform,
             key,
@@ -1647,7 +1648,7 @@ impl<P: Platform> Engine<P> {
             // Called with the stream's rate now (the highest any of its
             // viewers wants), which the program is drawn at least at.
             move |fps| stream_source(&inner, &target, fps, false, (max_width, None)),
-        ))
+        )
     }
 
     /// `target`'s picture (see [`Engine::frame`]) for a monitor in a
@@ -4407,42 +4408,78 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             .collect(),
         false => WriterInputs::new(),
     };
-    if platform.recording_needs_program_frame() {
-        for plan in plans.iter().filter(|plan| is_program(plan)) {
-            let since = platform.now();
-            let deadline = std::time::Instant::now() + FIRST_FRAME_TIMEOUT;
-            loop {
-                if options.stop.load(Ordering::SeqCst) {
-                    bail!("the recording was stopped before it started, so nothing was recorded");
-                }
-                let left = deadline.saturating_duration_since(std::time::Instant::now());
-                if left.is_zero() {
-                    bail!(
-                        "{}: the program did not finish preparing a picture within {} seconds; no recording files were opened",
+    // Draw each recorded program before choosing the epoch, so its first
+    // draws (a canvas let go while nothing watched it, cold GPU pipelines)
+    // don't consume the take's first slots (#150). Software GPU drivers
+    // must finish one; elsewhere warming is bounded and the recording
+    // starts anyway, its program's skipped head counted as dropped.
+    let required = platform.recording_needs_program_frame();
+    let warm_started = std::time::Instant::now();
+    let warm_until = warm_started + PROGRAM_WARM_TIMEOUT;
+    let program_output = |plan: &FilePlan| {
+        if plan.source == PROGRAM {
+            &inner.main
+        } else {
+            extra_output(&plan.source).expect("recorded canvas output")
+        }
+    };
+    // Every program starts drawing at once, so several idle canvases warm
+    // together within the one bound rather than one after another.
+    for plan in plans.iter().filter(|plan| is_program(plan)) {
+        program_output(plan)
+            .protected_program_wanted
+            .fetch_max(plan.spec.video.fps, Ordering::Relaxed);
+    }
+    for plan in plans.iter().filter(|plan| is_program(plan)) {
+        // A picture from the last two ticks shows a program already drawing
+        // (a preview or monitor watching): no wait. Ticks publish a frame
+        // after they're due, so an idle canvas still has to draw one.
+        let since = platform.now() - Duration::from_secs(2) / plan.spec.video.fps;
+        let deadline = if required {
+            std::time::Instant::now() + FIRST_FRAME_TIMEOUT
+        } else {
+            warm_until
+        };
+        loop {
+            if options.stop.load(Ordering::SeqCst) {
+                bail!("the recording was stopped before it started, so nothing was recorded");
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                if !required {
+                    isocast_diagnostics::diagnostic!("warn";
+                        "recording: {} drew no picture within {} ms of warming; starting anyway",
                         plan.source,
-                        FIRST_FRAME_TIMEOUT.as_secs()
+                        PROGRAM_WARM_TIMEOUT.as_millis()
                     );
-                }
-                // Required preparation must keep drawing even when disposable
-                // previews are paused. The slot publishes after GPU completion.
-                let output = if plan.source == PROGRAM {
-                    &inner.main
-                } else {
-                    extra_output(&plan.source).expect("recorded canvas output")
-                };
-                output
-                    .protected_program_wanted
-                    .fetch_max(plan.spec.video.fps, Ordering::Relaxed);
-                let slot = slot_of(inner, &plan.source, plan.spec.video.fps)
-                    .map_err(anyhow::Error::msg)?;
-                if slot
-                    .wait_from(since, left.min(Duration::from_millis(100)))
-                    .is_some()
-                {
                     break;
                 }
+                bail!(
+                    "{}: the program did not finish preparing a picture within {} seconds; no recording files were opened",
+                    plan.source,
+                    FIRST_FRAME_TIMEOUT.as_secs()
+                );
+            }
+            // Required preparation must keep drawing even when disposable
+            // previews are paused. The slot publishes after GPU completion.
+            program_output(plan)
+                .protected_program_wanted
+                .fetch_max(plan.spec.video.fps, Ordering::Relaxed);
+            let slot =
+                slot_of(inner, &plan.source, plan.spec.video.fps).map_err(anyhow::Error::msg)?;
+            if slot
+                .wait_from(since, left.min(Duration::from_millis(100)))
+                .is_some()
+            {
+                break;
             }
         }
+    }
+    if plans.iter().any(|plan| is_program(plan)) {
+        isocast_diagnostics::diagnostic!("info";
+            "recording: program warm-up took {} ms",
+            warm_started.elapsed().as_millis()
+        );
     }
     let (writers, admission_notes) = create_writers(platform, plans, &writer_inputs)?;
 
@@ -5566,5 +5603,328 @@ iso = {iso}
         assert_eq!(changed(&ten, &disabled), ["screen", "other"]);
         let ten_own_eight = setup(", encoder = { bit_depth = 8 }", &iso(", bit_depth = 10"));
         assert_eq!(changed(&default, &ten_own_eight), ["other"]);
+    }
+
+    /// A platform that can't capture, composite or encode anything: enough
+    /// for an engine to start and run its program's monitor workers.
+    mod inert {
+        use std::path::Path;
+        use std::sync::{Arc, OnceLock};
+        use std::time::Instant;
+
+        use anyhow::{Result, bail};
+        use isocast_protocol::api::Machine;
+        use isocast_protocol::devices::{Devices, PermissionKind, PermissionsReport};
+        use isocast_protocol::{Canvas, SourceKind};
+
+        use crate::gpu::{FrameImporter, Gpu, GpuFrame};
+        use crate::{
+            AudioEncoder, AudioRender, AudioSink, BrowserControl, BrowserPage, CameraRequest,
+            CaptureFormat, EncodedVideo, FileWriter, Finished, FramePool, LiveAudioSpec,
+            LiveVideoSpec, MediaInfo, MediaPart, MediaReader, Platform, Probe, ScreenTarget, Time,
+            VideoEncoder, VideoSink, Volume, WriterSpec,
+        };
+
+        #[derive(Clone)]
+        pub(super) struct Inert;
+
+        /// A resource it never makes.
+        pub(super) enum Never {}
+
+        impl FramePool for Never {
+            type Frame = ();
+            fn draw(&mut self, _draw: &mut dyn FnMut(&mut [u8], usize)) -> Result<Option<()>> {
+                match *self {}
+            }
+            fn take(&mut self) -> Result<Option<()>> {
+                match *self {}
+            }
+        }
+
+        impl FileWriter for Never {
+            type Frame = ();
+            fn start(&mut self, _at: Time) -> Result<()> {
+                match *self {}
+            }
+            fn append_video(&mut self, _frame: &(), _pts: Time) -> Result<bool> {
+                match *self {}
+            }
+            fn append_audio(
+                &mut self,
+                _track: usize,
+                _samples: &[f32],
+                _pts: Time,
+            ) -> Result<bool> {
+                match *self {}
+            }
+            fn finish(self, _end: Time) -> Result<Finished> {
+                match self {}
+            }
+            fn cancel(self) {
+                match self {}
+            }
+        }
+
+        impl MediaReader for Never {
+            type Frame = ();
+            fn next_video(&mut self) -> Result<Option<((), std::time::Duration)>> {
+                match *self {}
+            }
+            fn next_audio(&mut self) -> Result<Option<(Vec<f32>, std::time::Duration)>> {
+                match *self {}
+            }
+        }
+
+        impl VideoEncoder for Never {
+            type Frame = ();
+            fn encode(&mut self, _frame: &(), _pts: Time, _keyframe: bool) -> Result<()> {
+                match *self {}
+            }
+            fn receive(&mut self) -> Result<Option<EncodedVideo>> {
+                match *self {}
+            }
+            fn receive_timeout(
+                &mut self,
+                _timeout: std::time::Duration,
+            ) -> Result<Option<EncodedVideo>> {
+                match *self {}
+            }
+            fn dropped(&self) -> u64 {
+                match *self {}
+            }
+            fn set_rate(&mut self, _fps: u32, _bitrate_kbps: u32) -> Result<()> {
+                match *self {}
+            }
+        }
+
+        impl AudioEncoder for Never {
+            fn encode(&mut self, _samples: &[f32]) -> Result<Vec<Vec<u8>>> {
+                match *self {}
+            }
+            fn delay(&self) -> u32 {
+                match *self {}
+            }
+        }
+
+        impl FrameImporter for Never {
+            type Frame = ();
+            fn import(&mut self, _frame: &()) -> Result<GpuFrame> {
+                match *self {}
+            }
+            fn target(&mut self, _frame: &()) -> Result<wgpu::Texture> {
+                match *self {}
+            }
+            fn ycbcr_target(&mut self, _frame: &()) -> Result<(wgpu::Texture, wgpu::Texture)> {
+                match *self {}
+            }
+        }
+
+        impl Platform for Inert {
+            type Frame = ();
+            type FramePool = Never;
+            type Writer = Never;
+            type Capture = Never;
+            type Importer = Never;
+            type Media = Never;
+            type Playback = Never;
+            type VideoEncoder = Never;
+            type AudioEncoder = Never;
+            type SharedSurface = ();
+
+            fn now(&self) -> Time {
+                static ORIGIN: OnceLock<Instant> = OnceLock::new();
+                let nanos = ORIGIN.get_or_init(Instant::now).elapsed().as_nanos();
+                Time::from_nanos(i64::try_from(nanos).unwrap_or(i64::MAX))
+            }
+            fn devices(&self) -> Result<Devices> {
+                bail!("inert")
+            }
+            fn permissions(&self) -> Result<PermissionsReport> {
+                bail!("inert")
+            }
+            fn request_permissions(
+                &self,
+                _only: Option<PermissionKind>,
+            ) -> Result<PermissionsReport> {
+                bail!("inert")
+            }
+            fn open_permission_settings(&self, _permission: PermissionKind) -> Result<String> {
+                bail!("inert")
+            }
+            fn media_info(&self, _path: &Path) -> Result<MediaInfo> {
+                bail!("inert")
+            }
+            fn open_media(&self, _path: &Path, _part: MediaPart) -> Result<Never> {
+                bail!("inert")
+            }
+            fn frame_importer(&self, _gpu: &Gpu) -> Result<Never> {
+                bail!("inert")
+            }
+            fn machine(&self) -> Machine {
+                Machine {
+                    chip: "inert".into(),
+                    memory_gb: 0.0,
+                    cores: 1,
+                    os: "inert".into(),
+                    hardware_encoders: Vec::new(),
+                }
+            }
+            fn probe(&self, _source: &SourceKind, _canvas: &Canvas) -> Result<Option<Probe>> {
+                bail!("inert")
+            }
+            fn volume(&self, _path: &Path) -> Result<Volume> {
+                bail!("inert")
+            }
+            fn frame_pool(&self, _width: u32, _height: u32) -> Result<Never> {
+                bail!("inert")
+            }
+            fn ycbcr_frame_pool(&self, _width: u32, _height: u32) -> Result<Never> {
+                bail!("inert")
+            }
+            fn frame_size(&self, _frame: &()) -> (u32, u32) {
+                (0, 0)
+            }
+            fn frame_is_ycbcr(&self, _frame: &()) -> bool {
+                false
+            }
+            fn shared_surface(
+                &self,
+                _gpu: &Gpu,
+                _width: u32,
+                _height: u32,
+            ) -> Result<((), wgpu::Texture)> {
+                bail!("inert")
+            }
+            fn encode_jpeg(
+                &self,
+                _frame: &(),
+                _max_width: Option<u32>,
+                _quality: f32,
+            ) -> Result<(Vec<u8>, u32, u32)> {
+                bail!("inert")
+            }
+            fn create_writer(&self, _spec: &WriterSpec) -> Result<Never> {
+                bail!("inert")
+            }
+            fn capture_screen(
+                &self,
+                _target: ScreenTarget<'_>,
+                _fps: u32,
+                _ten_bit: bool,
+                _cursor: bool,
+                _sink: VideoSink<()>,
+            ) -> Result<(Never, CaptureFormat)> {
+                bail!("inert")
+            }
+            fn capture_camera(
+                &self,
+                _device: &str,
+                _request: CameraRequest,
+                _canvas: &Canvas,
+                _sink: VideoSink<()>,
+            ) -> Result<(Never, CaptureFormat)> {
+                bail!("inert")
+            }
+            fn capture_microphone(
+                &self,
+                _device: &str,
+                _channels: Option<&[u32]>,
+                _sink: AudioSink,
+            ) -> Result<(Never, u32)> {
+                bail!("inert")
+            }
+            fn capture_system_audio(
+                &self,
+                _exclude: &[String],
+                _sink: AudioSink,
+                _exclude_own: bool,
+            ) -> Result<(Never, u32)> {
+                bail!("inert")
+            }
+            fn play_audio(&self, _device: &str, _render: AudioRender) -> Result<(Never, String)> {
+                bail!("inert")
+            }
+            fn capture_browser(
+                &self,
+                _page: &BrowserPage<'_>,
+                _video: VideoSink<()>,
+                _audio: Option<AudioSink>,
+            ) -> Result<(Never, CaptureFormat, Arc<dyn BrowserControl>)> {
+                bail!("inert")
+            }
+            fn capture_application_audio(
+                &self,
+                _app: &str,
+                _sink: AudioSink,
+            ) -> Result<(Never, u32)> {
+                bail!("inert")
+            }
+            fn create_video_encoder(&self, _spec: &LiveVideoSpec) -> Result<Never> {
+                bail!("inert")
+            }
+            fn create_audio_encoder(&self, _spec: &LiveAudioSpec) -> Result<Never> {
+                bail!("inert")
+            }
+            fn has_secret(&self, _service: &str, _account: &str) -> Result<bool> {
+                bail!("inert")
+            }
+            fn secret(&self, _service: &str, _account: &str) -> Result<Option<String>> {
+                bail!("inert")
+            }
+            fn set_secret(&self, _service: &str, _account: &str, _secret: &str) -> Result<()> {
+                bail!("inert")
+            }
+            fn delete_secret(&self, _service: &str, _account: &str) -> Result<bool> {
+                bail!("inert")
+            }
+        }
+    }
+
+    /// `stop` ends every monitor stream before it returns (its worker owns a
+    /// native encoder that must be gone before the process exits), and a
+    /// monitor asked for afterwards is refused rather than started on a
+    /// stopped engine.
+    #[test]
+    fn stop_ends_monitor_streams_and_refuses_new_ones() {
+        use isocast_protocol::api::{H264Profile, frames};
+
+        let setup = Setup::from_toml(
+            r##"
+version = 1
+name = "t"
+[canvas]
+width = 64
+height = 64
+fps = 30
+[[scenes]]
+id = "main"
+items = []
+[recording]
+folder = "/nonexistent/isocast-engine-test"
+[recording.program]
+encoder = { codec = "hevc", quality = 70 }
+"##,
+        )
+        .unwrap();
+        let engine = Engine::start(&inert::Inert, &setup, None, None).unwrap();
+        let feed = engine
+            .frames(PROGRAM, None, 30, H264Profile::High)
+            .expect("a running engine streams its program");
+
+        engine.stop();
+        // Already there: stop joined the worker that sent it.
+        let end = feed
+            .records
+            .try_iter()
+            .map(|record| frames::Record::read(&mut &record[..]).unwrap().unwrap())
+            .find(|record| record.kind == frames::END)
+            .expect("the monitor heard the stream end before stop returned");
+        let why = String::from_utf8(end.payload).unwrap();
+        assert!(why.contains("engine stopped"), "ended with {why:?}");
+
+        match engine.frames(PROGRAM, None, 30, H264Profile::High) {
+            Ok(_) => panic!("a monitor started on a stopped engine"),
+            Err(why) => assert_eq!(why, "engine stopped"),
+        }
     }
 }

@@ -39,7 +39,11 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Windows media decoder samples (2026-10-25, #153):** readers give Media Foundation's decoder samples back as
   soon as the pool copy is submitted. Its video processor allocates 10 samples and on a software GPU the copy
   fences lag many frames, so holding samples to completion emptied the allocator (0xc00d4a3e, hosted run
-  40175602445). A full pool waits up to 2 s and an empty allocator up to 1 s before the source ends.
+  40175602445). A full pool waits up to 500 ms before the source ends (#156).
+- **Windows media empty allocator (2026-10-25, #156):** after `MF_E_SAMPLEALLOCATOR_EMPTY` the Source Reader is
+  wedged: every later `ReadSample` blocks, even with all samples returned (traced on WARP). Never retry it.
+  Releasing the wedged reader returns promptly (8-18 ms with its samples still held). Picture readers open the
+  file again and seek to the last picture's own Media Foundation time, at most 3 times per reader.
 - **aws-win (2026-10-25):** isocast-win-build (Microsoft Basic Display Adapter, SSH session) builds and runs unit
   tests but not the engine e2e (`win_record` on main: "program delivered no frames"); use hosted CI or exon-desk.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
@@ -115,6 +119,18 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   both); the helper logs it at warn, `doctor` reports it, and `isocast-browser --sandbox-status` prints its decision.
   The helper (webkit6/gdk4 bindings) needs GTK 4.10+, so the Debian 12 .deb (GTK 4.8) has no browser sources;
   where the helper is missing, sources and doctor say it needs GTK 4.10 or newer.
+- **Linux NVENC and capture buffering (2026-10-25, #141), experimental:** Linux NVENC (SDK 13, synchronous:
+  driver waits can block shutdown; a kill/reap encoder-helper process is the approved follow-up). High stays the
+  recording profile; Constrained Baseline is real CB (CAVLC, no 8x8, no FMO). Fallback to OpenH264 is
+  creation-time only. Doctor shows NVENC failure reasons and recovery. Packed RGB24/BGR24 portal frames expand
+  to BGRA (stock sway/portal-wlr on the T4 negotiates RGB24; main before #141 couldn't open that screen).
+  Capture requests 16 buffers and checks the data loop's real kernel policy; denied realtime warns once per
+  process. Engine stop refuses new previews and joins H.264 workers before native teardown; idle teardown holds
+  the shutdown lock until native stop completes. T4 (g4dn.xlarge, driver 580.178.04, sway): video, NVENC,
+  fallback and shutdown qualified, 0 dropped video frames in 10 takes (30 s and 300 s). **Linux capture stays
+  experimental:** desktop audio drops out without realtime scheduling (11-188 dropouts per take, #160), and
+  takes with app previews open exceed one frame of A/V skew (worst -46 ms, #161). GeForce's capped NVENC
+  sessions are unqualified (previews can take sessions before recording). Evidence: lane scratch REPORT.
 - **Linux capture lane (2026-10-23), experimental/unreleased:** portal/SHM screens, PipeWire default-sink
   desktop audio and microphones, and V4L2 MJPEG/YUYV cameras are implemented. PipeWire headers/runtime
   >=1.0.5 are required. Restore tokens are private engine-adjacent `*.linux-capture.json` files; devices
@@ -372,6 +388,14 @@ through `pr.sh` (implementers: ci/<lane> snapshots and their PRs) and `merge-pr.
 - Windows packaging (Inno, WinSparkle) is in releasing.md. Authenticode and publication aren't set up yet.
 
 ## 6. Gotchas that still bite
+
+- 2026-10-25 (#149, #151): program files count the slots between their take's start and their first picture
+  as dropped (#150); `start_offset_seconds` still says where the file begins, and ISO start offsets aren't
+  drops. Files end on their take's frame boundary even when they start late (`file_end` allows the 1 ns that
+  truncated tick arithmetic can lose). A recording draws each program before choosing its epoch: bounded to
+  1 s except on Linux, where it is required; an idle canvas adds its cold draw (about 190 ms on an M4 Max), one
+  already drawing adds nothing (`recording: program warm-up took N ms`). e2e split checks anchor take 2 at
+  `host_time_ns`, and every take-1 file must end by the split.
 
 - 2026-10-25 (#144): on a 2-vCPU VM with llvmpipe, a 720p30 browser page plus program plus ISO is at the
   edge (page about 0.6 core: helper 31%, WebKit 30%), and two full-canvas layers (a full colour under a full
