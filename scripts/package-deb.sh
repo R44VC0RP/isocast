@@ -33,15 +33,25 @@ rm -rf "$work" "dist/$name.deb"
 mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/doc/isocast" \
   "$root/usr/share/applications" "$root/usr/share/icons/hicolor/512x512/apps"
 
-# The browser source helper ships beside isocastd once it's built
-# (crates/isocast-browser): then with its AppArmor profile and the
-# maintainer scripts that load and unload it.
+# The browser source helper ships beside isocastd in the Ubuntu 24.04
+# package only, with its AppArmor profile and the maintainer scripts that
+# load and unload it. It needs GTK 4.10 or newer and Debian 12 has 4.8:
+# there isocastd says browser sources need GTK 4.10+ (doctor).
 exes="isocast isocastd isocast-ui"
 helper=
-if [ -e "$bin/isocast-browser" ]; then
+case $distro in
+ubuntu24.04)
+  test -e "$bin/isocast-browser" || { echo "package-deb: no $bin/isocast-browser (the Ubuntu 24.04 package ships the browser helper)" >&2; exit 1; }
   helper=isocast-browser
   exes="$exes isocast-browser"
-fi
+  ;;
+debian12)
+  if [ -e "$bin/isocast-browser" ]; then
+    echo "package-deb: $bin/isocast-browser is built, but the Debian 12 package ships without it (GTK 4.8; it needs 4.10)" >&2
+    exit 1
+  fi
+  ;;
+esac
 for exe in $exes; do
   test -x "$bin/$exe" || { echo "package-deb: no $bin/$exe" >&2; exit 1; }
   # Before stripping: OpenH264's entry points defined in a binary mean it

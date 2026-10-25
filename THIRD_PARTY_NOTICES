@@ -496,7 +496,7 @@ License 2.0. libxaac's NOTICE and its copy of the licence follow.
    See the License for the specific language governing permissions and
    limitations under the License.
 
-Rust crates (785)
+Rust crates (807)
 =================
 
 Crate, version, licence, link.
@@ -735,6 +735,12 @@ byteorder-lite 0.1.0
 bytes 1.12.1
   MIT
   https://github.com/tokio-rs/bytes
+cairo-rs 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
+cairo-sys-rs 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
 calloop 0.13.0
   MIT
   https://github.com/Smithay/calloop
@@ -1224,6 +1230,18 @@ gbm 0.18.0
 gbm-sys 0.4.0
   MIT
   https://github.com/Drakulix/gbm.rs/tree/master/gbm-sys
+gdk-pixbuf 0.22.0
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
+gdk-pixbuf-sys 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
+gdk4 0.11.5
+  MIT
+  https://github.com/gtk-rs/gtk4-rs
+gdk4-sys 0.11.5
+  MIT
+  https://github.com/gtk-rs/gtk4-rs
 generic-array 0.14.7
   MIT
   https://github.com/fizyk20/generic-array.git
@@ -1251,6 +1269,9 @@ gif 0.14.2
 gimli 0.33.0
   MIT OR Apache-2.0
   https://github.com/gimli-rs/gimli
+gio 0.22.10
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
 gio-sys 0.22.9
   MIT
   https://github.com/gtk-rs/gtk-rs-core
@@ -1296,12 +1317,24 @@ gobject-sys 0.22.9
 gpu-allocator 0.28.0
   MIT OR Apache-2.0
   https://github.com/Traverse-Research/gpu-allocator
+graphene-rs 0.22.8
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
+graphene-sys 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
 grid 1.0.1
   MIT
   https://github.com/becheran/grid
 group 0.13.0
   MIT/Apache-2.0
   https://github.com/zkcrypto/group
+gsk4 0.11.5
+  MIT
+  https://github.com/gtk-rs/gtk4-rs
+gsk4-sys 0.11.5
+  MIT
+  https://github.com/gtk-rs/gtk4-rs
 gstreamer 0.25.4
   MIT OR Apache-2.0
   https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
@@ -1338,6 +1371,15 @@ gstreamer-video 0.25.4
 gstreamer-video-sys 0.25.4
   MIT
   https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+gtk4 0.11.5
+  MIT
+  https://github.com/gtk-rs/gtk4-rs
+gtk4-macros 0.11.5
+  MIT
+  https://github.com/gtk-rs/gtk4-rs
+gtk4-sys 0.11.5
+  MIT
+  https://github.com/gtk-rs/gtk4-rs
 half 2.7.1
   MIT OR Apache-2.0
   https://github.com/VoidStarKat/half-rs
@@ -1521,6 +1563,12 @@ itertools 0.15.0
 itoa 1.0.18
   MIT OR Apache-2.0
   https://github.com/dtolnay/itoa
+javascriptcore6 0.6.0
+  MIT
+  https://gitlab.gnome.org/World/Rust/webkit6-rs
+javascriptcore6-sys 0.6.0
+  MIT
+  https://gitlab.gnome.org/World/Rust/webkit6-rs
 jobserver 0.1.35
   MIT OR Apache-2.0
   https://github.com/rust-lang/jobserver-rs
@@ -1848,6 +1896,12 @@ p256 0.13.2
 p384 0.13.1
   Apache-2.0 OR MIT
   https://github.com/RustCrypto/elliptic-curves/tree/master/p384
+pango 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
+pango-sys 0.22.9
+  MIT
+  https://github.com/gtk-rs/gtk-rs-core
 parking 2.2.1
   Apache-2.0 OR MIT
   https://github.com/smol-rs/parking
@@ -2286,6 +2340,12 @@ socket2 0.6.5
 softbuffer 0.4.8
   MIT OR Apache-2.0
   https://github.com/rust-windowing/softbuffer
+soup3 0.9.0
+  MIT
+  https://gitlab.gnome.org/World/Rust/soup3-rs
+soup3-sys 0.9.0
+  MIT
+  https://gitlab.gnome.org/World/Rust/soup3-rs
 spake2 0.4.0
   MIT OR Apache-2.0
   https://github.com/RustCrypto/PAKEs/tree/master/spake2
@@ -2619,6 +2679,12 @@ wayland-sys 0.31.11
 webbrowser 1.2.4
   MIT OR Apache-2.0
   https://github.com/amodm/webbrowser-rs
+webkit6 0.6.1
+  MIT
+  https://gitlab.gnome.org/World/Rust/webkit6-rs
+webkit6-sys 0.6.0
+  MIT
+  https://gitlab.gnome.org/World/Rust/webkit6-rs
 weezl 0.1.12
   MIT OR Apache-2.0
   https://github.com/image-rs/weezl

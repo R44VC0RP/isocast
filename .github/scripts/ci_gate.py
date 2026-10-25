@@ -58,12 +58,17 @@ PATH_RULES = [
     (r"crates/isocast-engine/src/media_engines\.json", {"shared"}, "engine (not drawing)"),
     (r"crates/isocast-engine/.*", {"shared", "render"}, "engine (compositor and render)"),
     (r"crates/isocast-surfaces/.*", {"shared", "render"}, "GPU surfaces"),
+    # The Linux browser helper embeds macOS's page-audio script.
+    (r"crates/isocast-platform-macos/src/browser/audio\.js", {"mac", "linux"}, "browser page audio script"),
     (r"crates/isocast-platform-macos/src/(gpu|frames|pacing)\.rs", {"mac", "render"}, "macOS render"),
     (r"crates/isocast-platform-macos/.*", {"mac"}, "macOS platform"),
     (r"crates/isocast-vp8/.*", {"mac"}, "macOS VP8"),
     (r"camera-extension/.*", {"mac"}, "macOS camera extension"),
     (r"crates/isocast-platform-windows/.*", {"windows"}, "Windows platform"),
     (r"crates/isocast-platform-linux/.*", {"linux"}, "Linux platform"),
+    # main.rs is the stub every platform compiles; the rest is Linux-only.
+    (r"crates/isocast-browser/src/main\.rs", {"linux", "mac", "windows"}, "browser helper entry point"),
+    (r"crates/isocast-browser/.*", {"linux"}, "Linux browser helper"),
     (r"crates/isocast-(protocol|daemon|cli|client|ipc|discovery|diagnostics|mux|obsws|remote|"
      r"platform-credentials|platform-stub|openh264)/.*", {"shared"}, "shared crates"),
     (r"crates/isocast-platform-contracts/.*", {"shared", "contracts"}, "platform contracts"),

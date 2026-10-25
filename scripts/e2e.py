@@ -102,7 +102,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern; win_media plays a real file.
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture") if sys.platform.startswith("linux") else ()) + (("win_media",) if sys.platform == "win32" else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture", "linux_browser") if sys.platform.startswith("linux") else ()) + (("win_media",) if sys.platform == "win32" else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -4248,6 +4248,163 @@ def scenario_linux_capture(e, cfg, evidence):
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
             log.close()
+
+
+LINUX_BROWSER_SECONDS = 10
+
+
+def browser_oracle_page(path, fps, frames):
+    """A page for linux_browser: on a transparent background, the frame
+    oracle's block code of tag c for the page's current frame (time-based,
+    so it advances at `fps` whatever the drawing rate) in its top-left
+    quarter, a 50% blue box moving left and right across a band of the
+    right half (otherwise transparent), and a 660 Hz Web Audio tone."""
+    lo, hi = ORACLE_LEVELS
+    codes = ["".join(f"{b}" for b in oracle_cells(ORACLE_TAGS["c"], n)) for n in range(frames)]
+    path.write_text(f"""<!doctype html><html><head><style>
+html, body {{ margin: 0; background: transparent; overflow: hidden; }}
+canvas {{ position: absolute; left: 0; top: 0; width: 50vw; height: 50vh; image-rendering: pixelated; }}
+#box {{ position: absolute; top: 65vh; width: 10vw; height: 20vh; background: rgba(0, 0, 255, 0.5); }}
+</style></head><body><canvas id=code width=16 height=9></canvas><div id=box></div><script>
+const codes = {json.dumps(codes)};
+const fps = {fps}, lo = {lo}, hi = {hi};
+const ctx = document.getElementById("code").getContext("2d");
+const img = ctx.createImageData(16, 9);
+const box = document.getElementById("box");
+const t0 = performance.now();
+const sound = new AudioContext(), tone = sound.createOscillator(), gain = sound.createGain();
+tone.frequency.value = 660; gain.gain.value = 0.3;
+tone.connect(gain); gain.connect(sound.destination); tone.start(); sound.resume();
+function draw() {{
+  const n = Math.floor((performance.now() - t0) * fps / 1000) % codes.length;
+  const bits = codes[n];
+  for (let i = 0; i < 144; i++) {{
+    const v = bits[i] === "1" ? hi : lo;
+    img.data[4 * i] = v; img.data[4 * i + 1] = v; img.data[4 * i + 2] = v; img.data[4 * i + 3] = 255;
+  }}
+  ctx.putImageData(img, 0, 0);
+  const phase = (n % (2 * fps)) / fps;  // 0..2: out and back in two seconds
+  box.style.left = (55 + 30 * (phase < 1 ? phase : 2 - phase)) + "vw";
+  requestAnimationFrame(draw);
+}}
+draw();
+</script></body></html>""")
+
+
+def scenario_linux_browser(e, cfg, evidence):
+    """A browser source on Linux (the isocast-browser helper next to the
+    daemon: WebKitGTK 6 on a private GTK Broadway display) over a green
+    color source: a local page draws the frame oracle's block code for its
+    current frame and a 50% blue box moving on a transparent background,
+    and plays a 660 Hz Web Audio tone, sent to the mixer (control_audio).
+    The take's browser ISO and program both show the codes advancing (every
+    picture decodes, never backwards, most distinct) and carry the tone; in
+    the program, the page's transparent parts show the green beneath and
+    the box blends with it; and no file dropped a frame (zero, also under
+    --hosted)."""
+    if not LINUX:
+        raise Skip("Linux only")
+    helper = e.binary.parent / "isocast-browser"
+    if not helper.is_file():
+        raise Skip(f"no {helper.name} next to the daemon (cargo build --release -p isocast-browser)")
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    seconds = LINUX_BROWSER_SECONDS
+    page = e.root / "oracle-page.html"
+    browser_oracle_page(page, fps, (seconds + 30) * fps)
+    count = (seconds + 30) * fps
+    cfg["sources"] = [{"id": "green", "kind": "color", "color": "#00ff00", "width": w, "height": h // 2},
+                      {"id": "web", "kind": "browser", "file": str(page), "width": w, "height": h, "fps": fps,
+                       "css": "", "control_audio": True}]
+    # Green under the bottom half only (where the alpha checks look): two
+    # full-canvas layers are more llvmpipe fill than a 2-vCPU VM affords at
+    # 720p30 beside the page (a full colour layer under a full test pattern
+    # drops there too; either alone, or the colour under half, doesn't).
+    cfg["scenes"][0]["items"] = [item("green", (0, 0.5, 1, 0.5), (w, h)), item("web", (0, 0, 1, 1), (w, h))]
+    cfg["recording"]["program"]["audio"] = ["web"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["web"], audio=["web"])
+    e.apply(cfg)
+    e.rpc("engine", {"running": True}, timeout=60)
+    # The helper, its display and WebKit start and load the page before the
+    # source's first picture: record once the source itself shows the
+    # page's frame code (up to 60 s; refusals while it has no picture yet
+    # are part of the wait).
+    started = time.monotonic()
+    code_region = oracle_regions([("c", (0, 0, 0.5, 0.5))])
+
+    def page_shown():
+        try:
+            png = base64.b64decode(e.rpc("snapshot", {"source": "web"})["png_base64"])
+        except RpcError:
+            return False
+        (e.root / "first-picture.png").write_bytes(png)
+        pixels = ffmpeg("-i", e.root / "first-picture.png", "-vf", f"scale={w}:{h}", "-pix_fmt", "gray",
+                        "-f", "rawvideo", "-").stdout
+        got = oracle_read(pixels, w, h, code_region[0])
+        return got[0] == "id" and got[1] == ORACLE_TAGS["c"]
+    until(page_shown, 60, "the browser source showing its page", interval=0.25)
+    evidence["first_picture_s"] = round(time.monotonic() - started, 2)
+    # An ISO starts only with a picture from the last 300 ms; a helper
+    # stalled briefly on a loaded runner (2 vCPUs, WebKit busy) misses
+    # that. Exactly that refusal is retried, for up to 10 s, and counted.
+    refused, deadline = 0, time.monotonic() + 10
+    while True:
+        try:
+            path, manifest = take(e, seconds)
+            break
+        except RpcError as err:
+            require("has no input picture yet" in str(err) and time.monotonic() < deadline, str(err))
+            refused += 1
+            time.sleep(0.25)
+    evidence["start_refusals"] = refused
+    evidence["files"] = check_take(path, manifest, seconds, expected_sources=["program", "web"], evidence=evidence)
+    evidence["writer_drops"] = {f["source"]: f["dropped_frames"] for f in manifest["files"]}
+    lost = {k: v for k, v in evidence["writer_drops"].items() if v}
+    require(not lost, f"writer drops (zero required, also under --hosted): {lost}")
+    tones = {}
+    for f in manifest["files"]:
+        tones[f["source"]] = tone_amplitudes(path.parent / f["path"], 0, freqs=(660, 440))
+        require(tones[f["source"]][660] > 0.05 and tones[f["source"]][440] < 0.1 * tones[f["source"]][660],
+                f"{f['source']}: the page's 660 Hz tone isn't its sound: {tones[f['source']]}")
+    evidence["tones"] = {k: {str(f): round(a, 4) for f, a in v.items()} for k, v in tones.items()}
+
+    code_region = oracle_regions([("c", (0, 0, 0.5, 0.5))])
+    for source in ("web", "program"):
+        file, _ = manifest_file(path, manifest, source)
+        rows = oracle_decode(file, code_region, fps)
+        ids = [r[2]["c"] for r in rows]
+        wrong = [x for x in ids if x[0] != "id" or x[1] != ORACLE_TAGS["c"]]
+        require(not wrong, f"{file.name}: {len(wrong)} of {len(rows)} pictures don't show the page's frame code "
+                           f"(first: {wrong[:1]})")
+        good = [x[2] for x in ids]
+        back = sum(1 for a, b in zip(good, good[1:]) if 0 < (a - b) % count < count // 2)
+        require(back == 0, f"{file.name}: the page's frames went backwards {back} times")
+        require(len(set(good)) >= len(good) * 2 // 3,
+                f"{file.name}: only {len(set(good))} different page frames in {len(good)} pictures")
+        evidence[f"{source}_codes"] = {"pictures": len(rows), "unique": len(set(good)), "backwards": back}
+
+    # Alpha in the program: the page's transparent parts show the green
+    # beneath; the 50% blue box blends with it (never black or opaque blue).
+    program, _ = manifest_file(path, manifest, "program")
+    band_y = int(h * 0.75)
+    # RGB first: one row of 4:2:0 video can't be cropped.
+    raw = ffmpeg("-i", program, "-an", "-vf", f"format=rgb24,crop={w}:1:0:{band_y}", "-fps_mode", "passthrough",
+                 "-pix_fmt", "rgb24", "-f", "rawvideo", "-").stdout
+    rows = [raw[i:i + w * 3] for i in range(0, len(raw), w * 3)]
+    require(rows, "program: no decoded rows")
+    clear = blended = 0
+    for row in rows:
+        px = [tuple(row[x * 3:x * 3 + 3]) for x in range(w)]
+        left = px[int(w * 0.05):int(w * 0.45)]  # never under the box
+        if all(g > 200 and r < 60 and b < 60 for r, g, b in left):
+            clear += 1
+        right = px[int(w * 0.55):int(w * 0.95)]
+        if any(r < 60 and 80 < g < 180 and 80 < b < 180 for r, g, b in right):
+            blended += 1
+    evidence["alpha"] = {"rows": len(rows), "transparent_shows_green": clear, "box_blends": blended}
+    require(clear == len(rows), f"program: the page's transparent area wasn't green beneath in "
+                                f"{len(rows) - clear} of {len(rows)} pictures")
+    require(blended >= len(rows) * 9 // 10, f"program: the 50% box blended over green in only {blended} of "
+                                            f"{len(rows)} pictures")
 
 
 def scenario_linux_recovery(e, cfg, evidence):

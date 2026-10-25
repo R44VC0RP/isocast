@@ -6,10 +6,11 @@
 #
 #   packaging/deb/test-installed.sh SETUP_TOML DEB
 #
-# With the browser helper in the package, also: its AppArmor profile is a
-# conffile, AppArmor (where it runs) has it loaded after install and after
-# reinstalling the .deb over itself (the upgrade path of the maintainer
-# scripts), and it is unloaded and gone after purge.
+# The Ubuntu 24.04 package has the browser helper: its AppArmor profile is
+# a conffile, AppArmor (where it runs) has it loaded after install and
+# after reinstalling the .deb over itself (the upgrade path of the
+# maintainer scripts), and it is unloaded and gone after purge. The Debian
+# 12 package has none (GTK 4.8; it needs 4.10), and doctor says so.
 set -eu
 setup=${1:?usage: packaging/deb/test-installed.sh SETUP_TOML DEB}
 deb=${2:?usage: packaging/deb/test-installed.sh SETUP_TOML DEB}
@@ -24,6 +25,10 @@ apparmor() {
 loaded() { $sudo cat /sys/kernel/security/apparmor/profiles | grep -q '^isocast-browser '; }
 helper=
 [ -x /usr/bin/isocast-browser ] && helper=1
+case $(dpkg-query -W -f='${Version}' isocast) in
+*~ubuntu*) [ -n "$helper" ] || { echo "the Ubuntu package has no /usr/bin/isocast-browser" >&2; exit 1; } ;;
+*~debian12) [ -z "$helper" ] || { echo "the Debian 12 package has isocast-browser (it needs GTK 4.10)" >&2; exit 1; } ;;
+esac
 
 step "installed files"
 dpkg -L isocast | grep -E '^/usr/(bin|share/(applications|icons|doc))/' | grep -v '/$' | sort
@@ -64,6 +69,9 @@ doctor=$(isocast doctor 2>&1 || true)
 printf '%s\n' "$doctor"
 printf '%s\n' "$doctor" | grep -q 'codec: OpenH264' || { echo "doctor didn't report the missing OpenH264" >&2; exit 1; }
 printf '%s\n' "$doctor" | grep -q 'isocast-openh264-install' || { echo "doctor didn't name isocast-openh264-install" >&2; exit 1; }
+if [ -z "$helper" ]; then
+  printf '%s\n' "$doctor" | grep -q 'GTK 4.10' || { echo "doctor didn't say browser sources need GTK 4.10" >&2; exit 1; }
+fi
 
 step "isocast-openh264-install"
 isocast-openh264-install

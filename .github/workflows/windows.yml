@@ -304,7 +304,10 @@ jobs:
           echo "FIXTURE=$RUNNER_TEMP/linux-capture-fixture" >> "$GITHUB_ENV"
           echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base
+          # GStreamer builds and runs media sources; WebKitGTK 6 and GTK 4
+          # build the browser helper (libgtk-4-bin has gtk4-broadwayd, its
+          # private display).
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav libwebkitgtk-6.0-dev libgtk-4-dev libgtk-4-bin
           scripts/linux-capture-fixture.sh deps
           rustup toolchain install stable --profile minimal
           rustup default stable
@@ -323,10 +326,10 @@ jobs:
           key: linux-capture-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build daemon and CLI
+      - name: Build daemon, CLI and browser helper
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         timeout-minutes: 30
-        run: cargo build --release --locked -p isocast-daemon -p isocast-cli
+        run: cargo build --release --locked -p isocast-daemon -p isocast-cli -p isocast-browser
 
       # Cisco's OpenH264 (the recordings encode H.264 with it).
       - name: Cache Cisco's OpenH264
@@ -352,17 +355,22 @@ jobs:
           . "$FIXTURE/session.env"
           cargo test --release --locked -p isocast-platform-linux stream_callbacks_run_on_the_worker_thread -- --ignored
 
-      - name: Record screen, desktop audio, microphone and camera (hosted rules)
+      - name: Record screen, desktop audio, microphone, camera, a media file and a browser source (hosted rules)
         if: env.MODE == 'full'
         timeout-minutes: 20
         run: |
           . "$FIXTURE/session.env"
-          python3 scripts/e2e.py --hosted --only linux_capture --linux-profile 360p30 --codec h264 \
+          python3 scripts/e2e.py --hosted --only linux_capture --only linux_media --only linux_browser --linux-profile 360p30 --codec h264 \
             --work "$RUNNER_TEMP/linux-capture" --keep-failures --report linux-capture.json
-          # A skipped scenario would pass silently: it must have run.
+          # A skipped scenario would pass silently: all three must have run.
           python3 - <<'PY'
           import json
           r = {s["name"]: s for s in json.load(open("linux-capture.json"))["scenarios"]}
+          m = r.get("linux_media")
+          assert m and m["status"] == "PASS", f"linux_media did not pass: {m and (m['status'], m.get('reason'))}"
+          b = r.get("linux_browser")
+          assert b and b["status"] == "PASS", f"linux_browser did not pass: {b and (b['status'], b.get('reason'))}"
+          print("browser:", {k: b["evidence"].get(k) for k in ("web_codes", "program_codes", "alpha", "tones", "writer_drops")})
           s = r.get("linux_capture")
           assert s and s["status"] == "PASS", f"linux_capture did not pass: {s and (s['status'], s.get('reason'))}"
           ev = s["evidence"]
@@ -440,7 +448,7 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers nasm cmake clang libclang-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libwebkitgtk-6.0-dev libgtk-4-dev
           mkdir -m 700 "$XDG_RUNTIME_DIR"
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
@@ -465,15 +473,15 @@ jobs:
         if: env.MODE == 'full'
         run: packaging/linux/install.sh --openh264
 
-      - name: Build app, engine and CLI
+      - name: Build app, engine, CLI and browser helper
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
+        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser
 
       - name: App checks
         if: env.MODE == 'full'
         run: |
-          cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -- -D warnings
-          cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics
+          cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -p isocast-browser -- -D warnings
+          cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics -p isocast-browser
 
       - name: Offscreen snapshot against a local engine
         if: env.MODE == 'full'
@@ -628,7 +636,7 @@ jobs:
         run: |
           echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/backports.list
           apt-get -o Acquire::Retries=3 update
-          apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl git build-essential pkg-config cmake clang libclang-dev libssl-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libwebkitgtk-6.0-dev libgtk-4-dev python3 dpkg-dev lintian binutils xz-utils file
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl git build-essential pkg-config cmake clang libclang-dev libssl-dev libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev python3 dpkg-dev lintian binutils xz-utils file
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends -t bookworm-backports libpipewire-0.3-dev
           # rustup-init pinned by version and SHA-256 (not a piped script).
           case "$(uname -m)" in
@@ -650,12 +658,10 @@ jobs:
           key: deb-debian12-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build app, engine, CLI and browser helper
-        run: |
-          # The browser source helper, once its crate is on this branch.
-          helper=
-          if [ -d crates/isocast-browser ]; then helper="-p isocast-browser"; fi
-          cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli $helper
+      - name: Build app, engine and CLI
+        # No browser helper: it needs GTK 4.10+ and bookworm has 4.8, so the
+        # Debian 12 package ships without browser sources (package-deb.sh).
+        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
 
       - name: Runs on bookworm's glibc
         run: |
