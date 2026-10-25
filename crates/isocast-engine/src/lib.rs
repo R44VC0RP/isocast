@@ -60,6 +60,14 @@ pub struct MissingCodec {
     pub fix: String,
 }
 
+/// Something that works, but less well than it should, with how to fix it
+/// ([`Platform::browser_warning`]); `doctor` reports it as a warning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoctorWarning {
+    pub detail: String,
+    pub fix: String,
+}
+
 /// The video encoders found by [`Platform::video_encoders`], by name, in
 /// the order a recording tries them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -210,6 +218,14 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// command that fixes it. `doctor` reports each as a problem.
     fn missing_codecs(&self) -> Vec<MissingCodec> {
         Vec::new()
+    }
+
+    /// Why browser sources here run less safely or not at all (Linux:
+    /// pages without WebKit's sandbox, or WebKitGTK missing), if they do.
+    /// `doctor` reports it as a warning when the setup has a browser
+    /// source, or without a setup.
+    fn browser_warning(&self) -> Option<DoctorWarning> {
+        None
     }
 
     /// The video encoders a recording here would use, looked for in full
