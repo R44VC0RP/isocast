@@ -1,0 +1,40 @@
+name: Temporary Windows job probe (ASK-36)
+
+# One reviewed diagnostic push only; no PR, main, dispatch, or scheduled trigger.
+on:
+  push:
+    branches: [ci/windows-job-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/ci/windows-job-probe'
+    runs-on: windows-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Measure parent and same-user Limited task (no build)
+        timeout-minutes: 5
+        run: ./scripts/windows-isolated-ci.ps1
+
+      - name: Always remove the diagnostic task
+        if: always()
+        timeout-minutes: 1
+        run: ./scripts/windows-isolated-ci.ps1 -CleanupOnly
+
+      - name: Keep job, token, CreateProcessW and child-exit evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-job-probe-ASK36
+          path: ${{ runner.temp }}/windows-job-probe
+          if-no-files-found: error
+          retention-days: 7
