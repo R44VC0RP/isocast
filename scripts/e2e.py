@@ -115,6 +115,13 @@ HOSTED_HOLD_CAP = 3
 # file that misses half a second still fails.
 HOSTED_LATE_START_CAP = 12
 HOSTED_SUITE_LOSS_LIMIT = 0.03
+# Hosted only: the webrtc scenario's take may lose program frames while its
+# recording starts, as hosted takes do without any monitor (#147/#149: 1 and
+# 8 frames, all within 1.9 s of start; 18 hosted runs 2026-10-25: the webrtc
+# take lost frames in 2, monitor-free projects/nle takes in 22%/8%). After
+# this window, with the WHEP viewer and 960-wide monitor still running, the
+# take must lose nothing; a test Mac allows no loss at all.
+HOSTED_MONITOR_TAKE_START_SECONDS = 3.0
 # Hosted only: the vertical scenario's stream may drop this many frames, or
 # this share of the frames it sent if more, counted in the suite's budget.
 # The VM's GPU and CPU stalls cost it 1 and 4 frames of ~300 on 2026-10-23
@@ -746,6 +753,24 @@ def check_loss(row, limit):
             f"{row['output']}: unexpected repeated_frames={row['repeated']}")
 
 
+def monitor_take_losses(manifest, startup, snapshot_seconds):
+    """The webrtc monitor take's loss rule. Test Macs (`startup` None): no
+    file may lose a frame. Hosted: `startup` is each source's dropped count
+    in live status at `snapshot_seconds` (at least
+    HOSTED_MONITOR_TAKE_START_SECONDS in); any later loss fails, and a source
+    missing from that snapshot counts every loss as later. The losses before
+    it stay in check_take's hosted per-output and suite budgets."""
+    if startup is None:
+        for loss in drop_metrics(manifest):
+            check_loss(loss, 0)
+        return None
+    later = {f["source"]: f["dropped_frames"] - startup.get(f["source"], 0)
+             for f in manifest["files"] if f.get("dropped_frames") is not None}
+    require(not any(later.values()),
+            f"monitor take lost frames after its first {snapshot_seconds:g} s with monitors running: {later}")
+    return {"snapshot_seconds": snapshot_seconds, "during_start": startup, "after_start": later}
+
+
 def vertical_stream_loss(final, fps, evidence):
     """The vertical stream's losses as a drops row (counted in the suite's
     budget), checked: no audio dropouts ever, and no dropped frames unless
@@ -1203,9 +1228,20 @@ def scenario_webrtc(e, cfg, evidence):
               seconds=5, description="WHEP media active before recording")
         # Hosted pressure may legitimately shed new viewers to protect this
         # zero-loss take. Require both new viewers on the native hardware run.
-        profile_modes = (() if evidence["capabilities"].get("hosted") else
+        hosted = evidence["capabilities"].get("hosted")
+        profile_modes = (() if hosted else
                          ("constrained_baseline", "constrained_high_and_baseline"))
-        started = e.rpc("start", {"seconds": 8 if profile_modes else 4})
+        started = e.rpc("start", {"seconds": 8})
+        # Hosted: what the take lost while its recording started, so the
+        # rest of the take (monitors still running) can be held to zero.
+        startup_losses = snapshot_seconds = None
+        if hosted:
+            def after_start():
+                live = e.rpc("status").get("live")
+                return live if live and live["elapsed_seconds"] >= HOSTED_MONITOR_TAKE_START_SECONDS else None
+            live = until(after_start, seconds=15, description="monitor take past its start window")
+            startup_losses = {f["source"]: f["dropped_frames"] for f in live["files"]}
+            snapshot_seconds = live["elapsed_seconds"]
         # Baseline-only and Constrained High + Baseline viewers joining while
         # the take runs must still get decodable Constrained Baseline.
         baseline_viewers = []
@@ -1227,10 +1263,13 @@ def scenario_webrtc(e, cfg, evidence):
                     process.kill()
                     process.wait(timeout=5)
         manifest = until(lambda: finished(started["manifest"]), description="monitor take finalization")
-        # This short protection take explicitly requires zero loss, including
-        # on hosted runners; viewer eviction is allowed instead of a failure.
-        for loss in drop_metrics(manifest):
-            check_loss(loss, 0)
+        # This protection take requires zero loss on a test Mac. Hosted, only
+        # its recording start may lose frames (within the hosted per-output
+        # limit, counted in the suite budget); viewer eviction is allowed
+        # instead of a failure.
+        taken = monitor_take_losses(manifest, startup_losses, snapshot_seconds)
+        if taken is not None:
+            evidence["monitor_take_losses"] = taken
         evidence.setdefault("files", []).extend(check_take(Path(started["manifest"]), manifest, evidence=evidence))
     finally:
         for name, process in (("recording_viewer", recording_viewer), ("recording_monitor", legacy)):
@@ -3772,6 +3811,27 @@ def oracle_rules_selftest(work):
         "hosted: vertical stream drops 4 of 100": (stream(4, 100, hosted()), "fail"),
         "received audio with a gap": (
             "pass" if packets_unbroken([k * 0.021333 for k in range(400) if k != 200], 0.023) else "fail", "fail"),
+    })
+
+    def monitor_take(dropped, startup, snapshot=3.2):
+        manifest = {"files": [{"path": "monitor-take.mov", "source": "program", "fps": 30,
+                               "frames": 240 - dropped, "dropped_frames": dropped, "repeated_frames": 0,
+                               "duration_seconds": 8.0, "audio_dropouts": 0}]}
+        try:
+            monitor_take_losses(manifest, startup, snapshot)
+            return "pass"
+        except Failure:
+            return "fail"
+    cases.update({
+        "hosted: monitor take lost 8 frames, all before the snapshot": (
+            monitor_take(8, {"program": 8}), "pass"),
+        "hosted: monitor take lost nothing": (monitor_take(0, {"program": 0}), "pass"),
+        "hosted: monitor take lost 1 frame after the snapshot": (
+            monitor_take(9, {"program": 8}), "fail"),
+        "hosted: monitor take source missing from the snapshot": (
+            monitor_take(1, {"other": 0}), "fail"),
+        "strict: monitor take lost 1 frame at its start": (monitor_take(1, None), "fail"),
+        "strict: monitor take lost nothing": (monitor_take(0, None), "pass"),
     })
     wrong = {k: v for k, v in cases.items() if v[0] != v[1]}
     require(not wrong, f"oracle rules: {wrong}")
