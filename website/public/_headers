@@ -1,5 +1,6 @@
-# Response headers for a static host that reads _headers (Cloudflare Pages,
-# Netlify). HTML, CSS and JS keep their names from deploy to deploy, so
+# Response headers, applied by the isocast-site Worker's static assets
+# (website/cloudflare.config.ts; Cloudflare Pages and Netlify read the same
+# file). HTML, CSS and JS keep their names from deploy to deploy, so
 # browsers revalidate them every time; the take's media lives in a folder
 # named after its contents (media/take-<hash>/), so it is cached for a year.
 
