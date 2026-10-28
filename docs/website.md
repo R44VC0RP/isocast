@@ -85,9 +85,9 @@ length, which the timecodes use.
 
 ### What to record
 
-The current loops (from 2026-10-22) show an older version of this page,
-with its old headline, on the screen. To replace them, record a new Isocast
-take:
+The current loops (from 2026-10-22) show an older version of this page on
+the screen, with its old copy erased (see "Cutting the loops"), which leaves
+the screen's left side empty. To replace them, record a new Isocast take:
 
 - The program plus ISO files for the screen and the camera, at 60 fps, with
   the mic in the program. At least 20 s; the loop is cut from a 3 to 4 s
@@ -107,12 +107,23 @@ take:
 
 Copy the take's files somewhere private, choose the loop's start `S` (s) and
 length `L`, measure the crops (the page area of the screen, at 1080p for the
-program and the same window doubled for a 4K screen file), then:
+program and the same window doubled for a 4K screen file), then run the
+commands below.
+
+The 2026-10-22 take recorded an older version of this site, so its screen
+shows the old headline, line, Download button, version and diagram title.
+The hero must never show copy that disagrees with the page, so `ERASE_*`
+paints those regions over with the surrounding background (ffmpeg's
+`delogo`, which interpolates from the region's edges; the page holds still
+over the loop, so the fill is steady). A take that doesn't show the site
+needs no erasing: leave both empty.
 
 ```zsh
 TAKE=/path/to/take-copy          # program.mov, screen.mov, camera.mov
 S=20.1667 L=3.4 X=0.4            # start, length, crossfade at the seam
 PROG_CROP="crop=1424:801:474:225," SCR_CROP="crop=2848:1602:948:450,"
+ERASE_PROG="delogo=x=494:y=284:w=374:h=282,delogo=x=678:y=854:w=150:h=26,"
+ERASE_SCR="delogo=x=988:y=568:w=748:h=564,delogo=x=1356:y=1708:w=300:h=52,"
 OUT=$(mktemp -d)
 
 loop() { # name input crop width h264-crf tune vp9-crf
@@ -132,8 +143,8 @@ loop() { # name input crop width h264-crf tune vp9-crf
   rm "$OUT/.$1-$4.mov" "$OUT/.$1-$4.png"
 }
 for W in 960 640; do
-  loop program "$TAKE/program.mov" "$PROG_CROP" $W 20 film 29
-  loop screen  "$TAKE/screen.mov"  "$SCR_CROP"  $W 19 animation 28
+  loop program "$TAKE/program.mov" "$ERASE_PROG$PROG_CROP" $W 20 film 29
+  loop screen  "$TAKE/screen.mov"  "$ERASE_SCR$SCR_CROP"   $W 19 animation 28
   loop camera  "$TAKE/camera.mov"  ""           $W 21 film 30
 done
 

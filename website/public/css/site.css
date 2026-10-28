@@ -147,7 +147,7 @@ main { overflow-x: clip; }
   column-gap: 56px;
   align-items: center;
   align-content: center;
-  min-height: clamp(560px, calc(100svh - var(--nav-h) - env(safe-area-inset-top) - var(--s-8)), 640px);
+  min-height: clamp(440px, calc(100svh - var(--nav-h) - env(safe-area-inset-top) - var(--s-8)), 640px);
   isolation: isolate;
 }
 .hero-light {
@@ -508,7 +508,10 @@ code {
   .lede { grid-area: lede; }
   .hero-object { margin-top: var(--s-5); }
   .download { grid-area: download; margin-top: var(--s-5); }
-  .stage { width: min(100%, 640px, calc(48svh * var(--sw) / var(--sh))); }
+  /* At most 48% of the window's height, and short enough that Download and
+     the version line stay in the first screen: 392px is the nav, headline
+     (two lines), line, the gaps, the button and the version line. */
+  .stage { width: min(100%, 640px, calc(min(48svh, 100svh - 392px) * var(--sw) / var(--sh))); }
 }
 @media (max-width: 720px) {
   :root { --gutter: 20px; --nav-h: 56px; --section: var(--s-8); }

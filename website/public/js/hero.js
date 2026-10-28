@@ -229,7 +229,9 @@ export function mountHero(ctx, loop, peaksP) {
       }
 
       // ── the four files ──
-      const gap = (ctx.compact ? 102 : 146) * (1 + boost * 0.35);
+      // Hover adds air to the fanned deck only: a wider gap would make the
+      // exploded stack taller than its box, over the copy and the nav.
+      const gap = ctx.compact ? 102 : 146;
       const stepX = (ctx.compact ? 44 : 54) * (1 + boost * 0.35);
       const stepY = (ctx.compact ? 58 : 52) * (1 + boost * 0.25);
       const depth = 60 * (1 + boost * 0.6);
