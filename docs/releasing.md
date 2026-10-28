@@ -511,6 +511,19 @@ an Apple ID app-specific password. Rotate it once the hosted run works:
      still true; every image link resolves and has alt text.
    Commit it as `README: <version>` (or "README checked for <version>, no
    changes"), publish the snapshot, and only then publish the release.
+6. **After publishing, bump the website's version and redeploy.** The site
+   names the version in one place: `data-version` on the meta line in
+   `website/public/index.html`. Both Download buttons are built from it
+   (`releases/download/vX.Y.Z/Isocast-X.Y.Z-arm64.dmg`), so check that URL
+   downloads and commit `website: X.Y.Z`. Then, on main, deploy from
+   `website/` with the `cf` CLI's `work` profile
+   ([docs/website.md](website.md)):
+   ```sh
+   npm ci && npm run check    # cf deploy --dry-run --profile work: uploads nothing
+   npm run deploy             # cf deploy --profile work
+   ```
+   Also check the page's claims against the release notes, as for the
+   README.
 
 Manual retry of an **existing tag** (also requires environment approval):
 

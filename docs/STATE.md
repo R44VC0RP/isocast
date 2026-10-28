@@ -229,12 +229,13 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 - Allowed: the delegator's merges; the `ui-dev` offscreen loop and headless motion harness (no windows, no focus
   stealing); being the Mac engine in remote tests (firewall off; the signed "Isocast Dev" already has LAN access).
 - The nightly hardware runner starts here (cronctl `isocast-hw-nightly`, 01:30 New York).
-- The isocast.com preview (`website/`, static, no build) is served on the LAN at http://basebook.local:8790/ by the
-  LaunchAgent `dev.isocast.website` (KeepAlive; it serves the `.claude/worktrees/website` checkout). Port 8788 is
-  something else; leave it alone. (2026-10-22)
-- Gotcha (2026-10-22): another project's `wrangler dev` (workerd) can bind `localhost:8790` (127.0.0.1 and ::1), and
-  then `basebook.local` resolves to ::1 on basebook itself and shows that app. Test the site from basebook via the LAN
-  IP (`http://10.0.10.26:8790/`); other devices are unaffected. The hero's video loops are built by
+- isocast.com (2026-10-28, #163): a Cloudflare Worker with static assets, `isocast-site`, on the work (anoma.ly)
+  account, zone isocast.com (Always Use HTTPS on), serving isocast.com and www.isocast.com from `website/public/`.
+  Deploy from `website/` on main: `npm ci && npm run check` (cf deploy --dry-run --profile work), then
+  `npm run deploy`. See docs/website.md.
+- The isocast.com preview is served on 127.0.0.1:8790 by the LaunchAgent `dev.isocast.website` (KeepAlive; it serves
+  the website worktree's `website/public/`), published on the tailnet at https://isocast-site.i.vogel.dev (OpenCan).
+  Port 8788 is something else; leave it alone. The hero's video loops are built by
   `/Volumes/IsocastBuild/website/scratch/harness/encode.sh` from copies of Ryan's take in `.../scratch/take/`.
 - Never build, test or run gates here as a fallback; when remote-build has no free host, wait and retry.
 
