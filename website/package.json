@@ -1,0 +1,13 @@
+{
+  "name": "isocast-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "cf deploy --profile work",
+    "check": "cf deploy --dry-run --profile work"
+  },
+  "devDependencies": {
+    "cf": "1.0.0-beta.20",
+    "wrangler": "4.154.0"
+  }
+}

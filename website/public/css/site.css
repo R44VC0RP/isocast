@@ -1,4 +1,4 @@
-/* Isocast — isocast.com
+/* Isocast, isocast.com
    Near-black, one copper accent, real depth. Everything that moves is driven
    by springs in js/; CSS holds materials, layout and press states. */
 
@@ -80,7 +80,7 @@ body {
 }
 img, svg { display: block; }
 a { color: inherit; text-decoration: none; }
-h1, h2 { text-wrap: balance; }
+h1 { text-wrap: balance; }
 p, li { text-wrap: pretty; }
 :focus { outline: none; }
 :focus-visible { outline: 3px solid var(--ring-color); outline-offset: 2px; }
@@ -142,7 +142,7 @@ main { overflow-x: clip; }
 .hero {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 500px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 540px) minmax(0, 1fr);
   grid-template-areas: "copy object";
   column-gap: 56px;
   align-items: center;
@@ -159,12 +159,13 @@ main { overflow-x: clip; }
 .hero-copy { grid-area: copy; position: relative; z-index: 2; }
 h1 {
   margin: 0;
-  font-size: clamp(46px, 6.2vw, 92px);
-  line-height: 0.96;
+  /* One sentence, three balanced lines on desktop. */
+  font-size: clamp(42px, 3.9vw, 56px);
+  line-height: 1.02;
   font-weight: 600;
   font-stretch: 112.5%;
   font-optical-sizing: auto;
-  letter-spacing: -0.046em;
+  letter-spacing: -0.034em;
   color: var(--ink);
   /* Optical edge: the E's stem lines up with the text column below; the
      round O overshoots it by a hair, as rounds should. */
@@ -177,6 +178,8 @@ h1 {
 }
 .download { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-4); margin-top: var(--s-6); }
 .meta { margin: 0; font-size: 12px; line-height: 16px; font-weight: 450; letter-spacing: 0.01em; color: var(--ink-4); }
+/* The version is written once, in the meta line's data-version (index.html). */
+.meta[data-version]::before { content: "Version " attr(data-version) " · "; }
 
 /* The tactile download key: its thickness is a stacked edge under the face. */
 .btn-download {
@@ -376,8 +379,6 @@ h1 {
     0 40px 80px -20px rgb(10 6 3 / 0.8);
 }
 .fig-take .panel { width: min(800px, 100%); }
-.panel-head { display: flex; align-items: center; height: 44px; padding: 0 var(--s-5); box-shadow: inset 0 -1px 0 rgb(255 255 255 / 0.06); }
-.panel-head h2 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 500; color: var(--ink-2); }
 
 .flow { display: flex; align-items: center; justify-content: center; padding: var(--s-7) var(--s-5); }
 .flow ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
@@ -432,7 +433,6 @@ h1 {
 }
 .points { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-4); }
 .points li { font-size: 16px; line-height: 26px; color: var(--ink-3); }
-.points strong { color: var(--ink); font-weight: 500; margin-right: 0.3em; }
 /* Inline code: line-height 1 so the pill never grows the line box. */
 code {
   font-family: var(--mono); font-size: 0.8em; font-weight: 400; line-height: 1; letter-spacing: -0.01em;
@@ -451,9 +451,9 @@ code {
 /* Each bar is the measured range: solid to the low value, lighter to the high. */
 .cpu-bar { position: absolute; left: 0; top: 0; height: 8px; width: calc(var(--hi) * 100%); border-radius: 4px; transform-origin: 0 50%; }
 .cpu-bar::before { content: ""; position: absolute; inset: 0; right: calc((1 - var(--lo) / var(--hi)) * 100%); border-radius: inherit; }
-.cpu-bar.is-iso { background: rgb(244 240 232 / 0.32); }
+.cpu-bar.is-iso { --lo: 0.25; --hi: 0.29; background: rgb(244 240 232 / 0.32); }
 .cpu-bar.is-iso::before { background: linear-gradient(180deg, #f4f0e8, #d9d2c6); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.8); }
-.cpu-bar.is-obs { background: rgb(74 71 68 / 0.45); }
+.cpu-bar.is-obs { --lo: 0.58; --hi: 0.71; background: rgb(74 71 68 / 0.45); }
 .cpu-bar.is-obs::before { background: linear-gradient(180deg, #4a4744, #393735); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08); }
 
 .foot {
@@ -467,9 +467,24 @@ code {
 .foot-link { font-weight: 450; }
 @media (hover: hover) and (pointer: fine) { .foot-link:hover, .foot-brand:hover { color: var(--ink-2); } }
 
-/* Sections enter on a spring as they scroll in (js/main.js). */
-.js [data-reveal] { opacity: 0; transform: translate3d(0, 16px, 0); }
-.js .cpu-bar { transform: scaleX(0); }
+/* The 404 page (404.html): the hero's type, without the object. */
+.notfound {
+  width: min(100%, calc(var(--content) + 2 * var(--gutter)));
+  margin-inline: auto;
+  padding: var(--s-10) max(var(--gutter), env(safe-area-inset-right)) var(--s-10) max(var(--gutter), env(safe-area-inset-left));
+  min-height: calc(100svh - var(--nav-h) - 160px);
+}
+.notfound h1 { max-width: 12em; }
+
+/* Sections enter on a spring as they scroll in (js/main.js). They start
+   hidden only where scripts run; if the script never starts (it marks the
+   page .is-live), they show themselves after 2.5 s. */
+@media (scripting: enabled) {
+  [data-reveal] { opacity: 0; transform: translate3d(0, 16px, 0); animation: reveal-fallback 0.4s ease-out 2.5s forwards; }
+  .cpu-bar { transform: scaleX(0); animation: reveal-fallback 0.4s ease-out 2.5s forwards; }
+  .is-live [data-reveal], .is-live .cpu-bar { animation: none; }
+}
+@keyframes reveal-fallback { to { opacity: 1; transform: none; } }
 
 /* Mobile dock (iOS-style), shown once the hero's Download scrolls away. */
 .dock { display: none; }
@@ -477,7 +492,7 @@ code {
 /* ───────────── Responsive ───────────── */
 @media (max-width: 1180px) {
   :root { --gutter: 48px; }
-  .hero { grid-template-columns: minmax(0, 430px) minmax(0, 1fr); column-gap: var(--s-6); }
+  .hero { grid-template-columns: minmax(0, 440px) minmax(0, 1fr); column-gap: var(--s-6); }
 }
 /* Stacked: headline, line, the object, then the download (as in the Paper 3a mobile). */
 @media (max-width: 960px) {
@@ -503,7 +518,7 @@ code {
   .nav-link span { display: none; }
   .nav-link { min-width: 44px; min-height: 44px; justify-content: center; padding: 0; margin-right: calc(-1 * var(--s-3)); }
   .nav-link svg { width: 20px; height: 20px; }
-  h1 { font-size: clamp(40px, 12.4vw, 56px); line-height: 0.98; }
+  h1 { font-size: clamp(29px, 9.4vw, 44px); line-height: 1.04; letter-spacing: -0.03em; }
   .lede { font-size: 16px; line-height: 1.5; margin-top: var(--s-3); }
   /* The object runs edge to edge. */
   .hero-object { margin: var(--s-4) calc(-1 * var(--gutter)) 0; }
@@ -562,6 +577,14 @@ code {
 @media (max-width: 360px) {
   .brand-name { font-size: 15px; }
 }
+@media (max-width: 340px) {
+  h1 { font-size: 28px; }
+}
+/* Short phones (SE class): a smaller object keeps Download in the first screen. */
+@media (max-width: 720px) and (max-height: 600px) {
+  .stage { width: min(100vw, calc(38svh * var(--sw) / var(--sh))); }
+  .lede { font-size: 15px; }
+}
 @media (max-height: 520px) and (orientation: landscape) {
   /* Landscape phones: side by side, compact. */
   :root { --nav-h: 52px; }
@@ -571,14 +594,13 @@ code {
   }
   .hero-copy { display: block; }
   .hero-object { margin: 0; }
-  h1 { font-size: clamp(34px, 6vw, 52px); }
+  h1 { font-size: clamp(26px, 3.8vw, 34px); }
   .download { margin-top: var(--s-5); }
   .stage { width: min(100%, calc((100svh - var(--nav-h) - 56px) * var(--sw) / var(--sh))); }
   .dock { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .js [data-reveal] { opacity: 1; transform: none; }
-  .js .cpu-bar { transform: none; }
+  [data-reveal], .cpu-bar { opacity: 1; transform: none; animation: none; }
   .btn-arrow { transition: none; }
 }

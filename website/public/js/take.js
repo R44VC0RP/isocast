@@ -2,7 +2,7 @@
 //
 // Each layer is a short, silent, looping video (`video`: a basename; the
 // files are `<base>-<size>.mp4`, `.webm` and a `.webp` poster at every size in
-// `sizes`), or a still picture (`image`: `<base>-<size>.webp`). The mic layer
+// SIZES), or a still picture (`image`: `<base>-<size>.webp`). The mic layer
 // draws a waveform from peaks (`peaks`: JSON with `peaks`, 4 per 60 fps frame
 // over the loop, and `overview`, the whole take at 30 per second).
 //
@@ -10,9 +10,9 @@
 // clock: the first video layer drives the others, and the hero's copper pin,
 // playheads and timecodes read it. With no video layers, a plain timer runs.
 //
-// To swap in a new take: encode the loops and peaks
-// (scratch/harness/encode.sh and peaks.py), update TAKE below, and point the
-// layers at the new basenames.
+// To swap in a new take, follow docs/website.md: encode the loops and peaks
+// into a new media/take-<hash>/ folder (files under media/ are cached as
+// immutable, so a new cut always gets a new folder), then update TAKE and DIR.
 
 export const TAKE = {
   start: 20.1667, // where the loop starts in the original take (s): timecodes show this
@@ -20,11 +20,12 @@ export const TAKE = {
   total: 26.233, // the whole take (s): every file is this long
 };
 
+const DIR = "media/take-a712ed6e";
 export const LAYERS = {
-  program: { video: "media/program" },
-  screen: { video: "media/screen" },
-  camera: { video: "media/camera" },
-  mic: { peaks: "media/mic-peaks.json" },
+  program: { video: `${DIR}/program` },
+  screen: { video: `${DIR}/screen` },
+  camera: { video: `${DIR}/camera` },
+  mic: { peaks: `${DIR}/mic-peaks.json` },
 };
 export const SIZES = [640, 960]; // encoded widths, about 2x the drawn size
 

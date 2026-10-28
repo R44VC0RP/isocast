@@ -1,12 +1,28 @@
-// isocast.com — one loop, one clock, springs for everything that moves.
+// isocast.com: one render loop, one clock, and springs for everything that moves.
 import { Spring, clamp, timecode } from "./spring.js";
 import { mountHero } from "./hero.js";
 import { TAKE, SIZES, createTake, loadPeaks } from "./take.js";
 
 const root = document.documentElement;
-// The inline head script hides scroll-in sections and un-hides them if this
-// module is slow to arrive; in that case leave them in place.
-const lateStart = !root.classList.contains("js");
+
+// The release on offer: index.html writes the version once (.meta's
+// data-version); both download links point at that version's DMG. Without
+// this script they open the latest release's page.
+const version = document.querySelector(".meta[data-version]")?.dataset.version;
+if (version && /^\d+\.\d+\.\d+$/.test(version)) {
+  const dmg = `https://github.com/R44VC0RP/isocast/releases/download/v${version}/Isocast-${version}-arm64.dmg`;
+  for (const a of document.querySelectorAll("a[data-download]")) a.href = dmg;
+}
+
+// Scroll-in sections start hidden (site.css) and show themselves after 2.5 s
+// if this module never runs. If it arrives that late, or the browser can't
+// tell CSS that scripts run, they stay where they are, without the entrance.
+const lateStart = performance.now() > 2300 || !matchMedia("(scripting: enabled)").matches;
+if (lateStart) {
+  for (const el of document.querySelectorAll("[data-reveal]")) el.removeAttribute("data-reveal");
+  for (const b of document.querySelectorAll(".cpu-bar")) b.style.transform = "none";
+}
+root.classList.add("is-live");
 
 const stage = document.getElementById("stage");
 const inner = document.getElementById("stage-inner");
