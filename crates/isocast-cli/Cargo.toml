@@ -33,6 +33,13 @@ isocast-client = { path = "../isocast-client", features = ["wgpu"] }
 isocast-surfaces = { path = "../isocast-surfaces" }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# `frames --shared` (src/shared_frames.rs): shared-memory frames, checked
+# without a GPU.
+isocast-client = { path = "../isocast-client", features = ["wgpu"] }
+isocast-surfaces = { path = "../isocast-surfaces" }
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Console"] }
 isocast-client = { path = "../isocast-client", features = ["wgpu"] }
