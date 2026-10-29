@@ -42,7 +42,7 @@ fn prune_scene(scene: &mut Value, prune: impl Fn(&Value) -> Value) {
     if scene["vertical"].is_object() {
         scene["vertical"]["items"] = prune(&scene["vertical"]["items"]);
     }
-    if let Some(canvases) = scene["canvases"].as_object_mut() {
+    if let Some(canvases) = scene.get_mut("canvases").and_then(Value::as_object_mut) {
         for arrangement in canvases.values_mut() {
             if arrangement.is_object() {
                 arrangement["items"] = prune(&arrangement["items"]);
@@ -1451,8 +1451,46 @@ pub fn move_to_group(app: &Rc<App>, path: &str, group: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{int, whole};
+    use super::{int, whole, without_scene, without_source};
+    use isocast_protocol::Setup;
     use serde_json::json;
+
+    fn setup() -> serde_json::Value {
+        json!({
+            "version": 1,
+            "name": "Talk",
+            "canvas": { "width": 1920, "height": 1080, "fps": 30 },
+            "recording": {
+                "folder": "~/Videos",
+                "program": { "enabled": true, "encoder": { "codec": "h264" } },
+                "iso": { "enabled": true, "encoder": { "codec": "h264" }, "sources": ["camera", "doc"] }
+            },
+            "sources": [
+                { "id": "camera", "kind": "camera", "device": "cam" },
+                { "id": "doc", "kind": "window", "app": "browser" }
+            ],
+            "scenes": [
+                { "id": "camera", "name": "Camera", "items": [{ "id": "cam", "source": "camera" }] },
+                { "id": "doc", "name": "Doc", "items": [
+                    { "id": "doc", "source": "doc" },
+                    { "id": "cam", "source": "camera" }
+                ] }
+            ]
+        })
+    }
+
+    #[test]
+    fn removing_a_source_or_scene_leaves_a_valid_setup() {
+        let out = without_source(&setup(), "doc");
+        assert!(out["scenes"][1].get("canvases").is_none());
+        let out: Setup = serde_json::from_value(out).unwrap();
+        assert!(out.sources.iter().all(|s| s.id != "doc"));
+        assert_eq!(out.scenes[1].items.len(), 1);
+
+        let out = without_scene(&setup(), "doc");
+        let out: Setup = serde_json::from_value(out).unwrap();
+        assert!(out.scenes.iter().all(|s| s.id != "doc"));
+    }
 
     #[test]
     fn transform_numbers_fit_the_typed_rect_and_crop() {
