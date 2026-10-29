@@ -493,10 +493,10 @@ fn recording_settings(
     let folder = match profile.and_then(|p| p.folder.as_deref()) {
         Some(folder) => home_relative(folder, home),
         None => {
-            findings
-                .notes
-                .push("no OBS profile gave the recordings folder; using ~/Movies".into());
-            "~/Movies".into()
+            findings.notes.push(format!(
+                "no OBS profile gave the recordings folder; using {FALLBACK_FOLDER}"
+            ));
+            FALLBACK_FOLDER.into()
         }
     };
     let container = match profile.and_then(|p| p.container.as_deref()) {
@@ -1010,7 +1010,13 @@ pub struct Options<'a> {
 /// (isolated engines and tests, so they never read the user's OBS).
 pub const FOLDER_ENV: &str = "ISOCAST_OBS_FOLDER";
 
-/// Where OBS keeps its settings on this Mac: `$ISOCAST_OBS_FOLDER` if set.
+/// Recordings folder for an import whose OBS profile names none: Linux's
+/// XDG videos folder by its usual name, Movies elsewhere.
+const FALLBACK_FOLDER: &str =
+    crate::platform_text::select_linux("~/Movies", "~/Movies", "~/Videos");
+
+/// Where OBS keeps its settings on this computer: `$ISOCAST_OBS_FOLDER` if
+/// set.
 pub fn obs_folder(home: &Path) -> PathBuf {
     match std::env::var_os(FOLDER_ENV) {
         Some(folder) if !folder.is_empty() => PathBuf::from(folder),
@@ -1019,6 +1025,13 @@ pub fn obs_folder(home: &Path) -> PathBuf {
         _ if cfg!(windows) => {
             crate::api::windows_folder("APPDATA", "AppData/Roaming").join("obs-studio")
         }
+        // $XDG_CONFIG_HOME when absolute (the XDG spec ignores relative and
+        // empty values), else ~/.config.
+        _ if cfg!(target_os = "linux") => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .unwrap_or_else(|| home.join(".config"))
+            .join("obs-studio"),
         _ => home.join("Library/Application Support/obs-studio"),
     }
 }
@@ -4816,6 +4829,17 @@ mod tests {
         let setup = &imported.setup;
         assert_eq!(setup.canvas.fps, 60);
         assert_eq!(setup.recording.folder, "~/Movies");
+        let folderless = import_with(&Profile::parse("[Output]\nMode=Simple\n"));
+        assert_eq!(folderless.setup.recording.folder, FALLBACK_FOLDER);
+        assert!(
+            folderless
+                .notes
+                .iter()
+                .any(|note| note.ends_with(&format!("using {FALLBACK_FOLDER}")))
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(FALLBACK_FOLDER, "~/Videos");
+        }
         assert_eq!(setup.recording.program.filename, "{date} {time}");
         let encoder = &setup.recording.program.encoder;
         assert_eq!(
