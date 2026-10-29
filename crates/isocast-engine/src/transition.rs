@@ -672,7 +672,8 @@ fn between<'a>(from: &Layer<'_>, to: Layer<'a>, t: f32) -> Layer<'a> {
 
 /// A box (its transform and size) `t` of the way from one place to
 /// another: moving its centre, turning the shorter way round, scaling and
-/// resizing.
+/// resizing. A box flipped at only one end turns over about its upright
+/// axis, edge on halfway.
 fn moved_box(from: (Affine, [f32; 2]), to: (Affine, [f32; 2]), t: f32) -> ([f32; 2], Affine) {
     let mix = |a: f32, b: f32| a + (b - a) * t;
     let (a, b) = (Placement::of(from.0, from.1), Placement::of(to.0, to.1));
@@ -687,27 +688,36 @@ fn moved_box(from: (Affine, [f32; 2]), to: (Affine, [f32; 2]), t: f32) -> ([f32;
     let transform = Affine::translate(center[0], center[1])
         .after(Affine::rotate((a.angle + turn * t).to_degrees()))
         .after(Affine::scale(mix(a.scale, b.scale)))
+        .after(Affine::scale_xy(mix(a.across, b.across), 1.0))
         .after(Affine::translate(-size[0] / 2.0, -size[1] / 2.0));
     (size, transform)
 }
 
 /// Where a layer is on the canvas: its centre, how far it is turned
-/// (radians, clockwise) and how much it is scaled. Layers are only moved,
-/// turned and scaled evenly, so this describes their transform whole.
+/// (radians, clockwise), how much it is scaled, and whether it is
+/// mirrored left to right before that (`across` −1, else 1). Layers are
+/// only moved, turned, scaled evenly and flipped, so this describes their
+/// transform whole: a flip top to bottom reads as one left to right,
+/// turned half way round.
 struct Placement {
     center: [f32; 2],
     angle: f32,
     scale: f32,
+    across: f32,
 }
 
 impl Placement {
     fn of(transform: Affine, size: [f32; 2]) -> Self {
         let [a, b, tx, c, d, ty] = transform.0;
         let (w, h) = (size[0] / 2.0, size[1] / 2.0);
+        // A mirror negates the first column (a, c), so undo it before
+        // reading the angle.
+        let across = if a * d - b * c < 0.0 { -1.0 } else { 1.0 };
         Self {
             center: [a * w + b * h + tx, c * w + d * h + ty],
-            angle: c.atan2(a),
+            angle: (across * c).atan2(across * a),
             scale: a.hypot(c),
+            across,
         }
     }
 }
@@ -760,6 +770,49 @@ mod tests {
         assert!((place.angle.to_degrees() - 45.0).abs() < 1e-3);
         assert_eq!(out[0].size, [75.0, 75.0]);
         assert_eq!(out[0].opacity, 0.75);
+    }
+
+    /// A 100-pixel `layer` at `x`, turned `rotate` degrees and flipped
+    /// about its centre.
+    fn flipped(x: f32, rotate: f32, horizontal: bool, vertical: bool) -> Layer<'static> {
+        let mut out = layer(x, 0.0, 100.0, 0.0, 1.0);
+        out.transform = Affine::translate(x + 50.0, 50.0)
+            .after(Affine::rotate(rotate))
+            .after(Affine::flip(horizontal, vertical))
+            .after(Affine::translate(-50.0, -50.0));
+        out
+    }
+
+    fn determinant(transform: Affine) -> f32 {
+        let [a, b, _, c, d, _] = transform.0;
+        a * d - b * c
+    }
+
+    #[test]
+    fn flipped_items_stay_flipped_as_they_move() {
+        // Left to right at one end, top to bottom (and turned) at the other.
+        let from = || flipped(0.0, 0.0, true, false);
+        let to = || flipped(200.0, 90.0, false, true);
+        let at = |t| moved(vec![(id("a"), from())], vec![(id("a"), to())], t)[0].transform;
+        for (t, want) in [(0.0, from().transform), (1.0, to().transform)] {
+            let got = at(t);
+            for (g, w) in got.0.iter().zip(want.0) {
+                assert!((g - w).abs() < 1e-3, "at {t}: {got:?}");
+            }
+        }
+        assert!(determinant(at(0.5)) < 0.0, "{:?}", at(0.5));
+    }
+
+    #[test]
+    fn an_item_flipped_at_one_end_turns_over() {
+        let at = |t| {
+            let before = vec![(id("a"), flipped(0.0, 0.0, false, false))];
+            let after = vec![(id("a"), flipped(0.0, 0.0, true, false))];
+            determinant(moved(before, after, t)[0].transform)
+        };
+        assert!(at(0.25) > 0.0);
+        assert!(at(0.5).abs() < 1e-6, "edge on halfway");
+        assert!(at(0.75) < 0.0);
     }
 
     #[test]
