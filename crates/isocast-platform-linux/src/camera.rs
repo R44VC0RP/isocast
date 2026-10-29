@@ -845,6 +845,28 @@ fn probe(node: &Path, ids: &HashMap<PathBuf, String>) -> Result<Option<(Identity
     )))
 }
 
+/// A capture node is a camera only if it offers a format this backend
+/// decodes; the Logitech BRIO's infrared node (GREY only, named like the
+/// camera) doesn't. Nodes whose formats can't be read still count.
+fn is_camera(sizes: &Result<Vec<Size>>) -> bool {
+    !matches!(sizes, Ok(sizes) if sizes.is_empty())
+}
+
+/// Every pixel format a node offers, for messages.
+fn offered_formats(fd: RawFd) -> Vec<String> {
+    let mut formats = Vec::new();
+    for index in 0..MAX_ENUM {
+        let mut desc: FmtDesc = zeroed();
+        desc.index = index;
+        desc.kind = BUF_TYPE_VIDEO_CAPTURE;
+        if xioctl(fd, VIDIOC_ENUM_FMT, &mut desc).is_err() {
+            break;
+        }
+        formats.push(fourcc_name(desc.pixelformat));
+    }
+    formats
+}
+
 /// Every V4L2 capture device and the formats this backend decodes.
 /// Devices that can't be opened (permissions) are skipped and logged.
 pub fn devices() -> Result<Vec<Camera>> {
@@ -854,7 +876,22 @@ pub fn devices() -> Result<Vec<Camera>> {
         match probe(&node, &ids) {
             Ok(Some((identity, file))) => {
                 let mut camera = identity.camera;
-                match sizes(file.as_raw_fd()) {
+                let sizes = sizes(file.as_raw_fd());
+                if !is_camera(&sizes) {
+                    isocast_diagnostics::output::deferred(
+                        "info",
+                        module_path!(),
+                        format!(
+                            "Linux camera devices: skipping {:?} ({}): no MJPEG or YUYV \
+                             format; it offers {}",
+                            camera.name,
+                            node.display(),
+                            offered_formats(file.as_raw_fd()).join(", ")
+                        ),
+                    );
+                    continue;
+                }
+                match sizes {
                     Ok(sizes) => camera.formats = video_formats(&sizes),
                     Err(error) => isocast_diagnostics::output::deferred(
                         "warn",
@@ -903,15 +940,41 @@ fn resolve(query: &str) -> Result<(Identity, File)> {
     let ids = stable_ids();
     let mut found = Vec::new();
     for node in nodes() {
-        if let Ok(Some((identity, _))) = probe(&node, &ids) {
+        // Only what `devices` lists.
+        if let Ok(Some((identity, file))) = probe(&node, &ids)
+            && is_camera(&sizes(file.as_raw_fd()))
+        {
             found.push(identity);
         }
     }
+    let Some(index) = pick(&found, query) else {
+        let choices = found
+            .iter()
+            .map(|identity| format!("{} ({})", identity.camera.name, identity.camera.id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "camera.device: {query:?} matches no single camera; use an id, a /dev/video node, an exact name or an unambiguous part of one; valid choices: {}",
+            if choices.is_empty() {
+                "(none)"
+            } else {
+                &choices
+            }
+        );
+    };
+    let identity = found.swap_remove(index);
+    let file = open(&identity.node)?;
+    Ok((identity, file))
+}
+
+/// The one camera in `found` that `query` names: its id, its node, its
+/// exact name, or an unambiguous part of its name.
+fn pick(found: &[Identity], query: &str) -> Option<usize> {
     let canonical = query
         .starts_with('/')
         .then(|| std::fs::canonicalize(query).ok())
         .flatten();
-    let index = found
+    found
         .iter()
         .position(|identity| identity.camera.id == query)
         .or_else(|| {
@@ -946,25 +1009,7 @@ fn resolve(query: &str) -> Result<(Identity, File)> {
                 exact
             };
             (matches.len() == 1).then(|| matches[0])
-        });
-    let Some(index) = index else {
-        let choices = found
-            .iter()
-            .map(|identity| format!("{} ({})", identity.camera.name, identity.camera.id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "camera.device: {query:?} matches no single camera; use an id, a /dev/video node, an exact name or an unambiguous part of one; valid choices: {}",
-            if choices.is_empty() {
-                "(none)"
-            } else {
-                &choices
-            }
-        );
-    };
-    let identity = found.swap_remove(index);
-    let file = open(&identity.node)?;
-    Ok((identity, file))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -2167,6 +2212,51 @@ mod tests {
                     .collect(),
             ),
         }
+    }
+
+    #[test]
+    fn a_node_with_no_decodable_format_is_not_a_second_camera() {
+        let node = |n: u32, name: &str| Identity {
+            node: PathBuf::from(format!("/dev/video{n}")),
+            caps: CAP_VIDEO_CAPTURE | CAP_STREAMING,
+            camera: Camera {
+                id: format!("/dev/v4l/by-id/usb-046d_Logitech_BRIO-video-index{n}"),
+                name: name.into(),
+                model: String::new(),
+                manufacturer: String::new(),
+                kind: CameraKind::External,
+                formats: Vec::new(),
+                suspended: false,
+            },
+        };
+        // A BRIO's colour and infrared nodes, and a node with unreadable formats.
+        let nodes = || {
+            [
+                node(0, "Logitech BRIO"),
+                node(2, "Logitech BRIO"),
+                node(4, "Capture card"),
+            ]
+        };
+        let sizes = [
+            Ok(vec![size(FOURCC_YUYV, 1920, 1080, &[30])]),
+            Ok(Vec::new()),
+            Err(anyhow::anyhow!("camera.formats: VIDIOC_ENUM_FMT: EIO")),
+        ];
+        // Unfiltered, the name is ambiguous.
+        assert_eq!(pick(&nodes(), "Logitech BRIO"), None);
+
+        let cameras: Vec<Identity> = nodes()
+            .into_iter()
+            .zip(&sizes)
+            .filter(|(_, sizes)| is_camera(sizes))
+            .map(|(identity, _)| identity)
+            .collect();
+        let listed: Vec<_> = cameras.iter().map(|c| c.node.to_str().unwrap()).collect();
+        assert_eq!(listed, ["/dev/video0", "/dev/video4"]);
+        assert_eq!(pick(&cameras, "Logitech BRIO"), Some(0));
+        assert_eq!(pick(&cameras, "brio"), Some(0));
+        assert_eq!(pick(&cameras, "/dev/video2"), None);
+        assert_eq!(pick(&cameras, "capture"), Some(1));
     }
 
     #[test]
