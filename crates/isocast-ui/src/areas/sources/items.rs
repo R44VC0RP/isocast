@@ -1197,6 +1197,22 @@ pub fn rotate_by(app: &Rc<App>, degrees: f64) {
     );
 }
 
+/// Mirror it left to right (`flip_horizontal`) or top to bottom
+/// (`flip_vertical`), or back, about the centre.
+pub fn flip(app: &Rc<App>, field: &str) {
+    let Some((_, chain)) = unlocked(app) else {
+        return;
+    };
+    let item = &chain[chain.len() - 1];
+    let flipped = item["style"]["transform"][field] == true;
+    let next = if flipped { Value::Null } else { json!(true) };
+    update_selected(
+        app,
+        json!({ "style": { "transform": { (field): next } } }),
+        None,
+    );
+}
+
 // ---------- Groups ----------
 
 /// The items of one level of `scene` (its top level, or the children of
