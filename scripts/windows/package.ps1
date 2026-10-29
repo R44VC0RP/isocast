@@ -29,8 +29,9 @@ function Assert-Signature([string]$Path) {
 }
 $BinDir = (Resolve-Path $BinDir).Path
 $CrtDir = (Resolve-Path $CrtDir).Path
-# isocastd starts the WGC/camera helper isocast-capture.exe from its own folder.
-$executables = @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe')
+# isocastd starts the WGC/camera helper isocast-capture.exe and the browser
+# source helper isocast-browser.exe from its own folder.
+$executables = @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe', 'isocast-browser.exe')
 foreach ($name in $executables) {
     if (-not (Test-Path -LiteralPath "$BinDir\$name" -PathType Leaf)) { throw "Missing executable: $BinDir\$name" }
 }

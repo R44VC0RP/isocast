@@ -839,7 +839,7 @@ jobs:
 
       - name: Build native services and test binaries (do not run)
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts
+        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts -p isocast-browser -p isocast-browser-protocol -p isocast-browser-host
 
       # Synchronous MF AAC transactions: serial, after the native build so
       # the test binary is cached. Package-only features can still rebuild
@@ -848,6 +848,17 @@ jobs:
         if: env.MODE == 'full'
         timeout-minutes: 30
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
+
+      # Browser sources: the isocastd side against fake helpers (Python
+      # scripts speaking the helper protocol: crash, hang, restart, sizes,
+      # the job that ends WebView2's processes), and the helper's own checks.
+      - name: Check browser sources
+        if: env.MODE == 'full'
+        timeout-minutes: 20
+        run: |
+          cargo clippy --locked --all-targets -p isocast-browser -p isocast-browser-protocol -p isocast-browser-host -- -D warnings
+          cargo test --locked -p isocast-browser -p isocast-browser-protocol -p isocast-browser-host
+          cargo test --locked -j 1 -p isocast-platform-windows --lib browser:: -- --test-threads=1
 
       - name: Check monitoring channel mapping and conversion
         if: env.MODE == 'full'
@@ -918,7 +929,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/bins/first" | Out-Null
-          foreach ($exe in @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe')) { Copy-Item "target/debug/$exe" "$env:RUNNER_TEMP/bins/first/" }
+          foreach ($exe in @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe', 'isocast-browser.exe')) { Copy-Item "target/debug/$exe" "$env:RUNNER_TEMP/bins/first/" }
 
       # A distinct compiled build, with the same qualification key, lets the
       # clean VM prove update and authenticated rollback without release keys.
@@ -939,7 +950,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/bins/next" | Out-Null
-          foreach ($exe in @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe')) { Copy-Item "target/debug/$exe" "$env:RUNNER_TEMP/bins/next/" }
+          foreach ($exe in @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe', 'isocast-browser.exe')) { Copy-Item "target/debug/$exe" "$env:RUNNER_TEMP/bins/next/" }
 
       - name: Hand the builds to the qualification jobs
         # After the UI build, even if a check above failed: its binaries stay available.
@@ -1316,7 +1327,7 @@ jobs:
       # binaries used for recovery/contract checks above.
       - name: Build recording qualification services
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli -p isocast-platform-windows --bins --example monitor-loopback
+        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli -p isocast-platform-windows -p isocast-browser --bins --example monitor-loopback
 
       - name: Install recording recovery decoder
         if: env.MODE == 'full'
@@ -1334,6 +1345,34 @@ jobs:
         if: env.MODE == 'full'
         timeout-minutes: 9
         run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
+
+      # A page through isocast-browser.exe (WebView2 on this runner's
+      # console session, software rendering): frame codes advance in the ISO
+      # and program, alpha blends over the layer beneath, the page's tone is
+      # in both files, zero writer drops.
+      - name: Record a browser source
+        if: env.MODE == 'full'
+        timeout-minutes: 10
+        run: |
+          python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_browser --windows-profile 180p30 --codec h264 --timeout 300 --work "$RUNNER_TEMP/windows-browser" --keep-failures --report windows-browser.json
+          # A skipped scenario would pass silently: it must have run.
+          python - <<'PY'
+          import json
+          b = {s["name"]: s for s in json.load(open("windows-browser.json"))["scenarios"]}.get("win_browser")
+          assert b and b["status"] == "PASS", f"win_browser did not pass: {b and (b['status'], b.get('reason'))}"
+          print("browser:", {k: b["evidence"].get(k) for k in ("first_picture_s", "web_codes", "program_codes", "alpha", "tones", "writer_drops", "unique_share_required")})
+          PY
+
+      - name: Keep browser source evidence
+        if: (!cancelled()) && (env.MODE == 'full')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-browser
+          path: |
+            windows-browser.json
+            ${{ runner.temp }}/windows-browser
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Monitoring startup preserves recording audio (no-device skip on hosted Windows)
         if: env.MODE == 'full'

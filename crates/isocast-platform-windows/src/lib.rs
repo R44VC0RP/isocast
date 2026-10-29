@@ -7,6 +7,7 @@
 mod aac;
 mod audio;
 mod broker;
+mod browser;
 mod camera;
 mod capture;
 mod clock;
