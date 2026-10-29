@@ -10,7 +10,8 @@ use isocast_engine::{
 };
 use isocast_protocol::api::Machine;
 use isocast_protocol::devices::{
-    Devices, Permission, PermissionKind, Permissions, PermissionsReport,
+    Devices, Permission, PermissionAction, PermissionDetail, PermissionKind, Permissions,
+    PermissionsReport,
 };
 use isocast_protocol::{Canvas, SourceKind};
 
@@ -114,15 +115,40 @@ impl Platform for LinuxPlatform {
         Ok(devices)
     }
     fn permissions(&self) -> Result<PermissionsReport> {
+        let camera = match camera::access() {
+            Some(true) => Permission::Granted,
+            Some(false) => Permission::Denied,
+            None => Permission::Unknown,
+        };
+        let details = (camera == Permission::Denied)
+            .then(|| PermissionDetail {
+                permission: PermissionKind::Camera,
+                state: camera,
+                needed_for: "cameras and capture cards".into(),
+                action: PermissionAction::AskAdministrator,
+                settings_url: String::new(),
+                next_step: Some(
+                    "your user can't open any /dev/video* device: log in at this computer's \
+                     own screen (the desktop session is given its cameras), or add your user \
+                     to the `video` group (`sudo usermod -aG video $USER`) and log in again"
+                        .into(),
+                ),
+                restart_after_granting: true,
+                app: String::new(),
+                app_path: None,
+                denied_without_prompt: false,
+            })
+            .into_iter()
+            .collect();
         Ok(PermissionsReport {
             permissions: Permissions {
                 screen_recording: Permission::Unknown,
-                camera: Permission::Unknown,
+                camera,
                 microphone: Permission::Unknown,
                 system_audio: Permission::Unknown,
             },
             app: "Isocast".into(),
-            details: Vec::new(),
+            details,
         })
     }
     fn source_open_timeout(&self, source: &SourceKind) -> std::time::Duration {

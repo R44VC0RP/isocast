@@ -716,6 +716,23 @@ struct Identity {
     camera: Camera,
 }
 
+pub fn access() -> Option<bool> {
+    access_to(&nodes())
+}
+
+/// Whether this user can open any of `nodes` for reading and writing
+/// (`None` without nodes). One is enough: `devices` skips the others.
+fn access_to(nodes: &[PathBuf]) -> Option<bool> {
+    (!nodes.is_empty()).then(|| {
+        nodes.iter().any(|node| {
+            std::ffi::CString::new(node.as_os_str().as_encoded_bytes()).is_ok_and(|path| {
+                // SAFETY: checks access to a NUL-terminated path; no side effects.
+                unsafe { libc::access(path.as_ptr(), libc::R_OK | libc::W_OK) == 0 }
+            })
+        })
+    })
+}
+
 /// Capture nodes, `/dev/videoN` ordered by N.
 fn nodes() -> Vec<PathBuf> {
     let number = |name: &str| name.strip_prefix("video")?.parse::<u32>().ok();
@@ -2156,6 +2173,29 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn camera_access_needs_one_node_that_opens() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("isocast-access-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let node = |name: &str, mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, b"").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let closed = node("video0", 0o000);
+        let open = node("video1", 0o600);
+
+        assert_eq!(access_to(&[]), None);
+        assert_eq!(access_to(&[closed.clone(), open]), Some(true));
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(access_to(&[closed]), Some(false));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
