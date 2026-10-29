@@ -849,11 +849,16 @@ jobs:
         timeout-minutes: 30
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
 
-      - name: Check monitoring channel mapping and conversion
+      - name: Check WASAPI clocks and application selectors without audio devices
+        timeout-minutes: 15
         if: env.MODE == 'full'
         run: |
-          cargo clippy --locked --all-targets -j 1 -p isocast-platform-windows -- -D warnings
-          cargo test --locked -j 1 -p isocast-platform-windows --lib playback::tests
+          cargo test --locked -j 1 -p isocast-platform-windows --lib audio -- --test-threads=1 --nocapture
+          cargo clippy --locked -j 1 -p isocast-platform-windows --all-targets -- -D warnings
+
+      - name: Check monitoring channel mapping and conversion
+        if: env.MODE == 'full'
+        run: cargo test --locked -j 1 -p isocast-platform-windows --lib playback::tests
 
       - name: Install FFmpeg for the media fixtures
         if: env.MODE == 'full'
@@ -999,6 +1004,17 @@ jobs:
           }
           ffmpeg -version
           ffprobe -version
+
+      - name: List application audio (real capture needs explicit tone fixtures)
+        timeout-minutes: 5
+        run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_app_audio --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-app-audio" --keep-failures --report windows-app-audio.json
+
+      - name: Keep application audio listing and fixture skip evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-app-audio
+          path: windows-app-audio.json
 
       - name: Recover recordings after engine and process-tree termination
         timeout-minutes: 10
