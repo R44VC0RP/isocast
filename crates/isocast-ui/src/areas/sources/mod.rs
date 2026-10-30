@@ -518,6 +518,7 @@ impl Area for Sources {
             "rotate_cw" => items::rotate_by(app, 90.0),
             "rotate_ccw" => items::rotate_by(app, -90.0),
             "rotate_180" => items::rotate_by(app, 180.0),
+            "flip_horizontal" | "flip_vertical" => items::flip(app, id),
             "fit_screen" => items::fit_to_screen(app),
             "stretch_screen" => items::stretch_to_screen(app),
             "center_screen" => items::center_to_screen(app, None),
@@ -856,6 +857,8 @@ fn is_window_command(id: &str) -> bool {
             | "rotate_cw"
             | "rotate_ccw"
             | "rotate_180"
+            | "flip_horizontal"
+            | "flip_vertical"
             | "fit_screen"
             | "stretch_screen"
             | "center_screen"
@@ -933,6 +936,9 @@ fn transform_menu() -> MenuBuilder {
         .item("rotate_cw", "Rotate 90° Clockwise")
         .item("rotate_ccw", "Rotate 90° Counterclockwise")
         .item("rotate_180", "Rotate 180°")
+        .separator()
+        .item("flip_horizontal", "Flip Horizontal")
+        .item("flip_vertical", "Flip Vertical")
         .separator()
         .item("fit_screen", "Fit to Screen")
         .hint("⌘F")

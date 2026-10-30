@@ -546,6 +546,7 @@ fn own_transform(own: Transform, size: [f32; 2]) -> Affine {
     Affine::translate(own.translate[0], own.translate[1])
         .after(Affine::rotate(own.rotate))
         .after(Affine::scale(own.scale))
+        .after(Affine::flip(own.flip_horizontal, own.flip_vertical))
         .after(Affine::translate(-size[0] / 2.0, -size[1] / 2.0))
 }
 

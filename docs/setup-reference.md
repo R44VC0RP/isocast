@@ -760,10 +760,12 @@ How an item looks, in CSS terms.
 
 ## Transform
 
-Moves, scales and rotates an item around its centre.
+Moves, scales, rotates and flips an item around its centre.
 
 | Field | Type | Description |
 |---|---|---|
+| `flip_horizontal` | boolean | Mirrored left to right, before it is rotated: its picture, children, border and shadow. |
+| `flip_vertical` | boolean | Mirrored top to bottom, before it is rotated. |
 | `rotate` | number | Degrees, clockwise. Default `0.0`. |
 | `scale` | number |  Default `1.0`. |
 | `translate` | list of number | [x, y] in pixels. Default `[0.0, 0.0]`. |

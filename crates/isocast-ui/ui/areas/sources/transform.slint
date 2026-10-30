@@ -1,15 +1,15 @@
 // Edit Transform (⌘E; the web app's transform.js), as in OBS, drawn as a
 // Console sheet of grouped rows (Paper's Settings sheet): the selected
-// item's position, rotation, size, scale and alignment; its bounding box;
-// its crop; and Isocast's item style (opacity, corners, border, shadow,
-// background) under Appearance. Reset at the bottom left, Close at the
-// right. It follows the selection and changes show at once.
+// item's position, rotation, flip, size, scale and alignment; its
+// bounding box; its crop; and Isocast's item style (opacity, corners,
+// border, shadow, background) under Appearance. Reset at the bottom left,
+// Close at the right. It follows the selection and changes show at once.
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import {
-    Button, Callout, CalloutKind, ColorField, ControlSize, Dialog, Dropdown, GroupHeading,
+    Button, Callout, CalloutKind, Checkbox, ColorField, ControlSize, Dialog, Dropdown, GroupHeading,
     GroupRow, IconButton, NumberField, RowGroup, RowPlace, Slider,
 } from "../../kit.slint";
 import { SourcesArea } from "state.slint";
@@ -131,6 +131,30 @@ export component TransformDialog inherits Dialog {
                             maximum: 360;
                             value: SourcesArea.transform-rotate;
                             enabled: root.live;
+                        }
+                    }
+                }
+                GroupRow {
+                    label: "Flip";
+                    enabled: root.live;
+                    Centred {
+                        Checkbox {
+                            text: "Horizontal";
+                            small: true;
+                            tooltip: "Mirror it left to right";
+                            checked <=> SourcesArea.transform-flip-horizontal;
+                            enabled: root.live;
+                            toggled => { SourcesArea.transform-action("flip-horizontal"); }
+                        }
+                    }
+                    Centred {
+                        Checkbox {
+                            text: "Vertical";
+                            small: true;
+                            tooltip: "Mirror it top to bottom";
+                            checked <=> SourcesArea.transform-flip-vertical;
+                            enabled: root.live;
+                            toggled => { SourcesArea.transform-action("flip-vertical"); }
                         }
                     }
                 }

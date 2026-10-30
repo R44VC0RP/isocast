@@ -173,6 +173,9 @@ export global SourcesArea {
     in property <float> transform-w;
     in property <float> transform-h;
     in property <float> transform-rotate;
+    // Flipped left to right, top to bottom.
+    in-out property <bool> transform-flip-horizontal;
+    in-out property <bool> transform-flip-vertical;
     in property <float> transform-scale;
     in-out property <string> transform-anchor: "top_left";
     in property <string> transform-fit;
@@ -249,8 +252,8 @@ export global SourcesArea {
     callback transform-choose(string, string);
     // border-color, shadow-color, background-color
     callback transform-color(string, string);
-    // reset, add-border, remove-border, add-shadow, remove-shadow,
-    // add-background, remove-background
+    // reset, flip-horizontal, flip-vertical, add-border, remove-border,
+    // add-shadow, remove-shadow, add-background, remove-background
     callback transform-action(string);
     callback rename-accept();
 
