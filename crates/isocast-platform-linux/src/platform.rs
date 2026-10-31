@@ -179,7 +179,8 @@ impl Platform for LinuxPlatform {
         crate::media::open_media(path, part)
     }
     fn doctor_checks(&self) -> Vec<isocast_protocol::api::Check> {
-        vec![crate::media::decoders_check()]
+        let [server, capture] = pipewire_audio::scheduling_checks();
+        vec![crate::media::decoders_check(), server, capture]
     }
     fn probe(&self, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
         match source {

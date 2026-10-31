@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -1420,13 +1420,14 @@ fn capture_worker(
     };
     let mut app_links = BTreeMap::new();
     let mut check_realtime = None;
+    let capture_loop = CaptureLoop::register();
     while !cancel.load(Ordering::Acquire) {
         iterate(&mainloop)?;
         if check_realtime.is_some_and(|at: Instant| at.elapsed() >= Duration::from_secs(1)) {
             // RTKit grants asynchronously and can silently deny a request.
             // Observe the actual data thread, never mistake a request for a grant.
             check_realtime = None;
-            if !capture_is_realtime(&context) {
+            if !capture_loop.observe(&context, &stream) {
                 static WARN_NOT_REALTIME: std::sync::Once = std::sync::Once::new();
                 WARN_NOT_REALTIME.call_once(|| {
                     isocast_diagnostics::output::deferred(
@@ -1637,8 +1638,171 @@ fn realtime_policy(policy: i32) -> bool {
     )
 }
 
-fn capture_is_realtime(context: &pw::context::Context) -> bool {
-    unsafe extern "C" fn policy(
+fn server_policies() -> Option<Vec<Option<i32>>> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
+
+    // The server exclusively flocks <socket>.lock even with socket activation
+    // (where SO_PEERCRED on the listener can identify systemd instead).
+    let mut socket =
+        PathBuf::from(std::env::var_os("PIPEWIRE_REMOTE").unwrap_or_else(|| "pipewire-0".into()));
+    if !socket.is_absolute() {
+        let dir = std::env::var_os("PIPEWIRE_RUNTIME_DIR")
+            .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))?;
+        socket = PathBuf::from(dir).join(socket);
+    }
+    let mut lock = socket.into_os_string();
+    lock.push(".lock");
+    let stat = std::fs::metadata(lock).ok()?;
+    let key = format!(
+        "{:02x}:{:02x}:{}",
+        libc::major(stat.dev()),
+        libc::minor(stat.dev()),
+        stat.ino()
+    );
+    let pid = std::fs::read_to_string("/proc/locks")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut f = line.split_whitespace().skip(1);
+            if f.next()? != "FLOCK" || f.next()? != "ADVISORY" || f.next()? != "WRITE" {
+                return None;
+            }
+            let pid = f.next()?.parse::<u32>().ok()?;
+            (f.next()? == key).then_some(pid)
+        })?;
+    let mut policies = Vec::new();
+    for task in std::fs::read_dir(format!("/proc/{pid}/task")).ok()? {
+        let path = task.ok()?.path();
+        let name = std::fs::read_to_string(path.join("comm")).ok()?;
+        if is_data_loop(name.trim_end()) {
+            policies.push(
+                std::fs::read_to_string(path.join("sched"))
+                    .ok()
+                    .and_then(|s| sched_policy(&s)),
+            );
+        }
+    }
+    Some(policies)
+}
+
+fn is_data_loop(name: &str) -> bool {
+    matches!(name, "pw-data-loop" | "data-loop")
+        || name
+            .strip_prefix("data-loop.")
+            .is_some_and(|n| n.parse::<u32>().is_ok())
+}
+
+fn sched_policy(sched: &str) -> Option<i32> {
+    sched.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "policy")
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
+}
+
+pub(crate) fn scheduling_checks() -> [protocol::api::Check; 2] {
+    fn check(
+        name: &str,
+        policies: &[Option<i32>],
+        absent: &str,
+        retry: &str,
+    ) -> protocol::api::Check {
+        use protocol::api::{Check, CheckStatus};
+        let rt = policies
+            .iter()
+            .filter(|p| p.is_some_and(realtime_policy))
+            .count();
+        let ordinary = policies.iter().flatten().count() - rt;
+        let ok = !policies.is_empty() && rt == policies.len();
+        let (detail, fix) = if policies.is_empty() {
+            (absent.into(), Some(retry.into()))
+        } else if ordinary > 0 {
+            (format!("{rt} of {} data loops run realtime. RTKit/polkit may have denied realtime because there is no local login session.", policies.len()),
+             Some("Log in at the computer itself. On a headless or remote machine, an administrator can allow RTKit realtime scheduling for your user.".into()))
+        } else {
+            (
+                format!("{rt} of {} data loops confirmed realtime", policies.len()),
+                (!ok).then(|| retry.into()),
+            )
+        };
+        Check {
+            name: name.into(),
+            status: if ok {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Warning
+            },
+            detail,
+            fix,
+        }
+    }
+
+    let server = server_policies().unwrap_or_default();
+    let capture: Vec<_> = CAPTURE_TIDS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, tid)| tid.and_then(thread_policy))
+        .collect();
+    [
+        check(
+            "PipeWire server realtime",
+            &server,
+            "Could not identify the PipeWire server data loop.",
+            "Check that PipeWire is running and its threads are visible to Isocast.",
+        ),
+        check(
+            "Isocast audio capture realtime",
+            &capture,
+            "No active audio capture data loop measured.",
+            "Start desktop or microphone capture and run doctor again after one second.",
+        ),
+    ]
+}
+
+// Only audio capture workers register here; screen, enumeration and playback
+// threads can have identical names. Unregister before tearing down the stream.
+static CAPTURE_TIDS: Mutex<Vec<(thread::ThreadId, Option<i32>)>> = Mutex::new(Vec::new());
+
+struct CaptureLoop(thread::ThreadId);
+
+impl Drop for CaptureLoop {
+    fn drop(&mut self) {
+        CAPTURE_TIDS.lock().unwrap().retain(|(id, _)| *id != self.0);
+    }
+}
+
+fn thread_policy(tid: i32) -> Option<i32> {
+    // SAFETY: reads the kernel policy (including RTKit's out-of-process grants).
+    let policy = unsafe { libc::sched_getscheduler(tid) };
+    (policy >= 0).then_some(policy)
+}
+
+impl CaptureLoop {
+    fn register() -> Self {
+        let id = thread::current().id();
+        CAPTURE_TIDS.lock().unwrap().push((id, None));
+        Self(id)
+    }
+
+    fn observe(&self, context: &pw::context::Context, stream: &pw::stream::Stream) -> bool {
+        let tid = capture_loop_tid(context, stream);
+        if let Some(entry) = CAPTURE_TIDS
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|(id, _)| *id == self.0)
+        {
+            entry.1 = tid;
+        }
+        tid.and_then(thread_policy).is_some_and(realtime_policy)
+    }
+}
+
+fn capture_loop_tid(context: &pw::context::Context, stream: &pw::stream::Stream) -> Option<i32> {
+    unsafe extern "C" fn tid(
         _loop: *mut spa::sys::spa_loop,
         _async: bool,
         _seq: u32,
@@ -1646,30 +1810,40 @@ fn capture_is_realtime(context: &pw::context::Context) -> bool {
         _size: usize,
         _user_data: *mut std::ffi::c_void,
     ) -> i32 {
-        // SAFETY: this queries the calling data thread, with no shared state.
-        // pthread_getschedparam caches SCHED_OTHER after RTKit changes the
-        // kernel policy externally; sched_getscheduler reads the kernel.
-        unsafe { libc::sched_getscheduler(0) }
+        // SAFETY: this reads only the calling thread's kernel ID.
+        unsafe { libc::gettid() }
     }
 
     // SAFETY: the context owns this live data loop. Its owning worker is the
     // sole outside writer of the invoke queue (as for stream/node operations).
     // The blocking invoke returns the callback result and borrows no data.
     unsafe {
-        let data_loop = pw::sys::pw_context_get_data_loop(context.as_raw_ptr());
-        if data_loop.is_null() {
-            return false;
-        }
-        let policy = pw::sys::pw_data_loop_invoke(
-            data_loop,
-            Some(policy),
+        // PipeWire 1.1 added per-stream loop selection. Keep compatibility
+        // with 1.0.5 (one data loop per capture context).
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"pw_stream_get_data_loop".as_ptr());
+        let loop_ptr = if symbol.is_null() {
+            let data = pw::sys::pw_context_get_data_loop(context.as_raw_ptr());
+            if data.is_null() {
+                return None;
+            }
+            pw::sys::pw_data_loop_get_loop(data)
+        } else {
+            type GetLoop = unsafe extern "C" fn(*mut pw::sys::pw_stream) -> *mut pw::sys::pw_loop;
+            std::mem::transmute::<*mut libc::c_void, GetLoop>(symbol)(stream.as_raw_ptr())
+        };
+        let loop_ = loop_ptr.as_ref()?;
+        let id = pw::spa::spa_interface_call_method!(
+            loop_.loop_,
+            spa::sys::spa_loop_methods,
+            invoke,
+            Some(tid),
             0,
             std::ptr::null(),
             0,
             true,
-            std::ptr::null_mut(),
+            std::ptr::null_mut()
         );
-        policy >= 0 && realtime_policy(policy)
+        (id > 0 && id != libc::gettid()).then_some(id)
     }
 }
 
@@ -1854,6 +2028,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reads_data_loop_policy_not_main_thread_or_priority() {
+        assert!(!is_data_loop("pipewire"));
+        assert!(!is_data_loop("pipewire-audio"));
+        for name in ["pw-data-loop", "data-loop", "data-loop.12"] {
+            assert!(is_data_loop(name));
+        }
+        for (text, expected) in [
+            (
+                "pw-data-loop (896, #threads: 3)\npolicy   : 0\nprio : 120",
+                Some(false),
+            ),
+            (
+                "data-loop.1 (900, #threads: 3)\npolicy   : 2\nprio : 79",
+                Some(true),
+            ),
+            ("policy : unknown\nprio : 1", None),
+        ] {
+            assert_eq!(sched_policy(text).map(realtime_policy), expected);
+        }
+    }
+
     // Run with ISOCAST_EXPECT_RT=1 for an authorized RTKit/direct-RT session,
     // or =0 to require the denied path. No implicit skip of a failed grant.
     #[test]
@@ -1924,7 +2120,7 @@ mod tests {
         }
         assert_eq!(buffers.get(), 16);
         assert!(processed.get() > 10, "capture did not process audio");
-        let realtime = capture_is_realtime(&context);
+        let realtime = CaptureLoop::register().observe(&context, &stream);
         eprintln!(
             "capture buffers: {}, data loop realtime: {realtime}",
             buffers.get()
