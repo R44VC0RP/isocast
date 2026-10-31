@@ -4013,9 +4013,14 @@ def pattern_samples(path, specs, src_w, src_h):
         sx, sy = w / src_w, h / src_h
         ry = int(y + row * h)
         graph.append(f"[i{3 * k}]crop={max(1, int(w))}:1:{int(x)}:{ry},scale={src_w}:1:flags=bicubic[r{k}];")
-        cx, cy, cw, ch = x + 30 * s * sx, y + 6 * s * sy, max(1, 5 * s * sx), max(1, 7 * s * sy)
-        graph.append(f"[i{3 * k + 1}]crop={max(1, int(cw))}:{max(1, int(ch))}:{int(cx)}:{int(cy)},"
-                     f"scale={src_w}:1:flags=area[c{k}];")
+        # Project both edges of the fifth glyph: in the 180p square inset
+        # it is only 1.4 x 2 pixels. Flooring the origin and size separately
+        # can leave just a black pixel above the '2'. Read the actual mean;
+        # resizing a tiny crop to a single row can skip lit strokes.
+        left, right = (round(x + col * s * sx) for col in (30, 35))
+        top, bottom = (round(y + line * s * sy) for line in (6, 13))
+        graph.append(f"[i{3 * k + 1}]crop={max(1, right-left)}:{max(1, bottom-top)}:{left}:{top},"
+                     f"geq=lum='psum(W-1,H-1)/(W*H)',scale={src_w}:1:flags=neighbor[c{k}];")
         bx0, bx1 = band
         graph.append(f"[i{3 * k + 2}]crop={max(1, int(w * (bx1 - bx0)))}:{max(1, int(h / 4))}:"
                      f"{int(x + w * bx0)}:{int(y + h * 0.75)},scale={src_w}:1:flags=area[b{k}];")
@@ -4033,14 +4038,14 @@ def pattern_samples(path, specs, src_w, src_h):
         for k, (name, *_rest) in enumerate(specs):
             base = 3 * k * src_w
             bars = picture[base:base + src_w]
-            cell = sum(picture[base + src_w:base + 2 * src_w]) / src_w
+            cell = picture[base + src_w]
             band = sum(picture[base + 2 * src_w:base + 3 * src_w]) / src_w
             row[name] = (bars, cell, band)
         rows.append((t, row))
     return rows
 
 
-def pattern_value(bars, cell, width, fps):
+def pattern_value(bars, cell, width, fps, sampled_width=None):
     """("id", tag, frame mod 4 s) for a sampled source, or ("garbled",)."""
     bits = bars.translate(BAR_LEVELS)
     rise, fall = bits.find(b"01"), bits.find(b"10")
@@ -4051,6 +4056,23 @@ def pattern_value(bars, cell, width, fps):
     else:
         return ("garbled",)
     period = pattern_period(fps)
+    if sampled_width is not None and sampled_width < period:
+        # Less than one output pixel per frame of scroll. Two adjacent
+        # frames can put the black/white edge on the same pixel; the other
+        # seven edges land at different pixel fractions. Measure how much
+        # of each side's luma is in a small window around the coarse edge.
+        radius = width // 32
+        corrections = []
+        for stripe in range(8):
+            edge = ((stripe * width + 7) // 8 - shift) % width
+            if radius and radius <= edge <= width - radius:
+                window = bars[edge-radius:edge+radius]
+                left, right = window[0], window[-1]
+                if right != left:
+                    corrections.append((sum(window) - radius * (left + right)) / (right - left))
+        if not corrections:
+            return ("garbled",)
+        shift = (shift + statistics.mean(corrections)) % width
     guess = round(shift * period / width)
     best = min(range(guess - 2, guess + 3), key=lambda n: min(abs(pattern_shift(n % period, width, fps) - shift),
                                                              width - abs(pattern_shift(n % period, width, fps) - shift)))
@@ -4064,10 +4086,11 @@ def pattern_rows(path, specs, src, fps):
     """[(slot, pts, {name: ("id", tag, frame) or ("garbled",)})] of `path`,
     the test pattern read at `specs` (see pattern_samples)."""
     rows = []
+    widths = {name: rect[2] for name, rect, _, _ in specs}
     for t, sampled in pattern_samples(path, specs, *src):
         slot = round(t * fps)
         require(abs(t * fps - slot) < 0.02, f"{Path(path).name}: a picture at {t:.5f} s is off the frame grid")
-        rows.append((slot, t, {n: pattern_value(b, c, src[0], fps) for n, (b, c, _) in sampled.items()}))
+        rows.append((slot, t, {n: pattern_value(b, c, src[0], fps, widths[n]) for n, (b, c, _) in sampled.items()}))
     return rows
 
 
