@@ -472,6 +472,28 @@ impl Platform for WindowsPlatform {
             )
             .map(Some),
             SourceKind::Camera(camera) => crate::devices::camera_probe(&camera.device).map(Some),
+            SourceKind::Microphone(mic) => {
+                let (device, channels) =
+                    crate::probe_microphone(&mic.device, mic.channels.as_deref())?;
+                Ok(Some(Probe {
+                    device: device.name,
+                    video: None,
+                    channels: Some(channels),
+                }))
+            }
+            SourceKind::SystemAudio(settings) => {
+                if !settings.exclude.is_empty() {
+                    bail!(
+                        "system_audio.exclude: process exclusion is not supported by this Windows endpoint-loopback backend; use exclude=[]"
+                    );
+                }
+                let (device, channels) = crate::probe_loopback()?;
+                Ok(Some(Probe {
+                    device: device.name,
+                    video: None,
+                    channels: Some(channels),
+                }))
+            }
             SourceKind::TestPattern(_)
             | SourceKind::Tone(_)
             | SourceKind::Color(_)
@@ -888,5 +910,44 @@ impl Platform for WindowsPlatform {
 
     fn delete_secret(&self, service: &str, account: &str) -> Result<bool> {
         crate::credentials::delete(service, account)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isocast_protocol::{MicrophoneSource, SystemAudioSource};
+
+    #[test]
+    fn audio_sources_probe_the_selected_endpoint() {
+        let platform = WindowsPlatform::default();
+        let canvas = Canvas {
+            width: 320,
+            height: 180,
+            fps: 30,
+        };
+        let mic = SourceKind::Microphone(MicrophoneSource {
+            device: "default".into(),
+            channels: Some(vec![]),
+        });
+        assert!(
+            platform
+                .probe(&mic, &canvas)
+                .unwrap_err()
+                .to_string()
+                .contains("microphone.channels")
+        );
+
+        let source = SourceKind::SystemAudio(SystemAudioSource { exclude: vec![] });
+        let actual = platform.probe(&source, &canvas);
+        match crate::probe_loopback() {
+            Ok((device, channels)) => {
+                let probe = actual.unwrap().unwrap();
+                assert_eq!(probe.device, device.name);
+                assert!(probe.video.is_none());
+                assert_eq!(probe.channels, Some(channels));
+            }
+            Err(error) => assert_eq!(actual.unwrap_err().to_string(), error.to_string()),
+        }
     }
 }
