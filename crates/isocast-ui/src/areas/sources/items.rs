@@ -297,17 +297,19 @@ pub fn remove_scene(app: &Rc<App>, id: &str) {
     let Some(scene) = scenes_of(&setup).into_iter().find(|s| s["id"] == id) else {
         return;
     };
-    app.replace_setup(without_scene(&setup, id), true);
-    app.show_toast(
-        Toast::new(
-            ToastKind::Info,
-            format!("Removed “{}”", name_of(&scene)),
-            "",
-        )
-        .action("Undo", move |app| {
-            app.replace_setup(setup.clone(), true);
-        }),
-    );
+    let title = format!("Removed “{}”", name_of(&scene));
+    let next = without_scene(&setup, id);
+    // Only once the daemon has it: a refused removal shows its error alone.
+    app.replace_setup_then(next, true, move |app, applied| {
+        if !applied {
+            return;
+        }
+        app.show_toast(
+            Toast::new(ToastKind::Info, title, "").action("Undo", move |app| {
+                app.replace_setup(setup.clone(), true);
+            }),
+        );
+    });
 }
 
 /// Move a scene in the list: "up", "down", "top" or "bottom".
@@ -671,18 +673,18 @@ pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
         && source.kind.has_video()
         && uses(&typed, &source.id) <= 1
     {
-        app.replace_setup(without_source(&setup, &source.id), true);
-        let before = setup.clone();
-        app.show_toast(
-            Toast::new(
-                ToastKind::Info,
-                format!("Removed “{}”", model::source_name(source)),
-                "",
-            )
-            .action("Undo", move |app| {
-                app.replace_setup(before.clone(), true);
-            }),
-        );
+        let title = format!("Removed “{}”", model::source_name(source));
+        let next = without_source(&setup, &source.id);
+        app.replace_setup_then(next, true, move |app, applied| {
+            if !applied {
+                return;
+            }
+            app.show_toast(
+                Toast::new(ToastKind::Info, title, "").action("Undo", move |app| {
+                    app.replace_setup(setup.clone(), true);
+                }),
+            );
+        });
         return;
     }
     let label = item_label_json(&typed, item);
@@ -691,29 +693,29 @@ pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
         .unwrap_or(scene)
         .to_string();
     let before = model::canvas_items(&setup, scene, canvas);
-    app.edit(
-        item_patch_json(scene, chain, json!({ "remove": true })),
-        EditOptions::default(),
-    );
+    let title = format!("Removed “{label}” from {scene_name}");
+    let patch = item_patch_json(scene, chain, json!({ "remove": true }));
     let scene = scene.to_string();
-    app.show_toast(
-        Toast::new(
-            ToastKind::Info,
-            format!("Removed “{label}” from {scene_name}"),
-            "",
-        )
-        // Back on the canvas it was removed from, whichever is edited now.
-        .action("Undo", move |app| {
-            let now = setup_json(app)
-                .map(|s| model::canvas_items(&s, &scene, canvas))
-                .unwrap_or_default();
-            app.edit_on(
-                json!({ "scenes": [{ "id": scene, "items": replace_list(&now, &before) }] }),
-                EditOptions::default(),
-                canvas,
-            );
-        }),
-    );
+    app.edit_then(patch, EditOptions::default(), move |app, applied| {
+        if !applied {
+            return;
+        }
+        app.show_toast(
+            Toast::new(ToastKind::Info, title, "")
+                // Back on the canvas it was removed from, whichever is
+                // edited now.
+                .action("Undo", move |app| {
+                    let now = setup_json(app)
+                        .map(|s| model::canvas_items(&s, &scene, canvas))
+                        .unwrap_or_default();
+                    app.edit_on(
+                        json!({ "scenes": [{ "id": scene, "items": replace_list(&now, &before) }] }),
+                        EditOptions::default(),
+                        canvas,
+                    );
+                }),
+        );
+    });
 }
 
 fn item_label_json(setup: &Setup, item: &Value) -> String {
