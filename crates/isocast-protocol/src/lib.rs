@@ -1500,7 +1500,7 @@ pub struct Shadow {
     pub color: Color,
 }
 
-/// Moves, scales and rotates an item around its centre.
+/// Moves, scales, rotates and flips an item around its centre.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Transform {
@@ -1512,6 +1512,13 @@ pub struct Transform {
     /// Degrees, clockwise.
     #[serde(default)]
     pub rotate: f32,
+    /// Mirrored left to right, before it is rotated: its picture,
+    /// children, border and shadow.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flip_horizontal: bool,
+    /// Mirrored top to bottom, before it is rotated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flip_vertical: bool,
 }
 
 impl Default for Transform {
@@ -1520,6 +1527,8 @@ impl Default for Transform {
             translate: [0.0; 2],
             scale: 1.0,
             rotate: 0.0,
+            flip_horizontal: false,
+            flip_vertical: false,
         }
     }
 }

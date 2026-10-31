@@ -20899,8 +20899,16 @@
       },
       "Transform": {
         "additionalProperties": false,
-        "description": "Moves, scales and rotates an item around its centre.",
+        "description": "Moves, scales, rotates and flips an item around its centre.",
         "properties": {
+          "flip_horizontal": {
+            "description": "Mirrored left to right, before it is rotated: its picture,\nchildren, border and shadow.",
+            "type": "boolean"
+          },
+          "flip_vertical": {
+            "description": "Mirrored top to bottom, before it is rotated.",
+            "type": "boolean"
+          },
           "rotate": {
             "default": 0.0,
             "description": "Degrees, clockwise.",
@@ -20931,8 +20939,16 @@
       },
       "TransformResult": {
         "additionalProperties": false,
-        "description": "Moves, scales and rotates an item around its centre.",
+        "description": "Moves, scales, rotates and flips an item around its centre.",
         "properties": {
+          "flip_horizontal": {
+            "description": "Mirrored left to right, before it is rotated: its picture,\nchildren, border and shadow.",
+            "type": "boolean"
+          },
+          "flip_vertical": {
+            "description": "Mirrored top to bottom, before it is rotated.",
+            "type": "boolean"
+          },
           "rotate": {
             "default": 0.0,
             "description": "Degrees, clockwise.",

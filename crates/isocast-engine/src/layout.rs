@@ -1198,6 +1198,55 @@ items = [
     }
 
     #[test]
+    fn flipped_items_are_mirrored_in_their_own_box() {
+        let setup = setup(
+            r##"
+[[scenes]]
+id = "s"
+items = [
+  { id = "across", source = "p", rect = { x = 100, y = 50, width = 200, height = 100 }, style = { transform = { flip_horizontal = true } } },
+  { id = "down", source = "p", rect = { x = 100, y = 50, width = 200, height = 100 }, style = { transform = { flip_vertical = true } } },
+  { id = "turned", source = "p", rect = { x = 100, y = 50, width = 200, height = 100 }, style = { transform = { flip_horizontal = true, rotate = 90 } } },
+]
+"##,
+        );
+        let mut ids = NodeIds::default();
+        let scenes = laid_out(
+            &setup,
+            (1920, 1080),
+            &mut ids,
+            &mut Contents::default(),
+            &DataStore::default(),
+        );
+        let compiled = compile(
+            scenes.into(),
+            (1920, 1080),
+            &mut ids,
+            None,
+            &[],
+            &mut |_| None,
+        );
+        let resolved = resolved(&compiled);
+        let items = &resolved[0].items;
+        // Its own left edge lands on the box's right, and the reverse.
+        assert_eq!(items[0].transform, [-1.0, 0.0, 300.0, 0.0, 1.0, 50.0]);
+        assert_eq!(items[1].transform, [1.0, 0.0, 100.0, 0.0, -1.0, 150.0]);
+        assert_eq!(items[0].canvas, items[0].rect);
+        assert_eq!(items[1].canvas, items[1].rect);
+        // Mirrored, then turned a quarter clockwise about its centre (200,
+        // 100): its own top left (0, 0) ends at the turned box's bottom
+        // right, (250, 200), where unflipped it would be top right.
+        let [a, b, tx, c, d, ty] = items[2].transform;
+        let near = |x: f32, y: f32| (x - y).abs() < 1e-3;
+        assert!(near(a, 0.0) && near(b, -1.0) && near(c, -1.0) && near(d, 0.0));
+        assert!(
+            near(tx, 250.0) && near(ty, 200.0),
+            "{:?}",
+            items[2].transform
+        );
+    }
+
+    #[test]
     fn scenes_without_layout_are_left_alone() {
         let setup = setup(
             r##"
