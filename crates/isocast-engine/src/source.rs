@@ -232,6 +232,15 @@ impl<F: Clone> FrameSlot<F> {
         frames.back().filter(|(_, at)| *at >= from).cloned()
     }
 
+    /// The newest frame and when it was captured, waiting up to `timeout`
+    /// for one if the slot is empty; leaves it for the frame clock.
+    pub(crate) fn wait_any(&self, timeout: Duration) -> Option<(F, Time)> {
+        let mut frames = self.frames.lock();
+        self.arrived
+            .wait_while_for(&mut frames, |frames| frames.is_empty(), timeout);
+        frames.back().cloned()
+    }
+
     /// The newest frame captured no later than `limit`. Other readers may
     /// still be drawing an earlier tick, so only the producer trims history.
     pub(crate) fn newest_until(&self, limit: Time) -> Option<F> {
