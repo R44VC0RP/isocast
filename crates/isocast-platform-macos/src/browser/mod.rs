@@ -54,6 +54,9 @@ const AUDIO_SCRIPT: &str = include_str!("audio.js");
 /// The message handler `audio.js` posts to.
 const AUDIO_HANDLER: &str = "isocastAudio";
 
+const AUDIO_RATES: std::ops::RangeInclusive<u32> = 8_000..=192_000;
+const FRAME_BYTES: usize = 2 * size_of::<f32>();
+
 /// How far the page's audio may drift from the host clock before its
 /// timestamps are reset to it.
 const AUDIO_RESYNC: Duration = Duration::from_millis(150);
@@ -486,7 +489,7 @@ define_class!(
             let decoded = body
                 .downcast::<NSString>()
                 .map_err(|_| anyhow!("not a string"))
-                .and_then(|text| decode(&text.to_string()));
+                .and_then(|text| decode(&text));
             match decoded {
                 Ok((rate, samples)) => {
                     let samples = self.ivars().resampler.borrow_mut().run(rate, samples);
@@ -522,10 +525,27 @@ impl PageAudio {
 
 /// A message from `audio.js`: `RATE:BASE64`, the base64 of interleaved
 /// stereo 32-bit floats.
-fn decode(message: &str) -> Result<(u32, Vec<f32>)> {
+fn decode(message: &NSString) -> Result<(u32, Vec<f32>)> {
+    // Bound the native string before copying it. RATE (u32), colon and
+    // padded base64 are ASCII, so each occupies one UTF-16 unit per byte.
+    let max_bytes = *AUDIO_RATES.end() as usize * FRAME_BYTES;
+    if message.length() > 11 + max_bytes.div_ceil(3) * 4 {
+        bail!("oversized browser audio message");
+    }
+    let message = message.to_string();
     let (rate, data) = message.split_once(':').context("no sample rate")?;
     let rate: u32 = rate.parse().context("bad sample rate")?;
+    if !AUDIO_RATES.contains(&rate) {
+        bail!("unsupported browser audio rate {rate} Hz (accepted: {AUDIO_RATES:?} Hz)");
+    }
+    let second = rate as usize * FRAME_BYTES;
+    if data.len() > second.div_ceil(3) * 4 {
+        bail!("browser audio exceeds one second at {rate} Hz");
+    }
     let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
+    if bytes.len() > second || !bytes.len().is_multiple_of(FRAME_BYTES) {
+        bail!("expected whole stereo frames and at most one second of browser audio");
+    }
     let samples = bytes
         .as_chunks::<4>()
         .0
@@ -570,7 +590,7 @@ struct Resampler {
 impl Resampler {
     fn run(&mut self, rate: u32, samples: Vec<f32>) -> Vec<f32> {
         let input = samples.as_chunks::<2>().0;
-        if rate == SAMPLE_RATE || rate == 0 || input.is_empty() {
+        if rate == SAMPLE_RATE || input.is_empty() {
             return samples;
         }
         let step = f64::from(rate) / f64::from(SAMPLE_RATE);
@@ -603,8 +623,37 @@ mod tests {
             "44100:{}",
             base64::engine::general_purpose::STANDARD.encode(bytes)
         );
-        assert_eq!(decode(&message).unwrap(), (44100, samples.to_vec()));
-        assert!(decode("no rate").is_err());
+        let (rate, decoded) = decode(&NSString::from_str(&message)).unwrap();
+        assert_eq!(decoded, samples);
+        let mut resampler = Resampler::default();
+        let out = resampler.run(rate, decoded);
+        assert_eq!(out.len(), 4);
+        assert_eq!(&out[..2], &samples[..2]);
+        assert!((out[2] - 0.959375).abs() < 1e-6);
+        assert!((out[3] - -0.0203125).abs() < 1e-6);
+        let message = message.replacen("44100:", "48000:", 1);
+        let (rate, decoded) = decode(&NSString::from_str(&message)).unwrap();
+        assert_eq!(resampler.run(rate, decoded), samples);
+        assert!(decode(&NSString::from_str("no rate")).is_err());
+    }
+
+    #[test]
+    fn browser_audio_bounds_apply_before_resampling() {
+        let message = |rate, bytes| {
+            let data = base64::engine::general_purpose::STANDARD.encode(vec![0; bytes]);
+            NSString::from_str(&format!("{rate}:{data}"))
+        };
+        for rate in [0, 1, 7_999, 192_001, u32::MAX] {
+            assert!(decode(&message(rate, FRAME_BYTES)).is_err(), "{rate} Hz");
+        }
+        for rate in [8_000, 192_000] {
+            let second = rate as usize * FRAME_BYTES;
+            assert_eq!(decode(&message(rate, second)).unwrap().1.len(), second / 4);
+            assert!(decode(&message(rate, second + FRAME_BYTES)).is_err());
+        }
+        // One extra byte can fit within the same padded base64 length.
+        assert!(decode(&message(8_000, 64_001)).is_err());
+        assert!(decode(&message(48_000, FRAME_BYTES - 1)).is_err());
     }
 
     #[test]
