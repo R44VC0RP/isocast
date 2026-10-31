@@ -40,11 +40,12 @@ use super::timings::CompositorTimings;
 use super::{
     AUDIO_TAIL, COMMIT_TIMEOUT, CaptureReport, DiskReport, FIRST_FRAME_TIMEOUT, FilePlan,
     FolderLock, Formats, MIN_FREE_BYTES, MIN_FREE_SECONDS, MIN_TAKE, MIX_QUEUE_DEPTH, MONITOR_FPS,
-    OnAir, Output, PROGRAM_WARM_TIMEOUT, Packet, QUEUE_DEPTH, RecordOptions, Report,
+    NoPicture, OnAir, Output, PROGRAM_WARM_TIMEOUT, Packet, QUEUE_DEPTH, RecordOptions, Report,
     SPACE_CHECK_INTERVAL, SPEED_MARGIN, SPLIT_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL,
     SessionControl, Shared, Slots, SourceFilters, SplitRefused, SplitTake, Take, WriterInputs,
     create_writers, expand_home, interrupted_note, interrupted_sessions, is_program, live_status,
-    next_recording, plan_take, sidechain_sources, take_manifest, wait_for_frame,
+    next_recording, plan_take, sidechain_sources, take_manifest, wait_for_first_picture,
+    wait_for_frame,
 };
 use super::{AudioStopped, audio_stop_errors, file_audio_stops};
 #[cfg(not(windows))]
@@ -4392,13 +4393,22 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             outputs: Vec::new(),
         };
         let newest = match raw_inputs && runner.filters.is_none() {
-            true => Some(
-                wait_for_frame(&runner.slot)
-                    .with_context(|| {
-                        format!("recording.iso.sources: {id:?} has no input picture yet")
-                    })?
-                    .0,
-            ),
+            true => {
+                match wait_for_first_picture(&runner.slot, FIRST_FRAME_TIMEOUT, &options.stop) {
+                    Ok((frame, _)) => Some(frame),
+                    Err(NoPicture::Stopped) => {
+                        bail!(
+                            "the recording was stopped before it started, so nothing was recorded"
+                        )
+                    }
+                    Err(NoPicture::TimedOut) => bail!(
+                        "recording.iso.sources: {id:?} has no input picture yet (waited {} s after \
+                         it opened).\nCheck that it shows a picture in a preview, or set its \
+                         fps (for example 30) in its source settings.",
+                        FIRST_FRAME_TIMEOUT.as_secs()
+                    ),
+                }
+            }
             false => runner.slot.newest(),
         };
         if runner.filters.is_some()

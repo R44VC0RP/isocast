@@ -212,6 +212,42 @@ pub(crate) fn wait_for_frame<F: Clone>(slot: &FrameSlot<F>) -> Option<(F, Time)>
     }
 }
 
+/// Why a wait for a source's first picture ended without one.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NoPicture {
+    /// The recording was asked to stop.
+    Stopped,
+    /// Nothing arrived within the bound.
+    TimedOut,
+}
+
+/// How often a wait for a first picture looks at the stop request.
+const STOP_CHECK: Duration = Duration::from_millis(50);
+
+/// The newest frame of `slot` and its time, waiting up to `limit` for one
+/// (a camera that just started can take a moment: a debug build decodes a
+/// 1080p MJPEG picture in about 330 ms) and giving up at once when `stop`
+/// is set.
+pub(crate) fn wait_for_first_picture<F: Clone>(
+    slot: &FrameSlot<F>,
+    limit: Duration,
+    stop: &AtomicBool,
+) -> Result<(F, Time), NoPicture> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return Err(NoPicture::Stopped);
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if let Some(newest) = slot.wait_any(left.min(STOP_CHECK)) {
+            return Ok(newest);
+        }
+        if left.is_zero() {
+            return Err(NoPicture::TimedOut);
+        }
+    }
+}
+
 /// The filters of the sources that have any, by source id, shared with the
 /// program so changes show at once.
 pub(crate) type SourceFilters = Arc<Mutex<HashMap<String, Arc<[Filter]>>>>;
@@ -2341,5 +2377,82 @@ pub fn expand_home(folder: &str) -> PathBuf {
             }
         }
         _ => PathBuf::from(folder),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::Timeline;
+    use std::time::Instant;
+
+    fn slot() -> Arc<FrameSlot<u32>> {
+        Arc::new(FrameSlot::new(Arc::new(Timeline::default())))
+    }
+
+    #[test]
+    fn first_picture_arrives_late() {
+        let slot = slot();
+        let pusher = {
+            let slot = slot.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(400));
+                slot.push(7, Time::from_nanos(1));
+            })
+        };
+        let started = Instant::now();
+        let got = wait_for_first_picture(&slot, Duration::from_secs(3), &AtomicBool::new(false));
+        pusher.join().expect("the pushing thread panicked");
+        assert_eq!(got, Ok((7, Time::from_nanos(1))));
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(400) && waited < Duration::from_secs(3),
+            "returned after {waited:?}"
+        );
+    }
+
+    #[test]
+    fn first_picture_times_out() {
+        let started = Instant::now();
+        let got =
+            wait_for_first_picture(&slot(), Duration::from_millis(200), &AtomicBool::new(false));
+        let waited = started.elapsed();
+        assert_eq!(got, Err(NoPicture::TimedOut));
+        assert!(
+            waited >= Duration::from_millis(200) && waited < Duration::from_secs(2),
+            "timed out after {waited:?}"
+        );
+    }
+
+    #[test]
+    fn first_picture_stops() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopper = {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                stop.store(true, Ordering::SeqCst);
+            })
+        };
+        let started = Instant::now();
+        let got = wait_for_first_picture(&slot(), Duration::from_secs(3), &stop);
+        stopper.join().expect("the stopping thread panicked");
+        let waited = started.elapsed();
+        assert_eq!(got, Err(NoPicture::Stopped));
+        // Stopped 100 ms in; a wait that ignored it would take the full 3 s.
+        assert!(waited < Duration::from_secs(1), "stopped after {waited:?}");
+    }
+
+    #[test]
+    fn first_picture_already_there() {
+        let slot = slot();
+        slot.push(3, Time::from_nanos(5));
+        let started = Instant::now();
+        let got = wait_for_first_picture(&slot, Duration::from_secs(3), &AtomicBool::new(false));
+        assert_eq!(got, Ok((3, Time::from_nanos(5))));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a waiting picture must return at once"
+        );
     }
 }
