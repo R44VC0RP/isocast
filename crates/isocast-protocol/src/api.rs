@@ -523,6 +523,14 @@ pub enum Method {
     /// End this connection's WebRTC viewer (WHEP DELETE semantics).
     /// Returns null, then closes the connection.
     WhepClose,
+    /// Choose the screen or window a `display` or `window` source records,
+    /// in the desktop's sharing dialog, where apps can't list screens and
+    /// windows themselves (Linux). Waits up to 3 minutes for the choice.
+    /// The source then opens that screen or window without asking again
+    /// while the desktop remembers it; a running source switches to it.
+    /// Returns [`ScreenPicked`]. Only on this machine; refused where
+    /// `devices` lists screens and windows instead (macOS, Windows).
+    ScreenPick(ScreenPickParams),
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -3542,6 +3550,29 @@ pub struct OverloadedFile {
     pub dropped_frames: u64,
     /// Of the pictures due so far.
     pub percent: f64,
+}
+
+/// The source `screen_pick` chooses for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenPickParams {
+    /// The id of a `display` or `window` source in the live setup. A window
+    /// source keeps its own window; a display source's choice is kept for
+    /// its `display` value, shared by display sources that give the same.
+    pub source: String,
+}
+
+/// What was chosen in the desktop's sharing dialog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenPicked {
+    pub source: String,
+    /// The size the desktop shares, in pixels; 0 if it didn't say.
+    pub width: u32,
+    pub height: u32,
+    /// Whether the desktop remembers the choice. If not, its dialog asks
+    /// again each time the source starts (on Hyprland, tick "Allow a
+    /// restore token" in it).
+    pub remembered: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -156,6 +156,10 @@ pub fn local_only_reason(method: &Method) -> Option<&'static str> {
             "the operating system's permission prompts and settings appear on the engine's own \
              screen, for someone there to answer",
         ),
+        Method::ScreenPick(_) => Some(
+            "the desktop's sharing dialog appears on the engine's own screen, for someone there to \
+             choose a screen or window",
+        ),
         Method::TakeExportNle(params) if params.replace => Some(
             "`replace` overwrites whatever file is at the path; leave it out (an earlier Isocast \
              export is still replaced) or choose another path",

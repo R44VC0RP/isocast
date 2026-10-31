@@ -6,10 +6,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use isocast_protocol::api::{
     Applied, ApplyParams, CapacityEstimate, CapacityParams, Doctor, DoctorParams, EngineInfo,
-    Frame, FrameParams, ImportObsParams, Live, Marked, Method, Plan, Refreshed, Report, Snapshot,
-    SnapshotParams, StartParams, Started, Status, StreamDestinationParams, StreamDestinations,
-    StreamKey, StreamKeyParams, StreamKeyTarget, StreamStartParams, Streaming, Switched,
-    TuneParams, Tuning,
+    Frame, FrameParams, ImportObsParams, Live, Marked, Method, Plan, Refreshed, Report,
+    ScreenPickParams, ScreenPicked, Snapshot, SnapshotParams, StartParams, Started, Status,
+    StreamDestinationParams, StreamDestinations, StreamKey, StreamKeyParams, StreamKeyTarget,
+    StreamStartParams, Streaming, Switched, TuneParams, Tuning,
 };
 use isocast_protocol::change::Change;
 use isocast_protocol::data::{DataGetParams, DataRevision, DataSetParams, DataValues};
@@ -1542,6 +1542,26 @@ impl Isocast {
     )]
     async fn list_devices(&self) -> Result<Json<Devices>, String> {
         self.call(Method::Devices).await
+    }
+
+    #[tool(
+        description = "Linux only, where screens and windows can't be listed: show the desktop's \
+                       screen-sharing dialog so the person at the computer chooses the window a \
+                       window source records, or the screen of a display source (`source`: its \
+                       id). The source then opens that choice without the dialog while the \
+                       desktop remembers it (`remembered`); a running source switches to it. \
+                       Waits up to 3 minutes for the choice; fails if it is cancelled.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn pick_screen(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ScreenPickParams>>,
+    ) -> Result<Json<ScreenPicked>, String> {
+        self.call(Method::ScreenPick(params)).await
     }
 
     #[tool(

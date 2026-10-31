@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-104 tools. Arguments marked required must be given; ids, not names,
+105 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -472,6 +472,14 @@ Optimize the live setup for `goal` recording, streaming or both (OBS's Auto-Conf
 ## pause_recording
 
 Pause the same recording files on a shared video/audio boundary. Streaming continues. Markers land at the paused playhead; resume before split.
+
+## pick_screen
+
+Linux only, where screens and windows can't be listed: show the desktop's screen-sharing dialog so the person at the computer chooses the window a window source records, or the screen of a display source (`source`: its id). The source then opens that choice without the dialog while the desktop remembers it (`remembered`); a running source switches to it. Waits up to 3 minutes for the choice; fails if it is cancelled.
+
+| Argument | Type | Description |
+|---|---|---|
+| `source` (required) | string | The id of a `display` or `window` source in the live setup. A window source keeps its own window; a display source's choice is kept for its `display` value, shared by display sources that give the same. |
 
 ## plan_change
 

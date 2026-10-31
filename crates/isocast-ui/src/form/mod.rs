@@ -139,6 +139,8 @@ pub fn build(ctx: &Context, fields: &[Field], value: &Map<String, Value>) -> Vec
         .iter()
         .filter(|f| !ctx.skip.contains(&f.name.as_str()))
         .filter(|f| !(camera && CAMERA_FORMAT.contains(&f.name.as_str())))
+        // The desktop's dialog chooses the window itself, not by its title.
+        .filter(|f| !(dev::PICKED_IN_DIALOG && ctx.kind == "window" && f.name == "title"))
         .collect();
     // When any row ends in a button, every row keeps that lane, so the
     // fields share one right edge.
@@ -420,6 +422,15 @@ fn choice_control(
             row.options = dev::exclude_options(devices, &excluded);
             row.value = String::new();
             row.refresh = true;
+        }
+        ("window", "app") if dev::PICKED_IN_DIALOG => {
+            // The dialog chooses the window; `app` only names it.
+            row.options = dev::picked_window_options(&v);
+            row.value = v.clone();
+            row.extra = true;
+            row.extra_text = v;
+            row.extra_placeholder = "A name for this window, like its app".into();
+            row.lane = true;
         }
         ("window" | "application", "app") => {
             let none = devices.is_none_or(|d| d.windows.is_empty());
@@ -1059,6 +1070,9 @@ pub enum Outcome {
     Reshow,
     /// Nothing at all (cancelled, not a value it takes, devices asked for).
     Nothing,
+    /// Choose the source's screen or window in the desktop's sharing
+    /// dialog (`screen_pick`).
+    Pick,
 }
 
 /// The setting `key` changes when its control does `event`.
@@ -1074,7 +1088,11 @@ pub fn change(app: &Rc<App>, t: &Target, key: &str, event: FormEvent) -> Outcome
                 let Some((_, f)) = find(fields, key) else {
                     return Outcome::Nothing;
                 };
+                if chosen == dev::PICK {
+                    return Outcome::Pick;
+                }
                 match (kind, f.name.as_str()) {
+                    ("window", "app") if dev::PICKED_IN_DIALOG => return Outcome::Nothing,
                     ("camera", "device") => camera_change(devices, value, &chosen),
                     ("microphone", "device") => microphone_change(devices, value, &chosen),
                     ("microphone", "channels") => one("channels", channels_json(&chosen)),
@@ -1141,7 +1159,13 @@ pub fn change(app: &Rc<App>, t: &Target, key: &str, event: FormEvent) -> Outcome
         FormEvent::Extra(text) => {
             let text = text.trim().to_string();
             let text = (!text.is_empty()).then_some(text);
-            if kind == "filter" {
+            if dev::PICKED_IN_DIALOG && kind == "window" && key == "app" {
+                // The window's name: required, so an empty one is kept.
+                match text {
+                    Some(text) => one("app", json!(text)),
+                    None => return Outcome::Reshow,
+                }
+            } else if kind == "filter" {
                 aspect(text)
             } else {
                 one("title", text.map_or(Value::Null, Value::String))

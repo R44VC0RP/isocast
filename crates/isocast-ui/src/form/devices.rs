@@ -297,7 +297,9 @@ pub fn display_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
         main.map(|m| format!("{}, {}×{}", m.name, m.width, m.height))
             .unwrap_or_default(),
     )];
-    options.extend(displays.iter().map(|d| {
+    // A display whose id is "main" (Linux's desktop-portal screen) is the
+    // row above already.
+    options.extend(displays.iter().filter(|d| d.id != "main").map(|d| {
         let v = if matched.is_some_and(|m| m.id == d.id) {
             value.to_string()
         } else {
@@ -305,7 +307,33 @@ pub fn display_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
         };
         choice(v, &d.name, format!("{}×{}", d.width, d.height))
     }));
+    if PICKED_IN_DIALOG {
+        options.push(pick_option("screen"));
+    }
     keep(options, value, "not connected")
+}
+
+/// Screens and windows are chosen in the desktop's sharing dialog
+/// (`screen_pick`), since the engine can't list them (Linux).
+pub const PICKED_IN_DIALOG: bool = cfg!(target_os = "linux");
+
+/// The choice that opens the desktop's sharing dialog for the source.
+pub const PICK: &str = "\u{200b}pick in the dialog";
+
+/// The choice that opens the desktop's sharing dialog for a `what`
+/// ("screen" or "window").
+fn pick_option(what: &str) -> Choice {
+    choice(PICK, format!("Choose a {what}…"), "in the desktop’s dialog")
+}
+
+/// A window source's choices where the desktop's dialog chooses the window
+/// (`PICKED_IN_DIALOG`): the one it has, named by `app` (a label there),
+/// and the dialog.
+pub fn picked_window_options(app: &str) -> Vec<Choice> {
+    vec![
+        choice(app, "Chosen in the desktop’s dialog", app),
+        pick_option("window"),
+    ]
 }
 
 /// An app with windows that can be captured.

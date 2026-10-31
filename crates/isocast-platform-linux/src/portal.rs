@@ -17,7 +17,7 @@ use ashpd::desktop::{
 };
 use ashpd::enumflags2::BitFlags;
 use futures_util::StreamExt;
-use isocast_engine::{CaptureFormat, ScreenTarget, VideoSink};
+use isocast_engine::{CaptureFormat, PickedScreen, ScreenTarget, VideoSink};
 use isocast_protocol::devices::Display;
 use serde::{Deserialize, Serialize};
 
@@ -267,30 +267,53 @@ fn check_offered(kind: Kind, offered: BitFlags<SourceType>) -> Result<()> {
     Ok(())
 }
 
+/// How the dialog was opened: by a source starting, or by `screen_pick`.
+#[derive(Clone, Copy)]
+enum Asked {
+    Start,
+    Pick,
+}
+
 /// Refuse a stream of the wrong kind. Some desktops' dialogs offer every
-/// kind whatever the source asks for (xdg-desktop-portal-hyprland shows
-/// Windows, Outputs and Region tabs), and a wrong choice, once saved, would
-/// reopen on every start. A portal that doesn't say what it shared is
+/// kind whatever the source asks for (xdg-desktop-portal-hyprland ignores
+/// the requested types and opens on its Windows tab), so the error names
+/// the tab to use there. A portal that doesn't say what it shared is
 /// trusted.
-fn check_shared(kind: Kind, shared: Option<SourceType>) -> Result<()> {
+fn check_shared(
+    kind: Kind,
+    shared: Option<SourceType>,
+    asked: Asked,
+    hyprland: bool,
+) -> Result<()> {
+    let again = match asked {
+        Asked::Start => "start the source again and choose",
+        Asked::Pick => "choose again and pick",
+    };
     match (kind, shared) {
         (_, None) | (Kind::Window, Some(SourceType::Window)) => Ok(()),
         (Kind::Screen, Some(SourceType::Monitor | SourceType::Virtual)) => Ok(()),
         (Kind::Window, Some(shared)) => bail!(
-            "window source: a {} was chosen in the desktop's sharing dialog, not a window; start \
-             the source again and choose a window, or use a display source to record a screen",
+            "window source: a {} was chosen in the desktop's sharing dialog, not a window; \
+             {again} a window{}, or use a display source to record a screen",
             if shared == SourceType::Virtual {
                 "region or virtual screen"
             } else {
                 "screen"
-            }
+            },
+            if hyprland { " in its Windows tab" } else { "" }
         ),
         (Kind::Screen, Some(_)) => bail!(
             "display source: a window was chosen in the desktop's sharing dialog, not a screen; \
-             start the source again and choose a screen, or use a window source to record one \
-             window"
+             {again} a screen{}, or use a window source to record one window",
+            if hyprland { " in its Outputs tab" } else { "" }
         ),
     }
+}
+
+/// Whether the desktop is Hyprland, whose dialog shows every kind.
+fn hyprland() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .is_ok_and(|desktops| desktops.split(':').any(|desktop| desktop == "Hyprland"))
 }
 
 /// The size `target` records at, from the size the portal last gave it,
@@ -304,6 +327,145 @@ pub fn saved_size(target: &ScreenTarget<'_>) -> Option<(u32, u32)> {
             pipewire_video::even(saved.width),
             pipewire_video::even(saved.height),
         )
+    })
+}
+
+type Session = ashpd::desktop::Session<Screencast>;
+
+/// The ScreenCast portal on a connection of its own, and a new session.
+async fn connect() -> Result<(Screencast, Session)> {
+    // A dedicated connection belongs to the caller's runtime. ASHPD's
+    // process-global connection would outlive the first runtime.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let connection = zbus::Connection::session().await?;
+        let portal = Screencast::with_connection(connection)
+            .await
+            .context("connect to desktop ScreenCast portal")?;
+        let session = portal.create_session(Default::default()).await?;
+        Ok::<_, anyhow::Error>((portal, session))
+    })
+    .await
+    .context("desktop portal connection timed out")?
+}
+
+/// The one stream the portal started for a selection.
+struct Selected {
+    node: u32,
+    width: u32,
+    height: u32,
+    /// The portal gave a restore token: later starts reopen it silently.
+    remembered: bool,
+}
+
+/// Ask the portal for one screen or window of `kind`, which `token` may
+/// grant without its dialog. A stream of the right kind is saved under
+/// `key`; one of the wrong kind is refused and the grant under `key`
+/// cleared, so the next start asks again.
+async fn select(
+    portal: &Screencast,
+    session: &Session,
+    key: &str,
+    kind: Kind,
+    asked: Asked,
+    cursor: Option<CursorMode>,
+    token: Option<&str>,
+) -> Result<Selected> {
+    check_offered(kind, portal.available_source_types().await?)?;
+    let options = SelectSourcesOptions::default()
+        .set_sources(Some(kind.source_type().into()))
+        .set_multiple(false)
+        .set_cursor_mode(cursor)
+        .set_persist_mode(PersistMode::ExplicitlyRevoked)
+        .set_restore_token(token);
+    portal.select_sources(session, options).await?.response()?;
+    let response = portal
+        .start(session, None, Default::default())
+        .await?
+        .response()?;
+    ensure!(
+        response.streams().len() == 1,
+        "desktop portal must return exactly one screen per source"
+    );
+    let stream = &response.streams()[0];
+    if let Err(error) = check_shared(kind, stream.source_type(), asked, hyprland()) {
+        // A start spent the saved token on the wrong kind; forget it so the
+        // next start asks. A pick used no token, so the earlier choice stays.
+        if let Asked::Start = asked {
+            let _ = save(key, Saved::default());
+        }
+        return Err(error);
+    }
+    let (width, height) = stream.size().unwrap_or((0, 0));
+    let token = response.restore_token().map(str::to_owned);
+    let selected = Selected {
+        node: stream.pipe_wire_node_id(),
+        width: width.max(0) as u32,
+        height: height.max(0) as u32,
+        remembered: token.is_some(),
+    };
+    save(
+        key,
+        Saved {
+            token,
+            width: selected.width,
+            height: selected.height,
+        },
+    )?;
+    Ok(selected)
+}
+
+/// Show the desktop's sharing dialog for `target` and keep the choice for
+/// it, replacing any it had. Waits up to 3 minutes for the person.
+pub fn pick(target: &ScreenTarget<'_>) -> Result<PickedScreen> {
+    let (key, kind) = target_key(target)?;
+    let thread_key = key.clone();
+    let selected = std::thread::Builder::new()
+        .name("linux-screen-pick".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                let (portal, session) = connect().await?;
+                let selected = tokio::time::timeout(
+                    Duration::from_secs(180),
+                    select(
+                        &portal,
+                        &session,
+                        &thread_key,
+                        kind,
+                        Asked::Pick,
+                        None,
+                        None,
+                    ),
+                )
+                .await
+                .context("nothing was chosen within 3 minutes")
+                .and_then(|result| result);
+                let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+                selected
+            })
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("screen_pick: the portal thread panicked"))?
+        .context("screen_pick")?;
+    // A choice made now overrides an earlier decline.
+    DECLINED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&key);
+    // The size it records at: even, or 0 if the portal didn't say.
+    let even = |size: u32| {
+        if size == 0 {
+            0
+        } else {
+            pipewire_video::even(size)
+        }
+    };
+    Ok(PickedScreen {
+        width: even(selected.width),
+        height: even(selected.height),
+        remembered: selected.remembered,
     })
 }
 
@@ -347,17 +509,9 @@ pub fn capture(
         let result = (|| -> Result<()> {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             runtime.block_on(async {
-                // A dedicated connection belongs to this runtime. ASHPD's
-                // process-global connection would outlive the first runtime.
-                let connecting = tokio::time::timeout(Duration::from_secs(10), async {
-                    let connection = zbus::Connection::session().await?;
-                    let portal = Screencast::with_connection(connection).await.context("connect to desktop ScreenCast portal")?;
-                    let session = portal.create_session(Default::default()).await?;
-                    Ok::<_, anyhow::Error>((portal, session))
-                });
                 let (portal, session) = tokio::select! {
                     _ = &mut stopped => return Ok(()),
-                    result = connecting => result.context("desktop portal connection timed out")??,
+                    result = connect() => result?,
                 };
                 let mut closed = tokio::time::timeout(Duration::from_secs(5), session.receive_closed())
                     .await.context("desktop portal signal subscription timed out")??;
@@ -365,24 +519,9 @@ pub fn capture(
                     let available = portal.available_cursor_modes().await?;
                     let requested = if cursor { CursorMode::Embedded } else { CursorMode::Hidden };
                     ensure!(available.contains(requested), "desktop portal cannot provide the requested cursor mode");
-                    check_offered(kind, portal.available_source_types().await?)?;
-                    let options = SelectSourcesOptions::default()
-                        .set_sources(Some(kind.source_type().into())).set_multiple(false)
-                        .set_cursor_mode(requested).set_persist_mode(PersistMode::ExplicitlyRevoked)
-                        .set_restore_token(token.as_deref());
-                    portal.select_sources(&session, options).await?.response()?;
-                    let response = portal.start(&session, None, Default::default()).await?.response()?;
-                    ensure!(response.streams().len() == 1, "desktop portal must return exactly one screen per source");
-                    let stream = &response.streams()[0];
-                    if let Err(error) = check_shared(kind, stream.source_type()) {
-                        // Forget the grant, so the next start asks again.
-                        let _ = save(&key, Saved::default());
-                        return Err(error);
-                    }
-                    let (width, height) = stream.size().unwrap_or((0, 0));
-                    save(&key, Saved { token: response.restore_token().map(str::to_owned), width: width.max(0) as u32, height: height.max(0) as u32 })?;
+                    let selected = select(&portal, &session, &key, kind, Asked::Start, Some(requested), token.as_deref()).await?;
                     let fd = portal.open_pipe_wire_remote(&session, Default::default()).await?;
-                    Ok::<_, anyhow::Error>((fd, stream.pipe_wire_node_id()))
+                    Ok::<_, anyhow::Error>((fd, selected.node))
                 };
                 let opened = tokio::select! {
                     _ = &mut stopped => Err(anyhow::anyhow!("screen sharing cancelled")),
@@ -520,27 +659,30 @@ mod tests {
             (Kind::Screen, Some(SourceType::Virtual)),
             (Kind::Screen, None),
         ] {
-            check_shared(kind, shared).unwrap();
+            check_shared(kind, shared, Asked::Start, true).unwrap();
         }
-        for (kind, shared, start) in [
-            (
-                Kind::Window,
-                SourceType::Monitor,
-                "window source: a screen was chosen",
-            ),
-            (
-                Kind::Window,
-                SourceType::Virtual,
-                "window source: a region or virtual screen was chosen",
-            ),
-            (
-                Kind::Screen,
-                SourceType::Window,
-                "display source: a window was chosen",
-            ),
-        ] {
-            let error = check_shared(kind, Some(shared)).unwrap_err().to_string();
-            assert!(error.starts_with(start), "{error}");
-        }
+        let refused = |kind, shared, asked, hyprland| {
+            check_shared(kind, Some(shared), asked, hyprland)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            refused(Kind::Screen, SourceType::Window, Asked::Pick, true),
+            "display source: a window was chosen in the desktop's sharing dialog, not a screen; \
+             choose again and pick a screen in its Outputs tab, or use a window source to record \
+             one window"
+        );
+        assert_eq!(
+            refused(Kind::Window, SourceType::Monitor, Asked::Start, false),
+            "window source: a screen was chosen in the desktop's sharing dialog, not a window; \
+             start the source again and choose a window, or use a display source to record a \
+             screen"
+        );
+        assert!(
+            refused(Kind::Window, SourceType::Virtual, Asked::Pick, true).starts_with(
+                "window source: a region or virtual screen was chosen in the desktop's sharing \
+                 dialog, not a window; choose again and pick a window in its Windows tab"
+            )
+        );
     }
 }

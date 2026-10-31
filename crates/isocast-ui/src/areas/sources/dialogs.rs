@@ -7,6 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use isocast_protocol::api::{Method, ScreenPickParams, ScreenPicked};
 use isocast_protocol::{CanvasId, Codec, Setup};
 use serde_json::{Map, Value, json};
 use slint::{ComponentHandle, SharedString};
@@ -765,7 +766,12 @@ impl Dialogs {
         if name.is_empty() || area.get_create_taken() {
             return;
         }
-        let settings = starting(&kind, app.session.borrow().devices.as_ref());
+        let mut settings = starting(&kind, app.session.borrow().devices.as_ref());
+        if form::devices::PICKED_IN_DIALOG && kind == "window" {
+            // The desktop's dialog chooses the window when the source first
+            // starts; `app` only names it, after the source.
+            settings.insert("app".into(), json!(name));
+        }
         if missing(&kind, &settings).is_some() {
             // Not valid yet: Properties collects what it needs, then adds it.
             let mut draft = Map::new();
@@ -1107,6 +1113,14 @@ impl Dialogs {
             },
             Outcome::Reshow => {}
             Outcome::Nothing => return,
+            Outcome::Pick => {
+                // A draft isn't in the setup yet: the dialog opens when it
+                // first starts.
+                if self.pending.borrow().is_none() {
+                    pick_screen(app, self.props_source.borrow().clone());
+                }
+                return;
+            }
         }
         self.reshow(app, window, form_id);
     }
@@ -2169,4 +2183,46 @@ fn filter_skips(filter: &Value) -> Vec<&'static str> {
         }
     }
     skip
+}
+
+/// Show the desktop's sharing dialog for display or window source `id`
+/// (`screen_pick`). The engine keeps the choice and switches the source to
+/// it. The call runs on a connection of its own: the dialog waits for the
+/// person, and the window's calls mustn't wait with it.
+pub fn pick_screen(app: &Rc<App>, id: String) {
+    if app.mode.offscreen || id.is_empty() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("screen pick".into())
+        .spawn(move || {
+            let result = crate::daemon::connect()
+                .and_then(|mut client| {
+                    client.call::<ScreenPicked>(Method::ScreenPick(ScreenPickParams { source: id }))
+                })
+                .map_err(|error| format!("{error:#}"));
+            let _ = slint::invoke_from_event_loop(move || {
+                crate::window::with_app(|app| match result {
+                    Ok(picked) if !picked.remembered => {
+                        app.toast(
+                            ToastKind::Warning,
+                            "The desktop won’t remember this choice",
+                            "Its sharing dialog asks again each time the source starts. On \
+                             Hyprland, tick “Allow a restore token” in it.",
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(message) => {
+                        app.toast(ToastKind::Error, "The source wasn’t changed", message);
+                    }
+                });
+            });
+        });
+    if let Err(error) = spawned {
+        app.toast(
+            ToastKind::Error,
+            "Couldn’t open the sharing dialog",
+            error.to_string(),
+        );
+    }
 }

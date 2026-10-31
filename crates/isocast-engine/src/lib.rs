@@ -193,6 +193,17 @@ pub trait Platform: Clone + Send + Sync + 'static {
         std::time::Duration::from_secs(8)
     }
 
+    /// Ask the desktop which screen or window `target` shows, where apps
+    /// can't list them (Linux's sharing dialog), and remember the choice
+    /// for it. Refused where `devices` lists screens and windows.
+    fn pick_screen(&self, _target: ScreenTarget<'_>) -> anyhow::Result<PickedScreen> {
+        anyhow::bail!(
+            "screen_pick: only Linux chooses screens and windows in the desktop's sharing \
+             dialog; here `isocast devices` (method `devices`) lists them: give a display \
+             source's `display` or a window source's `app` from it"
+        )
+    }
+
     /// Ask the OS for screen recording, camera and microphone access where
     /// it hasn't been decided (only `only`, if given), showing its prompts,
     /// and wait a while for the answers. Returns the permissions afterwards.
@@ -728,6 +739,16 @@ pub enum PageLocation<'a> {
     Url(&'a str),
     /// A local HTML file, which may load files next to it.
     File(&'a std::path::Path),
+}
+
+/// What the desktop's sharing dialog chose ([`Platform::pick_screen`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickedScreen {
+    /// The size it shares, in pixels; 0 if it didn't say.
+    pub width: u32,
+    pub height: u32,
+    /// Whether the desktop remembers the choice for later starts.
+    pub remembered: bool,
 }
 
 /// What a screen capture shows.

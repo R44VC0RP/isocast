@@ -840,7 +840,7 @@ impl Controls {
                 }
                 return;
             }
-            Outcome::Nothing => return,
+            Outcome::Nothing | Outcome::Pick => return,
         };
         let drafting = {
             let mut dialog = self.dialog.borrow_mut();

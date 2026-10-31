@@ -1409,11 +1409,11 @@ A whole display (OBS's macOS Screen Capture, display mode).
 
 ## WindowSource
 
-One window (OBS's macOS Screen Capture, window mode), matched by its app and optionally its title; the largest match wins. It keeps its size if the window is resized, scaling the window to fit. On Linux the first start asks for the window in the desktop's sharing dialog instead, and the source reopens that window by its id.
+One window (OBS's macOS Screen Capture, window mode), matched by its app and optionally its title; the largest match wins. It keeps its size if the window is resized, scaling the window to fit. On Linux the desktop's sharing dialog chooses the window instead, when the source first starts or with `isocast screen pick` (method `screen_pick`), and the source reopens it by its id; `app` and `title` only name it there.
 
 | Field | Type | Description |
 |---|---|---|
-| `app` (required) | string | The app's name or bundle id, or part of the name. |
+| `app` (required) | string | The app's name or bundle id, or part of the name. On Linux, a name for the window chosen in the desktop's sharing dialog. |
 | `cursor` | boolean | Show the mouse pointer. Default `true`. |
 | `title` | string (optional) | Part of the window's title. |
 

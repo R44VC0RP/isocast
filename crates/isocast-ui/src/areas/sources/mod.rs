@@ -1491,6 +1491,12 @@ fn show_quick_setting(app: &Rc<App>, window: &AppWindow) {
             "device",
             devices::microphone_options(devices.as_ref(), &text("device")),
         ),
+        SourceKind::Window(_) if devices::PICKED_IN_DIALOG => choice(
+            &area,
+            "Window",
+            "app",
+            devices::picked_window_options(&text("app")),
+        ),
         SourceKind::Window(_) | SourceKind::Application(_) => choice(
             &area,
             "Application",
@@ -1568,9 +1574,15 @@ fn quick_choose(app: &Rc<App>, value: &str) {
     let Some(source) = selected_source(app) else {
         return;
     };
+    if value == devices::PICK {
+        dialogs::pick_screen(app, source.id.clone());
+        return;
+    }
     let now = source_value(app, &source.id);
     let mut patch = json!({ "id": source.id });
     match source.kind.label() {
+        // The dialog chooses the window; its name stays.
+        "window" if devices::PICKED_IN_DIALOG => return,
         "display" => patch["display"] = json!(value),
         "microphone" => patch["device"] = json!(value),
         "camera" => {

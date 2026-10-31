@@ -1498,6 +1498,45 @@ impl<P: Platform> Engine<P> {
         self.inner.levels.lock().clone()
     }
 
+    /// Close source `id` and open it again, as it is in the setup: after
+    /// something outside the setup changed what it opens (a screen or
+    /// window chosen again in the desktop's sharing dialog). Refused while
+    /// a recording uses it, which keeps it as it is. Nothing to do if the
+    /// engine doesn't have it open.
+    pub fn reopen(&self, id: &str) -> Result<(), String> {
+        self.reopen_unpinned(id)
+    }
+
+    /// Whether a recording uses source `id`, keeping it as it is.
+    pub fn recording_uses(&self, id: &str) -> bool {
+        self.inner.state.lock().pins.iter().any(|pin| pin == id)
+    }
+
+    fn reopen_unpinned(&self, id: &str) -> Result<(), String> {
+        let inner = &self.inner;
+        let (old, setup) = {
+            let mut state = inner.state.lock();
+            if state.pins.contains(&id.to_string()) {
+                return Err(format!(
+                    "source {id:?} is being recorded, which keeps it as it is; choose again once \
+                     the recording stops"
+                ));
+            }
+            let old = state.sources.remove(id);
+            if old.is_some() {
+                publish(inner, &mut state);
+            }
+            (old, state.setup.clone())
+        };
+        if old.is_none() {
+            return Ok(());
+        }
+        drop(old);
+        *inner.wanted.lock() = Some(setup);
+        inner.wake.notify_all();
+        Ok(())
+    }
+
     /// Stage `scene` as studio mode's preview (or none).
     pub fn set_preview(&self, scene: Option<String>) {
         let _ = self.set_canvas_preview(CanvasId::Main, scene);
