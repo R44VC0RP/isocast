@@ -1,5 +1,6 @@
-//! A single user-selected portal stream per display source. The portal owns
-//! consent and cursor compositing; discovery never opens a share dialog.
+//! A single user-selected portal stream per display or window source. The
+//! portal owns consent and cursor compositing; discovery never opens a
+//! share dialog.
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -14,6 +15,7 @@ use ashpd::desktop::{
     PersistMode,
     screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType},
 };
+use ashpd::enumflags2::BitFlags;
 use futures_util::StreamExt;
 use isocast_engine::{CaptureFormat, ScreenTarget, VideoSink};
 use isocast_protocol::devices::Display;
@@ -196,41 +198,113 @@ impl Drop for Capture {
     }
 }
 
-/// Saved window selections are kept under `window:` and the source's app
-/// (and title, if it gives one), apart from displays.
+/// Saved window selections are kept under `window:` and the source's id,
+/// apart from displays, so each window source keeps its own window.
 const WINDOW_KEY: &str = "window:";
+/// The longest key a selection is saved under.
+const MAX_KEY: usize = 128;
 
-/// The key a target's portal selection is saved under, and whether the
-/// portal should offer windows instead of monitors.
-fn target_key(target: &ScreenTarget<'_>) -> Result<(String, bool)> {
-    let (key, window) = match *target {
-        ScreenTarget::Display(id) if !id.is_empty() && !id.starts_with(WINDOW_KEY) => {
-            (id.to_owned(), false)
-        }
-        ScreenTarget::Window { app, title } if !app.is_empty() => (
-            match title {
-                Some(title) => format!("{WINDOW_KEY}{app}:{title}"),
-                None => format!("{WINDOW_KEY}{app}"),
-            },
-            true,
-        ),
-        _ => bail!(
-            "screen target: Linux shares one screen or one window chosen in the desktop portal; use a display or window source"
-        ),
-    };
-    ensure!(
-        key.len() <= 128,
-        "screen target: a display id or window app and title must be at most 128 bytes together"
-    );
-    Ok((key, window))
+/// What a target asks the portal to share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Screen,
+    Window,
 }
 
-/// The size the portal last gave `target`, if it was shared before.
+impl Kind {
+    fn source_type(self) -> SourceType {
+        match self {
+            Kind::Screen => SourceType::Monitor,
+            Kind::Window => SourceType::Window,
+        }
+    }
+}
+
+/// The key a target's portal selection is saved under, and what it shares.
+fn target_key(target: &ScreenTarget<'_>) -> Result<(String, Kind)> {
+    match *target {
+        ScreenTarget::Display(id) if !id.is_empty() && !id.starts_with(WINDOW_KEY) => {
+            ensure!(
+                id.len() <= MAX_KEY,
+                "display: a display id must be at most {MAX_KEY} bytes; got {}",
+                id.len()
+            );
+            Ok((id.to_owned(), Kind::Screen))
+        }
+        ScreenTarget::Window { source, .. } if !source.is_empty() => {
+            let key = format!("{WINDOW_KEY}{source}");
+            ensure!(
+                key.len() <= MAX_KEY,
+                "source {source:?}: Linux saves a window source's choice under its id, which \
+                 must be at most {} bytes",
+                MAX_KEY - WINDOW_KEY.len()
+            );
+            Ok((key, Kind::Window))
+        }
+        ScreenTarget::Application { .. } => bail!(
+            "application source: Linux's desktop portal shares one screen or one window, never \
+             every window of an app; use a window source or a display source instead"
+        ),
+        _ => bail!(
+            "screen target: Linux shares one screen or one window chosen in the desktop portal; \
+             give a display source's `display`, or use a window source"
+        ),
+    }
+}
+
+/// Refuse a portal that can't share what the source asks for, instead of
+/// showing a dialog with nothing right to choose.
+fn check_offered(kind: Kind, offered: BitFlags<SourceType>) -> Result<()> {
+    let (wanted, other) = match kind {
+        Kind::Screen => ("screens", "a window source"),
+        Kind::Window => ("single windows", "a display source"),
+    };
+    ensure!(
+        offered.contains(kind.source_type()),
+        "this desktop's screen-sharing portal can't share {wanted} (it offers {offered:?}); use \
+         {other} instead"
+    );
+    Ok(())
+}
+
+/// Refuse a stream of the wrong kind. Some desktops' dialogs offer every
+/// kind whatever the source asks for (xdg-desktop-portal-hyprland shows
+/// Windows, Outputs and Region tabs), and a wrong choice, once saved, would
+/// reopen on every start. A portal that doesn't say what it shared is
+/// trusted.
+fn check_shared(kind: Kind, shared: Option<SourceType>) -> Result<()> {
+    match (kind, shared) {
+        (_, None) | (Kind::Window, Some(SourceType::Window)) => Ok(()),
+        (Kind::Screen, Some(SourceType::Monitor | SourceType::Virtual)) => Ok(()),
+        (Kind::Window, Some(shared)) => bail!(
+            "window source: a {} was chosen in the desktop's sharing dialog, not a window; start \
+             the source again and choose a window, or use a display source to record a screen",
+            if shared == SourceType::Virtual {
+                "region or virtual screen"
+            } else {
+                "screen"
+            }
+        ),
+        (Kind::Screen, Some(_)) => bail!(
+            "display source: a window was chosen in the desktop's sharing dialog, not a screen; \
+             start the source again and choose a screen, or use a window source to record one \
+             window"
+        ),
+    }
+}
+
+/// The size `target` records at, from the size the portal last gave it,
+/// if it was shared before.
 pub fn saved_size(target: &ScreenTarget<'_>) -> Option<(u32, u32)> {
     let (key, _) = target_key(target).ok()?;
     let _lock = SETTINGS_LOCK.lock();
     let saved = load().ok()?.remove(&key)?;
-    (saved.width > 0 && saved.height > 0).then_some((saved.width, saved.height))
+    (saved.width > 0 && saved.height > 0).then(|| {
+        (
+            pipewire_video::even(saved.width),
+            pipewire_video::even(saved.height),
+        )
+    })
 }
 
 pub fn capture(
@@ -244,7 +318,7 @@ pub fn capture(
         !ten_bit,
         "Linux screen capture: 10-bit capture is not supported; select 8-bit ISO recording"
     );
-    let (key, window) = target_key(&target)?;
+    let (key, kind) = target_key(&target)?;
     {
         let mut declined = DECLINED.lock().unwrap_or_else(|error| error.into_inner());
         declined.retain(|_, when| when.elapsed() < Duration::from_secs(600));
@@ -291,14 +365,20 @@ pub fn capture(
                     let available = portal.available_cursor_modes().await?;
                     let requested = if cursor { CursorMode::Embedded } else { CursorMode::Hidden };
                     ensure!(available.contains(requested), "desktop portal cannot provide the requested cursor mode");
+                    check_offered(kind, portal.available_source_types().await?)?;
                     let options = SelectSourcesOptions::default()
-                        .set_sources(Some(if window { SourceType::Window } else { SourceType::Monitor }.into())).set_multiple(false)
+                        .set_sources(Some(kind.source_type().into())).set_multiple(false)
                         .set_cursor_mode(requested).set_persist_mode(PersistMode::ExplicitlyRevoked)
                         .set_restore_token(token.as_deref());
                     portal.select_sources(&session, options).await?.response()?;
                     let response = portal.start(&session, None, Default::default()).await?.response()?;
                     ensure!(response.streams().len() == 1, "desktop portal must return exactly one screen per source");
                     let stream = &response.streams()[0];
+                    if let Err(error) = check_shared(kind, stream.source_type()) {
+                        // Forget the grant, so the next start asks again.
+                        let _ = save(&key, Saved::default());
+                        return Err(error);
+                    }
                     let (width, height) = stream.size().unwrap_or((0, 0));
                     save(&key, Saved { token: response.restore_token().map(str::to_owned), width: width.max(0) as u32, height: height.max(0) as u32 })?;
                     let fd = portal.open_pipe_wire_remote(&session, Default::default()).await?;
@@ -355,43 +435,112 @@ pub fn capture(
 mod tests {
     use super::*;
 
+    fn window(source: &str) -> ScreenTarget<'_> {
+        ScreenTarget::Window {
+            app: "firefox",
+            title: None,
+            source,
+        }
+    }
+
     #[test]
-    fn windows_and_displays_are_saved_apart() {
+    fn each_window_source_keeps_its_own_grant_apart_from_displays() {
         assert_eq!(
             target_key(&ScreenTarget::Display("main")).unwrap(),
-            ("main".into(), false)
+            ("main".into(), Kind::Screen)
         );
         assert_eq!(
-            target_key(&ScreenTarget::Window {
-                app: "firefox",
-                title: None
-            })
-            .unwrap(),
-            ("window:firefox".into(), true)
+            target_key(&window("slides")).unwrap(),
+            ("window:slides".into(), Kind::Window)
         );
-        assert_eq!(
-            target_key(&ScreenTarget::Window {
-                app: "firefox",
-                title: Some("Docs")
-            })
-            .unwrap(),
-            ("window:firefox:Docs".into(), true)
+        // Two sources of one app, matched by the same app, keep two grants.
+        assert_ne!(
+            target_key(&window("slides")).unwrap(),
+            target_key(&window("notes")).unwrap()
         );
         for refused in [
             ScreenTarget::Display(""),
-            ScreenTarget::Display("window:firefox"),
-            ScreenTarget::Window {
-                app: "",
-                title: None,
-            },
-            ScreenTarget::Application {
-                app: "firefox",
-                display: "main",
-            },
+            ScreenTarget::Display("window:slides"),
+            window(""),
         ] {
             assert!(target_key(&refused).is_err());
         }
-        let long = "x".repeat(130);
-        assert!(target_key(&ScreenTarget::Display(&long)).is_err());
+        let longest = "x".repeat(MAX_KEY - WINDOW_KEY.len());
+        assert!(target_key(&window(&longest)).is_ok());
+        let error = target_key(&window(&format!("{longest}x")))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("which must be at most 121 bytes"), "{error}");
+        let display = "x".repeat(MAX_KEY + 1);
+        let error = target_key(&ScreenTarget::Display(&display))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("display: a display id must be at most 128 bytes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn application_sources_suggest_a_window_or_display() {
+        let error = target_key(&ScreenTarget::Application {
+            app: "firefox",
+            display: "main",
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("application source:"), "{error}");
+        assert!(
+            error.contains("use a window source or a display source"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_portal_that_cannot_share_the_kind_is_refused_before_its_dialog() {
+        let monitors = BitFlags::from(SourceType::Monitor);
+        check_offered(Kind::Screen, monitors).unwrap();
+        let error = check_offered(Kind::Window, monitors)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("this desktop's screen-sharing portal can't share single windows"),
+            "{error}"
+        );
+        assert!(error.ends_with("use a display source instead"), "{error}");
+        check_offered(Kind::Window, SourceType::Monitor | SourceType::Window).unwrap();
+    }
+
+    #[test]
+    fn the_wrong_kind_chosen_in_the_dialog_is_refused() {
+        for (kind, shared) in [
+            (Kind::Window, Some(SourceType::Window)),
+            (Kind::Window, None),
+            (Kind::Screen, Some(SourceType::Monitor)),
+            (Kind::Screen, Some(SourceType::Virtual)),
+            (Kind::Screen, None),
+        ] {
+            check_shared(kind, shared).unwrap();
+        }
+        for (kind, shared, start) in [
+            (
+                Kind::Window,
+                SourceType::Monitor,
+                "window source: a screen was chosen",
+            ),
+            (
+                Kind::Window,
+                SourceType::Virtual,
+                "window source: a region or virtual screen was chosen",
+            ),
+            (
+                Kind::Screen,
+                SourceType::Window,
+                "display source: a window was chosen",
+            ),
+        ] {
+            let error = check_shared(kind, Some(shared)).unwrap_err().to_string();
+            assert!(error.starts_with(start), "{error}");
+        }
     }
 }

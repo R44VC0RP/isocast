@@ -100,7 +100,7 @@ pub fn capture_screen(
             };
             (filter, width, height, label)
         }
-        ScreenTarget::Window { app, title } => {
+        ScreenTarget::Window { app, title, .. } => {
             let window = find_window(&content, app, title)?;
             let filter = unsafe {
                 SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)

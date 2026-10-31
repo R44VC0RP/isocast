@@ -1911,7 +1911,7 @@ pub fn probed_formats<P: crate::Platform>(
         let Some(source) = setup.source(id).filter(|_| !formats.contains_key(id)) else {
             continue;
         };
-        if let Ok(Some(probe)) = platform.probe(&source.kind, &setup.canvas)
+        if let Ok(Some(probe)) = platform.probe(id, &source.kind, &setup.canvas)
             && let Some(video) = probe.video
         {
             formats.insert(id.to_string(), (video.width, video.height, video.fps));

@@ -358,7 +358,7 @@ pub(crate) fn screen_target(target: ScreenTarget<'_>) -> Result<CaptureTarget> {
             let displays = displays(&mut Vec::new())?;
             select_display(&displays, name).map(|info| CaptureTarget::Monitor(info.monitor))
         }
-        ScreenTarget::Window { app, title } => {
+        ScreenTarget::Window { app, title, .. } => {
             let windows = windows(&mut Vec::new())?;
             find_window(&windows, app, title).map(|window| CaptureTarget::Window(window.hwnd))
         }
@@ -394,7 +394,7 @@ pub(crate) fn screen_probe(target: ScreenTarget<'_>, fps: u32) -> Result<Probe> 
                 info.display.height,
             )
         }
-        ScreenTarget::Window { app, title } => {
+        ScreenTarget::Window { app, title, .. } => {
             let windows = windows(&mut Vec::new())?;
             let window = find_window(&windows, app, title)?;
             (window.label(), window.width, window.height)

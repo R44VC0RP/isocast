@@ -747,6 +747,7 @@ fn open_native<P: Platform>(
             ScreenTarget::Window {
                 app: &window.app,
                 title: window.title.as_deref(),
+                source: &source.id,
             },
             window.cursor,
         ),

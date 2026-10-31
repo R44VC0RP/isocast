@@ -6078,7 +6078,12 @@ iso = {iso}
                     hardware_encoders: Vec::new(),
                 }
             }
-            fn probe(&self, _source: &SourceKind, _canvas: &Canvas) -> Result<Option<Probe>> {
+            fn probe(
+                &self,
+                _id: &str,
+                _source: &SourceKind,
+                _canvas: &Canvas,
+            ) -> Result<Option<Probe>> {
                 bail!("inert")
             }
             fn volume(&self, _path: &Path) -> Result<Volume> {

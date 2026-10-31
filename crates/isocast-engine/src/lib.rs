@@ -244,10 +244,15 @@ pub trait Platform: Clone + Send + Sync + 'static {
         }
     }
 
-    /// Find the device a source would record, and the format it would
-    /// record in, without opening it. `None` for synthetic sources; an
-    /// error naming the valid devices if none matches.
-    fn probe(&self, source: &SourceKind, canvas: &Canvas) -> anyhow::Result<Option<Probe>>;
+    /// Find the device the source `id` would record, and the format it
+    /// would record in, without opening it. `None` for synthetic sources;
+    /// an error naming the valid devices if none matches.
+    fn probe(
+        &self,
+        id: &str,
+        source: &SourceKind,
+        canvas: &Canvas,
+    ) -> anyhow::Result<Option<Probe>>;
 
     /// Free space and kind of the volume holding `path`.
     fn volume(&self, path: &Path) -> anyhow::Result<Volume>;
@@ -734,6 +739,9 @@ pub enum ScreenTarget<'a> {
     Window {
         app: &'a str,
         title: Option<&'a str>,
+        /// The source's id. Linux saves the window chosen in the desktop's
+        /// sharing dialog under it.
+        source: &'a str,
     },
     /// Every window of an app on a display.
     Application { app: &'a str, display: &'a str },

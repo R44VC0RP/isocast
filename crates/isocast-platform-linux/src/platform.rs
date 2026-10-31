@@ -36,6 +36,20 @@ fn unsupported(what: &str) -> anyhow::Error {
     anyhow::anyhow!("{what}: not supported by the Linux backend")
 }
 
+/// A screen or window as `probe` reports it: the size the portal last
+/// shared it at, if it was shared before.
+fn screen_probe(device: String, target: ScreenTarget<'_>, canvas: &Canvas) -> Probe {
+    Probe {
+        device,
+        video: portal::saved_size(&target).map(|(width, height)| CaptureFormat {
+            width,
+            height,
+            fps: canvas.fps,
+        }),
+        channels: None,
+    }
+}
+
 impl Platform for LinuxPlatform {
     type Frame = Frame;
     type FramePool = FramePool;
@@ -217,7 +231,7 @@ impl Platform for LinuxPlatform {
             },
         ]
     }
-    fn probe(&self, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
+    fn probe(&self, id: &str, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
         match source {
             SourceKind::Camera(source) => camera::probe_capture(
                 &source.device,
@@ -228,35 +242,20 @@ impl Platform for LinuxPlatform {
                 canvas,
             )
             .map(Some),
-            SourceKind::Display(display) => {
-                let saved = portal::displays()?
-                    .into_iter()
-                    .find(|d| d.id == display.display);
-                Ok(Some(Probe {
-                    device: display.display.clone(),
-                    video: saved
-                        .filter(|d| d.width > 0 && d.height > 0)
-                        .map(|d| CaptureFormat {
-                            width: d.width,
-                            height: d.height,
-                            fps: canvas.fps,
-                        }),
-                    channels: None,
-                }))
-            }
-            SourceKind::Window(window) => Ok(Some(Probe {
-                device: window.app.clone(),
-                video: portal::saved_size(&ScreenTarget::Window {
+            SourceKind::Display(display) => Ok(Some(screen_probe(
+                display.display.clone(),
+                ScreenTarget::Display(&display.display),
+                canvas,
+            ))),
+            SourceKind::Window(window) => Ok(Some(screen_probe(
+                window.app.clone(),
+                ScreenTarget::Window {
                     app: &window.app,
                     title: window.title.as_deref(),
-                })
-                .map(|(width, height)| CaptureFormat {
-                    width,
-                    height,
-                    fps: canvas.fps,
-                }),
-                channels: None,
-            })),
+                    source: id,
+                },
+                canvas,
+            ))),
             SourceKind::Microphone(mic) => {
                 let (devices, _, _) = pipewire_audio::devices()?;
                 let device = devices.iter().find(|d| d.id == mic.device || d.name == mic.device)

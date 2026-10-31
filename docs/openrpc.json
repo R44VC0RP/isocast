@@ -22352,7 +22352,7 @@
         "type": "object"
       },
       "WindowSource": {
-        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit.",
+        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit. On Linux the first\nstart asks for the window in the desktop's sharing dialog instead, and\nthe source reopens that window by its id.",
         "properties": {
           "app": {
             "description": "The app's name or bundle id, or part of the name.",
@@ -22377,7 +22377,7 @@
         "type": "object"
       },
       "WindowSourceResult": {
-        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit.",
+        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit. On Linux the first\nstart asks for the window in the desktop's sharing dialog instead, and\nthe source reopens that window by its id.",
         "properties": {
           "app": {
             "description": "The app's name or bundle id, or part of the name.",

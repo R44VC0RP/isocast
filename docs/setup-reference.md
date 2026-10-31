@@ -1409,7 +1409,7 @@ A whole display (OBS's macOS Screen Capture, display mode).
 
 ## WindowSource
 
-One window (OBS's macOS Screen Capture, window mode), matched by its app and optionally its title; the largest match wins. It keeps its size if the window is resized, scaling the window to fit.
+One window (OBS's macOS Screen Capture, window mode), matched by its app and optionally its title; the largest match wins. It keeps its size if the window is resized, scaling the window to fit. On Linux the first start asks for the window in the desktop's sharing dialog instead, and the source reopens that window by its id.
 
 | Field | Type | Description |
 |---|---|---|
