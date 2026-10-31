@@ -57,20 +57,17 @@
 #                                              Never ~/.lima. --dry-run lists
 #                                              what and how much.
 #
-# Hosts (--host, or $ISOCAST_BUILD_HOST): exonbook (M4 Max, 14 cores),
-# m2-a and m2-b (isocast-m2-a/-b, the AWS M2 test Macs, 8 cores), or auto
-# (the default). Auto takes the free host where the build would wait least
-# in the host's queue (below), counting lanes picked in the last 3 min that
-# haven't reached it yet. The lane's own host (the one it last built on in
-# the last 12 h: its warm target is there) wins ties and keeps the lane
-# unless its queue is 2 or more places longer; then the lowest load per
-# core. A host
+# Hosts (--host, or $ISOCAST_BUILD_HOST): m2-b, m2-a, or auto (default).
+# Auto builds on m2-b. It falls back to the hardware-test Mac, m2-a, if
+# m2-b is unavailable or its slots are taken and m2-a has a free slot.
+# If both queues are full, it queues on m2-b. Slots include lanes picked
+# in the last 3 minutes that haven't reached their queue yet. A host
 # is not free while it's unreachable, below the disk minimum, running a
 # hardware-queue job or its receiver (hw-batch: /Volumes/IsocastBuild/
 # .bench.lock held, its running/*.json; on the host ~/isocast-builds/.hw-job
 # or ~/isocast-scratch/.bench.lock), or, from 45 min before the nightly
 # batch ($ISOCAST_HW_NIGHTLY, default 01:30), the target of a queued job.
-# An explicit --host moves the lane there (sticky from then on). The lane's
+# An explicit --host moves the lane there for this command. The lane's
 # host is remembered in $ISOCAST_BUILD_STATE/<lane> (default
 # ~/.cache/isocast-remote-build), so fetch finds the binaries.
 #
@@ -95,8 +92,8 @@
 # second call waits up to 60 min for the lane's lock), and nothing starts
 # below $ISOCAST_BUILD_MIN_FREE_GB (default 40) GB free there (a build
 # refused for space tidies the host once, as above, and retries). Each host
-# runs at most a few commands at once (~/isocast-builds/.slots there, else 3
-# on exonbook's 14 cores and 2 on the M2s' 8); the rest wait in arrival
+# runs two commands at once by default (override in ~/isocast-builds/.slots
+# there); the rest wait in arrival
 # order and print their place ("queued 2nd on m2-a"); a `run` that compiles
 # nothing can skip the queue with ISOCAST_BUILD_QUEUE=0. A queued command whose
 # client is gone (killed, Ctrl-C, SIGTERM) leaves the queue, and a running
@@ -142,10 +139,10 @@ lane_group() {
 }
 
 # How many cargo jobs run at once on this host: ~/isocast-builds/.slots,
-# else 3 on 12 or more cores (exonbook), 2 below (the M2s).
+# else 2 on the M2s.
 host_slots() {
     s="${ISOCAST_BUILD_SLOTS:-$(cat "$root/.slots" 2>/dev/null || true)}"
-    case "$s" in '' | *[!0-9]* | 0) [ "$(sysctl -n hw.ncpu)" -ge 12 ] && s=3 || s=2 ;; esac
+    case "$s" in '' | *[!0-9]* | 0) s=2 ;; esac
     echo "$s"
 }
 
@@ -914,20 +911,20 @@ lane="${ISOCAST_LANE:-$(basename "$here")}"
 case "$lane" in */* | .* | '') echo "remote-build: bad lane name '$lane'" >&2; exit 2 ;; esac
 
 if [ "${1:-}" = --host ]; then
-    [ $# -ge 2 ] || { echo "remote-build: --host takes exonbook, m2-a, m2-b or auto" >&2; exit 2; }
+    [ $# -ge 2 ] || { echo "remote-build: --host takes m2-a, m2-b or auto" >&2; exit 2; }
     host_arg="$2"
     shift 2
 fi
-build_hosts="${ISOCAST_BUILD_HOSTS:-exonbook isocast-m2-a isocast-m2-b}"
+build_hosts="${ISOCAST_BUILD_HOSTS:-isocast-m2-b isocast-m2-a}"
 state_dir="${ISOCAST_BUILD_STATE:-$HOME/.cache/isocast-remote-build}"
 hw_root="${ISOCAST_HW_ROOT:-/Volumes/IsocastBuild}"
 case "$host_arg" in
 m2-a | m2-b) host_arg="isocast-$host_arg" ;;
-auto | exonbook | isocast-m2-a | isocast-m2-b) ;;
+auto | isocast-m2-a | isocast-m2-b) ;;
 *)
     case " $build_hosts " in
     *" $host_arg "*) ;;
-    *) echo "remote-build: unknown host '$host_arg' (exonbook, m2-a, m2-b, auto)" >&2; exit 2 ;;
+    *) echo "remote-build: unknown host '$host_arg' (m2-a, m2-b, auto)" >&2; exit 2 ;;
     esac
     ;;
 esac
@@ -1008,7 +1005,7 @@ for p in sys.argv[1:]:
 }
 
 # Probe every build host into $probes and pick one into $host (auto; see
-# the header). Uses $busy, $sticky and $recent.
+# the header). Uses $busy and $recent.
 pick_host() {
     for h in $build_hosts; do
         case " $busy " in *" $h "*) echo "hw-job" >"$probes/$h"; continue ;; esac
@@ -1027,7 +1024,7 @@ pick_host() {
         for h in $build_hosts; do
             i=$((i + 1))
             printf '%s %s %s\n' "$i" "$h" "$(cat "$probes/$h" 2>/dev/null || echo unreachable)"
-        done | awk -v min="$min_free_gb" -v sticky="$sticky" -v recent="$recent" '
+        done | awk -v min="$min_free_gb" -v recent="$recent" '
             # recent: "host:lane" picks in the last 3 min, which may not
             # have reached the queue on their host yet.
             BEGIN { n = split(recent, r, " "); for (k = 1; k <= n; k++) { split(r[k], hl, ":"); rh[k] = hl[1]; rl[k] = hl[2] } }
@@ -1036,13 +1033,9 @@ pick_host() {
                 for (k = 1; k <= n; k++) if (rh[k] == $2 && index(lanes, "," rl[k] ",") == 0) just++
                 q += just
                 wait = q + 1 - $9; if (wait < 0) wait = 0
-                # The shortest queue, where moving off the lane sticky host
-                # (its warm target; a cold one costs about a build) counts as
-                # one place more; then that host; then the lowest load per
-                # core and slot.
-                eff = wait - ($2 == sticky ? 1 : 0); if (eff < 0) eff = 0
-                score = eff * 1000 + ($2 == sticky ? 0 : 100) + $4 / $3 + q / $9
-                if (best == "" || score < best) { best = score; pick = $2 }
+                # First prefer a free slot, then the build Mac over the test Mac.
+                score = (wait > 0 ? 2 : 0) + ($2 == "isocast-m2-b" ? 0 : 1)
+                if (!pick || score < best) { best = score; pick = $2 }
                 printf "remote-build: %s %d of %d slots taken (%s%s), %s GB free, load %s/%s cores%s\n", $2, q, $9, $11, (just ? ", " just " just picked" : ""), $5, $4, $3, (wait ? ", would queue " wait : "") > "/dev/stderr"
                 next
             }
@@ -1072,8 +1065,6 @@ choose_host() {
         trap 'rmdir "$state_dir/.pick" 2>/dev/null' EXIT
         recent="$(find "$state_dir" -maxdepth 1 -type f -mmin -3 ! -name "$lane" ! -name '*.*' 2>/dev/null |
             while read -r f; do printf '%s:%s ' "$(cat "$f")" "$(basename "$f")"; done)"
-        # A lane idle for 12 h has finished its task: pick afresh.
-        [ -n "$(find "$state_dir/$lane" -mmin -720 2>/dev/null)" ] || sticky=
         busy="$(hw_busy | sort -u | tr '\n' ' ')"
         probes="$(mktemp -d "${TMPDIR:-/tmp}/remote-build.XXXXXX")"
         pick_host
@@ -1104,7 +1095,7 @@ choose_host() {
             exit 69
         fi
         if [ -n "$sticky" ] && [ "$sticky" != "$host" ]; then
-            echo "remote-build: lane $lane moves from $sticky (not free) to $host; its target there starts from that host's warmest lane" >&2
+            echo "remote-build: lane $lane moves from $sticky to $host; its target there starts from that host's warmest lane" >&2
         fi
     fi
     if [ "${dry_run:-}" ]; then
@@ -1121,7 +1112,11 @@ lane_host() {
     if [ "$host_arg" != auto ]; then
         host="$host_arg"
     else
-        host="$(cat "$state_dir/$lane" 2>/dev/null || echo exonbook)"
+        host="$(cat "$state_dir/$lane" 2>/dev/null || echo isocast-m2-b)"
+        case " $build_hosts " in
+        *" $host "*) ;;
+        *) echo "remote-build: remembered host '$host' is no longer configured; rebuild the lane before fetching" >&2; exit 69 ;;
+        esac
     fi
 }
 

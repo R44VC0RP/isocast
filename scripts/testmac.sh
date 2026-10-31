@@ -24,8 +24,7 @@
 #   scripts/testmac.sh vnc                open Screen Sharing to it through
 #                                         an SSH tunnel, logged in
 #
-# The test Mac is $ISOCAST_TESTMAC (an SSH host; default exonbook, an M4
-# Max; isocast-m2-a and isocast-m2-b are M2 Macs on AWS, see docs/archive/2026-10-22/notes.md).
+# The test Mac is $ISOCAST_TESTMAC (an SSH host; default isocast-m2-a).
 # The main checkout goes to ~/dev/isocast there, and a worktree to
 # ~/dev/isocast-worktrees/<name> with its own dev app (ISOCAST_DEV_APP), so
 # agents in different worktrees don't overwrite each other. Scratch output
@@ -34,7 +33,7 @@
 # Dev apps there share one signing identity, so all have its privacy grants.
 set -eu
 
-host="${ISOCAST_TESTMAC:-exonbook}"
+host="${ISOCAST_TESTMAC:-isocast-m2-a}"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 name="$(basename "$here")"
 if [ "$name" = isocast ]; then
@@ -75,7 +74,7 @@ build)
 cargo build --release 2>&1 | tail -3 && scripts/sign-dev.sh target/release/isocastd"
     ;;
 push)
-    # Binaries from Ryan's Mac or exonbook (scripts/remote-build.sh) are the
+    # Binaries from the build Mac (scripts/remote-build.sh) are the
     # same arch and macOS target as a build there.
     bin_dir="${2:-${CARGO_TARGET_DIR:-$here/target}/release}"
     [ -f "$bin_dir/isocastd" ] || { echo "testmac push: no isocastd in $bin_dir" >&2; exit 2; }

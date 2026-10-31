@@ -6,7 +6,7 @@
 # privacy prompts and cua-driver need a helper that already runs there: a
 # launch agent that runs the jobs queued in ~/.config/isocast-testmac/queue.
 # It must be ProcessType Interactive: launchd's default policy throttled its
-# jobs' timers (a 10 ms sleep took 75-85 ms on exonbook), which skewed every
+# jobs' timers (a 10 ms sleep took 75-85 ms), which skewed every
 # benchmark run through it.
 #
 #   testmac-bridge.sh install   copy this script to ~/.config/isocast-testmac

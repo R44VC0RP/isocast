@@ -131,7 +131,7 @@ def prepare(repo, stage):
         require(Path("/Volumes/IsocastBuild").is_mount(), "mount IsocastBuild before building; no internal-disk fallback")
     stage.mkdir(parents=True, exist_ok=True)
     # The shared build disk's 20 GiB floor (agent rules). Elsewhere (a CI
-    # runner after the Rust build, exonbook) the extension needs only MBs.
+    # runner after the Rust build, for example) the extension needs only MBs.
     require(not shared or shutil.disk_usage(stage).free >= 20 * 1024**3,
             "build volume has less than 20 GiB free; free space before building")
     version = next_version(stage)

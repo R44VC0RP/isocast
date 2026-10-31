@@ -71,8 +71,8 @@ The base for bench and smoke: --base-bin-dir DIR or --base-commit REV
 bench.py...) come from --commit (or HEAD); testmac.sh and remote-build.sh
 from this runner.
 
-Other options: --mac m2-a|m2-b|any (default any: the first reachable one
-whose benchmark lock is free; the runner then holds /Volumes/IsocastBuild/
+Other options: --mac m2-a|m2-b|any (default m2-a; any picks the first reachable
+Mac whose benchmark lock is free; for any the runner holds /Volumes/IsocastBuild/
 .bench.lock while it builds and picks), --out DIR (results; default
 /Volumes/IsocastBuild/hw-queue/results/DATE/ID), --timeout MIN, --note TEXT,
 --lane NAME (default this checkout's folder name).
@@ -379,7 +379,7 @@ def build_remote(src, lane, bins, dest, out):
     log(f"building {' '.join(bins)} with scripts/remote-build.sh (lane {lane})")
     # This runner holds the batch lock while it builds, before any Mac is
     # picked; without ISOCAST_HW_BUILDING remote-build.sh would count both
-    # test Macs busy and, with exonbook away, find no host (2026-10-16).
+    # test Macs busy and find no build host.
     env = dict(os.environ, ISOCAST_LANE=lane, ISOCAST_HW_BUILDING="1")
     with open(out / "build.log", "a") as f:
         r = subprocess.run(["sh", "scripts/remote-build.sh", "build", "--to", str(dest), *bins],
@@ -961,8 +961,8 @@ def reap(args):
     """Lane engines left on the test Macs: isocastd processes older than
     --hours that no running job owns (a job owns what started on its Mac
     after it did). Never the Mac's own engine (~/Library/Application
-    Support/Isocast/Isocast Dev.app), an installed app's, or exonbook's
-    (only the M2s are looked at). Lists them; --kill stops them (TERM)."""
+    Support/Isocast/Isocast Dev.app) or an installed app's. Lists them;
+    --kill stops them (TERM)."""
     dirs()
     now = time.time()
     jobs = []
@@ -1060,7 +1060,7 @@ def main():
                             "this worktree as it is, uncommitted merge included (with --bin-dir)")
         s.add_argument("--base-bin-dir")
         s.add_argument("--base-commit")
-        s.add_argument("--mac", choices=("any", *MACS), default="any")
+        s.add_argument("--mac", choices=("any", *MACS), default="m2-a")
         s.add_argument("--out")
         s.add_argument("--timeout", type=int, help="minutes")
         s.add_argument("--note")
