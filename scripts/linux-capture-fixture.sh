@@ -178,8 +178,15 @@ EOF
     elif ! ( wait_for 10 "/dev/video30" test -e /dev/video30 ) 2>/dev/null; then
         camera_skip="v4l2loopback loaded but /dev/video30 did not appear"
     else
-        sudo -n chmod 0666 /dev/video30
         echo "loaded" >"$dir/v4l2loopback"
+        # udev sets the new node's mode (root:video 0660 on Ubuntu; the
+        # runner's user isn't in `video`, #166), sometimes after a chmod. Let
+        # it finish the node's add event first; as root, settle also pings
+        # udevd, so an event it hasn't read yet counts.
+        sudo -n udevadm settle --timeout=10 || true
+        sudo -n chmod 0666 /dev/video30
+        test -w /dev/video30 ||
+            die "/dev/video30 isn't writable by $(id): $(ls -l /dev/video30 2>&1)"
     fi
 
     {
