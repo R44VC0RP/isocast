@@ -146,6 +146,12 @@ impl Gpu {
         })
     }
 
+    /// Wake the completion thread to poll again: a `map_async` asked for
+    /// after its last poll began fires only on the next one.
+    pub(crate) fn nudge(&self) {
+        let _ = self.poll.try_send(());
+    }
+
     pub(crate) fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
     }

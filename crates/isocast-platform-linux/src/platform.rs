@@ -268,13 +268,42 @@ impl Platform for LinuxPlatform {
     fn frame_is_ycbcr(&self, _frame: &Frame) -> bool {
         false
     }
+    /// A memfd surface for a local client, and a GPU texture the frame is
+    /// drawn into first; the engine reads it back into the surface.
     fn shared_surface(
         &self,
-        _gpu: &Gpu,
-        _width: u32,
-        _height: u32,
+        gpu: &Gpu,
+        width: u32,
+        height: u32,
     ) -> Result<(Self::SharedSurface, wgpu::Texture)> {
-        Err(unsupported("shared GPU surfaces"))
+        let surface = isocast_surfaces::Surface::rgba(width, height)?;
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shared frame"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        Ok((surface, texture))
+    }
+    fn shared_surface_in_memory(&self) -> bool {
+        true
+    }
+    fn write_shared_surface(
+        &self,
+        surface: &Self::SharedSurface,
+        rows: &[u8],
+        stride: usize,
+        bgra: bool,
+    ) -> Result<()> {
+        surface.write(rows, stride, bgra)
     }
     fn encode_jpeg(
         &self,

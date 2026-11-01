@@ -16,6 +16,10 @@ anyhow = "1.0.104"
 # Pinned like the engine's: textures are wrapped through wgpu-hal.
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"], optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# memfd, mmap and SCM_RIGHTS (src/linux.rs).
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 isocast-ipc = { path = "../isocast-ipc" }
 windows-core = "0.62.2"
