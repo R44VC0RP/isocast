@@ -26,6 +26,7 @@ use pw::spa::pod::Pod;
 use pw::{spa, stream::StreamState};
 
 use crate::pw_loop::WorkerLoop;
+use crate::usb_setup;
 
 const RATE: u32 = 48_000;
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -164,6 +165,8 @@ struct Device {
     channels: u32,
     rate: u32,
     position: Option<[u32; spa::param::audio::MAX_CHANNELS]>,
+    /// ALSA card number of a hardware node, for usb_setup.
+    alsa_card: Option<u32>,
 }
 
 impl Device {
@@ -186,6 +189,9 @@ impl Device {
         }
         if let Some(rate) = props.get("audio.rate").and_then(|v| v.parse().ok()) {
             self.rate = rate;
+        }
+        if let Some(card) = props.get("api.alsa.pcm.card").and_then(|v| v.parse().ok()) {
+            self.alsa_card = Some(card);
         }
     }
 }
@@ -1393,6 +1399,12 @@ fn capture_worker(
     let pod = Pod::from_bytes(&bytes).context("invalid serialized PipeWire audio format")?;
     let buffers = capture_buffers()?;
     let buffers = Pod::from_bytes(&buffers).context("invalid serialized PipeWire audio buffers")?;
+    // Until the first buffer, not while the webcam's own camera sets up (usb_setup).
+    let mut setup = Some(usb_setup::begin(
+        target
+            .and_then(|node| node.alsa_card)
+            .and_then(usb_setup::sound_card_device),
+    ));
     // No RT_PROCESS: callbacks and the engine sink run on this owned main-loop
     // worker, not PipeWire's realtime thread. This also keeps Rc state confined.
     stream.connect(
@@ -1464,6 +1476,7 @@ fn capture_worker(
                     .send(Ok(count))
                     .context("PipeWire startup caller disconnected")?;
                 *started = true;
+                drop(setup.take());
                 check_realtime = Some(Instant::now());
             } else {
                 ensure!(

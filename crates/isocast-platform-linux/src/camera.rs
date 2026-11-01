@@ -27,6 +27,7 @@ use isocast_protocol::devices::{Camera, CameraKind, FrameRateRange, VideoFormat}
 
 use crate::frames::{Frame, FramePool};
 use crate::system;
+use crate::usb_setup;
 
 #[cfg(not(all(
     target_pointer_width = "64",
@@ -1971,6 +1972,8 @@ pub fn capture(
     let sizes = sizes(fd)?;
     let mode = select(&modes(&sizes), request, canvas)
         .with_context(|| format!("camera {:?} ({})", identity.camera.name, identity.camera.id))?;
+    // Not while the webcam's own microphone sets up (usb_setup).
+    let setup = usb_setup::begin(usb_setup::video_node_device(&identity.node));
     let layout = set_format(fd, &mode)?;
     let fps = set_rate(fd, &mode, request, canvas)?;
     let (width, height) = (layout.width as usize, layout.height as usize);
@@ -1982,6 +1985,7 @@ pub fn capture(
     .context("camera.format: frame size overflow")?;
     let pool = FramePool::new(layout.width, layout.height)?;
     let stream = Stream::start(file, minimum)?;
+    drop(setup);
     let stop = Arc::new(AtomicBool::new(false));
     let (exited, receiver) = mpsc::channel::<()>();
     let mut worker = Worker {
