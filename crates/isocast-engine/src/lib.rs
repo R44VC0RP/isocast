@@ -209,6 +209,11 @@ pub trait Platform: Clone + Send + Sync + 'static {
         )
     }
 
+    /// Forget the windows chosen for window source ids not in `sources` (the
+    /// window sources of all scene collections), so a new source reusing
+    /// such an id starts with none. Linux only.
+    fn keep_windows(&self, _sources: &std::collections::BTreeSet<String>) {}
+
     /// Ask the OS for screen recording, camera and microphone access where
     /// it hasn't been decided (only `only`, if given), showing its prompts,
     /// and wait a while for the answers. Returns the permissions afterwards.

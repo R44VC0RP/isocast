@@ -4,8 +4,10 @@
 //! `apply` like any change, and switching applies the new pair to the live
 //! engine at once.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use isocast_engine::Platform as _;
 use isocast_protocol::api::{ApplyParams, Event, RpcError};
 use isocast_protocol::change::Change;
 use isocast_protocol::library::{
@@ -14,7 +16,7 @@ use isocast_protocol::library::{
     LibrarySwitchParams, LibraryTarget, Profile,
 };
 use isocast_protocol::obs;
-use isocast_protocol::{Issue, SETUP_VERSION, Setup, Transition};
+use isocast_protocol::{Issue, SETUP_VERSION, Setup, SourceKind, Transition};
 
 use crate::store::{self, CurrentFile};
 use crate::{Daemon, State, content_size, devices, now, relative_folder};
@@ -224,6 +226,56 @@ impl Daemon {
             state.file.root().to_path_buf(),
             state.file.current().cloned(),
         )
+    }
+
+    /// Forget the windows chosen for window source ids that no scene
+    /// collection has: neither the live setup nor another collection's file.
+    /// If a collection can't be read, nothing is forgotten.
+    pub(crate) fn forget_unused_windows(&self) {
+        fn window_ids(sources: &[isocast_protocol::Source]) -> impl Iterator<Item = String> + '_ {
+            sources
+                .iter()
+                .filter(|source| matches!(source.kind, SourceKind::Window(_)))
+                .map(|source| source.id.clone())
+        }
+        let (root, current, mut used) = {
+            let state = self.state.read();
+            let used: BTreeSet<String> = state
+                .setup
+                .iter()
+                .flat_map(|setup| window_ids(&setup.sources))
+                .collect();
+            let root = state.file.root().to_path_buf();
+            let current = state.file.current().map(|current| {
+                store::document_path(&root, LibraryKind::Collection, &current.collection)
+            });
+            (root, current, used)
+        };
+        let entries = match std::fs::read_dir(root.join(LibraryKind::Collection.folder())) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                crate::native().keep_windows(&used);
+                return;
+            }
+            Err(_) => return,
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return };
+            let path = entry.path();
+            let collection = path.extension().is_some_and(|e| e == "toml")
+                && path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(library::valid_id);
+            if !collection || current.as_ref() == Some(&path) {
+                continue;
+            }
+            match store::read_document::<Collection>(&path) {
+                Ok(collection) => used.extend(window_ids(&collection.sources)),
+                Err(_) => return,
+            }
+        }
+        crate::native().keep_windows(&used);
     }
 
     pub(crate) fn library(&self) -> Library {
@@ -616,6 +668,9 @@ impl Daemon {
             kept
         };
         self.library_changed(LibraryAction::Deleted, Some(kind), Some(&id));
+        if kind == LibraryKind::Collection {
+            self.forget_unused_windows();
+        }
         let mut change = self.change(vec![LibraryEntry {
             current: false,
             ..entry

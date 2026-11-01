@@ -193,6 +193,12 @@ impl Platform for LinuxPlatform {
     ) -> Result<isocast_engine::PickedScreen> {
         portal::pick(&target, cursor)
     }
+    fn keep_windows(&self, sources: &std::collections::BTreeSet<String>) {
+        if let Err(error) = portal::keep_windows(sources) {
+            isocast_diagnostics::diagnostic!("warn";
+                "could not forget the windows chosen for removed window sources: {error:#}");
+        }
+    }
     fn request_permissions(&self, _only: Option<PermissionKind>) -> Result<PermissionsReport> {
         // Consent belongs to a selection, not a global permission bit:
         // `screen_pick` asks for a source's screen or window.

@@ -2264,6 +2264,7 @@ impl Daemon {
                     message: callers::with_cleared(message, &cleared),
                 })?;
         }
+        let removes_window = removes_a_window(state.setup.as_ref(), plan.setup.as_ref());
         state.setup = plan.setup;
         // A local caller's recordings folder is one set on this machine: a
         // folder root for network callers (decision 26). Nobody else's is.
@@ -2304,6 +2305,9 @@ impl Daemon {
         let vertical_events = sync_canvases(&mut state, &vertical_before, false);
         let revision = state.revision;
         drop(state);
+        if removes_window {
+            self.forget_unused_windows();
+        }
         self.publish(Event::SetupChanged {
             revision,
             by: callers::by(),
@@ -2819,6 +2823,18 @@ impl Daemon {
         let picked = native()
             .pick_screen(target.target(), cursor)
             .map_err(failed)?;
+        // The source was removed while the dialog was open: its choice goes.
+        if matches!(target, PickTarget::Window { .. })
+            && !self
+                .state
+                .read()
+                .setup
+                .as_ref()
+                .and_then(|setup| setup.source(&params.source))
+                .is_some_and(|source| matches!(source.kind, SourceKind::Window(_)))
+        {
+            self.forget_unused_windows();
+        }
         // A recording that started during the dialog keeps its sources; they
         // reopen on the saved choice when it ends, which needs the desktop to
         // keep it. Refuse before switching any.
@@ -6099,6 +6115,20 @@ impl PickTarget {
     }
 }
 
+/// Whether `new` lacks a window source `old` has (removed, renamed or
+/// retyped).
+fn removes_a_window(old: Option<&Setup>, new: Option<&Setup>) -> bool {
+    let is_window =
+        |source: &isocast_protocol::Source| matches!(source.kind, SourceKind::Window(_));
+    old.into_iter()
+        .flat_map(|old| &old.sources)
+        .filter(|source| is_window(source))
+        .any(|source| {
+            !new.and_then(|new| new.source(&source.id))
+                .is_some_and(is_window)
+        })
+}
+
 /// The screen target `screen_pick` chooses for source `id`, which must be
 /// a display or window source of the live `setup`, and whether that source
 /// shows the cursor.
@@ -6176,6 +6206,46 @@ fn to_json(value: impl serde::Serialize) -> Result<serde_json::Value, RpcError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_a_window_on_remove_rename_or_retype() {
+        let setup = |sources: &str| {
+            Setup::from_toml(&format!(
+                r#"
+                version = 1
+                name = "t"
+                canvas = {{ width = 1280, height = 720, fps = 30 }}
+                sources = [{sources}]
+                [recording]
+                folder = "."
+                program = {{ enabled = false, encoder = {{ codec = "h264", quality = 70 }} }}
+                iso = {{ enabled = true, encoder = {{ codec = "h264", quality = 70 }} }}
+                "#
+            ))
+            .unwrap()
+        };
+        let before = setup(
+            r#"{ id = "terminal", kind = "window", app = "foot" },
+               { id = "browser", kind = "window", app = "Chromium" },
+               { id = "slides", kind = "window", app = "Chromium" },
+               { id = "screen", kind = "display", display = "main" }"#,
+        );
+        let after = setup(
+            r#"{ id = "terminal", kind = "window", app = "kitty" },
+               { id = "web", kind = "window", app = "Chromium" },
+               { id = "slides", kind = "display", display = "main" }"#,
+        );
+        assert!(removes_a_window(Some(&before), Some(&after)));
+        assert!(removes_a_window(Some(&before), None));
+        assert!(!removes_a_window(None, Some(&after)));
+        let renamed_app = setup(
+            r#"{ id = "terminal", kind = "window", app = "kitty" },
+               { id = "browser", kind = "window", app = "Firefox" },
+               { id = "slides", kind = "window", app = "Chromium" },
+               { id = "screen", kind = "display", display = "main" }"#,
+        );
+        assert!(!removes_a_window(Some(&before), Some(&renamed_app)));
+    }
 
     #[test]
     fn screen_pick_chooses_for_display_and_window_sources_only() {

@@ -31,6 +31,9 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 /// it is for, and the person answers them one after another.
 static DIALOG: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const MAX_SETTINGS: u64 = 64 * 1024;
+/// The most choices kept: with keys at their longest, they fit in
+/// `MAX_SETTINGS`.
+const MAX_SAVED: usize = 128;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
@@ -68,12 +71,36 @@ fn save(key: &str, saved: Saved) -> Result<()> {
         .lock()
         .map_err(|_| anyhow::anyhow!("capture settings lock poisoned"))?;
     let mut all = load()?;
-    ensure!(
-        all.contains_key(key) || all.len() < 32,
-        "at most 32 saved portal selections are supported"
-    );
+    check_room(&all, key)?;
     all.insert(key.to_owned(), saved);
     write(&all)
+}
+
+/// Refuse a new choice once `MAX_SAVED` are kept.
+fn check_room(all: &BTreeMap<String, Saved>, key: &str) -> Result<()> {
+    ensure!(
+        all.contains_key(key) || all.len() < MAX_SAVED,
+        "Linux keeps at most {MAX_SAVED} screen and window choices, and has that many; remove \
+         window sources you no longer use, in any scene collection"
+    );
+    Ok(())
+}
+
+/// Forget the windows chosen for window sources not in `sources`.
+pub fn keep_windows(sources: &std::collections::BTreeSet<String>) -> Result<()> {
+    let _lock = SETTINGS_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("capture settings lock poisoned"))?;
+    let mut all = load()?;
+    let before = all.len();
+    all.retain(|key, _| {
+        key.strip_prefix(WINDOW_KEY)
+            .is_none_or(|source| sources.contains(source))
+    });
+    if all.len() != before {
+        write(&all)?;
+    }
+    Ok(())
 }
 
 /// Forget the choice saved under `key`, so its source waits for a pick.
@@ -512,6 +539,13 @@ fn open(
                     dialog = tokio::time::timeout(Duration::from_secs(10), DIALOG.lock()) => dialog
                         .context("another source's sharing dialog is open; answer it first")?,
                 };
+                // Refuse a pick with no room before the dialog opens. Saves
+                // happen under `DIALOG`, so this holds until the pick saves;
+                // a start's key is already saved.
+                if let Asked::Pick = asked {
+                    let _lock = SETTINGS_LOCK.lock().map_err(|_| anyhow::anyhow!("capture settings lock poisoned"))?;
+                    check_room(&load()?, &key)?;
+                }
                 let opening = async {
                     let available = portal.available_cursor_modes().await?;
                     let requested = if cursor { CursorMode::Embedded } else { CursorMode::Hidden };
@@ -782,6 +816,34 @@ mod tests {
             error.starts_with("display: a display id must be at most 128 bytes"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_full_store_refuses_new_choices_but_keeps_replacing_old_ones() {
+        let mut all: BTreeMap<String, Saved> = (0..MAX_SAVED)
+            .map(|n| (format!("{WINDOW_KEY}{n}"), Saved::default()))
+            .collect();
+        check_room(&all, "window:0").unwrap();
+        let error = check_room(&all, "window:new").unwrap_err().to_string();
+        assert!(
+            error.starts_with("Linux keeps at most 128 screen and window choices"),
+            "{error}"
+        );
+        all.remove("window:0");
+        check_room(&all, "window:new").unwrap();
+        // At their longest, that many still fit the settings file.
+        let longest: BTreeMap<String, Saved> = (0..MAX_SAVED)
+            .map(|n| {
+                let key = format!("{n:0>width$}", width = MAX_KEY);
+                let saved = Saved {
+                    token: Some("f".repeat(64)),
+                    width: u32::MAX,
+                    height: u32::MAX,
+                };
+                (key, saved)
+            })
+            .collect();
+        assert!(serde_json::to_vec(&longest).unwrap().len() <= MAX_SETTINGS as usize);
     }
 
     #[test]
