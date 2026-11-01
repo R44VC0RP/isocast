@@ -4392,6 +4392,42 @@ def scenario_linux_shared_frames(e, cfg, evidence):
                 f"width {width}: rings {got['rings']}")
     evidence["shared_frames"] = results
 
+    # Hold both slots, so there are no already-submitted frames when the
+    # governor pauses. Releasing them must not produce frames at 0 fps;
+    # the same subscription must deliver later ticks in order on resume.
+    import select
+    with engine_connection(e.sock, 10) as sock, sock.makefile("rb", buffering=0) as reader:
+        def send(value):
+            sock.sendall((json.dumps(value) + "\n").encode())
+
+        def frame():
+            return json.loads(reader.readline())["frame"]
+
+        def release(f):
+            send({"release": {k: f[k] for k in ("generation", "slot")}})
+
+        send({"jsonrpc": "2.0", "id": 1, "method": "shared_frames", "params": {"slots": 2}})
+        require(json.loads(reader.readline())["result"]["transport"] == "memfd-unix", "not a memfd viewer")
+        require(json.loads(reader.readline())["ring"]["slots"] == 2, "expected two shared slots")
+        held = [frame(), frame()]
+        require(held[0]["slot"] != held[1]["slot"], "reused a slot before release")
+        ticks = [f["time"] for f in held]
+        e.rpc("start", {})
+        try:
+            paused = e.rpc("status")["governor"]["preview_fps"] == 0
+            for f in held:
+                release(f)
+            if paused:  # Software GPU protecting the take, as in hosted CI.
+                require(not select.select([sock], [], [], .5)[0], "shared frames continued at 0 fps")
+        finally:
+            e.rpc("stop")
+        for _ in range(8):
+            f = frame()
+            ticks.append(f["time"])
+            release(f)
+        require(all(b > a for a, b in zip(ticks, ticks[1:])), f"shared ticks out of order: {ticks}")
+        evidence["shared_frame_order"] = {"ticks": ticks, "pause_checked": paused}
+
 
 LINUX_CAPTURE_SECONDS = 15
 LINUX_CAPTURE_CANVAS = (480, 270)

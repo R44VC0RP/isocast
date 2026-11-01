@@ -148,15 +148,18 @@ impl SharedControl {
         }
     }
 
-    /// Wait up to `timeout` for a slot to come back.
-    fn wait(&self, timeout: Duration) {
+    /// Wake for viewer changes or when the oldest outstanding readback can
+    /// be published. A later map alone must neither publish nor spin.
+    fn wait(&self, timeout: Duration, front: Option<u64>) {
         let mut pending = self.0.pending.lock();
         let _ = self.0.changed.wait_while_for(
             &mut pending,
             |pending| {
                 pending.released.is_empty()
                     && pending.size.is_none()
-                    && self.0.mapped.lock().is_empty()
+                    && !front.is_some_and(|front| {
+                        self.0.mapped.lock().iter().any(|(seq, _)| *seq == front)
+                    })
                     && !self.0.closed.load(Ordering::SeqCst)
             },
             timeout,
@@ -324,8 +327,9 @@ fn run<P: Platform>(
             return Ok(());
         }
         publish(platform, control, tx, &mut readbacks)?;
+        let front = readbacks.front().map(|read| read.seq);
         if !in_flight.available().map_err(failed)? {
-            control.wait(Duration::from_millis(1));
+            control.wait(Duration::from_millis(1), front);
             continue;
         }
         let pending = control.take();
@@ -362,7 +366,7 @@ fn run<P: Platform>(
             .as_ref()
             .is_some_and(|ring| ring.held.iter().all(|held| *held))
         {
-            control.wait(WAIT);
+            control.wait(WAIT, front);
             continue;
         }
         // Changed filters show at once, even on a still picture.
@@ -379,13 +383,25 @@ fn run<P: Platform>(
         }
         let fps = crate::governor::monitor_fps(control.0.fps.load(Ordering::Relaxed));
         if fps == 0 {
-            control.wait(WAIT);
+            control.wait(WAIT, front);
             continue;
         }
         let size_limit = crate::governor::monitor_size(max_size);
         let Source { slot, grid, drawn } = source(fps, size_limit)?;
         let again = || ring.as_ref().is_none_or(|ring| ring.fresh);
-        let Some((frame, at)) = pace.next(platform, &slot, grid, fps, again) else {
+        // While a map is pending, don't sleep inside Pace on the source:
+        // keep drawing due ticks if the GPU falls behind, otherwise let
+        // the map callback wake this thread immediately for publication.
+        let picked = if front.is_some() {
+            let picked = pace.pick(platform, &slot, grid, fps, || false, Duration::ZERO);
+            if picked.is_none() {
+                control.wait((Duration::from_secs(1) / fps).min(WAIT), front);
+            }
+            picked
+        } else {
+            pace.next(platform, &slot, grid, fps, again)
+        };
+        let Some((frame, at)) = picked else {
             continue;
         };
         // The completion below retains `frame` through the GPU read, so

@@ -522,6 +522,20 @@ impl Pace {
         fps: u32,
         again: impl Fn() -> bool,
     ) -> Option<(P::Frame, Time)> {
+        self.pick(platform, slot, grid, fps, again, WAIT)
+    }
+
+    /// With a zero wait, try the same frame grid without sleeping on the
+    /// source: a shared-memory viewer has a readback to wake for instead.
+    pub(super) fn pick<P: Platform>(
+        &mut self,
+        platform: &P,
+        slot: &FrameSlot<P::Frame>,
+        grid: Option<(Time, u32)>,
+        fps: u32,
+        again: impl Fn() -> bool,
+        wait_limit: Duration,
+    ) -> Option<(P::Frame, Time)> {
         let period = Duration::from_secs(1) / fps;
         // On the canvas's grid at a multiple of the stream's rate, only every
         // n-th tick from its start: then every program and preview stream at
@@ -540,9 +554,12 @@ impl Pace {
         if let Some(wait) = from.as_nanos().checked_sub(platform.now().as_nanos())
             && wait > 0
         {
-            thread::sleep(Duration::from_nanos(wait as u64).min(WAIT));
+            if wait_limit.is_zero() {
+                return None;
+            }
+            thread::sleep(Duration::from_nanos(wait as u64).min(wait_limit));
         }
-        let (picked, again) = match slot.wait_from(from, WAIT) {
+        let (picked, again) = match slot.wait_from(from, wait_limit) {
             Some(frame) => (Some(frame), false),
             None if again() => (slot.newest_timed(), true),
             None => (None, false),
