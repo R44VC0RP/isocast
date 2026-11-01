@@ -130,6 +130,48 @@ pub fn allow_prompt() {
         .clear();
 }
 
+/// Read the ScreenCast capabilities, never create a session or ask for a grant.
+pub fn doctor_check() -> isocast_protocol::api::Check {
+    use isocast_protocol::api::{Check, CheckStatus};
+    let result = std::thread::spawn(|| -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let portal =
+                    Screencast::with_connection(zbus::Connection::session().await?).await?;
+                ensure!(
+                    portal
+                        .available_source_types()
+                        .await?
+                        .contains(SourceType::Monitor),
+                    "portal doesn't offer screen sharing"
+                );
+                Ok(())
+            })
+            .await
+            .context("desktop portal did not respond")?
+        })
+    })
+    .join()
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("portal check stopped")));
+    let fix = result.is_err().then(|| "Install xdg-desktop-portal and your desktop’s screen-sharing backend (e.g. xdg-desktop-portal-gnome or xdg-desktop-portal-kde), then log in to the desktop again.".into());
+    Check {
+        name: "ScreenCast portal".into(),
+        status: if result.is_ok() {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warning
+        },
+        detail: result.err().map_or_else(
+            || "Screen sharing available; the desktop asks when capture starts.".into(),
+            |e| e.to_string(),
+        ),
+        fix,
+    }
+}
+
 pub struct Capture {
     // Stop PipeWire before closing its portal session.
     video: Option<pipewire_video::Capture>,

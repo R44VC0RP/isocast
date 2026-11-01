@@ -1,6 +1,12 @@
 name: Windows
 
 on:
+  workflow_call:
+    inputs:
+      linux_release_commit:
+        description: 'Build and install-test only the Linux packages at this release commit'
+        type: string
+        required: true
   push:
     # ci/<lane>: candidates published by scripts/ci.sh before they merge.
     # main: catches a break that merged anyway, and saves the Rust caches
@@ -12,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-${{ github.ref }}
+  group: windows-${{ inputs.linux_release_commit || github.ref }}
   # Per branch, so lanes never cancel each other; a lane's newer candidate
   # cancels its older run, main's never.
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/ci/') }}
@@ -51,7 +57,17 @@ jobs:
       - id: gate
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 .github/scripts/ci_gate.py windows
+          RELEASE_COMMIT: ${{ inputs.linux_release_commit }}
+        run: |
+          if [[ -n "$RELEASE_COMMIT" ]]; then
+            [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+            for job in portable linux linux_capture win_build win_release win_recovery win_wording win_package; do
+              echo "$job=skip" >> "$GITHUB_OUTPUT"
+            done
+            printf 'linux_app=full\ndeb=full\n' >> "$GITHUB_OUTPUT"
+          else
+            python3 .github/scripts/ci_gate.py windows
+          fi
 
   portable:
     name: portable (${{ matrix.os }})
@@ -127,12 +143,16 @@ jobs:
           spec.loader.exec_module(release)
           mac = {"Isocast-1.2.3-arm64.dmg", "Isocast-1.2.3-arm64.dmg.sha256", "appcast.xml"}
           windows = release.windows_asset_names("1.2.3")
+          linux = {"SHA256SUMS", *release.linux_packages("1.2.3")}
           current = {}
           def read_only(*args, **kwargs):
               assert args[:2] == ("gh", "api") and "--method" not in args
               return json.dumps(current)
           release.command = read_only
           for names, accepted in [(mac, True), (mac | windows, True),
+                                  (mac | linux, True), (mac | linux | windows, True),
+                                  (mac | (linux - {"SHA256SUMS"}), False),
+                                  (mac | {"SHA256SUMS"}, False),
                                   (mac | {"appcast-windows.xml"}, False),
                                   (mac | windows | {"unexpected.exe"}, False)]:
               current = {"tag_name": "v1.2.3", "draft": False,
@@ -442,6 +462,7 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ inputs.linux_release_commit || github.sha }}
           persist-credentials: false
 
       - name: Linux build dependencies
@@ -456,7 +477,7 @@ jobs:
         id: cache
         with:
           key: linux-app-${{ matrix.arch }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ !inputs.linux_release_commit && github.ref == 'refs/heads/main' }}
 
       # Cisco's OpenH264 binary, as install.sh downloads it (pinned version
       # and SHA-256; Isocast compiles none): the encoder and decoder tests
@@ -563,6 +584,7 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ inputs.linux_release_commit || github.sha }}
           persist-credentials: false
 
       - name: Packaging tools
@@ -650,12 +672,13 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ inputs.linux_release_commit || github.sha }}
           persist-credentials: false
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           key: deb-debian12-${{ matrix.arch }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ !inputs.linux_release_commit && github.ref == 'refs/heads/main' }}
 
       - name: Build app, engine and CLI
         # No browser helper: it needs GTK 4.10+ and bookworm has 4.8, so the
@@ -710,6 +733,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ inputs.linux_release_commit || github.sha }}
           persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -748,6 +772,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ inputs.linux_release_commit || github.sha }}
           persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -764,14 +789,18 @@ jobs:
           # Depends only (no Recommends), as on Ubuntu.
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends ./deb/isocast_*.deb
           # The test's own tools (not the package's).
-          apt-get -o Acquire::Retries=3 install -y --no-install-recommends python3
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends python3 sudo
+          useradd -m packager
+          # Only the reinstall and purge assertions use sudo; the desktop user
+          # downloads the codec, snapshots the app and records without it.
+          deb=(deb/isocast_*.deb)
+          test "${#deb[@]}" = 1
+          test -f "${deb[0]}"
+          echo "packager ALL=(root) NOPASSWD: /usr/bin/dpkg -i ${deb[0]}, /usr/bin/apt-get purge -y isocast" > /etc/sudoers.d/isocast-test
+          chmod 440 /etc/sudoers.d/isocast-test
 
       - name: Doctor, OpenH264, record 5 s, purge
-        # The container runs as root, which isocast-openh264-install
-        # refuses unless told that root is the user here.
-        env:
-          ISOCAST_OPENH264_AS_ROOT: 1
-        run: packaging/deb/test-installed.sh packaging/linux/test-setup.toml deb/isocast_*.deb
+        run: runuser -u packager -- packaging/deb/test-installed.sh packaging/linux/test-setup.toml deb/isocast_*.deb
 
   win-build:
     # W.1e: UI/native services compile with explicit platform stubs, not a

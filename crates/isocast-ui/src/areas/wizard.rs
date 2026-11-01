@@ -120,6 +120,9 @@ impl Area for Wizard {
         // The first launch: no setup yet.
         if first {
             self.discover(app, true);
+            if crate::engine::os() == isocast_protocol::hello::EngineOs::Linux {
+                self.linux_first_run(app);
+            }
         }
     }
 
@@ -229,7 +232,121 @@ impl Area for Wizard {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn offer_codec(app: &Rc<App>) {
+    use crate::toasts::Toast;
+    app.show_toast(Toast::new(ToastKind::Info, "Enable software H.264 and live previews?",
+        "OpenH264 Video Codec provided by Cisco Systems, Inc. Download from Cisco for your user; no sudo. Remove later with isocast-openh264-install --remove.")
+        .action2("Not now", |_| {})
+        .action("Download", download_codec));
+}
+
+#[cfg(target_os = "linux")]
+fn download_codec(app: &Rc<App>) {
+    use crate::toasts::Toast;
+    const KEY: &str = "openh264-download";
+    let mut progress = Toast::new(
+        ToastKind::Info,
+        "Downloading OpenH264",
+        "Fetching and verifying Cisco’s codec…",
+    )
+    .key(KEY);
+    progress.persistent = true;
+    app.show_toast(progress);
+    std::thread::spawn(|| {
+        // Never execute a PATH lookup or a command supplied by an engine.
+        let result = std::process::Command::new("/usr/bin/isocast-openh264-install").output();
+        let _ = slint::invoke_from_event_loop(move || {
+            crate::window::with_app(|app| {
+                let notice = match result {
+                    Ok(o) if o.status.success() => {
+                        if let Some(window) = app.window() {
+                            window
+                                .global::<crate::SettingsArea>()
+                                .set_ob_codec_hint("".into());
+                        }
+                        Toast::new(
+                            ToastKind::Success,
+                            "OpenH264 installed",
+                            "Software H.264 and live previews are available.",
+                        )
+                    }
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        let reason = stderr
+                            .lines()
+                            .rev()
+                            .map(str::trim)
+                            .find(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("Installer exited with {}.", o.status));
+                        Toast::new(ToastKind::Error, "OpenH264 wasn’t installed", reason)
+                    }
+                    Err(error) => Toast::new(
+                        ToastKind::Error,
+                        "Couldn’t start isocast-openh264-install",
+                        error.to_string(),
+                    ),
+                };
+                app.show_toast(notice.key(KEY));
+            })
+        });
+    });
+}
+
 impl Wizard {
+    /// Use the engine's doctor report, including for a remote Linux engine.
+    /// Remediation shown by another machine is text, never a command to execute.
+    fn linux_first_run(&self, app: &Rc<App>) {
+        use isocast_protocol::api::{CheckStatus, Doctor, DoctorParams};
+        let params = DoctorParams {
+            setup: None,
+            folder: None,
+        };
+        app.call_as::<Doctor>(Method::Doctor(Box::new(params)), |app, result| {
+            let Some(window) = app.window() else { return };
+            let area = window.global::<crate::SettingsArea>();
+            let Ok(doctor) = result else {
+                area.set_ob_linux_hint(
+                    "Couldn’t check capture support. Run isocast doctor on the engine’s computer."
+                        .into(),
+                );
+                return;
+            };
+            for check in doctor.checks {
+                if check.status == CheckStatus::Ok {
+                    continue;
+                }
+                match (check.name.as_str(), check.fix) {
+                    ("ScreenCast portal", Some(fix)) => {
+                        area.set_ob_linux_hint(format!("No screen picker: {fix}").into())
+                    }
+                    ("codec: OpenH264", Some(fix)) => {
+                        let where_to_run = if crate::engine::is_local() {
+                            "as your user"
+                        } else {
+                            "on the engine’s computer as its desktop user"
+                        };
+                        area.set_ob_codec_hint(
+                            format!(
+                                "For software H.264 and live previews, run {fix} {where_to_run}."
+                            )
+                            .into(),
+                        );
+                        #[cfg(target_os = "linux")]
+                        if crate::engine::is_local()
+                            && fix == "/usr/bin/isocast-openh264-install"
+                            && std::env::var_os(isocast_openh264::ENV).is_none()
+                        {
+                            offer_codec(app);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     /// Whether OBS collections were found (Welcome's Import from OBS… then
     /// opens them instead of a file picker).
     pub fn has_found(&self) -> bool {

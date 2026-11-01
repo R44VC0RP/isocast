@@ -28,6 +28,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
       version: ${{ steps.version.outputs.version }}
       proceed: ${{ steps.version.outputs.proceed }}
     steps:
@@ -62,6 +63,9 @@ jobs:
               sys.exit(f'{tag} does not exist in {repo}; push the tag from the public snapshot checkout first')
           if status != 200:
               sys.exit(f'could not resolve {tag} (HTTP {status})')
+          status, commit = api(f'commits/refs/tags/{tag}')
+          if status != 200 or not re.fullmatch(r'[0-9a-f]{40}', commit['sha']):
+              sys.exit(f'could not resolve the commit at {tag}')
           status, cargo = api(f'contents/Cargo.toml?ref=refs/tags/{tag}')
           if status != 200:
               sys.exit(f'could not read Cargo.toml at {tag} (HTTP {status})')
@@ -96,6 +100,7 @@ jobs:
               if '**Full Changelog**' in text:
                   sys.exit(f'{notes_path}: leave out the **Full Changelog** line; the GitHub release adds it')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'commit={commit["sha"]}\n')
               out.write(f'tag={tag}\nversion={version}\nproceed={str(proceed).lower()}\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               if proceed:
@@ -105,6 +110,16 @@ jobs:
           if not proceed:
               print(f'::notice::{tag} is already published; nothing to build or draft')
           PY
+
+  linux-packages:
+    needs: preflight
+    if: needs.preflight.outputs.proceed == 'true'
+    uses: ./.github/workflows/windows.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      linux_release_commit: ${{ needs.preflight.outputs.commit }}
 
   release:
     needs: preflight
@@ -142,6 +157,7 @@ jobs:
         run: |
           test "$(uname -m)" = arm64
           test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          test "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.commit }}"
           python3 - <<'PY'
           import os, tomllib
           with open('Cargo.toml', 'rb') as file:
@@ -324,3 +340,26 @@ jobs:
           if errors: raise SystemExit('; '.join(errors))
           print('Temporary keychain, API key and certificate removed')
           PY
+
+  attach-linux:
+    needs: [preflight, release, linux-packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: 'isocast-{deb-*,linux-*}'
+          path: ${{ runner.temp }}/isocast-linux-packages
+      - name: Attach Linux packages to the existing unpublished draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          ISOCAST_LINUX_ARTIFACTS: ${{ runner.temp }}/isocast-linux-packages
+        run: python3 scripts/release-finalize.py --attach-linux "$VERSION" --output "$RUNNER_TEMP/staged"

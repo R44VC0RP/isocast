@@ -389,6 +389,9 @@ export global SettingsArea {
     // The first step (permissions) is part of this run: always on macOS;
     // on Windows only when a privacy switch blocks the camera or mic.
     in-out property <bool> ob-access: true;
+    in-out property <string> ob-linux-hint;
+    in-out property <string> ob-codec-hint;
+    in-out property <bool> ob-pipewire-unavailable;
     // A live setup exists: the first run can be closed.
     in-out property <bool> can-close;
     in-out property <bool> creating;

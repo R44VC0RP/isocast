@@ -497,6 +497,15 @@ an Apple ID app-specific password. Rotate it once the hosted run works:
    approval and before any secret is read.
 4. Inspect the job summary's draft link, checksum and results. Download the
    DMG for the final human check. Publication is manual, outside the workflow.
+   The Mac job needs no Linux job. For a combined release, wait for the four
+   `.deb` install tests and approve the separate Linux attachment job. It adds
+   four `.deb`s, two Ubuntu 24.04-based tarballs and `SHA256SUMS` to the same
+   draft. Download those seven together and require six OKs from `sha256sum
+   -c SHA256SUMS` (on macOS, `shasum -a 256 -c SHA256SUMS`). The tarballs are
+   inspected, not clean-installed by the workflow. If attachment fails, leave
+   the draft unpublished and rerun the failed jobs; the Mac draft need not be
+   rebuilt. A Mac-only publication requires **no** Linux assets, never a partial
+   set. Never publish while a job might still upload.
 5. **README once-over, before publishing (every release).** The README is
    the landing page for people looking for an OBS alternative, so when the
    release goes live it must describe exactly what this version ships:
@@ -555,8 +564,8 @@ published release with one that embeds `docs/releases/X.Y.Z.md` from main:
 
 Preflight (no secrets) refuses drafts, unpublished or missing versions,
 missing notes and unexpected/partial asset sets. Assets must be the DMG, its
-`.sha256` and `appcast.xml`, optionally plus the complete four-file Windows
-set described above. After approval the job downloads the assets,
+`.sha256` and `appcast.xml`, optionally plus the complete seven-file Linux
+set and/or the complete four-file Windows set. After approval the job downloads the assets,
 checks their GitHub digests and the DMG's `.sha256`, reads the version, build
 and `SUPublicEDKey` from the DMG's app (mounted read-only), verifies the
 published appcast (one item, the DMG's EdDSA signature against that key,

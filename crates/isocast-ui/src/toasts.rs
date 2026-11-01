@@ -27,6 +27,8 @@ pub struct Toast {
     pub action: Option<(String, ToastAction)>,
     /// Updates the toast with the same key instead of adding one.
     pub key: Option<String>,
+    /// Progress stays until dismissed or replaced by its keyed result.
+    pub persistent: bool,
     /// A small table: label, value, and "", "bad" or "warn".
     pub rows: Vec<(String, String, &'static str)>,
     /// A second action ("Don't show again"): a notice like that stays
@@ -42,6 +44,7 @@ impl Toast {
             message: message.into(),
             action: None,
             key: None,
+            persistent: false,
             rows: Vec::new(),
             action2: None,
         }
@@ -182,7 +185,7 @@ impl ToastList {
         };
         // Warnings and errors get time to be read; a notice with a choice
         // waits for it.
-        let lasts = action2.is_none().then(|| {
+        let lasts = (action2.is_none() && !toast.persistent).then(|| {
             Duration::from_secs(match toast.kind {
                 ToastKind::Warning | ToastKind::Error => 8,
                 _ => 4,

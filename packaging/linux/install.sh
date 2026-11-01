@@ -111,7 +111,7 @@ install_openh264() {
     fi
   done
   tmp=$(mktemp -d)
-  if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$tmp/download.bz2" "$openh264_url"; then
+  if ! curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 --retry 2 -o "$tmp/download.bz2" "$openh264_url"; then
     echo "install.sh: couldn't download $openh264_url; check the connection, then run: $on_cmd" >&2
     return 1
   fi

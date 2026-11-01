@@ -2773,6 +2773,11 @@ impl Settings {
         // Devices
         let devices = s.devices.as_ref();
         area.set_devices_listed(devices.is_some());
+        area.set_ob_pipewire_unavailable(devices.is_some_and(|d| {
+            d.notes
+                .iter()
+                .any(|n| n.starts_with("PipeWire audio devices:"))
+        }));
         if let Some(devices) = devices {
             area.set_displays(model(devices.displays.iter().map(|d| {
                 DeviceChoice {

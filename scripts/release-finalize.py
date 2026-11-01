@@ -17,6 +17,7 @@ import plistlib
 import re
 import runpy
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -523,19 +524,119 @@ def all_releases():
     return [r for page in pages for r in page]
 
 
+def linux_packages(version):
+    """Release asset name -> exact path in this run's Actions artifacts.
+    Avoid '~' in upload names (GitHub normalizes special characters). The
+    package's internal dpkg version still distinguishes distribution builds.
+    """
+    packages = {}
+    for machine, arch in [('x86_64', 'amd64'), ('aarch64', 'arm64')]:
+        tar = f'isocast-linux-{machine}'
+        packages[f'{tar}.tar.gz'] = f'{tar}/{tar}.tar.gz'
+        for distro in ('debian12', 'ubuntu24.04'):
+            packages[f'isocast-{version}-{distro}-{arch}.deb'] = (
+                f'isocast-deb-{distro}-{machine}/isocast_{version}-1~{distro}_{arch}.deb')
+    return packages
+
+
+def stage_linux(output, version):
+    src = os.environ.get('ISOCAST_LINUX_ARTIFACTS')
+    require(src, 'Linux attachment requires ISOCAST_LINUX_ARTIFACTS')
+    packages = linux_packages(version)
+    root = Path(src)
+    actual = {str(p.relative_to(root)) for p in root.rglob('*') if not p.is_dir()}
+    require(actual == set(packages.values()), f'incomplete or unexpected Linux artifacts for {version}: {sorted(actual)}')
+    dest = output / 'linux'
+    dest.mkdir(parents=True, exist_ok=True)
+    files = []
+    for name, source in sorted(packages.items()):
+        path = root / source
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size, f'empty or invalid {path}')
+        files.append(Path(shutil.copyfile(path, dest / name)))
+    sums = dest / 'SHA256SUMS'
+    sums.write_text(''.join(f'{sha(p)}  {p.name}\n' for p in files))
+    return [*files, sums]
+
+
+def find_release(tag):
+    found = [r for r in all_releases() if r['tag_name'] == tag]
+    require(len(found) <= 1, f'multiple releases already use {tag}; inspect them')
+    return found[0] if found else None
+
+
+def linux_body(body, tag):
+    heading = '**Linux install and update**'
+    if heading in body:
+        return body
+    notes = (f'{heading}\n\nChoose the `.deb` for your distro and architecture (`dpkg --print-architecture`) '
+             'and download `SHA256SUMS` beside it. In an empty download folder run '
+             '`sha256sum --ignore-missing -c SHA256SUMS`, check your package says OK, then '
+             '`sudo apt install ./isocast-*.deb`. Debian 12 needs PipeWire ≥1.0.5 from bookworm-backports first; '
+             f'[install instructions](https://github.com/{REPO}/blob/{tag}/packaging/deb/README.Debian). '
+             'To update, finish all outputs, quit the app, stop the idle engine and install the newer package.')
+    before, marker, after = body.partition(CHANGELOG)
+    return (before.rstrip() + '\n\n' + notes + '\n\n' + marker + after).strip()
+
+
+def fingerprints(release, names):
+    return {a['name']: (a['id'], a['size'], a['digest']) for a in release['assets'] if a['name'] in names}
+
+
+def attach_linux(output, version, dry_run=False):
+    require(re.fullmatch(SEMVER, version), 'version must be X.Y.Z')
+    files = stage_linux(output, version)
+    tag = 'v' + version
+    if dry_run:
+        print(f'Would attach to an existing, unpublished {tag}; no Mac or Windows assets are written.')
+        for p in files:
+            print(f'{sha(p)}  {p.name}')
+        return
+    release = find_release(tag)
+    require(release and release['draft'], f'{tag} is missing or published; refusing Linux attachment')
+    rid = release['id']
+    mac = f'Isocast-{version}-arm64.dmg'
+    owned = {p.name for p in files}
+    assets = {a['name']: a for a in release['assets']}
+    adjacent = set(assets) - owned
+    mac_set = {mac, mac + '.sha256', 'appcast.xml'}
+    require(adjacent in (mac_set, mac_set | windows_asset_names(version)),
+            f'{tag} needs a complete Mac draft with no unknown assets; found {sorted(adjacent)}')
+    untouched = fingerprints(release, adjacent)
+    expected = {p.name: (p.stat().st_size, 'sha256:' + sha(p)) for p in files}
+
+    def matches(name, inventory):
+        asset = inventory.get(name, {})
+        return (asset.get('size'), asset.get('digest')) == expected[name]
+
+    def check_draft():
+        current = json.loads(command('gh', 'api', f'repos/{REPO}/releases/{rid}', capture=True))
+        require(current['draft'] and current['tag_name'] == tag, f'{tag} is no longer this draft')
+        inventory = {a['name']: a for a in current['assets']}
+        require(set(inventory) - owned == adjacent and fingerprints(current, adjacent) == untouched,
+                'non-Linux assets changed during attachment; inspect the draft')
+        return current, inventory
+
+    # Only missing/changed Linux files; publish their checksum last. An
+    # interrupted upload is resumable without replacing matching assets.
+    for p in files:
+        if not matches(p.name, assets):
+            check_draft()
+            command('gh', 'release', 'upload', tag, p, '--repo', REPO, '--clobber')
+    current, uploaded = check_draft()
+    require(all(matches(n, uploaded) for n in expected), 'Linux asset digest or size differs; do not publish')
+    body = linux_body(current.get('body') or '', tag)
+    if body != current.get('body'):
+        command('gh', 'api', '--method', 'PATCH', f'repos/{REPO}/releases/{rid}', '-f', 'body=' + body, capture=True)
+    print(f'{tag}: verified all seven Linux assets; other asset IDs, sizes and digests unchanged. Draft only.')
+
+
 def draft_release(output, metadata, files, replace=False, verify_tag=False):
     tag = "v" + metadata["version"]
     notes = release_notes(metadata["version"])
     if verify_tag:
         command("gh", "api", f"repos/{REPO}/git/ref/tags/{tag}", capture=True)
 
-    def lookup():
-        found = [r for r in releases if r["tag_name"] == tag]
-        require(len(found) <= 1, f"multiple releases already use {tag}; inspect them")
-        return found[0] if found else None
-
-    releases = all_releases()  # A failed/auth-denied read aborts; never assume absence.
-    release = lookup()
+    release = find_release(tag)  # A failed read aborts; never assume absence.
     existed = release is not None
     # The Mac-only replacement stage cannot verify or replace Windows assets.
     # In particular, its obsolete-asset cleanup must never delete them. Finish
@@ -544,7 +645,12 @@ def draft_release(output, metadata, files, replace=False, verify_tag=False):
         "windows" in asset["name"].lower() for asset in release["assets"]
     ), "Windows assets are already attached; the Mac-only finalizer refuses this draft. "
        "Finish the Mac draft before attaching verified Windows assets.")
-    body = release_body(notes, tag, releases)
+    require(not release or release['draft'], f'{tag} is published; refusing to change it')
+    linux = {'SHA256SUMS', *linux_packages(metadata['version'])}
+    keep = fingerprints(release, linux) if release else {}
+    body = release_body(notes, tag, all_releases())
+    if set(keep) == linux:
+        body = linux_body(body, tag)
     # Sparkle's feed beside the DMG: what the published release's
     # releases/latest/download/appcast.xml serves to installed apps.
     files = [*files, appcast(output / "notarized", metadata, files[0], notes,
@@ -554,22 +660,20 @@ def draft_release(output, metadata, files, replace=False, verify_tag=False):
         command("gh", "release", "create", tag, *files, "--draft", "--repo", REPO,
                 "--target", "main", "--title", f"Isocast {metadata['version']} Alpha", *flags,
                 "--notes", body)
-        releases = all_releases()
-        release = lookup()
+        release = find_release(tag)
     require(release is not None and release["draft"], f"{tag} is absent or published; refusing to change it")
     if replace and existed:
         # The workflow serializes releases. Never replace a published release,
         # and never create a second draft when a tag already has one.
+        require({a['name'] for a in release['assets']} <= {p.name for p in files} | set(keep),
+                'unknown draft assets; inspect before replacing the Mac files')
         command("gh", "release", "upload", tag, *files, "--repo", REPO, "--clobber")
-        for asset in release["assets"]:
-            if asset["name"] not in {p.name for p in files}:
-                command("gh", "api", "--method", "DELETE", f"repos/{REPO}/releases/assets/{asset['id']}")
         command("gh", "release", "edit", tag, "--repo", REPO, "--draft", "--notes", body)
-        releases = all_releases()
-        release = lookup()
+        release = find_release(tag)
         require(release is not None and release["draft"], "release is no longer a draft")
     assets = {a["name"]: a for a in release["assets"]}
-    require(set(assets) == {p.name for p in files}, "existing draft assets differ; inspect without creating another")
+    require(set(assets) == {p.name for p in files} | set(keep) and fingerprints(release, linux) == keep,
+            'draft assets differ; Linux assets must survive a Mac refresh unchanged')
     for path in files:
         asset = assets[path.name]
         require(asset.get("digest") == "sha256:" + sha(path) and asset["size"] == path.stat().st_size,
@@ -597,8 +701,10 @@ def published_release(tag, names, allow_windows=False):
     allowed = [names]
     if allow_windows:
         allowed.append(names | windows_asset_names(tag.removeprefix("v")))
+        linux = {'SHA256SUMS', *linux_packages(tag.removeprefix('v'))}
+        allowed += [s | linux for s in allowed]
     require(set(assets) in allowed, f"{tag} assets are {sorted(assets)}, expected {sorted(names)} "
-            "(optionally the complete Windows set); refusing")
+            "(optionally the complete Windows and/or Linux sets); refusing")
     return release, assets
 
 
@@ -643,13 +749,13 @@ def refresh_appcast(output, version, dry_run=False):
     names = {dmg_name, dmg_name + ".sha256", "appcast.xml"}
     prefix = f"https://github.com/{REPO}/releases/download/{tag}/"
     release, assets = published_release(tag, names, allow_windows=True)
-    # Preserve and verify the digest of every asset, including Windows. Later
+    # Preserve and verify the digest of every asset, including Linux and Windows. Later
     # reads require this exact set so an addition/removal during refresh fails.
     names = set(assets)
     print(f"{tag}: published {release.get('published_at')}, assets {sorted(names)}; "
           f"notes {RELEASES}/{version}.md ({len(notes)} characters)", flush=True)
     if dry_run:
-        print("Download the assets; check every GitHub digest and the DMG's .sha256. Preserve Windows assets unchanged.")
+        print("Download the assets; check every GitHub digest and the DMG's .sha256. Preserve other platforms' assets unchanged.")
         print("Mount the DMG read-only: its app's version, CFBundleVersion and SUPublicEDKey.")
         print("Verify the published appcast: one item for this DMG, EdDSA signature against SUPublicEDKey, feed signed.")
         print("generate_appcast on the same DMG with the notes embedded (key: SPARKLE_ED_PRIVATE_KEY on stdin only).")
@@ -731,12 +837,18 @@ def main():
                         help=f"only check that {RELEASES}/X.Y.Z.md has this version's release notes")
     parser.add_argument("--refresh-appcast", metavar="X.Y.Z",
                         help="replace a published release's appcast.xml with one embedding its notes (CI)")
+    parser.add_argument('--attach-linux', metavar='X.Y.Z', help='attach verified Linux packages to the existing draft')
     args = parser.parse_args()
     if args.check_notes:
         notes = release_notes(args.check_notes)
         print(f"{RELEASES}/{args.check_notes}.md: {len(notes.splitlines())} lines of release notes")
         return
     require(args.output, "--output is required")
+    if args.attach_linux:
+        require(not any((args.refresh_appcast, args.notarize, args.draft_release, args.verify_runtime,
+                         args.hosted, args.replace_draft, args.verify_tag)), '--attach-linux takes --output and --dry-run only')
+        attach_linux(args.output.resolve(), args.attach_linux, args.dry_run)
+        return
     if args.refresh_appcast:
         require(not (args.notarize or args.draft_release or args.verify_runtime or args.hosted
                      or args.replace_draft or args.verify_tag), "--refresh-appcast takes only --output and --dry-run")
@@ -780,7 +892,8 @@ def main():
                   f"those notes embedded (markdown), URL https://github.com/{REPO}/releases/download/v{metadata['version']}/<DMG>; feed signed.")
             print("Verify appcast build/version/URL/length, the DMG's EdDSA signature against the app's SUPublicEDKey, and the feed signature.")
             print(f"If absent: gh release create v{metadata['version']} <notarized DMG> <checksum> <appcast.xml> --draft --repo {REPO} --target main --notes <notes + Full Changelog link>")
-            print("Verify draft=true and all three uploaded asset SHA-256 digests; save draft.json URL. Never publish.")
+            print('Create/refresh only the three Mac assets. Preserve any existing Linux assets.')
+            print("Verify draft=true and every uploaded asset's SHA-256 digest; save draft.json URL. Never publish.")
         return
     lock = output / ".release-lock"
     lock.mkdir()  # Serialize finalization/draft operations for these artifacts.

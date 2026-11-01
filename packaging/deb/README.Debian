@@ -3,9 +3,10 @@ Isocast for Debian and Ubuntu
 
 H.264 (OpenH264, from Cisco)
 ----------------------------
-Isocast records, streams and previews H.264 with OpenH264, which this
+Isocast's software H.264 encoder and live preview decoder use OpenH264, which this
 package does not contain: Cisco's patent licence covers only Cisco's own
-binary, downloaded by each user. Run, as yourself (not root):
+binary, downloaded by each user. On first launch choose Download to enable
+it or Not now to skip. For CLI-only use or to retry, run as yourself (not root):
 
     isocast-openh264-install
 
@@ -17,8 +18,8 @@ Cisco Systems, Inc.
 
 You control it: `isocast-openh264-install --remove` turns it off (removes
 only Cisco's library) and `isocast-openh264-install` turns it on again.
-Without it, Isocast still starts, but H.264 recording, streaming and live
-previews are off; `isocast doctor` says so and names this command.
+Without it, Isocast still starts; a supported NVIDIA encoder can still
+encode H.264. `isocast doctor` checks the codec and names the repair command.
 
 Removing the package
 --------------------
@@ -37,7 +38,7 @@ Install that first, then the package:
       sudo tee /etc/apt/sources.list.d/backports.list
     sudo apt update
     sudo apt install -t bookworm-backports libpipewire-0.3-0 pipewire wireplumber
-    sudo apt install ./isocast_*_debian12_*.deb
+    sudo apt install ./isocast-*-debian12-$(dpkg --print-architecture).deb
 
 Coming from the tarball
 -----------------------

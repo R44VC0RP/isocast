@@ -71,7 +71,7 @@ impl Platform for LinuxPlatform {
             Err(error) => vec![isocast_engine::MissingCodec {
                 name: "OpenH264".into(),
                 reason: format!(
-                    "{}: H.264 recording, streaming and previews are off",
+                    "{}: software H.264 encoding and live H.264 previews are unavailable",
                     error.reason
                 ),
                 fix: error.fix,
@@ -206,6 +206,7 @@ impl Platform for LinuxPlatform {
         };
         vec![
             crate::media::decoders_check(),
+            portal::doctor_check(),
             server,
             capture,
             Check {

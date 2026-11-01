@@ -354,7 +354,10 @@ component DevicesStep inherits VerticalLayout {
     alignment: start;
     StepTitle {
         title: "Choose your devices";
-        lead: PlatformText.engine-linux ? "What to capture. On Linux the screen itself is picked in the desktop’s screen-sharing dialog when capture starts. You can add more sources, and change these, once you’re in." : "What to capture. You can add more sources, and change these, once you’re in.";
+        lead: PlatformText.engine-linux ? (SettingsArea.ob-linux-hint != "" ? SettingsArea.ob-linux-hint : "Choose your screen in the desktop’s screen-sharing dialog when capture starts.")
+            + (SettingsArea.ob-pipewire-unavailable ? "\nAudio unavailable: install pipewire and wireplumber and run them in your desktop session." : "")
+            + (SettingsArea.ob-codec-hint != "" ? "\n" + SettingsArea.ob-codec-hint : "")
+            : "What to capture. You can add more sources, and change these, once you’re in.";
     }
     HorizontalLayout {
         spacing: Theme.space-5;
