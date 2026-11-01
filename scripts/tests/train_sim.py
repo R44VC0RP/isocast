@@ -8,7 +8,7 @@ cases = ("resume", "single", "guards", "ff", "stale", "bisect", "flake", "two", 
 cases += ("post-push", "later-publication", "closing")
 cases += ("unrelated-red", "newest")
 cases += ("verdicts", "moving-workspace")
-cases += ("skipped-macos", "skipped-batch")
+cases += ("skipped-macos", "skipped-batch", "reserved-lanes")
 if not sys.argv[1:]:
     for case in cases:
         subprocess.run([sys.executable, __file__, case], check=True)
@@ -249,6 +249,17 @@ elif mode == "single":
     assert (root / "events").read_text().count("close 10") == 1
     assert git("rev-list", "--count", "main", cwd=pub) == "2"
     print("PASS: single current green uses 0 candidates, repeat no-op")
+elif mode == "reserved-lanes":
+    before = git("show-ref", cwd=root / "origin")
+    train_name = "batch-10-0123456789ab"
+    git("switch", "-qc", "agent/full")
+    git("branch", "agent/" + train_name)
+    for args in ([], ["--source", "agent/" + train_name], ["--lane", "batch-custom"],
+                 ["--full", "--lane", "full"], ["--lane", train_name]):
+        p = subprocess.run(["scripts/ci.sh", "--no-wait", *args], cwd=priv, env=env, capture_output=True, text=True)
+        assert p.returncode == 2 and "is reserved" in p.stderr, (args, p.stderr)
+    assert not ci.exists() and git("show-ref", cwd=root / "origin") == before
+    print("PASS: reserved explicit and inferred lane names refused before staging or pushing, even with --full")
 elif mode == "skipped-macos":
     (root / "lightweight").touch()
     # Use the real publisher for both policies. An opt-in does not move the PR.

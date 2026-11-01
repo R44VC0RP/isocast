@@ -15,16 +15,49 @@ on:
 
 permissions: {}
 
-# Serialised: every run pushes to the same branch.
-concurrency:
-  group: visual-report
-  cancel-in-progress: false
-
 jobs:
+  render-status:
+    name: report lane render result
+    # Default-branch code; use GitHub's job conclusion, never PR code or artifacts.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.path == '.github/workflows/visual.yml' &&
+      github.event.workflow_run.head_repository.id == github.event.repository.id &&
+      startsWith(github.event.workflow_run.head_branch, 'ci/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      statuses: write
+    steps:
+      - name: Report whether screenshots rendered and compared (not a judge verdict)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          shots=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.name == "screenshots (base vs head)") | .conclusion')
+          case "$shots:$CONCLUSION" in
+            skipped:success) exit 0 ;; # no UI paths changed
+            success:success) state=success; description='Screenshots rendered and compared; no broken renders' ;;
+            failure:*) state=failure; description='Screenshot build, render or comparison failed' ;;
+            *) state=error; description='No completed screenshot comparison' ;;
+          esac
+          gh api "repos/$REPO/statuses/$HEAD_SHA" -f context=isocast/visual-render \
+            -f state="$state" -f description="$description" -f target_url="$RUN_URL" >/dev/null
+
   report:
     name: comment, judge and status
-    # A same-repo lane PR intentionally produced no artifact or visual verdict.
-    if: github.event.workflow_run.event == 'pull_request' && (github.event.workflow_run.head_repository.full_name != github.repository || !startsWith(github.event.workflow_run.head_branch, 'ci/'))
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    # Only image publishers need serialising. Approval must not block render-status.
+    concurrency:
+      group: visual-report
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # OPENCODE_API_KEY lives in this environment, which only main may use,

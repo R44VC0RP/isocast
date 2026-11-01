@@ -23,7 +23,8 @@
 #                tree-only merge; nothing changes here). Without it, a
 #                candidate that doesn't contain main is refused.
 #   --lane NAME  publish to ci/NAME (default: this branch's name after its
-#                last "/", e.g. agent/ci-green -> ci/ci-green)
+#                last "/", e.g. agent/ci-green -> ci/ci-green). Names full
+#                and batch-* are reserved for opt-in and train refs.
 #   --full       opt into early macOS checks on ci/full/NAME, without
 #                replacing a PR head. Use --full again to --wait on that ref.
 #   --workflow NAME
@@ -67,6 +68,7 @@ merge_main=0
 allow_workflows=0
 no_wait=0
 full=0
+train=0
 lane=
 source_ref=
 wait_for=
@@ -78,7 +80,10 @@ while [ $# -gt 0 ]; do
         --worktree) worktree=1; shift ;;
         --merge-main) merge_main=1; shift ;;
         --allow-workflow-changes) allow_workflows=1; shift ;;
-        --lane) [ $# -ge 2 ] || { echo "ci: --lane needs a name" >&2; exit 2; }; lane="$2"; shift 2 ;;
+        --lane|--train-lane)
+            [ -n "${2:-}" ] && [ -z "$lane" ] || { echo "ci: specify one lane name" >&2; exit 2; }
+            [ "$1" != --train-lane ] || train=1
+            lane="$2"; shift 2 ;;
         --workflow) [ $# -ge 2 ] || { echo "ci: --workflow needs a name" >&2; exit 2; }; workflows+=("$2"); shift 2 ;;
         --source) [ $# -ge 2 ] || { echo "ci: --source needs a commit" >&2; exit 2; }; source_ref="$2"; shift 2 ;;
         --include) [ $# -ge 2 ] || { echo "ci: --include needs a commit" >&2; exit 2; }; includes+=("$2"); shift 2 ;;
@@ -115,6 +120,13 @@ case "$lane" in
         echo "ci: --lane must be letters, digits, '.', '_' or '-', not starting or ending with '.' or '-'," \
              "not ending in .lock, and not main: '$lane'" >&2; exit 2 ;;
 esac
+if [ "$train" = 1 ]; then
+    if [ "$full" = 1 ] || ! [[ "$lane" =~ ^batch-[0-9]+-[0-9a-f]{12}$ ]]; then
+        echo "ci: --train-lane requires the train's batch-<PR>-<12 hex> name, without --full" >&2; exit 2
+    fi
+elif [[ "$lane" = full || "$lane" = batch-* ]]; then
+    echo "ci: lane '$lane' is reserved; choose a name other than full or batch-*" >&2; exit 2
+fi
 [ "$full" = 0 ] || lane="full/$lane"
 branch="ci/$lane"
 case "$lane" in

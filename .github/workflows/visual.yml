@@ -7,13 +7,11 @@ name: Visual
 # token and no secrets; visual-report.yml (workflow_run, trusted) reads the
 # artifact, posts the comment, runs the judge and sets the commit status.
 #
-# Except for same-repo lane snapshots, it starts on pull requests and only builds when one of UI_PATHS
+# It starts on every pull request, but only builds when one of UI_PATHS
 # changed; otherwise it uploads an empty manifest. (A `paths:` filter would
 # leave other pull requests without the isocast/visual-check status, which
 # blocks them forever once the check is required.)
 on:
-  push:
-    branches: ['ci/full/*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -41,8 +39,6 @@ env:
 jobs:
   changes:
     name: interface changed?
-    # Skip the whole lane PR (including the dependent Mac job); --full opts in on push.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'ci/')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

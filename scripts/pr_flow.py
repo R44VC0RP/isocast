@@ -552,11 +552,15 @@ def refresh(pr, snapshot=None):
         raise Refused(f"#{pr['number']}'s snapshot {snapshot[:12]} has no provenance trailers; run pr.sh again")
 
 
-def ci_wait(lane, snapshot, lock=()):
+def ci_wait_cmd(lane, snapshot, train):
+    required = [arg for name in WORKFLOWS for arg in ('--workflow', name)]
+    return [os.path.join(SCRIPTS, 'ci.sh'), '--wait', snapshot, '--train-lane' if train else '--lane', lane, *required]
+
+
+def ci_wait(lane, snapshot, lock=(), *, train=False):
     """ci.sh --wait: True when every workflow passed on SNAPSHOT."""
     log(f"merge: waiting for CI on {snapshot[:12]} (ci/{lane})")
-    required = [arg for name in WORKFLOWS for arg in ('--workflow', name)]
-    return subprocess.run([os.path.join(SCRIPTS, "ci.sh"), "--wait", snapshot, "--lane", lane, *required], pass_fds=lock).returncode == 0
+    return subprocess.run(ci_wait_cmd(lane, snapshot, train), pass_fds=lock).returncode == 0
 
 
 # Set by merge-pr --allow-workflow-changes: QA reviewed the PRs' .github/ changes.
@@ -613,7 +617,7 @@ def ci_publish(train, group, notes):
         local = os.path.join(CI_DIR, lane, 'public.git')
         if train['candidate'] not in (None, snapshot) or not os.path.isdir(local) or rev(snapshot, cwd=local) != snapshot:
             raise Refused(f"merge: ci/{lane} moved outside this train; refusing to reuse it")
-    cmd = [os.path.join(SCRIPTS, "ci.sh"), "--source", source, "--merge-main", "--lane", lane,
+    cmd = [os.path.join(SCRIPTS, "ci.sh"), "--source", source, "--merge-main", "--train-lane", lane,
            "--no-wait"] + ALLOW_WORKFLOWS
     for inc in includes:
         cmd += ["--include", inc]
@@ -639,7 +643,7 @@ def ci_publish(train, group, notes):
     # ci.sh saves the exact run IDs once GitHub registers all three workflows.
     # Keep its timeout, evidence collection and SHA/branch checks on resume.
     ids_path = os.path.join(CI_DIR, lane, 'runs', snapshot, 'run-ids.txt')
-    with subprocess.Popen([os.path.join(SCRIPTS, 'ci.sh'), '--wait', snapshot, '--lane', lane],
+    with subprocess.Popen(ci_wait_cmd(lane, snapshot, train=True),
                           pass_fds=train.lock) as waiter:
         while True:
             try:
@@ -761,7 +765,7 @@ def rerun_failed_once(train, snapshot):
         if all(now.get(name, {}).get("status") != "completed" for name, _ in failed):
             break
         time.sleep(10)
-    if not ci_wait(lane, snapshot, train.lock):
+    if not ci_wait(lane, snapshot, train.lock, train=True):
         log(f"merge: {snapshot[:12]} failed again after the re-run")
         return False
     RERUN_NOTES[snapshot] = train['rerun']
