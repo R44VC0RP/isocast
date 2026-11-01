@@ -265,6 +265,17 @@ pub(super) fn write_files<W: FileWriter>(
                 }
                 let end = shared.end();
                 let (result, newest) = match packet {
+                    Packet::AudioGap { from, until } => {
+                        if let Some(c) = &mut closing {
+                            c.file.source_gap(from, until.min(c.at).min(end));
+                        }
+                        let split = next.as_ref().map_or(end, |(at, ..)| end.min(*at));
+                        file.source_gap(from, until.min(split));
+                        if let Some((at, _, new)) = &mut next {
+                            new.source_gap(from.max(*at), until.min(end));
+                        }
+                        (Ok(()), until)
+                    }
                     Packet::Video { frame, pts } => {
                         // A split the session ends before stays pending, and is
                         // cancelled below.
@@ -670,6 +681,16 @@ impl<W: FileWriter> OpenFile<W> {
             track.pad_to(&mut self.writer, i, start, pts - track.timing.wait)?;
         }
         Ok(())
+    }
+
+    /// Count a source-reported interval only if this take retained any of it.
+    fn source_gap(&mut self, from: Time, until: Time) {
+        let epoch = Time::from_nanos(self.plan.epoch.load(Ordering::Acquire));
+        let cuts = self.clock.state.read();
+        let start = cuts.map(from.max(epoch));
+        if self.start.map_or(start, |picture| start.max(picture)) < cuts.map(until) {
+            self.lost_packets += 1;
+        }
     }
 
     /// Append audio to `track`, up to `end`.
@@ -1121,6 +1142,45 @@ mod tests {
     }
 
     const CHUNK: usize = 480;
+
+    #[test]
+    fn explicit_loss_counts_on_sparse_and_mixed_files_only_inside_the_take() {
+        use super::super::engine::Routes;
+        use std::sync::mpsc::sync_channel;
+        let epoch = at(960);
+        let web = Arc::<Routes<()>>::default();
+        let program = Arc::<Routes<()>>::default();
+        let (tx, _rx) = sync_channel(1);
+        web.add_mix_input(tx, 0, true, "web", Arc::default(), program.clone());
+        let mut files = Vec::new();
+        for (kind, route) in [("browser", &web), ("program", &program)] {
+            let mut plan = plan(kind, epoch);
+            let p = Arc::get_mut(&mut plan).unwrap();
+            p.audio.push(kind.into());
+            p.audio_timing.push(AudioTiming {
+                sparse: kind == "browser",
+                ..AudioTiming::new(None)
+            });
+            p.spec.audio.push(crate::AudioTrackSpec { channels: 2 });
+            let (tx, rx) = sync_channel(4);
+            route.add_file_audio(tx, 0, epoch, None, Arc::default(), &plan);
+            let clock = Arc::new(RecordingClock::new(epoch, [30].into_iter()));
+            files.push((OpenFile::new(Count::default(), plan, clock), rx));
+        }
+        web.source_gap(epoch, std::time::Duration::from_millis(10));
+        web.source_gap(at(8160), std::time::Duration::from_millis(150));
+        for (mut file, rx) in files {
+            let end = epoch.add_ticks(6, 30);
+            file.video(Some(&()), epoch, end).unwrap();
+            for packet in rx.try_iter() {
+                let Packet::AudioGap { from, until } = packet else {
+                    panic!("expected a gap")
+                };
+                file.source_gap(from, until);
+            }
+            assert_eq!(file.finish(end, Ok(())).unwrap().audio_dropouts, 1);
+        }
+    }
     const ZERO: Time = Time::from_nanos(0);
 
     fn at(sample: u64) -> Time {

@@ -119,6 +119,7 @@ struct Route<F> {
     /// Counts packets the output missed because it had fallen behind, for
     /// outputs that report them.
     missed: Option<Arc<AtomicU64>>,
+    gap: Option<source::GapCallback>,
     /// A program-mix recording may receive its final audio early at Stop;
     /// live taps must keep their ordinary delivery schedule.
     recording_audio: bool,
@@ -146,10 +147,6 @@ impl<F: Clone> Routes<F> {
         self.add_counted(output.into(), track, from, filter, None, false)
     }
 
-    fn add_recording_audio(&self, output: Output<F>, track: usize, from: Time) -> u64 {
-        self.add_counted(output.into(), track, from, None, None, true)
-    }
-
     /// As [`Routes::add`], counting in `missed` the packets the output
     /// misses because its queue is full.
     fn add_counted(
@@ -161,6 +158,18 @@ impl<F: Clone> Routes<F> {
         missed: Option<Arc<AtomicU64>>,
         recording_audio: bool,
     ) -> u64 {
+        self.add_audio_route(output, track, from, filter, (missed, None), recording_audio)
+    }
+
+    fn add_audio_route(
+        &self,
+        output: super::tap::Output<F>,
+        track: usize,
+        from: Time,
+        filter: Option<AudioStage>,
+        (missed, gap): (Option<Arc<AtomicU64>>, Option<source::GapCallback>),
+        recording_audio: bool,
+    ) -> u64 {
         let key = self.next.fetch_add(1, Ordering::Relaxed);
         self.list.lock().push(Route {
             key,
@@ -169,13 +178,96 @@ impl<F: Clone> Routes<F> {
             from,
             filter,
             missed,
+            gap,
             recording_audio,
         });
         key
     }
 
+    pub(super) fn add_file_audio(
+        &self,
+        output: Output<F>,
+        track: usize,
+        from: Time,
+        filter: Option<AudioStage>,
+        missed: Arc<AtomicU64>,
+        plan: &FilePlan,
+    ) -> u64
+    where
+        F: Send + 'static,
+    {
+        let tx = output.clone();
+        let overflow = missed.clone();
+        let gap: source::GapCallback = Box::new(move |until, duration| {
+            // If even this marker cannot fit, retain its loss via the
+            // writer's existing queue-overflow counter.
+            if matches!(
+                tx.try_send(Packet::AudioGap {
+                    from: until - duration,
+                    until
+                }),
+                Err(TrySendError::Full(_))
+            ) {
+                overflow.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        // Regular queue loss is already detected by continuous tracks.
+        // Sparse tracks count explicit losses, never silence itself.
+        self.add_audio_route(
+            output.into(),
+            track,
+            from,
+            filter,
+            (plan.audio_timing[track].sparse.then_some(missed), Some(gap)),
+            plan.audio[track] == PROGRAM,
+        )
+    }
+
+    /// Loss follows the same active audio routes as the samples, but does
+    /// not depend on silence detection or space in the mixer's input queue.
+    pub(super) fn source_gap(&self, until: Time, duration: Duration) {
+        for route in self.list.read().iter() {
+            if until > route.from
+                && let Some(report) = &route.gap
+            {
+                report(until, duration.min(until.saturating_since(route.from)));
+            }
+        }
+    }
+
     pub(crate) fn remove(&self, key: u64) {
         self.list.lock().retain(|route| route.key != key);
+    }
+
+    pub(super) fn add_mix_input(
+        &self,
+        output: Output<F>,
+        track: usize,
+        mixed: bool,
+        id: &str,
+        control: Arc<SessionControl>,
+        program: Arc<Routes<F>>,
+    ) -> u64
+    where
+        F: Send + 'static,
+    {
+        let gap = mixed.then(|| {
+            let id = id.to_owned();
+            Box::new(move |until, duration| {
+                let settings = control.audio_settings(&id).unwrap_or_default();
+                if !settings.muted && settings.in_program() {
+                    program.source_gap(until, duration);
+                }
+            }) as source::GapCallback
+        });
+        self.add_audio_route(
+            output.into(),
+            track,
+            Time::from_nanos(0),
+            None,
+            (None, gap),
+            false,
+        )
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -2453,6 +2545,22 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
         let stop = Arc::new(AtomicBool::new(false));
         let channels = audio.channels;
         let feed = audio.feed.clone();
+        let _ = feed.gap.set(Box::new({
+            let (routes, id, control) = (
+                Arc::downgrade(&routes),
+                id.to_owned(),
+                inner.control.clone(),
+            );
+            move |until, duration| {
+                let Some(routes) = routes.upgrade() else {
+                    return;
+                };
+                let offset = control
+                    .audio_settings(&id)
+                    .map_or(0, |s| i64::from(s.offset_ms) * 1_000_000);
+                routes.source_gap(Time::from_nanos(until.as_nanos() + offset), duration);
+            }
+        }));
         let last_end = Arc::new(AtomicI64::new(i64::MIN));
         let thread = thread::spawn({
             let fault_inner = inner.clone();
@@ -2712,15 +2820,20 @@ fn ensure_mixer<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
     let Some(mixer) = &mut state.mixer else {
         return;
     };
-    for (track, (id, ..)) in mixer.inputs.iter().enumerate() {
+    for (track, (id, _, mixed)) in mixer.inputs.iter().enumerate() {
         let Some(audio) = state.sources.get(id).and_then(|live| live.audio.as_ref()) else {
             continue;
         };
         let reader = Arc::as_ptr(&audio.routes) as usize;
         if mixer.routed.get(id).map(|(r, _)| *r) != Some(reader) {
-            let key = audio
-                .routes
-                .add(mixer.tx.clone(), track, Time::from_nanos(0), None);
+            let key = audio.routes.add_mix_input(
+                mixer.tx.clone(),
+                track,
+                *mixed,
+                id,
+                inner.control.clone(),
+                inner.program_audio.clone(),
+            );
             mixer.routed.insert(id.clone(), (reader, key));
         }
     }
@@ -4562,21 +4675,20 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             });
         }
         for (track, id) in plan.audio.iter().enumerate() {
-            if id == PROGRAM {
-                let key = inner
-                    .program_audio
-                    .add_recording_audio(tx.clone(), track, epoch);
-                routes.0.push((inner.program_audio.clone(), key));
-                continue;
-            }
-            let Some(reader) = readers.get(id) else {
+            let reader = if id == PROGRAM {
+                Some(&inner.program_audio)
+            } else {
+                readers.get(id)
+            };
+            let Some(reader) = reader else {
                 continue;
             };
             // ISO files that record sources' audio filtered get it through
             // a filter stage of their own, apart from the mix's.
-            let source = setup.source(id).expect("validated");
-            let filter =
-                (iso.filtered && source.audio_filters.iter().any(|f| f.enabled)).then(|| {
+            let filter = setup
+                .source(id)
+                .filter(|source| iso.filtered && source.audio_filters.iter().any(|f| f.enabled))
+                .map(|_| {
                     AudioStage::new(
                         id,
                         formats.audio[id] as usize,
@@ -4585,16 +4697,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 });
             // Sparse sources legitimately leave timestamp gaps, so count their
             // actual queue losses instead of treating every silent gap as loss.
-            let key = reader.add_counted(
-                tx.clone().into(),
-                track,
-                epoch,
-                filter,
-                plan.audio_timing[track]
-                    .sparse
-                    .then(|| missed_audio.clone()),
-                false,
-            );
+            let key =
+                reader.add_file_audio(tx.clone(), track, epoch, filter, missed_audio.clone(), plan);
             routes.0.push((reader.clone(), key));
         }
         receivers.push((rx, missed_audio, wanted));
@@ -5606,7 +5710,7 @@ mod tests {
         let at = Time::from_nanos(0);
         let (recording, recorded) = sync_channel(2);
         let (stream, streamed) = sync_channel(2);
-        routes.add_recording_audio(recording, 0, at);
+        routes.add_counted(recording.into(), 0, at, None, None, true);
         let live = routes.add(stream, 0, at, None);
         let samples: Arc<[f32]> = vec![0.25; 960].into();
 
@@ -5709,6 +5813,7 @@ mod tests {
                 Ok(Packet::Video { pts, .. }) => video.push(pts.as_nanos()),
                 Ok(Packet::Audio { .. }) => audio += 1,
                 Ok(Packet::Skipped { .. }) => panic!("live taps never receive ISO skipped ticks"),
+                Ok(Packet::AudioGap { .. }) => panic!("live taps never receive file loss markers"),
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => panic!("every sender was removed"),
             }

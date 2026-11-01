@@ -494,7 +494,8 @@ fn encode<P: Platform>(
                 track.add(&samples, pts, &mut audio, &mut order)?;
             }
             // Only ISO files get skipped ticks; the program tap never does.
-            Ok(Packet::Skipped { .. }) | Err(RecvTimeoutError::Timeout) => {}
+            Ok(Packet::Skipped { .. } | Packet::AudioGap { .. })
+            | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(Ended::Program),
         }
         while let Some(mut frame) = video.receive()? {

@@ -61,9 +61,62 @@ impl Sub<Duration> for Time {
     }
 }
 
+/// Places page audio on the host clock. Start fresh for each document.
+#[derive(Default)]
+pub struct BrowserAudioStamper {
+    // End of stamped audio and actual arrival of that same chunk.
+    previous: Option<(Time, Time)>,
+}
+
+impl BrowserAudioStamper {
+    /// Returns the first sample's time and any missing duration before it.
+    pub fn stamp(&mut self, frames: usize, now: Time) -> (Time, Option<Duration>) {
+        const RESYNC: Duration = Duration::from_millis(150);
+        let duration =
+            Duration::from_nanos(frames as u64 * 1_000_000_000 / u64::from(crate::SAMPLE_RATE));
+        let made = now - duration;
+        let (mut at, mut gap) = (made, None);
+        if let Some((next, arrived)) = self.previous {
+            // The bridge has samples but no page play/pause signal. If no
+            // callback covered a whole resync window, this can be a paused
+            // page: start a new run. Otherwise a forward snap means the
+            // sample clock lost time while callbacks kept arriving (#203).
+            if made.saturating_since(arrived) < RESYNC {
+                if made.saturating_since(next) >= RESYNC {
+                    gap = Some(made.saturating_since(next));
+                } else if next.saturating_since(made) < RESYNC {
+                    at = next;
+                }
+            }
+        }
+        self.previous = Some((at + duration, now));
+        (at, gap)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_audio_counts_accumulated_lag_but_not_a_page_resuming() {
+        let mut clock = BrowserAudioStamper::default();
+        let ms = |n: i64| Time::from_nanos(n * 1_000_000);
+        let mut gaps = Vec::new();
+        // Ten ms of sound delivered every 17 ms: after 22 intervals the
+        // clock snaps forward by 154 ms, then stitches continuously again.
+        for n in 0..30 {
+            let (at, gap) = clock.stamp(480, ms(100 + n * 17));
+            if let Some(gap) = gap {
+                gaps.push((at, gap));
+            }
+        }
+        assert_eq!(gaps, [(ms(464), Duration::from_millis(154))]);
+        assert_eq!(clock.stamp(480, ms(900)), (ms(890), None));
+        assert_eq!(clock.stamp(480, ms(910)), (ms(900), None));
+        clock = Default::default();
+        assert_eq!(clock.stamp(480, ms(920)), (ms(910), None));
+    }
 
     #[test]
     fn ticks_round_trip_without_drift() {

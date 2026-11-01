@@ -155,7 +155,7 @@ impl<F> Sender<F> {
                 state.audio += 1;
             }
             // Only ISO files get skipped ticks, never a program tap.
-            Packet::Skipped { .. } => return Ok(()),
+            Packet::Skipped { .. } | Packet::AudioGap { .. } => return Ok(()),
         }
         state.packets.push_back(packet);
         drop(state);
@@ -186,7 +186,7 @@ impl<F> Packets<F> {
             match &packet {
                 Packet::Video { .. } => state.video -= 1,
                 Packet::Audio { .. } => state.audio -= 1,
-                Packet::Skipped { .. } => {}
+                Packet::Skipped { .. } | Packet::AudioGap { .. } => {}
             }
             Ok(packet)
         } else if state.senders == 0 {

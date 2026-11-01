@@ -16,7 +16,12 @@ use webkit6::prelude::*;
 
 /// The script that routes a page's sound to `isocastAudio` (shared with
 /// the macOS browser source).
-const AUDIO_SCRIPT: &str = include_str!("../../isocast-platform-macos/src/browser/audio.js");
+// An empty audio record opens each document's timeline, before any samples
+// from it (including same-URL reloads and script-initiated navigation).
+const AUDIO_SCRIPT: &str = concat!(
+    "window.webkit.messageHandlers.isocastAudio.postMessage('48000:');\n",
+    include_str!("../../isocast-platform-macos/src/browser/audio.js")
+);
 const AUDIO_HANDLER: &str = "isocastAudio";
 /// How long the private display may take to start.
 const DISPLAY_START: Duration = Duration::from_secs(10);

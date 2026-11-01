@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_engine::{
-    AudioSink, BrowserControl, BrowserPage, CaptureFormat, FramePool as _, PageLocation,
-    SAMPLE_RATE, Time, VideoSink,
+    AudioSink, BrowserAudioStamper as Stamper, BrowserControl, BrowserPage, CaptureFormat,
+    FramePool as _, PageLocation, SAMPLE_RATE, VideoSink,
 };
 
 use crate::frames::{Frame, FramePool};
@@ -47,9 +47,6 @@ const STABLE: Duration = Duration::from_secs(60);
 /// The helper and its WebKit processes together (resident memory); more,
 /// and the page is restarted. `ISOCAST_BROWSER_MEMORY_MB` overrides it.
 const MEMORY_CAP_MB: u64 = 1536;
-/// How far the page's audio may drift from the host clock before its
-/// timestamps are reset to it (as on macOS).
-const AUDIO_RESYNC: Duration = Duration::from_millis(150);
 const PACKAGES: &str = "install libwebkitgtk-6.0-4 and libgtk-4-bin (Debian/Ubuntu), \
      webkitgtk6.0 and gtk4 (Fedora) or webkitgtk-6.0 and gtk4 (Arch)";
 
@@ -157,26 +154,6 @@ pub(crate) mod protocol {
                 String::from_utf8_lossy(tag)
             ),
         }))
-    }
-}
-
-/// When the first of `frames` frames that have just arrived was made.
-#[derive(Default)]
-struct Stamper {
-    next: Option<Time>,
-}
-
-impl Stamper {
-    fn stamp(&mut self, frames: usize, now: Time) -> Time {
-        let made =
-            now - Duration::from_nanos(frames as u64 * 1_000_000_000 / u64::from(SAMPLE_RATE));
-        let limit = AUDIO_RESYNC.as_nanos() as i64;
-        let at = match self.next {
-            Some(next) if (next.as_nanos() - made.as_nanos()).abs() < limit => next,
-            _ => made,
-        };
-        self.next = Some(at.add_ticks(frames as u64, SAMPLE_RATE));
-        at
     }
 }
 
@@ -814,7 +791,6 @@ fn run(
     sink: VideoSink<Frame>,
     audio: Option<AudioSink>,
 ) {
-    let audio = audio.map(|sink| (sink, Mutex::new((Stamper::default(), Resampler::default()))));
     let mut failures = 0usize;
     loop {
         let reader = session
@@ -938,8 +914,10 @@ fn read(
     shared: &Shared,
     pool: &mut FramePool,
     sink: &VideoSink<Frame>,
-    audio: Option<&(AudioSink, Mutex<(Stamper, Resampler)>)>,
+    audio: Option<&AudioSink>,
 ) -> Result<()> {
+    // Each new reader is a new helper process, including watchdog restarts.
+    let (mut stamper, mut resampler) = (Stamper::default(), Resampler::default());
     let mut discard = Vec::new();
     loop {
         let Some(header) = protocol::read_header(&mut reader)? else {
@@ -987,7 +965,12 @@ fn read(
                     .read_exact(&mut bytes)
                     .context("reading browser audio")?;
                 let now = system::now();
-                if let Some((sink, state)) = audio {
+                if let Some(sink) = audio {
+                    if len == 0 {
+                        // Document-start marker, ordered with the page's audio.
+                        (stamper, resampler) = Default::default();
+                        continue;
+                    }
                     let samples: Vec<f32> = bytes
                         .as_chunks::<4>()
                         .0
@@ -995,11 +978,13 @@ fn read(
                         .map(|b| f32::from_le_bytes(*b))
                         .map(|s| if s.is_finite() { s } else { 0.0 })
                         .collect();
-                    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-                    let samples = state.1.run(rate, samples);
+                    let samples = resampler.run(rate, samples);
                     let frames = samples.len() / 2;
                     if frames > 0 {
-                        let at = state.0.stamp(frames, now);
+                        let (at, gap) = stamper.stamp(frames, now);
+                        if let Some(gap) = gap {
+                            (sink.report_gap)(at, gap);
+                        }
                         (sink.samples)(&samples, at);
                     }
                 }

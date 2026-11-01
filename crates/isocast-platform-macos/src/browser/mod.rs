@@ -19,8 +19,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use block2::RcBlock;
 use isocast_engine::{
-    AudioSink, BrowserControl, BrowserPage, CaptureFormat, FramePool as _, PageLocation,
-    SAMPLE_RATE, Time, VideoSink,
+    AudioSink, BrowserAudioStamper as Stamper, BrowserControl, BrowserPage, CaptureFormat,
+    FramePool as _, PageLocation, SAMPLE_RATE, VideoSink,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -49,17 +49,16 @@ use crate::{host_time, on_main_thread};
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The script that captures a page's sound.
-const AUDIO_SCRIPT: &str = include_str!("audio.js");
+const AUDIO_SCRIPT: &str = concat!(
+    "window.webkit.messageHandlers.isocastAudio.postMessage('48000:');\n",
+    include_str!("audio.js")
+);
 
 /// The message handler `audio.js` posts to.
 const AUDIO_HANDLER: &str = "isocastAudio";
 
 const AUDIO_RATES: std::ops::RangeInclusive<u32> = 8_000..=192_000;
 const FRAME_BYTES: usize = 2 * size_of::<f32>();
-
-/// How far the page's audio may drift from the host clock before its
-/// timestamps are reset to it.
-const AUDIO_RESYNC: Duration = Duration::from_millis(150);
 
 static NEXT_PAGE: AtomicU64 = AtomicU64::new(1);
 
@@ -492,10 +491,20 @@ define_class!(
                 .and_then(|text| decode(&text));
             match decoded {
                 Ok((rate, samples)) => {
+                    // The document-start script sends an empty first record.
+                    // Ordered with its audio, even on page-initiated reload.
+                    if samples.is_empty() {
+                        self.ivars().stamper.replace(Default::default());
+                        self.ivars().resampler.replace(Default::default());
+                        return;
+                    }
                     let samples = self.ivars().resampler.borrow_mut().run(rate, samples);
                     let frames = samples.len() / 2;
                     if frames > 0 {
-                        let at = self.ivars().stamper.borrow_mut().stamp(frames, now);
+                        let (at, gap) = self.ivars().stamper.borrow_mut().stamp(frames, now);
+                        if let Some(gap) = gap {
+                            (self.ivars().sink.report_gap)(at, gap);
+                        }
                         (self.ivars().sink.samples)(&samples, at);
                     }
                 }
@@ -553,29 +562,6 @@ fn decode(message: &NSString) -> Result<(u32, Vec<f32>)> {
         .map(|b| f32::from_le_bytes(*b))
         .collect();
     Ok((rate, samples))
-}
-
-/// Timestamps for audio that arrives in uneven bursts: each chunk follows
-/// the last unless that has drifted from when it arrived by more than
-/// [`AUDIO_RESYNC`].
-#[derive(Default)]
-struct Stamper {
-    next: Option<Time>,
-}
-
-impl Stamper {
-    /// When the first of `frames` frames that have just arrived was made.
-    fn stamp(&mut self, frames: usize, now: Time) -> Time {
-        let made =
-            now - Duration::from_nanos(frames as u64 * 1_000_000_000 / u64::from(SAMPLE_RATE));
-        let limit = AUDIO_RESYNC.as_nanos() as i64;
-        let at = match self.next {
-            Some(next) if (next.as_nanos() - made.as_nanos()).abs() < limit => next,
-            _ => made,
-        };
-        self.next = Some(at.add_ticks(frames as u64, SAMPLE_RATE));
-        at
-    }
 }
 
 /// Linear resampling of interleaved stereo to [`SAMPLE_RATE`], for pages
@@ -658,14 +644,14 @@ mod tests {
 
     #[test]
     fn bursts_are_stamped_back_to_back_until_they_drift() {
-        let ms = |n: i64| Time::from_nanos(n * 1_000_000);
+        let ms = |n: i64| isocast_engine::Time::from_nanos(n * 1_000_000);
         let mut stamper = Stamper::default();
         // 480 frames (10 ms) arriving at 100 ms: made at 90 ms.
-        assert_eq!(stamper.stamp(480, ms(100)), ms(90));
+        assert_eq!(stamper.stamp(480, ms(100)), (ms(90), None));
         // The next arrives 30 ms late but follows on.
-        assert_eq!(stamper.stamp(480, ms(140)), ms(100));
+        assert_eq!(stamper.stamp(480, ms(140)), (ms(100), None));
         // One 500 ms later starts again from when it arrived.
-        assert_eq!(stamper.stamp(480, ms(640)), ms(630));
+        assert_eq!(stamper.stamp(480, ms(640)), (ms(630), None));
     }
 
     #[test]

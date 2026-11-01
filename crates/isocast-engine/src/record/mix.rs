@@ -385,7 +385,7 @@ impl<F: Clone> Mixer<F> {
                         input.push(&samples, pts.ticks_since(epoch, SAMPLE_RATE));
                     }
                 }
-                Ok(Packet::Video { .. } | Packet::Skipped { .. })
+                Ok(Packet::Video { .. } | Packet::Skipped { .. } | Packet::AudioGap { .. })
                 | Err(RecvTimeoutError::Timeout) => {}
                 // Every source has stopped: mix silence until the end.
                 Err(RecvTimeoutError::Disconnected) => {
@@ -481,7 +481,7 @@ impl<F: Clone> Mixer<F> {
                         input.push(&samples, pts.ticks_since(epoch, SAMPLE_RATE));
                     }
                 }
-                Ok(Packet::Video { .. } | Packet::Skipped { .. })
+                Ok(Packet::Video { .. } | Packet::Skipped { .. } | Packet::AudioGap { .. })
                 | Err(RecvTimeoutError::Timeout) => {}
                 // Every source has stopped: mix silence until told to stop.
                 Err(RecvTimeoutError::Disconnected) => {

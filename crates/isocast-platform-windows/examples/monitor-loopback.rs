@@ -29,6 +29,7 @@ fn main() -> anyhow::Result<()> {
     let (capture, channels) = capture_loopback(
         &args[1],
         AudioSink {
+            report_gap: Box::new(|_, _| {}),
             samples: Box::new(move |packet, _| {
                 let mut samples = output.lock().unwrap();
                 if samples.len() + packet.len() <= limit {

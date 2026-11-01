@@ -149,6 +149,9 @@ elif sys.platform.startswith("linux"):
         "linux_shared_frames",
     )
 
+if sys.platform in ("darwin", "linux"):
+    SCENARIOS += ("browser_audio_gap",)
+
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -4712,6 +4715,53 @@ draw();
 </script></body></html>""")
 
 
+def scenario_browser_audio_gap(e, cfg, evidence):
+    """Exercise the real page bridge and stampers without a production fault switch."""
+    if LINUX and not (e.binary.parent / "isocast-browser").is_file():
+        raise Skip("needs the Linux browser helper next to isocastd")
+    page = e.root / "gap.html"
+
+    def render(loss):
+        # Mimic the lost Web Audio quanta in #203: callbacks keep arriving,
+        # but 21 successive buffers each lack 10 ms of samples. This leaves
+        # 60 ms above one resync and 90 ms below two, despite arrival jitter.
+        page.write_text("""<body style='background:green'><script>
+let last = Math.round(performance.now() * 48), tick = 0;
+setInterval(() => {
+  const end = Math.round(performance.now() * 48);
+  const frames = Math.min(end-last, 48000) - (tick >= 10 && tick < 31 ? LOSS : 0);
+  last = end; tick++;
+  if (frames > 0) webkit.messageHandlers.isocastAudio.postMessage('48000:' + btoa(String.fromCharCode(0).repeat(8*frames)));
+}, 40);
+</script>""".replace("LOSS", str(loss)))
+
+    render(0)
+    cfg["canvas"].update(width=320, height=180, fps=30)
+    cfg["sources"] = [{"id": "web", "kind": "browser", "file": str(page), "width": 320,
+                       "height": 180, "fps": 30, "control_audio": True}]
+    cfg["scenes"][0]["items"] = [item("web", (0, 0, 1, 1), (320, 180))]
+    cfg["recording"]["program"]["audio"] = ["web"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["web"], audio=["web"])
+    e.apply(cfg)
+    started = e.rpc("start", {})
+    time.sleep(1)
+    render(480)
+    e.rpc("refresh_browser", {"source": "web"})
+    def losses():
+        live = e.rpc("status").get("live") or {}
+        counts = {f["source"]: f["audio_dropouts"] for f in live.get("files", [])}
+        return counts if counts == {"program": 1, "web": 1} else None
+    evidence["live_dropouts"] = until(losses, 10, "one reported gap on the browser ISO and program")
+    stop = e.rpc("stop")
+    stopped = {f["source"]: f["audio_dropouts"] for f in stop["files"]}
+    require(stopped == evidence["live_dropouts"], f"stop disagrees with live dropouts: {stopped}")
+    evidence["stopped_dropouts"] = stopped
+    manifest = read_json(started["manifest"])
+    counts = {f["source"]: f["audio_dropouts"] for f in manifest["files"]}
+    require(counts == evidence["live_dropouts"], f"manifest disagrees with live dropouts: {counts}")
+    evidence["manifest_dropouts"] = counts
+
+
 def scenario_linux_browser(e, cfg, evidence):
     """A browser source on Linux (the isocast-browser helper next to the
     daemon: WebKitGTK 6 on a private GTK Broadway display) over a green
@@ -4778,6 +4828,8 @@ def scenario_linux_browser(e, cfg, evidence):
             time.sleep(0.25)
     evidence["start_refusals"] = refused
     evidence["files"] = check_take(path, manifest, seconds, expected_sources=["program", "web"], evidence=evidence)
+    web = next(f for f in manifest["files"] if f["source"] == "web")
+    require(web["audio_dropouts"] == 0, f"continuous browser audio reported {web['audio_dropouts']} dropouts")
     evidence["writer_drops"] = {f["source"]: f["dropped_frames"] for f in manifest["files"]}
     lost = {k: v for k, v in evidence["writer_drops"].items() if v}
     require(not lost, f"writer drops (zero required, also under --hosted): {lost}")

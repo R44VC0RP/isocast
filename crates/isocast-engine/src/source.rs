@@ -358,7 +358,10 @@ pub(crate) struct AudioFeed {
     /// The source has delivered audio (or is ready to).
     pub(crate) started: AtomicBool,
     pub(crate) stopped: Mutex<Option<String>>,
+    pub(crate) gap: OnceLock<GapCallback>,
 }
+
+pub(crate) type GapCallback = Box<dyn Fn(Time, Duration) + Send + Sync>;
 
 /// Interleaved audio chunks and when their first sample was captured.
 pub(crate) type AudioChunks = Receiver<(Arc<[f32]>, Time)>;
@@ -777,7 +780,7 @@ fn open_native<P: Platform>(
             Ok(captured_video(slot, capture, format, camera))
         }
         SourceKind::Microphone(microphone) => {
-            let (feed, sink, chunks) = audio_feed();
+            let (feed, sink, chunks) = audio_feed(id);
             let (capture, channels) = platform.capture_microphone(
                 &microphone.device,
                 microphone.channels.as_deref(),
@@ -786,14 +789,14 @@ fn open_native<P: Platform>(
             Ok(captured_audio(feed, chunks, capture, channels))
         }
         SourceKind::SystemAudio(system) => {
-            let (feed, sink, chunks) = audio_feed();
+            let (feed, sink, chunks) = audio_feed(id);
             // What monitoring plays would otherwise be recorded again.
             let (capture, channels) =
                 platform.capture_system_audio(&system.exclude, sink, setup.monitors())?;
             Ok(captured_audio(feed, chunks, capture, channels))
         }
         SourceKind::ApplicationAudio(application) => {
-            let (feed, sink, chunks) = audio_feed();
+            let (feed, sink, chunks) = audio_feed(id);
             let (capture, channels) = platform.capture_application_audio(&application.app, sink)?;
             Ok(captured_audio(feed, chunks, capture, channels))
         }
@@ -860,7 +863,7 @@ fn open_native<P: Platform>(
             let slot = Arc::new(FrameSlot::new(timeline.clone()));
             let (audio, audio_sink) = match browser.control_audio {
                 true => {
-                    let (feed, sink, chunks) = audio_feed();
+                    let (feed, sink, chunks) = audio_feed(id);
                     // A page may stay silent; sessions needn't wait for it.
                     feed.started.store(true, Ordering::SeqCst);
                     let audio = Audio {
@@ -1022,10 +1025,21 @@ fn slot_sink<F: Clone + Send + 'static>(slot: &Arc<FrameSlot<F>>) -> VideoSink<F
 }
 
 /// A feed for an audio capture, and the sink it delivers into.
-fn audio_feed() -> (Arc<AudioFeed>, AudioSink, AudioChunks) {
+fn audio_feed(id: &str) -> (Arc<AudioFeed>, AudioSink, AudioChunks) {
     let feed = Arc::new(AudioFeed::default());
     let (tx, rx) = sync_channel(AUDIO_QUEUE);
     let sink = AudioSink {
+        report_gap: Box::new({
+            let (id, feed) = (id.to_owned(), feed.clone());
+            move |until, duration| {
+                isocast_diagnostics::diagnostic!("warn";
+                    "audio source {id:?} reported a {:.2} ms gap", duration.as_secs_f64() * 1000.0
+                );
+                if let Some(report) = feed.gap.get() {
+                    report(until, duration);
+                }
+            }
+        }),
         samples: Box::new({
             let feed = feed.clone();
             move |samples, at| {

@@ -483,6 +483,10 @@ fn application_worker(
                     }
                     let first = Arc::new(AtomicBool::new(true));
                     let forward = AudioSink {
+                        report_gap: Box::new({
+                            let sink = sink.clone();
+                            move |until, duration| (sink.report_gap)(until, duration)
+                        }),
                         samples: Box::new({
                             let sink = sink.clone();
                             let end = end.clone();
@@ -688,6 +692,7 @@ mod tests {
         std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
         let (send, receive) = mpsc::channel();
         let sink = AudioSink {
+            report_gap: Box::new(|_, gap| panic!("unexpected gap: {gap:?}")),
             samples: Box::new(move |samples, _| {
                 let _ = send.send((samples.len() / 2, samples.iter().all(|&v| v == 0.0)));
             }),
@@ -775,6 +780,7 @@ mod tests {
     fn idle_silence_ends_on_the_real_packet_boundary_without_a_short_gap() {
         let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = AudioSink {
+            report_gap: Box::new(|_, gap| panic!("unexpected gap: {gap:?}")),
             samples: Box::new({
                 let delivered = delivered.clone();
                 move |samples, at| {

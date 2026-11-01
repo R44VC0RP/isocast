@@ -92,6 +92,7 @@ fn sinks(seen: &Arc<Seen>) -> (VideoSink<Frame>, AudioSink) {
             stopped: Box::new(move |why| *b.stopped.lock().unwrap() = Some(why)),
         },
         AudioSink {
+            report_gap: Box::new(|_, gap| panic!("unexpected browser gap: {gap:?}")),
             samples: Box::new(move |samples, _| {
                 c.audio_frames
                     .fetch_add(samples.len() / 2, Ordering::SeqCst);
@@ -242,16 +243,19 @@ for n in range(1000):
 #[test]
 fn audio_is_stamped_continuously_and_resampled() {
     let mut stamper = Stamper::default();
-    let start = Time::from_nanos(1_000_000_000);
+    let start = isocast_engine::Time::from_nanos(1_000_000_000);
     let first = stamper.stamp(480, start);
     // The next chunk arrives a little late: it still continues the first.
     let second = stamper.stamp(480, start + Duration::from_millis(12));
-    assert_eq!(second, first.add_ticks(480, SAMPLE_RATE));
+    assert_eq!(second, (first.0.add_ticks(480, SAMPLE_RATE), None));
     // A gap over the resync limit starts afresh from the host clock.
     let third = stamper.stamp(480, start + Duration::from_secs(2));
     assert_eq!(
         third,
-        start + Duration::from_secs(2) - Duration::from_millis(10)
+        (
+            start + Duration::from_secs(2) - Duration::from_millis(10),
+            None
+        )
     );
 
     let mut resampler = Resampler::default();

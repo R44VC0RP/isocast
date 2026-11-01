@@ -49,7 +49,7 @@ use isocast_protocol::api::Machine;
 use isocast_protocol::devices::{Devices, PermissionKind, PermissionsReport};
 use isocast_protocol::{Canvas, Container, Encoder, SourceKind};
 
-pub use time::Time;
+pub use time::{BrowserAudioStamper, Time};
 
 /// A codec this machine can't use now ([`Platform::missing_codecs`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -819,6 +819,9 @@ pub struct AudioSink {
     /// Interleaved samples at [`SAMPLE_RATE`], and when the first of them
     /// was captured on the host clock.
     pub samples: SamplesCallback,
+    /// A known hole ending at the next chunk's capture time. Report once,
+    /// before that chunk; ordinary sparse silence is not a hole.
+    pub report_gap: Box<dyn Fn(Time, std::time::Duration) + Send + Sync>,
     /// The capture stopped on its own, with the reason.
     pub stopped: Box<dyn Fn(String) + Send + Sync>,
 }
