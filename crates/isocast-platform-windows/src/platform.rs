@@ -472,6 +472,15 @@ impl Platform for WindowsPlatform {
             )
             .map(Some),
             SourceKind::Camera(camera) => crate::devices::camera_probe(&camera.device).map(Some),
+            SourceKind::ApplicationAudio(application) => {
+                crate::audio::probe_application_audio(&application.app).map(|device| {
+                    Some(Probe {
+                        device,
+                        video: None,
+                        channels: Some(2),
+                    })
+                })
+            }
             SourceKind::Microphone(mic) => {
                 let (device, channels) =
                     crate::probe_microphone(&mic.device, mic.channels.as_deref())?;
@@ -859,8 +868,9 @@ impl Platform for WindowsPlatform {
         Err(unsupported("browser sources"))
     }
 
-    fn capture_application_audio(&self, _app: &str, _sink: AudioSink) -> Result<(Capture, u32)> {
-        Err(unsupported("application audio capture"))
+    fn capture_application_audio(&self, app: &str, sink: AudioSink) -> Result<(Capture, u32)> {
+        crate::audio::capture_application_audio(app, sink, system::audio_thread)
+            .map(|(capture, channels)| (Capture::Audio(capture), channels))
     }
 
     fn create_video_encoder(&self, spec: &LiveVideoSpec) -> Result<WindowsVideoEncoder> {

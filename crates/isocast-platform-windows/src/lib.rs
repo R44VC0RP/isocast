@@ -6,6 +6,7 @@
 
 mod aac;
 mod audio;
+mod audio_apps;
 mod broker;
 mod camera;
 mod capture;
