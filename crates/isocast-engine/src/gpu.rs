@@ -55,7 +55,7 @@ impl Gpu {
         Ok(gpu)
     }
 
-    fn open(start: impl FnOnce() + Send + 'static) -> Result<Self> {
+    fn adapter() -> Result<wgpu::Adapter> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: if cfg!(windows) {
                 wgpu::Backends::DX12
@@ -72,6 +72,16 @@ impl Gpu {
             ..Default::default()
         }))
         .context("no GPU found")?;
+        Ok(adapter)
+    }
+
+    /// Report the rendering adapter without creating a device or starting a renderer.
+    pub fn adapter_info() -> Result<wgpu::AdapterInfo> {
+        Ok(Self::adapter()?.get_info())
+    }
+
+    fn open(start: impl FnOnce() + Send + 'static) -> Result<Self> {
+        let adapter = Self::adapter()?;
         let info = adapter.get_info();
         crate::governor::software_renderer(info.device_type == wgpu::DeviceType::Cpu);
         isocast_diagnostics::diagnostic!("info"; "graphics adapter: {} ({:?})", info.name, info.device_type);

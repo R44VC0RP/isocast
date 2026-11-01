@@ -336,6 +336,7 @@ impl Redactor {
         static ASSIGN: OnceLock<Regex> = OnceLock::new();
         static TITLES: OnceLock<Regex> = OnceLock::new();
         static PATH: OnceLock<Regex> = OnceLock::new();
+        static BLUETOOTH_ID: OnceLock<Regex> = OnceLock::new();
         let mut text = text.to_owned();
         if let Some(at) = text.find("; windows: ") {
             text.truncate(at);
@@ -432,9 +433,29 @@ impl Redactor {
             }
         }
         // Device IDs can contain a USB serial without a serial-number key.
-        if text.starts_with("AppleUSBAudioEngine:") {
+        if text.starts_with("AppleUSBAudioEngine:")
+            || text.starts_with("/dev/v4l/by-id/")
+            || text
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case(r"\\?\usb#"))
+            || text.starts_with("alsa_input.usb-")
+            || text.starts_with("alsa_output.usb-")
+        {
             self.removed("serial-bearing device identifiers");
             return self.fingerprint(&text);
+        }
+        // PipeWire node names and Core Audio UIDs can expose the Bluetooth
+        // address even in ordinary diagnostics, including in error messages.
+        if text.len() >= 17 && text.contains(['-', '_', ':']) {
+            let id = BLUETOOTH_ID.get_or_init(|| Regex::new(r"(?i)\b(?:bluez_[a-z_]+\.)?(?:(?:[0-9a-f]{2}_){5}|(?:[0-9a-f]{2}-){5}|(?:[0-9a-f]{2}:){5})[0-9a-f]{2}(?:[.:](?:input|output|[0-9]+))?\b").unwrap());
+            if let std::borrow::Cow::Owned(scrubbed) =
+                id.replace_all(&text, |c: &regex::Captures<'_>| {
+                    self.removed("Bluetooth device identifiers");
+                    self.fingerprint(&c[0])
+                })
+            {
+                text = scrubbed;
+            }
         }
         if self.hash_paths {
             for id in self.identities.clone().iter() {
@@ -468,6 +489,41 @@ impl Redactor {
                 .into_owned();
         }
         text
+    }
+}
+
+#[cfg(test)]
+mod device_id_tests {
+    use super::*;
+
+    #[test]
+    fn hardware_identifiers_are_hidden_without_strict_mode() {
+        let mut report = Redactor::report(false, &Value::Null, Vec::new());
+        for id in [
+            "bluez_input.AA_Bb_Cc_00_11_22.0",
+            "bluez_output.aa_bb_cc_33_44_55.1",
+            "AA-BB-CC-00-11-22:output",
+            "aa:bb:cc:33:44:55",
+            "/dev/v4l/by-id/usb-Camera-private123-video-index0",
+            r"\\?\USB#VID_1234&PID_1111#Private123",
+            "alsa_input.usb-Interface_PRIVATE123-00.analog-stereo",
+            "alsa_output.usb-Interface_PRIVATE123-00.analog-stereo",
+        ] {
+            let device = report.value(&json!({"id":id}));
+            let alias = device["id"].as_str().unwrap();
+            assert!(alias.starts_with("[hmac:") && alias.ends_with(']'), "{id}");
+            assert_eq!(report.text(id), alias);
+            if id.starts_with("bluez_") || id.starts_with("AA-") {
+                assert_eq!(
+                    report.text(&format!("device {id} unavailable")),
+                    format!("device {alias} unavailable")
+                );
+            }
+        }
+        assert_eq!(
+            report.text("bluez_output.headphones"),
+            "bluez_output.headphones"
+        );
     }
 }
 

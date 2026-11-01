@@ -34,8 +34,16 @@ impl Gpu {
         // (and no connection before the window opens).
         #[cfg(windows)]
         let adapter = if crate::engine::is_local() {
-            isocast_client::shared::adapter(&mut crate::daemon::connect()?, &instance)
-                .context("could not select the daemon's preview adapter")?
+            match crate::daemon::connect() {
+                Ok(mut client) => isocast_client::shared::adapter(&mut client, &instance)
+                    .context("could not select the daemon's preview adapter")?,
+                Err(_) => {
+                    // Still open the app (including Help > Report a Bug). Do
+                    // not bypass shared surfaces' adapter check on reconnect.
+                    isocast_client::shared::local_adapter(&instance)
+                        .context("could not select a graphics adapter while the engine was down")?
+                }
+            }
         } else {
             isocast_client::shared::local_adapter(&instance)
                 .context("could not select a graphics adapter")?

@@ -1,12 +1,14 @@
 //! Sending a written report to the report service (services/report-worker):
 //! the zip and its ISSUE.md, exactly as previewed, over HTTPS with the
-//! system's curl (no HTTP stack in the engine). Failure never loses the zip.
+//! system's TLS trust store. Failure never loses the zip.
 use isocast_protocol::diagnostics::{BugReport, REPORT_ENDPOINT, SubmittedReport};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::time::Duration;
+use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+use ureq::unversioned::multipart::{Form, Part};
 
 const MAX_ZIP: u64 = 50 << 20;
 
@@ -65,11 +67,21 @@ fn version(build: &str) -> String {
 }
 
 /// "Apple M5 Max (Mac17,6), macOS 27.2 (26B5101f)" from environment.json.
-pub fn mac_summary(environment: &str) -> String {
+pub fn machine_summary(environment: &str) -> String {
     let Ok(env) = serde_json::from_str::<Value>(environment) else {
         return String::new();
     };
     let chip = env["hardware"]["chip"].as_str().unwrap_or_default();
+    if let Some(os) = env["os"].as_str() {
+        return [chip, os]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .chars()
+            .take(200)
+            .collect();
+    }
     let model = env["hardware"]["model"].as_str().unwrap_or_default();
     let sw = env["macos"]["output"].as_str().unwrap_or_default();
     let field = |name: &str| {
@@ -90,11 +102,22 @@ pub fn mac_summary(environment: &str) -> String {
     line.chars().take(200).collect()
 }
 
-/// A path for curl's `-F name=@"…"` syntax.
-fn quoted(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+fn report_url(endpoint: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(endpoint).map_err(|e| format!("invalid report endpoint: {e}"))?;
+    if url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && (url.scheme() == "https"
+            || (url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))))
+    {
+        Ok(url)
+    } else {
+        Err(
+            "the report endpoint must be HTTPS (or loopback HTTP for tests), without credentials"
+                .into(),
+        )
+    }
 }
 
 /// Sends the written report; sets `submitted` or `submit_error`.
@@ -103,7 +126,7 @@ pub fn send(report: &mut BugReport, contents: &BTreeMap<String, String>) {
         report.submit_error = Some("no zip was written".into());
         return;
     };
-    match post(report, contents, &archive) {
+    match post(report, contents, &archive, RootCerts::PlatformVerifier) {
         Ok(submitted) => report.submitted = Some(submitted),
         Err(why) => report.submit_error = Some(why),
     }
@@ -112,7 +135,8 @@ pub fn send(report: &mut BugReport, contents: &BTreeMap<String, String>) {
 fn post(
     report: &BugReport,
     contents: &BTreeMap<String, String>,
-    archive: &PathBuf,
+    archive: &Path,
+    roots: RootCerts,
 ) -> Result<SubmittedReport, String> {
     let size = std::fs::metadata(archive).map_err(|e| e.to_string())?.len();
     if size > MAX_ZIP {
@@ -128,7 +152,8 @@ fn post(
         "title": title(&report.issue_body, &version),
         "issue": report.issue_body,
         "version": version,
-        "mac": mac_summary(contents.get("environment.json").map_or("", String::as_str)),
+        // Service schema 1 calls its unlabeled machine-summary footer `mac`.
+        "mac": machine_summary(contents.get("environment.json").map_or("", String::as_str)),
     });
     for key in ["title", "issue", "version", "mac"] {
         if let Some(rule) = crate::scan::find(fields[key].as_str().unwrap_or_default()) {
@@ -145,73 +170,57 @@ fn post(
     let endpoint = endpoint().ok_or(
         "no report service is configured yet (REPORT_ENDPOINT, or ISOCAST_REPORT_ENDPOINT for the daemon)",
     )?;
-    if !(endpoint.starts_with("https://")
-        || endpoint.starts_with("http://127.0.0.1")
-        || endpoint.starts_with("http://localhost"))
-    {
-        return Err(format!(
-            "the report endpoint must be https:// (or http://127.0.0.1 for tests), not {endpoint}"
-        ));
+    let endpoint = report_url(&endpoint)?;
+    let mut config = ureq::Agent::config_builder()
+        .tls_config(
+            TlsConfig::builder()
+                .provider(TlsProvider::NativeTls)
+                .root_certs(roots)
+                .build(),
+        )
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_global(Some(Duration::from_secs(300)))
+        .max_redirects(0)
+        .http_status_as_error(false);
+    if endpoint.scheme() == "http" {
+        config = config.proxy(None);
     }
-    let install = install_id()?;
-    let mut child = Command::new("/usr/bin/curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--proto",
-            "=https,http",
-            "--connect-timeout",
-            "15",
-            "--max-time",
-            "300",
-            "--header",
-            &format!("Isocast-Install-Id: {install}"),
-            "--user-agent",
-            concat!("isocast/", env!("CARGO_PKG_VERSION")),
-            "--form",
-            "fields=<-;type=application/json",
-            "--form",
-            &format!(
-                "zip=@\"{}\";type=application/zip;filename=report.zip",
-                quoted(archive)
-            ),
-            "--write-out",
-            "\n%{http_code}",
-            &endpoint,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("couldn't run curl: {e}"))?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(fields.to_string().as_bytes())
-        .map_err(|e| format!("couldn't run curl: {e}"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("couldn't run curl: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim().trim_start_matches("curl: ");
-        let detail = detail
-            .strip_prefix('(')
-            .and_then(|d| d.split_once(") "))
-            .map_or(detail, |(_, d)| d);
-        return Err(format!(
-            "couldn't reach the report service (are you offline?): {}",
-            detail.trim().trim_end_matches('.')
-        ));
-    }
-    let (body, status) = stdout.rsplit_once('\n').unwrap_or(("", &stdout));
-    let body = serde_json::from_str::<Value>(body).unwrap_or_default();
-    if status.trim() != "201" {
+    let fields = fields.to_string();
+    let form = Form::new()
+        .part(
+            "fields",
+            Part::text(&fields)
+                .mime_str("application/json")
+                .map_err(|e| e.to_string())?,
+        )
+        .part(
+            "zip",
+            Part::file(archive)
+                .map_err(|e| e.to_string())?
+                .file_name("report.zip"),
+        );
+    let mut response = config
+        .build()
+        .new_agent()
+        .post(endpoint.as_str())
+        .header("Isocast-Install-Id", install_id()?)
+        .header("User-Agent", concat!("isocast/", env!("CARGO_PKG_VERSION")))
+        .send(form)
+        .map_err(|e| format!("couldn't reach the report service (are you offline?): {e}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(64 << 10)
+        .read_to_string()
+        .map_err(|e| {
+            format!("the report service answered {status}, but its reply could not be read: {e}")
+        })?;
+    let body = serde_json::from_str::<Value>(&body).unwrap_or_default();
+    if status != 201 {
         return Err(format!(
             "the report service answered {}: {}",
-            status.trim(),
+            status,
             body["error"].as_str().unwrap_or("no reason given")
         ));
     }
@@ -222,5 +231,73 @@ fn post(
             deduplicated: body["deduplicated"].as_bool().unwrap_or(false),
         }),
         _ => Err("the report service's answer had no issue URL".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // SSH sessions cannot authorize macOS user trust changes. Exercise the
+    // same native TLS upload with a root scoped to this one test connection.
+    #[test]
+    #[ignore = "requires an isolated socket, a loopback HTTPS receiver and its temporary CA"]
+    fn https_fixture_with_connection_scoped_root() {
+        use std::io::Read;
+        let endpoint = std::env::var("ISOCAST_REPORT_ENDPOINT").unwrap();
+        let url = report_url(&endpoint).unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert!(matches!(
+            url.host_str(),
+            Some("localhost" | "127.0.0.1" | "[::1]")
+        ));
+        let socket = std::path::PathBuf::from(std::env::var_os("ISOCAST_SOCKET").unwrap());
+        assert!(socket.is_absolute());
+        let report = crate::bundle::disconnected(&isocast_protocol::diagnostics::BugReportParams {
+            describe: Some("Loopback TLS fixture".into()),
+            out: Some(socket.parent().unwrap().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        let path = report.archive.as_ref().unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        let mut files = BTreeMap::new();
+        for i in 0..zip.len() {
+            let mut file = zip.by_index(i).unwrap();
+            let mut text = String::new();
+            file.read_to_string(&mut text).unwrap();
+            files.insert(file.name().to_owned(), text);
+        }
+        let pem = std::fs::read(std::env::var_os("ISOCAST_TEST_REPORT_CA").unwrap()).unwrap();
+        let root = ureq::tls::Certificate::from_pem(&pem).unwrap();
+        let sent = post(&report, &files, path, RootCerts::from([root])).unwrap();
+        assert_eq!(sent.report_id, "test-only");
+    }
+
+    #[test]
+    fn report_destinations_are_https_or_loopback() {
+        for bad in [
+            "http://localhost.example/reports",
+            "http://127.0.0.1@example.com/reports",
+            "file:///reports",
+        ] {
+            assert!(report_url(bad).is_err());
+        }
+        assert!(report_url("http://127.0.0.1:8080/reports").is_ok());
+    }
+
+    #[test]
+    fn footer_names_the_reporting_machine() {
+        assert_eq!(
+            machine_summary(r#"{"hardware":{"chip":"Ryzen"},"os":"Windows 11"}"#),
+            "Ryzen, Windows 11"
+        );
+        assert_eq!(machine_summary(r#"{"os":"Linux 6.8"}"#), "Linux 6.8");
+        assert_eq!(
+            machine_summary(
+                r#"{"hardware":{"chip":"M2","model":"Mac14,2"},"macos":{"output":"ProductVersion: 26.1\nBuildVersion: 25B78"}}"#
+            ),
+            "M2 (Mac14,2), macOS 26.1 (25B78)"
+        );
     }
 }

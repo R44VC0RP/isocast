@@ -1,11 +1,24 @@
-# Offline bug reports
+# Report a bug
 
-1. Run `isocast report --describe "What happened, and what you expected"`.
-2. Review locally. `isocast report --preview --json` returns a compact file
+On macOS, Windows or Linux, open **Help → Report a Bug…**, describe what you
+did and what you expected, and update the preview. **Send Report** makes the
+previewed issue text public on GitHub and sends the zip privately to maintainers.
+**Save Zip Only** does not send anything. You can open a prefilled issue instead;
+attaching a zip to GitHub yourself makes it **public**. The triage block is
+copied for pasting when the desktop clipboard is available; otherwise use `ISSUE.md`.
+
+If the local engine won't start, the app can still preview, save and send a
+reduced report with your description, app version, OS, and recent local launch
+markers. It omits raw historical logs (the engine owns profile-key redaction),
+devices and live engine checks. Update Preview after reconnecting for a full report.
+
+From the CLI:
+
+1. Preview locally. `isocast report --describe "What happened, and what you expected" --preview --json` returns a compact file
    index with sizes, ISSUE.md, redaction policy and a `preview_id`, without
    creating a zip. Read selected contents with
    `isocast report-file PREVIEW_ID FILE --offset 0 --limit 4096 --json`.
-3. Send it: `isocast report --submit --preview-id PREVIEW_ID` (or
+2. Send it: `isocast report --submit --preview-id PREVIEW_ID` (or
    `isocast report --describe "…" --submit` in one step; MCP `bug_report`
    with `submit: true`; the app's Send Report). The engine writes the zip,
    checks it for secrets, and posts it to the report service
@@ -15,24 +28,25 @@
    returned. Sending happens only with this explicit flag. If it fails
    (offline, refused, rate limited, no service configured), `submit_error`
    says why, the command exits nonzero, and the zip is kept: attach it to a
-   new issue by hand. The endpoint is `ISOCAST_REPORT_ENDPOINT` in the
-   daemon's environment, else `REPORT_ENDPOINT` in the protocol (unset until
-   the service is deployed).
+    new public issue only if you're comfortable sharing it. The built-in endpoint
+    is configured. For testing, set `ISOCAST_REPORT_ENDPOINT` in both the daemon
+    and app environments to a loopback receiver. Submission uses the OS trust
+    store and does not need a command-line HTTP tool.
 
 `--out DIR` chooses a directory, `--launches 1..10` selects the most recent
 launches of each process (default 3). `--private` (alias `--hash-paths`)
 pseudonymizes paths, titles, device names and device IDs. Reports default to
 `~/Downloads/Isocast Reports`; isolated engines keep reports beside their logs.
 The API methods are `bug_report`, `report_file` and `logs`; MCP exposes
-`bug_report`, `read_bug_report_file` and `get_logs`. Apps can use these directly. The redesigned
-app's menu item is a separate integration step.
+`bug_report`, `read_bug_report_file` and `get_logs`.
 
 ## Bundle layout
 
 | File | Meaning |
 |---|---|
 | `ISSUE.md` | Description, short summary, valid fenced JSON triage block; under 60,000 characters |
-| `environment.json` | OS/build, chip/cores/RAM, GPU/displays, system/recording volumes, locale, power, signing of the actual running executable, capture process names/PIDs |
+| `environment.json` | OS version, CPU, cores, RAM, GPU and driver when available. macOS also includes displays, system/recording volumes, locale, power, signing and capture process names/PIDs. |
+| `doctor.json` | Machine-only doctor checks, including video encoder availability. Does not probe setup sources, request permissions or test-write to recording folders. |
 | `build.json` | Version, compiled commit, release/debug profile, architecture |
 | `status.json`, `diagnostics.json` | Current outputs, last recording/error, prior abnormal launches and logger health |
 | `setup.json`, `profile.json`, `library.json` | Current revisioned setup, current profile document and library inventory |
@@ -58,11 +72,12 @@ non-regular files are excluded. Reports remain until the user removes them.
 
 ## Logs and lifecycle
 
-Default: `~/Library/Logs/Isocast`. Setting `ISOCAST_SOCKET=/path/engine.sock`
+Defaults: `~/Library/Logs/Isocast` (macOS), `%LOCALAPPDATA%\Isocast\logs` (Windows),
+or `$XDG_DATA_HOME/isocast/logs` (Linux, normally `~/.local/share/isocast/logs`). Setting `ISOCAST_SOCKET=/path/engine.sock`
 uses `/path/engine.logs`, shared by clients of that isolated engine. Each process
 launch has its own timestamp/pid/name prefix. JSON lines have UTC `time`,
 `level`, `process`, `pid`, `launch`, `thread`, `component`, `message`, `fields`.
-An independent native-stderr relay drains the pipe even after immediate
+On Unix an independent native-stderr relay drains the pipe even after immediate
 producer death, including a final line without newline. Its credential seed
 channel is private and polled even when stderr is silent, with a 256 KiB
 receive buffer. Backpressured seeds retry off the caller's thread; native
@@ -170,7 +185,7 @@ all. It turns itself off after 24 hours unless set otherwise.
 
 ## Metrics and availability
 
-One record per second while the engine runs (one per five seconds while idle):
+The macOS sampler writes one record per second while the engine runs (one per five seconds while idle):
 daemon CPU as percent of **one core** (Mach rusage ticks converted using
 `mach_timebase_info`), physical footprint/RSS, threads, open
 files, process disk-write rate, recording volume/free space/filesystem,

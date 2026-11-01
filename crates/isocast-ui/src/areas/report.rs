@@ -3,8 +3,8 @@
 //! its size) before anything is written; Create Report writes the zip
 //! (`bug_report` without `preview`); Open GitHub Issue opens a new issue
 //! on R44VC0RP/isocast with the bug-report template's fields filled in
-//! (the description, the triage block, the version, the Mac) and shows the
-//! zip in the Finder to attach. Send Report instead has the engine file
+//! (the redacted description, triage instructions, version and system) and
+//! reveals the zip. Send Report instead has the engine file
 //! the issue (`bug_report` with `submit` and the preview's id, so exactly
 //! the text shown becomes public; the zip goes privately to the
 //! maintainers). Nothing is sent before Send Report.
@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use isocast_protocol::api::Method;
-use isocast_protocol::diagnostics::{BugReport, BugReportParams, ReportFile, ReportFileParams};
+use isocast_protocol::diagnostics::{BugReport, BugReportParams};
 use serde_json::Value;
 use slint::{ComponentHandle, SharedString};
 
@@ -34,9 +34,6 @@ const URL_LIMIT: usize = 2000;
 pub struct Report {
     /// The last report shown (preview or written).
     shown: RefCell<Option<BugReport>>,
-    /// "Apple M5 Max (Mac17,6), macOS 27.2 (26B5101f)", from the preview's
-    /// environment.json.
-    mac: RefCell<String>,
     /// The description the shown preview was made with.
     previewed: RefCell<Option<String>>,
 }
@@ -78,7 +75,6 @@ impl Report {
     /// The sheet opened: start afresh and preview.
     pub fn opened(&self, app: &Rc<App>) {
         *self.shown.borrow_mut() = None;
-        self.mac.borrow_mut().clear();
         if let Some(window) = app.window() {
             let area = window.global::<SettingsArea>();
             area.set_report_describe(SharedString::new());
@@ -118,34 +114,20 @@ impl Report {
     }
 
     fn preview(&self, app: &Rc<App>) {
-        *self.previewed.borrow_mut() = Some(Self::describe(app).unwrap_or_default());
+        *self.previewed.borrow_mut() = None;
+        let description = Self::describe(app);
         let params = BugReportParams {
-            describe: Self::describe(app),
+            describe: description.clone(),
             preview: true,
             ..BugReportParams::default()
         };
         Self::busy(app, true);
-        app.call_as::<BugReport>(Method::BugReport(params), |app, result| {
+        app.call_as::<BugReport>(Method::BugReport(params), move |app, result| {
             Self::busy(app, false);
             let report = &app.settings.report;
             match result {
                 Ok(preview) => {
-                    // The Mac and macOS, for the issue's form.
-                    if let Some(id) = preview.preview_id.clone() {
-                        app.call_as::<ReportFile>(
-                            Method::ReportFile(ReportFileParams {
-                                preview_id: id,
-                                file: "environment.json".into(),
-                                offset: 0,
-                                limit: Some(16384),
-                            }),
-                            |app, result| {
-                                if let Ok(file) = result {
-                                    *app.settings.report.mac.borrow_mut() = mac_line(&file.content);
-                                }
-                            },
-                        );
-                    }
+                    *report.previewed.borrow_mut() = Some(description.unwrap_or_default());
                     report.show(app, preview, None);
                 }
                 Err(error) => report.error(app, &error.message),
@@ -306,30 +288,28 @@ impl Report {
             crate::platform::open_url(&sent.issue_url);
             return;
         }
-        let describe = Self::describe(app).unwrap_or_default();
-        let url = issue_url(
-            report.repository_url.as_deref().unwrap_or(REPOSITORY),
-            &describe,
-            &report.issue_body,
-            &self.mac.borrow(),
-            report.archive.as_deref(),
-        );
         // The full triage block, to paste into the issue's Triage field
         // (the zip's ISSUE.md has it too).
-        let block = triage(&report.issue_body)
-            .map(|t| format!("```json\n{t}\n```"))
-            .unwrap_or_default();
-        if !block.is_empty() {
-            crate::platform::copy_text(&block);
-        }
+        let copied = triage(&report.issue_body).is_some_and(crate::platform::try_copy_text);
+        let url = issue_url(
+            report.repository_url.as_deref().unwrap_or(REPOSITORY),
+            &report.issue_body,
+            copied,
+            report.archive.as_deref(),
+        );
         crate::platform::open_url(&url);
         self.reveal(app);
         // The sheet's line says to paste it (a toast would sit behind the
         // sheet, or be gone by the time the browser is back).
         if let Some(window) = app.window() {
-            window
-                .global::<SettingsArea>()
-                .set_report_copied(!block.is_empty());
+            let area = window.global::<SettingsArea>();
+            area.set_report_copied(copied);
+            if !copied {
+                area.set_report_error(
+                    "Clipboard unavailable. Copy the triage block from ISSUE.md in the saved zip."
+                        .into(),
+                );
+            }
         }
     }
 }
@@ -363,51 +343,37 @@ fn size(bytes: usize) -> String {
     }
 }
 
-/// "Apple M5 Max (Mac17,6), macOS 27.2 (26B5101f)" from environment.json.
-fn mac_line(environment: &str) -> String {
-    let Ok(env) = serde_json::from_str::<Value>(environment) else {
-        return String::new();
-    };
-    let hardware = &env["hardware"];
-    let chip = hardware["chip"].as_str().unwrap_or_default();
-    let model = hardware["model"].as_str().unwrap_or_default();
-    let sw = env["macos"]["output"].as_str().unwrap_or_default();
-    let field = |name: &str| {
-        sw.lines()
-            .find_map(|l| l.strip_prefix(name))
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default()
-    };
-    let (version, build) = (field("ProductVersion:"), field("BuildVersion:"));
-    let mut line = match (chip.is_empty(), model.is_empty()) {
-        (false, false) => format!("{chip} ({model})"),
-        (false, true) => chip.to_string(),
-        _ => model.to_string(),
-    };
-    if !version.is_empty() {
-        line = format!("{line}, macOS {version} ({build})");
-    }
-    line
-}
-
 /// The triage block: the fenced JSON in ISSUE.md.
 fn triage(issue: &str) -> Option<&str> {
-    let start = issue.find("```json")? + "```json".len();
-    let rest = &issue[start..];
-    let end = rest.find("```")?;
+    let (_, rest) = issue.split_once("\n## Agent triage\n\n```json\n")?;
+    let end = rest.find("\n```")?;
     Some(rest[..end].trim())
 }
 
 fn issue_url(
     repository: &str,
-    describe: &str,
     issue: &str,
-    mac: &str,
+    copied: bool,
     archive: Option<&std::path::Path>,
 ) -> String {
     let triage = triage(issue).unwrap_or_default();
-    let version = serde_json::from_str::<Value>(triage)
-        .ok()
+    let fields = serde_json::from_str::<Value>(triage).ok();
+    let machine = fields
+        .as_ref()
+        .and_then(|t| t["machine_summary"].as_str())
+        .unwrap_or_default();
+    let describe = issue
+        .split_once("\n## Description\n\n")
+        .and_then(|(_, rest)| rest.split_once("\n\n## Agent triage\n"))
+        .map(|(s, _)| {
+            s.lines()
+                .map(|l| l.strip_prefix("> ").unwrap_or(l))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let version = fields
+        .as_ref()
         .and_then(|t| {
             let v = &t["versions"];
             Some(format!(
@@ -438,7 +404,7 @@ fn issue_url(
         ("title", title),
         ("summary", describe.to_string()),
         ("version", version),
-        ("mac", mac.to_string()),
+        ("mac", machine.to_string()),
         ("attachments", attach),
     ];
     let base = format!("{}/issues/new?", repository.trim_end_matches('/'));
@@ -453,7 +419,12 @@ fn issue_url(
     // Never the triage block (the clipboard has it): a pointer to paste it.
     fields.push((
         "triage",
-        "Paste here: Isocast copied the triage block to the clipboard (it is also in the zip's ISSUE.md).".to_string(),
+        if copied {
+            "Paste the triage block from the clipboard."
+        } else {
+            "Copy the triage block from ISSUE.md in the saved zip."
+        }
+        .to_string(),
     ));
     let mut url = format!("{base}{}", query(&fields));
     // A very long description is cut to fit (the zip has it whole).
@@ -483,4 +454,24 @@ fn encode(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn manual_form_uses_reviewed_text_and_actual_clipboard_outcome() {
+        let issue = "## Report\n## Description\n\n> Audio & video [redacted]\n\n## Agent triage\n\n```json\n{\"versions\":{\"version\":\"1.2\",\"commit\":\"abc\"},\"machine_summary\":\"Windows 11\"}\n```";
+        let url = |copied| super::issue_url("https://example.invalid", issue, copied, None);
+        let manual = url(false);
+        for field in [
+            "summary=Audio%20%26%20video%20%5Bredacted%5D",
+            "version=1.2%20%28abc%29",
+            "mac=Windows%2011",
+            "triage=Copy%20the%20triage%20block%20from%20ISSUE.md",
+        ] {
+            assert!(manual.contains(field), "missing {field}");
+        }
+        assert!(!manual.contains("clipboard"));
+        assert!(url(true).contains("clipboard"));
+    }
 }

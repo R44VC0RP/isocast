@@ -113,6 +113,36 @@ pub fn generate(
     manifest_folders: &[PathBuf],
     credentials: Vec<String>,
 ) -> Result<BugReport, String> {
+    collect_report(params, snapshot, manifest_folders, credentials, true)
+}
+
+/// The daemon owns stream-key seeding, so a disconnected app must not export
+/// historical free text (including bootstrap stderr). Keep typed launch
+/// evidence and the user's description, through the normal preview/zip path.
+pub fn disconnected(params: &BugReportParams) -> Result<BugReport, String> {
+    if params.preview_id.is_some() {
+        return from_preview(params);
+    }
+    let snapshot = json!({"environment":{"os":std::env::consts::OS}, "status":{"state":"engine unavailable"}, "build":{"version":env!("CARGO_PKG_VERSION"),"arch":std::env::consts::ARCH,"process":"app"}, "diagnostics":{"note":"The local engine could not be reached. Only launch markers are included; full logs and live checks need the engine."}});
+    collect_report(
+        params,
+        snapshot,
+        &[],
+        std::env::var("ISOCAST_STREAM_KEY")
+            .ok()
+            .into_iter()
+            .collect(),
+        false,
+    )
+}
+
+fn collect_report(
+    params: &BugReportParams,
+    snapshot: Value,
+    manifest_folders: &[PathBuf],
+    credentials: Vec<String>,
+    live: bool,
+) -> Result<BugReport, String> {
     check(params)?;
     let n = params.launches.unwrap_or(3);
     if !(1..=10).contains(&n) {
@@ -155,9 +185,18 @@ pub fn generate(
         "build",
         "diagnostics",
     ] {
+        if !live && snapshot.get(key).is_none() {
+            continue;
+        }
         contents.insert(
             format!("{key}.json"),
             serde_json::to_string_pretty(&snapshot[key]).unwrap(),
+        );
+    }
+    if let Some(doctor) = snapshot.get("doctor") {
+        contents.insert(
+            "doctor.json".into(),
+            serde_json::to_string_pretty(doctor).unwrap(),
         );
     }
     let mut omitted = Vec::new();
@@ -188,7 +227,30 @@ pub fn generate(
         .rev()
         .filter(|p| p.extension().is_some_and(|e| e == "run"))
     {
-        if let Ok(text) = std::fs::read_to_string(path)
+        // Windows byte-range locks prevent even reading an active .run file.
+        // Its JSONL segments aren't locked; identify them from our filename.
+        #[cfg(windows)]
+        if let Some((launch, process, pid)) = marker_name(path)
+            && std::fs::File::open(path)
+                .and_then(|mut f| f.read(&mut [0u8; 1]))
+                .is_err_and(|e| e.raw_os_error() == Some(33))
+        {
+            let count = counts.entry(process.into()).or_default();
+            if *count < n {
+                if live {
+                    launches.insert(launch.into());
+                } else {
+                    contents.insert(
+                        format!("logs/{process}-{count}.json"),
+                        json!({"process":process,"pid":pid,"marker_locked":true}).to_string(),
+                    );
+                }
+                *count += 1;
+            }
+            continue;
+        }
+        if path.metadata().is_ok_and(|m| m.len() <= MAX_FILE)
+            && let Ok(text) = std::fs::read_to_string(path)
             && let Some(first) = text.lines().next()
             && let Ok(value) = serde_json::from_str::<Value>(first)
             && let (Some(process), Some(launch)) =
@@ -196,7 +258,12 @@ pub fn generate(
         {
             let count = counts.entry(process.into()).or_default();
             if *count < n {
-                launches.insert(launch.to_owned());
+                if live {
+                    launches.insert(launch.to_owned());
+                } else if report_process(process) {
+                    let summary = json!({"process":process,"pid":value["pid"].as_u64(),"ready_marker":text.lines().any(|l|l=="{\"ready\":true}"),"clean_exit_marker":text.lines().any(|l|l=="{\"clean\":true}")});
+                    contents.insert(format!("logs/{process}-{count}.json"), summary.to_string());
+                }
                 *count += 1;
             }
         }
@@ -283,7 +350,7 @@ pub fn generate(
     }
     let home = isocast_protocol::api::home_folder();
     let bootstrap = isocast_protocol::api::daemon_file("log");
-    if bootstrap.exists() {
+    if live && bootstrap.exists() {
         collect(
             &bootstrap,
             "bootstrap.log".into(),
@@ -292,8 +359,11 @@ pub fn generate(
             &mut omitted,
         );
     }
-    let mut macos_crashes = files(&home.join("Library/Logs/DiagnosticReports"));
-    macos_crashes.extend(files(Path::new("/Library/Logs/DiagnosticReports")));
+    let mut macos_crashes = Vec::new();
+    if live && cfg!(target_os = "macos") {
+        macos_crashes = files(&home.join("Library/Logs/DiagnosticReports"));
+        macos_crashes.extend(files(Path::new("/Library/Logs/DiagnosticReports")));
+    }
     macos_crashes.sort_by_key(|p| p.metadata().ok().and_then(|m| m.modified().ok()));
     for path in macos_crashes
         .iter()
@@ -453,6 +523,9 @@ pub fn generate(
         "what_was_running":{"state":snapshot["status"]["state"],"scene":snapshot["status"]["scene"],"stream":snapshot["status"]["stream"]},
         "outputs":snapshot["status"]["live"],"last_recording":snapshot["status"]["last"]});
     let mut triage = triage;
+    triage["machine_summary"] = json!(crate::submit::machine_summary(
+        &contents["environment.json"]
+    ));
     if !latest_abnormal.is_null() && !last_abnormal_metrics.is_null() {
         triage["what_was_running"] = incident_summary(&last_abnormal_metrics);
         triage["current_state"] = json!({"state":snapshot["status"]["state"],"stream":snapshot["status"]["stream"]["state"]});
@@ -491,8 +564,13 @@ pub fn generate(
         .map(|line| format!("> {line}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let guide = if live {
+        "Review metrics.jsonl, logs/, status.json, manifests/ and crash reports in the report's zip."
+    } else {
+        "The engine was unavailable. This reduced app report includes build information and any available launch markers, not full logs or live checks."
+    };
     let issue = format!(
-        "# Isocast bug report\n\nState: {}. {} prior abnormal launch(es); {} recent warning/error entries.\n\n## Description\n\n{}\n\n## Agent triage\n\n```json\n{}\n```\n\nReview metrics.jsonl, logs/, status.json, manifests/ and crash reports in the report's zip. No media is included.\n",
+        "# Isocast bug report\n\nState: {}. {} prior abnormal launch(es); {} recent warning/error entries.\n\n## Description\n\n{}\n\n## Agent triage\n\n```json\n{}\n```\n\n{guide} No media is included.\n",
         snapshot["status"]["state"],
         snapshot["diagnostics"]["previous_abnormal"]
             .as_array()
@@ -670,6 +748,23 @@ fn collect(
     contents.insert(name, safe);
 }
 
+#[cfg(any(windows, test))]
+fn marker_name(path: &Path) -> Option<(&str, &str, u32)> {
+    let launch = path.file_stem()?.to_str()?;
+    let mut parts = launch.splitn(3, '-');
+    chrono::NaiveDateTime::parse_from_str(parts.next()?, "%Y%m%dT%H%M%S%.9fZ").ok()?;
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let process = parts.next()?;
+    report_process(process).then_some((launch, process, pid))
+}
+
+fn report_process(process: &str) -> bool {
+    matches!(
+        process,
+        "isocastd" | "isocast" | "isocast-ui" | "isocast-app"
+    )
+}
+
 /// Where a report goes when `out` isn't given: beside an isolated engine's
 /// logs, else `~/Downloads/Isocast Reports`.
 pub fn default_out() -> PathBuf {
@@ -677,5 +772,23 @@ pub fn default_out() -> PathBuf {
         logs_folder().with_extension("reports")
     } else {
         isocast_protocol::api::home_folder().join("Downloads/Isocast Reports")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn locked_launch_names_match_only_our_processes() {
+        let file = std::path::Path::new("20261101T035454.655409600Z-6700-isocast-ui.run");
+        assert_eq!(
+            super::marker_name(file).map(|(_, name, pid)| (name, pid)),
+            Some(("isocast-ui", 6700))
+        );
+        assert!(
+            super::marker_name(std::path::Path::new(
+                "20261101T035454.655409600Z-6700-private-app.run"
+            ))
+            .is_none()
+        );
     }
 }

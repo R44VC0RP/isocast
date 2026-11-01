@@ -175,6 +175,23 @@ pub fn start(deliver: impl Fn(Update) + Send + Clone + 'static) -> Sender<Reques
 fn worker(rx: Receiver<Request>, deliver: impl Fn(Update)) {
     let mut client: Option<(Client, u64)> = None;
     while let Ok(request) = rx.recv() {
+        // Offline previews live in this process. Never regenerate one for
+        // Send (or retry a send whose reply may have been lost).
+        if crate::engine::is_local()
+            && let Method::BugReport(params) = &request.method
+            && let Some(id) = params
+                .preview_id
+                .as_deref()
+                .and_then(|id| id.strip_prefix("app-"))
+        {
+            let mut params = params.clone();
+            params.preview_id = Some(id.into());
+            deliver(Update::Reply {
+                id: request.id,
+                result: offline_report(&params),
+            });
+            continue;
+        }
         let generation = LINK_GENERATION.load(Ordering::SeqCst);
         let connection = match client.take() {
             Some((c, at)) if at == generation => Ok(c),
@@ -183,6 +200,17 @@ fn worker(rx: Receiver<Request>, deliver: impl Fn(Update)) {
         let mut c = match connection {
             Ok(c) => c,
             Err(error) => {
+                if crate::engine::is_local()
+                    && let Method::BugReport(params) = &request.method
+                    && !params.submit
+                    && params.preview_id.is_none()
+                {
+                    deliver(Update::Reply {
+                        id: request.id,
+                        result: offline_report(params),
+                    });
+                    continue;
+                }
                 deliver(Update::Reply {
                     id: request.id,
                     result: Err(CallError {
@@ -219,6 +247,18 @@ fn worker(rx: Receiver<Request>, deliver: impl Fn(Update)) {
             result,
         });
     }
+}
+
+fn offline_report(
+    params: &isocast_protocol::diagnostics::BugReportParams,
+) -> Result<Value, CallError> {
+    let mut report =
+        isocast_diagnostics::bundle::disconnected(params).map_err(|message| CallError {
+            message,
+            code: None,
+        })?;
+    report.preview_id = report.preview_id.map(|id| format!("app-{id}"));
+    Ok(serde_json::json!(report))
 }
 
 /// Follow the daemon's events; reconnect with back-off when it goes away.

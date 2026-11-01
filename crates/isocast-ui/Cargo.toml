@@ -66,6 +66,10 @@ wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The same text clipboard backend as Slint/winit (Wayland, X11 and Windows).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+
 # Linux: the engine's live video decoded in software (src/video/openh264.rs)
 # by Cisco's OpenH264 binary, which the installer downloads and the Linux
 # engine encodes with too (isocast-openh264 loads it; none is compiled in).

@@ -459,6 +459,8 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
     }
     folders.sort();
     folders.dedup();
+    // Machine-only doctor: no source opens, consent dialogs or recording-disk write test.
+    let doctor = crate::doctor(None, None, &|_| false);
     #[cfg(target_os = "macos")]
     let folder = folders
         .first()
@@ -468,12 +470,26 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
     let platform = json!({"environment":isocast_platform_macos::diagnostics::environment(&folder),
         "permissions":isocast_platform_macos::diagnostics::permissions(),"devices":isocast_platform_macos::diagnostics::inventory()});
     #[cfg(not(target_os = "macos"))]
-    let platform =
-        json!({"environment":{"os":std::env::consts::OS},"permissions":null,"devices":null});
+    let platform = {
+        let devices = crate::devices()
+            .map(|d| report_devices(&d))
+            .unwrap_or_else(|e| json!({"error":e.to_string()}));
+        let gpu = isocast_engine::gpu::Gpu::adapter_info().map(|g| json!({"name":g.name,"backend":format!("{:?}",g.backend),"driver":g.driver,"driver_info":g.driver_info})).unwrap_or_else(|e| json!({"error":e.to_string()}));
+        let permissions = crate::permissions()
+            .map(|p| json!(p))
+            .unwrap_or_else(|e| json!({"error":e.to_string()}));
+        json!({"environment":{"os":doctor.machine.os,"hardware":doctor.machine,"gpu":gpu}, "permissions":{"capture":permissions}, "devices":devices})
+    };
     let snapshot = json!({"environment":platform["environment"],"permissions":platform["permissions"],"devices":platform["devices"],
-        "status":status,"setup":live,"library":library,"profile":profile,"plugins":daemon.plugins.list(),
+        "doctor":doctor,"status":status,"setup":live,"library":library,"profile":profile,"plugins":daemon.plugins.list(),
         "diagnostics":isocast_diagnostics::health(),"build":{"version":env!("CARGO_PKG_VERSION"),"commit":env!("ISOCAST_BUILD_COMMIT"),"profile":env!("ISOCAST_BUILD_PROFILE"),"arch":std::env::consts::ARCH}});
     isocast_diagnostics::bundle::generate(params, snapshot, &folders, credentials).map_err(error)
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn report_devices(devices: &isocast_protocol::devices::Devices) -> Value {
+    // Never export desktop window lists, process paths, audio clients or their titles.
+    json!({"displays":devices.displays,"cameras":devices.cameras,"microphones":devices.microphones,"audio_outputs":devices.audio_outputs})
 }
 
 pub fn error(message: String) -> RpcError {
@@ -491,6 +507,27 @@ pub fn error(message: String) -> RpcError {
 mod tests {
     use super::*;
     use isocast_protocol::api::{DeviceAction, DeviceKind, Event};
+
+    #[test]
+    fn report_inventory_only_contains_capture_devices() {
+        let devices = isocast_protocol::devices::Devices {
+            windows: vec![isocast_protocol::devices::Window {
+                id: 1,
+                app: "private-app".into(),
+                bundle_id: "private-path".into(),
+                title: Some("private-title".into()),
+                width: 20,
+                height: 10,
+            }],
+            notes: vec!["private-note".into()],
+            ..Default::default()
+        };
+        let inventory = report_devices(&devices);
+        assert!(inventory["microphones"].is_array());
+        assert!(inventory.get("windows").is_none());
+        assert!(inventory.get("audio_apps").is_none());
+        assert!(!inventory.to_string().contains("private"));
+    }
 
     #[test]
     fn devices_that_came_or_went_become_events() {

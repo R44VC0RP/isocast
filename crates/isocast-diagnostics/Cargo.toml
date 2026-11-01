@@ -16,3 +16,6 @@ hmac = "0.12"
 getrandom = "0.4"
 libc = "0.2"
 zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Synchronous multipart uploads with the operating system's TLS trust store.
+ureq = { version = "=3.5.0", default-features = false, features = ["multipart", "native-tls-no-default"] }
+url = "2.5.8"

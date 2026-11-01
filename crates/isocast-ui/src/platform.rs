@@ -421,7 +421,7 @@ fn shell_open(url: &str) -> std::io::Result<()> {
 
 /// Put `text` on the general pasteboard (a command to paste in Terminal).
 #[cfg(target_os = "macos")]
-pub fn copy_text(text: &str) {
+pub fn try_copy_text(text: &str) -> bool {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
@@ -433,12 +433,27 @@ pub fn copy_text(text: &str) {
         let _: isize = msg_send![&*board, clearContents];
         let string = ns_string(text);
         let kind = ns_string("public.utf8-plain-text");
-        let _: bool = msg_send![&*board, setString: &*string, forType: &*kind];
+        msg_send![&*board, setString: &*string, forType: &*kind]
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn copy_text(_text: &str) {}
+pub fn try_copy_text(text: &str) -> bool {
+    // X11/Wayland ownership lasts while this process serves the selection.
+    thread_local! { static CLIPBOARD: std::cell::RefCell<Option<arboard::Clipboard>> = const { std::cell::RefCell::new(None) }; }
+    CLIPBOARD.with_borrow_mut(|clipboard| {
+        if clipboard.is_none() {
+            *clipboard = arboard::Clipboard::new().ok();
+        }
+        clipboard
+            .as_mut()
+            .is_some_and(|clipboard| clipboard.set_text(text).is_ok())
+    })
+}
+
+pub fn copy_text(text: &str) {
+    try_copy_text(text);
+}
 
 /// Open `folder` (`~` allowed) in the Finder, as OBS's Show Recordings
 /// does; a folder that isn't there yet is made first (recording makes it

@@ -496,7 +496,7 @@ License 2.0. libxaac's NOTICE and its copy of the licence follow.
    See the License for the specific language governing permissions and
    limitations under the License.
 
-Rust crates (807)
+Rust crates (814)
 =================
 
 Crate, version, licence, link.
@@ -990,6 +990,9 @@ data-url 0.3.2
 der 0.7.10
   Apache-2.0 OR MIT
   https://github.com/RustCrypto/formats/tree/master/der
+der 0.8.3
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats
 der-parser 10.0.0
   MIT OR Apache-2.0
   https://github.com/rusticata/der-parser.git
@@ -1677,6 +1680,12 @@ memmap2 0.9.11
 memoffset 0.9.1
   MIT
   https://github.com/Gilnaa/memoffset
+mime 0.3.17
+  MIT OR Apache-2.0
+  https://github.com/hyperium/mime
+mime_guess 2.0.5
+  MIT
+  https://github.com/abonander/mime_guess
 minimal-lexical 0.2.1
   MIT/Apache-2.0
   https://github.com/Alexhuszagh/minimal-lexical
@@ -1926,6 +1935,9 @@ pastey 0.2.3
 pem-rfc7468 0.7.0
   Apache-2.0 OR MIT
   https://github.com/RustCrypto/formats/tree/master/pem-rfc7468
+pem-rfc7468 1.0.0
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats
 percent-encoding 2.3.2
   MIT OR Apache-2.0
   https://github.com/servo/rust-url/
@@ -2571,12 +2583,21 @@ untrusted 0.9.0
 unty 0.0.4
   MIT OR Apache-2.0
   https://github.com/bincode-org/unty
+ureq 3.5.0
+  MIT OR Apache-2.0
+  https://github.com/algesten/ureq
+ureq-proto 0.6.5
+  MIT OR Apache-2.0
+  https://github.com/algesten/ureq-proto
 url 2.5.8
   MIT OR Apache-2.0
   https://github.com/servo/rust-url
 usvg 0.48.1
   Apache-2.0 OR MIT
   https://github.com/linebender/resvg
+utf8-zero 0.8.1
+  MIT OR Apache-2.0
+  https://github.com/algesten/utf8-zero
 utf8_iter 1.0.4
   Apache-2.0 OR MIT
   https://github.com/hsivonen/utf8_iter

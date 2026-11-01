@@ -7,7 +7,8 @@ body:
       value: |
         Thanks for reporting. The quickest way to a fix is the report zip:
         run `isocast report --describe "what happened"` (or use the app's bug reporter).
-        It is made on your Mac and never uploaded. Its `ISSUE.md` has a summary
+        Save Zip Only keeps it on your computer. Send Report files the public issue
+        and sends the zip privately to maintainers. Its `ISSUE.md` has a summary
         and a triage block to paste below. Keys, tokens and stream URLs are
         redacted, but please look through it before attaching.
 
@@ -48,7 +49,7 @@ body:
     id: triage
     attributes:
       label: Triage block
-      description: Paste the "Agent triage" JSON block from the report's ISSUE.md (versions, Mac, macOS, what was running, recent metrics).
+      description: Paste the JSON from the "Agent triage" block in ISSUE.md (versions, machine, what was running and recent warnings).
       render: json
   - type: input
     id: version
@@ -61,15 +62,15 @@ body:
   - type: input
     id: mac
     attributes:
-      label: Mac and macOS
-      placeholder: "MacBook Air M2, macOS 26.1"
+      label: Computer and operating system
+      placeholder: "e.g. Ryzen 7, Windows 11; Intel Core i5, Ubuntu 24.04; MacBook Air M2, macOS 26.1"
     validations:
       required: true
   - type: textarea
     id: attachments
     attributes:
       label: Report zip
-      description: Attach the report zip here (drag it into this box). Screenshots or a short screen recording help too.
+      description: Optional. Files attached here are public. Review the zip before attaching, or use Send Report in Isocast to share it privately with maintainers.
   - type: checkboxes
     id: checks
     attributes:
