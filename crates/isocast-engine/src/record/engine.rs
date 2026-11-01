@@ -835,6 +835,8 @@ struct State<P: Platform> {
     /// Sources a recording uses, which keep running as they are until it
     /// ends.
     pins: Vec<String>,
+    /// Pinned sources to reopen once the recording releases them.
+    reopen_after: HashSet<String>,
     /// The revision of `setup` (the daemon's count of applied changes).
     revision: u64,
 }
@@ -1167,6 +1169,7 @@ impl<P: Platform> Engine<P> {
                 compositor: None,
                 extra_compositors: BTreeMap::new(),
                 pins: Vec::new(),
+                reopen_after: HashSet::new(),
                 revision: 0,
             }),
             wanted: Critical::new(None),
@@ -1501,43 +1504,59 @@ impl<P: Platform> Engine<P> {
         self.inner.levels.lock().clone()
     }
 
-    /// Close source `id` and open it again, as it is in the setup: after
-    /// something outside the setup changed what it opens (a screen or
-    /// window chosen again in the desktop's sharing dialog). Refused while
-    /// a recording uses it, which keeps it as it is. Nothing to do if the
-    /// engine doesn't have it open.
-    pub fn reopen(&self, id: &str) -> Result<(), String> {
-        self.reopen_unpinned(id)
+    /// Close source `id` and open it again as the setup has it, after the
+    /// sharing dialog changed what it opens. Returns false if a recording
+    /// keeps it; it then reopens when the recording ends. Does nothing if
+    /// the source isn't open.
+    pub fn reopen(&self, id: &str) -> bool {
+        let inner = &self.inner;
+        let (old, setup) = {
+            let mut state = inner.state.lock();
+            if pinned(&state, id) && state.sources.contains_key(id) {
+                state.reopen_after.insert(id.to_string());
+                return false;
+            }
+            let Some(old) = state.sources.remove(id) else {
+                return true;
+            };
+            publish(inner, &mut state);
+            (old, state.setup.clone())
+        };
+        drop(old);
+        *inner.wanted.lock() = Some(setup);
+        inner.wake.notify_all();
+        true
     }
 
     /// Whether a recording uses source `id`, keeping it as it is.
     pub fn recording_uses(&self, id: &str) -> bool {
-        self.inner.state.lock().pins.iter().any(|pin| pin == id)
+        pinned(&self.inner.state.lock(), id)
     }
 
-    fn reopen_unpinned(&self, id: &str) -> Result<(), String> {
+    /// The recording ended: its sources follow the setup again, and those
+    /// chosen again while it recorded them reopen.
+    fn release_pins(&self) {
         let inner = &self.inner;
-        let (old, setup) = {
+        let closed = {
             let mut state = inner.state.lock();
-            if state.pins.contains(&id.to_string()) {
-                return Err(format!(
-                    "source {id:?} is being recorded, which keeps it as it is; choose again once \
-                     the recording stops"
-                ));
+            state.pins.clear();
+            let reopened = std::mem::take(&mut state.reopen_after);
+            if inner.state.is_broken() {
+                Vec::new()
+            } else {
+                let closed: Vec<_> = reopened
+                    .iter()
+                    .filter_map(|id| state.sources.remove(id))
+                    .collect();
+                if !closed.is_empty() {
+                    publish(inner, &mut state);
+                }
+                *inner.wanted.lock() = Some(state.setup.clone());
+                closed
             }
-            let old = state.sources.remove(id);
-            if old.is_some() {
-                publish(inner, &mut state);
-            }
-            (old, state.setup.clone())
         };
-        if old.is_none() {
-            return Ok(());
-        }
-        drop(old);
-        *inner.wanted.lock() = Some(setup);
+        drop(closed);
         inner.wake.notify_all();
-        Ok(())
     }
 
     /// Stage `scene` as studio mode's preview (or none).
@@ -2044,16 +2063,7 @@ impl<P: Platform> Engine<P> {
         // No finalizer remains after return, including a contained panic.
         // Stale pending metadata must not leave the next session busy forever.
         inner.control.metadata_pending.lock().clear();
-        {
-            let mut state = inner.state.lock();
-            state.pins.clear();
-            // Changes to the sources it recorded apply now.
-            let setup = state.setup.clone();
-            if !inner.state.is_broken() {
-                *inner.wanted.lock() = Some(setup);
-            }
-        }
-        inner.wake.notify_all();
+        self.release_pins();
         *inner.audio_stops.lock() = None;
         inner.recording.store(false, Ordering::SeqCst);
         result
@@ -2081,6 +2091,10 @@ impl<P: Platform> Drop for Engine<P> {
             self.stop();
         }
     }
+}
+
+fn pinned<P: Platform>(state: &State<P>, id: &str) -> bool {
+    state.pins.iter().any(|pin| pin == id)
 }
 
 fn statuses<P: Platform>(state: &State<P>) -> Vec<SourceStatus> {
@@ -6319,11 +6333,10 @@ encoder = { codec = "hevc", quality = 70 }
         }
     }
 
-    /// A window source with nothing chosen for it waits for `screen_pick`,
-    /// naming the command, instead of failing like a missing device.
-    #[test]
-    fn a_window_with_nothing_chosen_waits_for_a_pick() {
-        let setup = Setup::from_toml(
+    /// A setup showing one window source, which the inert platform says
+    /// has nothing chosen.
+    fn one_window() -> Setup {
+        Setup::from_toml(
             r##"
 version = 1
 name = "t"
@@ -6347,7 +6360,14 @@ folder = "/nonexistent/isocast-engine-test"
 encoder = { codec = "hevc", quality = 70 }
 "##,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// A window source with nothing chosen for it waits for `screen_pick`,
+    /// naming the command, instead of failing like a missing device.
+    #[test]
+    fn a_window_with_nothing_chosen_waits_for_a_pick() {
+        let setup = one_window();
         let engine = Engine::start(&inert::Inert, &setup, None, None).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let status = loop {
@@ -6371,5 +6391,41 @@ encoder = { codec = "hevc", quality = 70 }
                  screen pick terminal` (method `screen_pick`)"
             )
         );
+    }
+
+    /// A screen chosen again while a recording keeps its source reopens
+    /// the source when the recording ends, not before.
+    #[test]
+    fn a_source_a_recording_keeps_reopens_when_it_ends() {
+        let engine = Engine::start(&inert::Inert, &one_window(), None, None).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !engine.sources().iter().any(|s| s.needs_pick) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal never settled"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        engine.inner.state.lock().pins.push("terminal".into());
+        assert!(!engine.reopen("terminal"), "reopened while recorded");
+        assert!(
+            engine.sources().iter().any(|s| s.needs_pick),
+            "closed while recorded"
+        );
+        engine.release_pins();
+        assert!(!engine.recording_uses("terminal"));
+        {
+            let state = engine.inner.state.lock();
+            assert!(state.reopen_after.is_empty());
+            // Closed to reopen, or opening again already.
+            assert!(
+                state
+                    .sources
+                    .get("terminal")
+                    .is_none_or(|live| !live.needs_pick)
+            );
+        }
+        assert!(engine.reopen("terminal"), "deferred with no recording");
+        engine.stop();
     }
 }

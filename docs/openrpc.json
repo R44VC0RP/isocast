@@ -16335,6 +16335,13 @@
       "ScreenPicked": {
         "description": "What was chosen in the desktop's sharing dialog.",
         "properties": {
+          "after_recording": {
+            "description": "Sources showing the choice that a recording started during the dialog\nkeeps; they switch when it stops.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "height": {
             "format": "uint32",
             "minimum": 0,
@@ -27076,7 +27083,7 @@
       "summary": "End this connection's WebRTC viewer (WHEP DELETE semantics)."
     },
     {
-      "description": "Choose the screen or window a `display` or `window` source records,\nin the desktop's sharing dialog, where apps can't list screens and\nwindows themselves (Linux). Waits up to 3 minutes for the choice.\nA source never shows the dialog by itself: one with nothing chosen\nwaits (`needs_pick` in `status`). The source then opens that screen\nor window without asking again while the desktop remembers it; a\nrunning source switches to it.\nReturns [`ScreenPicked`]. Only on this machine; refused where\n`devices` lists screens and windows instead (macOS, Windows).",
+      "description": "Choose the screen or window a `display` or `window` source records,\nin the desktop's sharing dialog, where apps can't list screens and\nwindows themselves (Linux). Waits up to 3 minutes for the choice.\nA source never shows the dialog by itself: one with nothing chosen\nwaits (`needs_pick` in `status`). The source then opens that screen\nor window without asking again while the desktop remembers it; a\nrunning source switches to it, even during a recording that shows it\nonly through the program (as any setup change would). Refused while\na recording writes the source's own ISO file, which keeps its\npicture to the end.\nReturns [`ScreenPicked`]. Only on this machine; refused where\n`devices` lists screens and windows instead (macOS, Windows).",
       "name": "screen_pick",
       "paramStructure": "by-name",
       "params": [

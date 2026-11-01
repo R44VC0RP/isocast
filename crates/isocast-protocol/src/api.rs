@@ -529,7 +529,10 @@ pub enum Method {
     /// A source never shows the dialog by itself: one with nothing chosen
     /// waits (`needs_pick` in `status`). The source then opens that screen
     /// or window without asking again while the desktop remembers it; a
-    /// running source switches to it.
+    /// running source switches to it, even during a recording that shows it
+    /// only through the program (as any setup change would). Refused while
+    /// a recording writes the source's own ISO file, which keeps its
+    /// picture to the end.
     /// Returns [`ScreenPicked`]. Only on this machine; refused where
     /// `devices` lists screens and windows instead (macOS, Windows).
     ScreenPick(ScreenPickParams),
@@ -3576,10 +3579,14 @@ pub struct ScreenPicked {
     /// The size the desktop shares, in pixels; 0 if it didn't say.
     pub width: u32,
     pub height: u32,
-    /// Whether the desktop remembers the choice. If not, its dialog asks
-    /// again each time the source starts (on Hyprland, tick "Allow a
-    /// restore token" in it).
+    /// Whether the desktop remembers the choice. If not, the source runs
+    /// on it until it stops, then waits to be chosen again (on Hyprland,
+    /// tick "Allow a restore token" in the dialog).
     pub remembered: bool,
+    /// Sources showing the choice that a recording started during the dialog
+    /// keeps; they switch when it stops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after_recording: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

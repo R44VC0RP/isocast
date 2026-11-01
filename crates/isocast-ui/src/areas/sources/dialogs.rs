@@ -2203,6 +2203,14 @@ pub fn pick_screen(app: &Rc<App>, id: String) {
                 .map_err(|error| format!("{error:#}"));
             let _ = slint::invoke_from_event_loop(move || {
                 crate::window::with_app(|app| match result {
+                    Ok(picked) if !picked.after_recording.is_empty() => {
+                        app.toast(
+                            ToastKind::Info,
+                            "It switches when the recording stops",
+                            "A recording started while the dialog was open; the source keeps \
+                             its picture until the recording stops.",
+                        );
+                    }
                     Ok(picked) if !picked.remembered => {
                         app.toast(
                             ToastKind::Warning,

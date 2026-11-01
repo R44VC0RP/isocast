@@ -1201,8 +1201,9 @@ trait LiveEngine: Send + Sync {
     fn canvas_stopped(&self, canvas: CanvasId) -> Option<String>;
     fn control(&self) -> Arc<SessionControl>;
     fn set_preview(&self, scene: Option<String>);
-    /// Close source `id` and open it again as the setup has it.
-    fn reopen(&self, id: &str) -> Result<(), String>;
+    /// Close source `id` and reopen it as the setup has it; false if a
+    /// recording keeps it (it reopens when the recording ends).
+    fn reopen(&self, id: &str) -> bool;
     /// Whether a recording uses source `id`, keeping it as it is.
     fn recording_uses(&self, id: &str) -> bool;
     fn frame_jpeg(
@@ -1316,7 +1317,7 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
         LiveEngineOf::set_preview(self, scene);
     }
 
-    fn reopen(&self, id: &str) -> Result<(), String> {
+    fn reopen(&self, id: &str) -> bool {
         LiveEngineOf::reopen(self, id)
     }
 
@@ -2818,20 +2819,41 @@ impl Daemon {
         let picked = native()
             .pick_screen(target.target(), cursor)
             .map_err(failed)?;
+        // A recording that started during the dialog keeps its sources; they
+        // reopen on the saved choice when it ends, which needs the desktop to
+        // keep it. Refuse before switching any.
         let state = self.state.read();
-        if let (Some(engine), Some(setup)) = (&state.engine, &state.setup) {
-            for id in target.showing(setup) {
-                engine.reopen(&id).map_err(|message| RpcError {
-                    code: RpcError::WRONG_STATE,
-                    message,
-                })?;
-            }
+        let (engine, showing) = match (&state.engine, &state.setup) {
+            (Some(engine), Some(setup)) => (Some(engine), target.showing(setup)),
+            _ => (None, Vec::new()),
+        };
+        let kept: Vec<String> = showing
+            .iter()
+            .filter(|id| !picked.remembered && engine.is_some_and(|e| e.recording_uses(id)))
+            .cloned()
+            .collect();
+        if !kept.is_empty() {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: format!(
+                    "{} started recording while the dialog was open, and the desktop didn't \
+                     keep the choice, so it can't switch to it when the recording stops; choose \
+                     again once it stops (on Hyprland, tick \"Allow a restore token\" in the \
+                     dialog)",
+                    kept.join(", ")
+                ),
+            });
         }
+        let after_recording = showing
+            .into_iter()
+            .filter(|id| engine.is_some_and(|e| !e.reopen(id)))
+            .collect();
         Ok(ScreenPicked {
             source: params.source,
             width: picked.width,
             height: picked.height,
             remembered: picked.remembered,
+            after_recording,
         })
     }
 
@@ -6245,7 +6267,7 @@ mod tests {
         fn set_preview(&self, _scene: Option<String>) {
             unreachable!()
         }
-        fn reopen(&self, _id: &str) -> Result<(), String> {
+        fn reopen(&self, _id: &str) -> bool {
             unreachable!()
         }
         fn recording_uses(&self, _id: &str) -> bool {

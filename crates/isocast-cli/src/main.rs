@@ -4918,6 +4918,9 @@ fn screen_pick(source: String, json: bool) -> Result<ExitCode> {
     } else {
         println!("{}: chosen", picked.source);
     }
+    for id in &picked.after_recording {
+        println!("{id:?} is being recorded: it switches to the choice when the recording stops.");
+    }
     if !picked.remembered {
         println!(
             "The desktop didn't keep the choice: the source runs on it until it stops, then \
