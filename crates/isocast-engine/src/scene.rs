@@ -158,13 +158,15 @@ impl<'a, S: AsRef<str>> Place<'a, '_, S> {
             let rect = rect_of(item);
             let (width, height) = (rect.width as f32, rect.height as f32);
             let t = style.transform;
-            // Moved, rotated and scaled about its centre, inside its parent.
+            // Moved, rotated, scaled and flipped about its centre, inside its
+            // parent.
             let place = Affine::translate(
                 rect.x as f32 + width / 2.0 + t.translate[0],
                 rect.y as f32 + height / 2.0 + t.translate[1],
             )
             .after(Affine::rotate(t.rotate))
             .after(Affine::scale(t.scale))
+            .after(Affine::flip(t.flip_horizontal, t.flip_vertical))
             .after(Affine::translate(-width / 2.0, -height / 2.0));
             let transform = parent.after(place);
             let opacity = opacity * style.opacity * look.opacity;

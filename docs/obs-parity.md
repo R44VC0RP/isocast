@@ -122,6 +122,7 @@ before the mix (done, 4.10a), and in ISO files only with
 | OBS | Isocast |
 |---|---|
 | Position, size, rotation, crop | `rect`, `style.transform`, `crop` (3.2, 4.1) |
+| Flip horizontal and vertical | `style.transform.flip_horizontal` and `flip_vertical`; an OBS item scaled by a negative amount imports as flipped (done, G.6) |
 | Visibility, order, lock | `visible`, list order (3.2); lock is an app concern |
 | Bounding box types and alignment | `fit` (`stretch`, `contain`, `cover`, `width`, `height`, `scale_down`, `none`) and `align` (done, 4.12a) |
 | Scale filtering | `scale_filter` (`point`, `bilinear`, `bicubic`, `lanczos`, `area`) (done, 4.12b) |

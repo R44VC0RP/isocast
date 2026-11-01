@@ -1741,6 +1741,8 @@ impl Dialogs {
         area.set_transform_w(w as f32);
         area.set_transform_h(h as f32);
         area.set_transform_rotate(n(&t["rotate"], 0.0) as f32);
+        area.set_transform_flip_horizontal(t["flip_horizontal"] == true);
+        area.set_transform_flip_vertical(t["flip_vertical"] == true);
         area.set_transform_scale(((n(&t["scale"], 1.0) * 1000.0).round() / 10.0) as f32);
         area.set_transform_fit(item["fit"].as_str().unwrap_or("stretch").into());
         area.set_transform_align(item["align"].as_str().unwrap_or("center").into());
@@ -1913,6 +1915,11 @@ impl Dialogs {
         let fields = match action {
             "reset" => {
                 items::reset_transform(app);
+                return;
+            }
+            "flip-horizontal" | "flip-vertical" => {
+                items::flip(app, &action.replace('-', "_"));
+                self.show_transform(app, window);
                 return;
             }
             "add-border" => json!({ "style": { "border": { "width": 4, "color": "#eeeae2" } } }),

@@ -22,6 +22,12 @@ A scene is a list of items, drawn back to front. An item shows one of:
 
 Any item can hold `children`, which move, scale, rotate and fade with it.
 
+`style.transform` moves, scales, turns and flips an item about its centre,
+after layout. A flip mirrors everything the item draws (its picture,
+children, border and shadow), so a camera that comes in mirrored is fixed
+with `transform = { flip_horizontal = true }`. ISO files keep the source
+as captured.
+
 ## Layout
 
 Place an item with `rect` (canvas pixels), or with `layout`: CSS flexbox,
