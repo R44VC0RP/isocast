@@ -130,7 +130,10 @@ pub trait Platform: Clone + Send + Sync + 'static {
         Ok(None)
     }
 
-    /// Open the installed virtual camera's bounded, IOSurface-backed sink.
+    /// A camera that takes disposable monitor frames rather than making a protected output.
+    const CAMERA_IS_MONITOR: bool = false;
+
+    /// Open the installed virtual camera's bounded sink.
     fn virtual_camera_sink(
         &self,
         _width: u32,

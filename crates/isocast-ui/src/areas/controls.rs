@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use isocast_protocol::api::{Capacity, EngineState, Event, LiveFile, Method, Overload};
+use isocast_protocol::hello::EngineOs;
 use isocast_protocol::platform_text as wording;
 use isocast_protocol::replay::{ReplaySaved, ReplayState, ReplayStatus};
 use isocast_protocol::stream::{StreamService, StreamState, StreamStatus};
@@ -2352,16 +2353,56 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
     let error = status
         .and_then(|x| x.last_error.clone())
         .unwrap_or_default();
-    let missing = vcam_missing(&error);
-    let approval = vcam_approval(&error);
+    // The extension's install and approval words are macOS's (a macOS
+    // engine's, whatever this window runs on). Windows has no camera yet;
+    // Linux's engine says why its v4l2loopback device can't be written.
+    let os = crate::engine::os();
+    let mac = os == EngineOs::Macos;
+    let unavailable = match os {
+        EngineOs::Macos => String::new(),
+        EngineOs::Windows => "Not available on Windows yet".into(),
+        _ => status
+            .and_then(|x| x.unavailable_reason.clone())
+            .unwrap_or_default(),
+    };
+    let missing = mac && vcam_missing(&error);
+    let approval = mac && vcam_approval(&error);
     area.set_vcam_missing(missing);
     area.set_vcam_approval(approval);
+    area.set_vcam_unavailable(unavailable.as_str().into());
     area.set_vcam_error(
-        if missing || approval {
+        if missing || approval || (!unavailable.is_empty() && error.contains(&unavailable)) {
             String::new()
         } else {
             error
         }
+        .into(),
+    );
+    let destination = status
+        .filter(|camera| camera.state == VirtualCameraState::Running)
+        .and_then(|camera| camera.destination.as_deref())
+        .map(|name| format!("Sending to {name}"));
+    let governor = match status.and_then(|x| x.governor_fps) {
+        Some(0) if status.is_some_and(|x| x.frames_sent == 0) => {
+            "Waiting for the first picture: Automatic Quality has paused live frames.".to_string()
+        }
+        Some(0) => {
+            "Held on its last picture by Automatic Quality to protect the recording.".to_string()
+        }
+        Some(fps) => {
+            format!("Reduced to {fps} fps by Automatic Quality to protect the recording.")
+        }
+        None => String::new(),
+    };
+    area.set_vcam_note(
+        [
+            destination.as_deref().unwrap_or_default(),
+            governor.as_str(),
+        ]
+        .into_iter()
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
         .into(),
     );
     let setup = s.setup.as_deref();
@@ -2468,6 +2509,16 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
     area.set_vcam_format(format!("{w}×{h} at {fps} fps").into());
     area.set_vcam_counts(
         match status {
+            Some(x) if x.state == VirtualCameraState::Running && x.transport == "v4l2loopback" => {
+                let mut text = format!("{} frames sent", count(x.frames_sent));
+                if x.frames_repeated > 0 {
+                    text.push_str(&format!(" · {} repeated", count(x.frames_repeated)));
+                }
+                if x.frames_dropped > 0 {
+                    text.push_str(&format!(" · {} dropped", count(x.frames_dropped)));
+                }
+                text
+            }
             Some(x) if x.state == VirtualCameraState::Running => format!(
                 "{} frames sent · {} dropped",
                 count(x.frames_sent),
@@ -2679,16 +2730,37 @@ fn set_vcam(app: &Rc<App>, field: &str, value: &str) {
 fn sample_vcam(app: &Rc<App>, which: &str) -> anyhow::Result<VirtualCameraStatus> {
     let s = app.session.borrow();
     let mut status = s.vcam.clone().unwrap_or_default();
+    // As each engine reports it: Linux's says why its v4l2loopback device
+    // can't be written (before any start); Windows has no camera to start.
+    let os = crate::engine::os();
+    let linux = !matches!(os, EngineOs::Macos | EngineOs::Windows);
+    if linux {
+        status.transport = "v4l2loopback".into();
+        status.unavailable_reason = None;
+        status.governor_fps = None;
+    }
     match which {
+        "missing" | "approval" if os == EngineOs::Windows => {
+            status.state = VirtualCameraState::Stopped;
+            status.last_error = None;
+        }
+        "missing" if linux => {
+            status.state = VirtualCameraState::Stopped;
+            status.last_error = None;
+            status.unavailable_reason = Some("No v4l2loopback camera device. Install v4l2loopback for your kernel (Debian/Ubuntu: v4l2loopback-dkms and matching kernel headers), then run: sudo modprobe v4l2loopback exclusive_caps=1 card_label=\"Isocast Camera\"".into());
+        }
+        "approval" if linux => {
+            status.state = VirtualCameraState::Stopped;
+            status.last_error = None;
+            status.unavailable_reason = Some("/dev/video10 can’t be opened for writing: add yourself to the video group, then sign in again".into());
+        }
         "missing" => {
             status.state = VirtualCameraState::Failed;
-            status.last_error = Some(wording::select_linux("virtual_camera: Isocast Virtual Camera is not installed/approved; run scripts/vcam-install.sh (a development engine never installs it)", "virtual_camera: Windows virtual camera installation is not available in this build",
-                "virtual_camera: Linux has no Isocast Virtual Camera yet").into());
+            status.last_error = Some("virtual_camera: Isocast Virtual Camera is not installed/approved; run scripts/vcam-install.sh (a development engine never installs it)".into());
         }
         "approval" => {
             status.state = VirtualCameraState::Failed;
-            status.last_error = Some(wording::select_linux("virtual_camera: allow Isocast Virtual Camera in System Settings › General › Login Items & Extensions › Camera Extensions (macOS asks once); it starts as soon as you do", "virtual_camera: Windows virtual camera installation is not available in this build",
-                "virtual_camera: Linux has no Isocast Virtual Camera yet").into());
+            status.last_error = Some("virtual_camera: allow Isocast Virtual Camera in System Settings › General › Login Items & Extensions › Camera Extensions (macOS asks once); it starts as soon as you do".into());
         }
         "running" => {
             status.state = VirtualCameraState::Running;

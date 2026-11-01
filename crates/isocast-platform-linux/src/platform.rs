@@ -48,6 +48,17 @@ impl Platform for LinuxPlatform {
     type AudioEncoder = crate::audio::StreamEncoder;
     type SharedSurface = isocast_surfaces::Surface;
 
+    const CAMERA_IS_MONITOR: bool = true;
+
+    fn virtual_camera_sink(
+        &self,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<Box<dyn isocast_engine::record::CameraSink<Frame>>> {
+        camera::output::start(width, height, fps)
+    }
+
     fn now(&self) -> Time {
         system::now()
     }
@@ -180,7 +191,30 @@ impl Platform for LinuxPlatform {
     }
     fn doctor_checks(&self) -> Vec<isocast_protocol::api::Check> {
         let [server, capture] = pipewire_audio::scheduling_checks();
-        vec![crate::media::decoders_check(), server, capture]
+        use isocast_protocol::api::{Check, CheckStatus};
+        let (status, detail, fix) = match camera::output::device() {
+            Ok(node) => (
+                CheckStatus::Ok,
+                format!("v4l2loopback: {}", node.display()),
+                None,
+            ),
+            Err(e) => (
+                CheckStatus::Warning,
+                "Optional camera output unavailable; recording is unaffected".into(),
+                Some(e.to_string()),
+            ),
+        };
+        vec![
+            crate::media::decoders_check(),
+            server,
+            capture,
+            Check {
+                name: "virtual camera".into(),
+                status,
+                detail,
+                fix,
+            },
+        ]
     }
     fn probe(&self, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
         match source {

@@ -34,7 +34,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
                 isocast_protocol::platform_text::select_linux(
                     "Removing Isocast Virtual Camera: enter an administrator password when macOS asks…",
                     "Requesting removal of Isocast Virtual Camera; Windows support depends on this build",
-                    "Requesting removal of Isocast Virtual Camera; Linux has none yet"
+                    "Isocast does not remove Linux v4l2loopback devices"
                 )
             );
         }
@@ -63,6 +63,17 @@ pub fn run(command: Command) -> Result<ExitCode> {
 }
 
 pub fn print(status: &VirtualCameraStatus) {
+    if let Some(reason) = &status.unavailable_reason {
+        println!("{reason}");
+    }
+    match status.governor_fps {
+        Some(0) if status.frames_sent == 0 => println!(
+            "Virtual camera waiting for its first picture: Automatic Quality paused live frames"
+        ),
+        Some(0) => println!("Virtual camera held: repeating the last picture to protect outputs"),
+        Some(fps) => println!("Virtual camera reduced to {fps} fps to protect outputs"),
+        None => (),
+    }
     if status.fps == 0 {
         println!(
             "Virtual camera {:?}: no live setup ({})",

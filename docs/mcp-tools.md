@@ -844,7 +844,7 @@ Remove Isocast Virtual Camera from macOS (the release app's camera extension), f
 
 ## virtual_camera_start
 
-Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first (target "vertical" shows the vertical program, 1080x1920 by default; it needs the vertical canvas on). Requires its signed/approved extension; never installs it. Recording and streaming stay independent.
+Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first (target "vertical" needs the vertical canvas on). Requires a macOS camera extension or a writable Linux v4l2loopback device. Recording and streaming stay independent.
 
 ## virtual_camera_status
 

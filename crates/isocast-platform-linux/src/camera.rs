@@ -28,6 +28,8 @@ use isocast_protocol::devices::{Camera, CameraKind, FrameRateRange, VideoFormat}
 use crate::frames::{Frame, FramePool};
 use crate::system;
 
+pub(crate) mod output;
+
 #[cfg(not(all(
     target_pointer_width = "64",
     any(
@@ -854,6 +856,9 @@ fn probe(node: &Path, ids: &HashMap<PathBuf, String>) -> Result<Option<(Identity
     let driver = text(&cap.driver);
     let bus = text(&cap.bus_info);
     let mut name = text(&cap.card);
+    if output::is_own_output(node, &driver, &name) {
+        return Ok(None);
+    }
     if name.is_empty() {
         name = node.display().to_string();
     }

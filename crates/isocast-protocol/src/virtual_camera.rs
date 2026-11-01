@@ -212,7 +212,7 @@ impl VirtualCameraSettings {
 
     /// The default remains valid in any setup, but a camera can only start
     /// in a mode it advertises to applications.
-    pub fn check_start(&self, setup: &Setup) -> Result<(), String> {
+    pub fn check_start(&self, setup: &Setup, flexible_canvas: bool) -> Result<(), String> {
         let issues = self.issues(setup);
         if !issues.is_empty() {
             return Err(issues
@@ -221,7 +221,7 @@ impl VirtualCameraSettings {
                 .collect::<Vec<_>>()
                 .join("; "));
         }
-        if !SIZES.contains(&self.size(setup)) {
+        if !flexible_canvas && !SIZES.contains(&self.size(setup)) {
             return Err(format!(
                 "virtual_camera.width: {}; set virtual_camera.width and height",
                 size_error()
@@ -262,9 +262,21 @@ pub struct VirtualCameraStatus {
     pub fps: u32,
     /// cmio-iosurface, or diagnostic-iosurface (explicit development probe).
     pub transport: String,
+    /// Name and node of the opened camera (Linux), not a guessed device name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
     pub frames_sent: u64,
+    /// Accepted re-sends of the last converted picture (included in frames_sent).
+    #[serde(default)]
+    pub frames_repeated: u64,
     pub frames_dropped: u64,
     pub last_error: Option<String>,
+    /// Why this engine cannot start the camera, including any installation step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    /// Live governor limit below the requested rate. Zero means hold the last delivered picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governor_fps: Option<u32>,
     /// Host-clock picture timestamp to sink enqueue, not camera-client latency.
     pub enqueue_latency_us: crate::api::Percentiles,
     /// This engine carries the camera extension (the release app), so

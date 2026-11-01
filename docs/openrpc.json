@@ -22017,6 +22017,13 @@
       },
       "VirtualCameraStatusResult": {
         "properties": {
+          "destination": {
+            "description": "Name and node of the opened camera (Linux), not a guessed device name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "enqueue_latency_us": {
             "allOf": [
               {
@@ -22035,10 +22042,26 @@
             "minimum": 0,
             "type": "integer"
           },
+          "frames_repeated": {
+            "default": 0,
+            "description": "Accepted re-sends of the last converted picture (included in frames_sent).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "frames_sent": {
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "governor_fps": {
+            "description": "Live governor limit below the requested rate. Zero means hold the last delivered picture.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "height": {
             "format": "uint32",
@@ -22066,6 +22089,13 @@
             "description": "cmio-iosurface, or diagnostic-iosurface (explicit development probe).",
             "type": "string"
           },
+          "unavailable_reason": {
+            "description": "Why this engine cannot start the camera, including any installation step.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "width": {
             "format": "uint32",
             "minimum": 0,
@@ -22080,6 +22110,7 @@
           "fps",
           "transport",
           "frames_sent",
+          "frames_repeated",
           "frames_dropped",
           "last_error",
           "enqueue_latency_us",

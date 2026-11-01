@@ -1715,7 +1715,9 @@ impl<P: Platform> Engine<P> {
         use isocast_protocol::virtual_camera::{Target, VirtualCameraStatus};
         let setup = self.setup();
         let settings = setup.virtual_camera.clone();
-        settings.check_start(&setup).map_err(anyhow::Error::msg)?;
+        settings
+            .check_start(&setup, P::CAMERA_IS_MONITOR)
+            .map_err(anyhow::Error::msg)?;
         let (width, height) = settings.size(&setup);
         let fps = settings.fps(&setup);
         if settings.target == Target::Preview && self.inner.main.preview_scene.lock().is_none() {
@@ -1749,17 +1751,18 @@ impl<P: Platform> Engine<P> {
             &self.inner.platform,
             self.inner.timeline.clocks.clone(),
             status,
-            move |after| {
+            move |after, fps| {
                 let _keep_source_open = &source_guard;
                 if inner.stopping.load(Ordering::SeqCst) {
                     bail!("virtual_camera: the engine stopped");
                 }
-                if settings.target == Target::Scene {
+                if settings.target == Target::Scene && !P::CAMERA_IS_MONITOR {
                     return Ok(inner.main.scenes.latest().map(|scenes| {
                         super::virtual_camera::Input::Scene(scenes, settings.scene.clone().unwrap())
                     }));
                 }
-                if settings.target != Target::Source
+                if !P::CAMERA_IS_MONITOR
+                    && settings.target != Target::Source
                     && let Some(output) = inner.output(extra.unwrap_or(CanvasId::Main))
                 {
                     let wanted = if settings.target == Target::Preview {
@@ -1775,6 +1778,13 @@ impl<P: Platform> Engine<P> {
                     // quietly.
                     (_, Some(canvas)) => canvas_camera_slot(&inner, canvas, fps),
                     (Target::Program, None) => slot_of(&inner, PROGRAM, fps),
+                    (Target::Scene, None) if P::CAMERA_IS_MONITOR => scene_slot(
+                        &inner,
+                        CanvasId::Main,
+                        settings.scene.as_deref().unwrap(),
+                        fps,
+                        (Some(width), Some(height)),
+                    ),
                     (Target::Preview, None) => slot_of(&inner, "preview", fps),
                     (Target::Source, None) => {
                         slot_of(&inner, settings.source.as_deref().unwrap(), fps)
@@ -1801,7 +1811,13 @@ impl<P: Platform> Engine<P> {
                 } else {
                     slot.wait_from(
                         Time::from_nanos(after.as_nanos() + 1),
-                        Duration::from_millis(50),
+                        if P::CAMERA_IS_MONITOR {
+                            // Allow compositor jitter, but don't borrow the
+                            // next camera tick waiting for a fresh picture.
+                            Duration::from_millis(250) / fps
+                        } else {
+                            Duration::from_millis(50)
+                        },
                     )
                 };
                 Ok(frame.and_then(|(frame, time)| {

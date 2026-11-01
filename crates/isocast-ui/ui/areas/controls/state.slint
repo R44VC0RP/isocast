@@ -46,6 +46,14 @@ export global ControlsArea {
     in property <bool> vcam-approval;
     // Why the last start failed, when it isn't that ("" for none).
     in property <string> vcam-error;
+    // Why Start can't be used, before any start ("" when it can): Windows
+    // has no camera yet; a Linux engine's v4l2loopback device is missing,
+    // not writable or busy (the engine's own words).
+    in property <string> vcam-unavailable;
+    // The engine's other words about the camera, one per line ("" for
+    // none): its Linux device is writable; Automatic Quality holds it or
+    // reduces its frame rate.
+    in property <string> vcam-note;
     // The engine carries the camera extension (the release app), so the
     // popover offers Remove Virtual Camera; removing: waiting for macOS.
     in property <bool> vcam-removable;

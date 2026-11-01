@@ -2920,6 +2920,12 @@ fn status(json: bool) -> Result<ExitCode> {
             eprintln!("warning: automatic quality: {error}");
         }
     }
+    if let Some(camera) = &status.virtual_camera
+        && camera.transport == "v4l2loopback"
+        && camera.state == isocast_protocol::virtual_camera::VirtualCameraState::Running
+    {
+        virtual_camera::print(camera);
+    }
     if let (Some(collection), Some(profile)) = (&status.collection, &status.profile) {
         println!(
             "Scene collection: {:?} ({}), profile: {:?} ({})",

@@ -66,6 +66,8 @@ impl CameraOutput {
         if status.transport.is_empty() {
             status.transport = if cfg!(target_os = "macos") {
                 "cmio-iosurface"
+            } else if cfg!(target_os = "linux") {
+                "v4l2loopback"
             } else {
                 "unsupported"
             }
@@ -73,6 +75,26 @@ impl CameraOutput {
         }
         status.removable = removable();
         status
+    }
+}
+
+fn unavailable() -> Option<String> {
+    #[cfg(windows)]
+    return Some("Virtual camera not available on Windows yet".into());
+    #[cfg(target_os = "linux")]
+    return isocast_platform_linux::virtual_camera_unavailable();
+    #[cfg(not(any(target_os = "linux", windows)))]
+    None
+}
+
+/// Discovery may access sysfs; never call under the daemon state lock.
+pub(super) fn availability(status: &mut VirtualCameraStatus) {
+    if matches!(
+        status.state,
+        VirtualCameraState::Stopped | VirtualCameraState::Failed
+    ) {
+        status.unavailable_reason = unavailable();
+        status.governor_fps = None;
     }
 }
 
@@ -101,10 +123,16 @@ impl Daemon {
 
     pub(super) fn virtual_camera_status(&self) -> VirtualCameraStatus {
         let state = self.state.read();
-        state.camera.status_for(state.setup.as_ref())
+        let mut status = state.camera.status_for(state.setup.as_ref());
+        drop(state);
+        availability(&mut status);
+        status
     }
 
     pub(super) fn virtual_camera_start(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
+        if let Some(reason) = unavailable() {
+            return Err(refused(reason));
+        }
         // Extension activation can retry here outside the dispatcher.
         let _gate = self.starting.read_recursive();
         self.cancel_calibration("Calibration deferred for the virtual camera")?;
@@ -459,7 +487,10 @@ impl Daemon {
                 .setup
                 .as_ref()
                 .ok_or_else(|| state.no_setup("no virtual camera picture"))?;
-            setup.virtual_camera.check_start(setup).map_err(refused)?;
+            setup
+                .virtual_camera
+                .check_start(setup, crate::platform::NativePlatform::CAMERA_IS_MONITOR)
+                .map_err(refused)?;
             if state.tuning {
                 return Err(refused("virtual_camera: wait for tune to finish".into()));
             }

@@ -3205,6 +3205,9 @@ impl Daemon {
         };
         // Measured without the lock (a slow disk can't hold up the rest).
         drop(state);
+        if let Some(camera) = &mut status.virtual_camera {
+            virtual_camera::availability(camera);
+        }
         status.recording_free_bytes = folder.as_deref().and_then(free_bytes);
         status
     }

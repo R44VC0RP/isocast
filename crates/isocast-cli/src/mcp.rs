@@ -1306,7 +1306,7 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first (target \"vertical\" shows the vertical program, 1080x1920 by default; it needs the vertical canvas on). Requires its signed/approved extension; never installs it. Recording and streaming stay independent.",
+        description = "Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first (target \"vertical\" needs the vertical canvas on). Requires a macOS camera extension or a writable Linux v4l2loopback device. Recording and streaming stay independent.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1337,7 +1337,7 @@ impl Isocast {
 
     #[tool(
         description = wording::select_linux("Remove Isocast Virtual Camera from macOS (the release app's camera extension), for deleting Isocast cleanly: stops the camera, then macOS asks the user for an administrator password; waits for it (up to about 4 minutes). Ask the user first. A later virtual_camera_start installs it again.", "Request removal of Isocast Virtual Camera. Windows support depends on the native backend; an unsupported operation is reported without installing or removing anything. Ask the user first.",
-            "Request removal of Isocast Virtual Camera. Linux has no Isocast Virtual Camera yet: the operation is reported as unsupported, without changing anything."),
+            "Linux v4l2loopback devices are managed by the administrator; Isocast never removes them."),
         annotations(
             read_only_hint = false,
             destructive_hint = true,
