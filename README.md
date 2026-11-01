@@ -1,19 +1,20 @@
 # Isocast
 
-**A free, open-source OBS alternative for Mac that records every source as its own file.**
+**A free, open-source OBS alternative for Mac and Linux that records every source as its own file.**
 
-Isocast is a screen recorder and streaming app for macOS on Apple silicon.
-It works like OBS, with scenes, sources, transitions and an audio mixer,
-and it also saves each screen, window and camera as a separate
-full-quality file (ISO recording), all on one clock. It uses about half
-the CPU of OBS for the same recording, imports your OBS scene
+Isocast is a screen recorder and streaming app for macOS on Apple silicon
+and for Linux (Ubuntu 24.04 and Debian 12). It works like OBS, with
+scenes, sources, transitions and an audio mixer, and it also saves each
+screen, window and camera as a separate full-quality file (ISO
+recording), all on one clock. On a Mac it uses
+about half the CPU of OBS for the same recording, imports your OBS scene
 collections, and answers the obs-websocket tools you already use. Written
 in Rust, MIT or Apache 2.0.
-[isocast.xyz](https://isocast.xyz)
+[isocast.com](https://isocast.com)
 
 ![Isocast recording: the Screen scene shows a terminal with a picture-in-picture photo and a title, above the recording timer, frame rate, dropped frames and CPU; below are the scenes, the sources with their ISO badges, the audio mixer and the Controls dock with Stop, Pause, Marker, Replay Buffer, Virtual Camera and Studio Mode](docs/images/app.png)
 
-[Download for Mac](https://github.com/R44VC0RP/isocast/releases) ·
+[Download for Mac or Linux](https://github.com/R44VC0RP/isocast/releases) ·
 [Getting started](docs/getting-started.md) ·
 [Isocast vs OBS](#isocast-vs-obs) · [FAQ](#faq)
 
@@ -41,7 +42,7 @@ in Rust, MIT or Apache 2.0.
 | | Isocast | OBS Studio |
 |---|---|---|
 | Price and licence | Free, MIT or Apache 2.0 | Free, GPL |
-| Platforms | macOS 14+, Apple silicon | macOS, Windows, Linux |
+| Platforms | macOS 14+ on Apple silicon; Linux (Ubuntu 24.04, Debian 12) | macOS, Windows, Linux |
 | Scenes, sources, transitions, Studio Mode | Yes | Yes |
 | Each source as its own file (ISO), on one clock | Built in | Not built in (third-party Source Record plugin) |
 | CPU for the same recording ([benchmarks](docs/benchmarks.md)) | About half of OBS's | Baseline |
@@ -60,10 +61,10 @@ in Rust, MIT or Apache 2.0.
 | Adjusts quality live when the machine falls behind | Built in (never the recording) | No |
 | Track record | New, in alpha | Years of polish |
 
-OBS is the better choice today if you need Windows or Linux, a specific
-OBS plugin, Elgato's official Stream Deck actions, or years of proven
-polish. Isocast is for Mac users who want
-separate files per source, a lighter app, or a recorder they can script.
+OBS is the better choice today if you need Windows, a specific OBS
+plugin, Elgato's official Stream Deck actions, or years of proven polish.
+Isocast is for Mac and Linux users who want separate files per source, a
+lighter app, or a recorder they can script.
 
 ![Isocast compared with OBS 32.2.2: less CPU, less memory, faster stop and launch, and no skipped frames on a base M2](docs/images/benchmark.png)
 
@@ -75,7 +76,7 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 ## Features
 
-**In Isocast 0.0.9 (the current download):**
+**In Isocast 0.0.10 (the current download), on a Mac:**
 
 - Scenes and sources: screens, windows, cameras, microphones, desktop
   audio, one app's audio or everything but some apps (macOS 14.2+),
@@ -122,6 +123,8 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 - **Virtual camera:** the program as a camera for Zoom, Meet, FaceTime
   and other apps, updated with the app, and **Remove Virtual Camera**
   when you're done with it.
+- Flip Horizontal and Flip Vertical for any source (the ISO file keeps
+  the picture as captured).
 - Streaming to Twitch, YouTube, Kick, Facebook or any RTMP/RTMPS server,
   or to several at once, each with its own key kept in your Keychain.
   Starting a stream during a recording no longer drops ISO frames.
@@ -142,13 +145,29 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   recording, before frames drop.
 - Automatic updates. macOS prompts name the engine "Isocast Engine".
 
+**On Linux (new in 0.0.10):**
+
+- Screens through your desktop's screen-sharing picker, cameras
+  (including NV12-only ones), microphones, desktop audio, media files and
+  web pages (Ubuntu 24.04 only), recorded to the program and ISO files.
+- Previews through shared memory when the app and engine run on the same
+  computer.
+- The virtual camera through a v4l2loopback device you set up; Isocast
+  never loads the module or asks for root.
+- OBS import from `~/.config/obs-studio`, a dark title bar and Linux key
+  names.
+- `isocast doctor` checks capture, the codec, camera access and real-time
+  audio scheduling.
+- Updates are manual (see [Download](#download)), and window sources
+  aren't available yet.
+
 **Coming next** (not in a release yet; see [coming soon](docs/coming.md)):
 
 - **More remote control:** live video for every monitor, not just the
   program, and a choice of where its sound plays.
-- **Windows:** recording works end to end in testing (screen, camera and
-  microphone to the program and ISO files, with previews); streaming,
-  media playback and an installer release come next.
+- **Windows:** the next release (0.0.11), once its installer is
+  code-signed.
+- **Window sources on Linux.**
 - Later ideas: running real OBS plugins in a
   helper process, Elgato Stream Deck's own protocol, shader filters and
   WebAssembly sources.
@@ -224,6 +243,8 @@ back once the load passes.
 
 ## Download
 
+### Mac
+
 1. Get the latest **Isocast.dmg** from
    [Releases](https://github.com/R44VC0RP/isocast/releases).
 2. Open it and drag Isocast to Applications.
@@ -233,15 +254,59 @@ back once the load passes.
 You need a Mac with Apple silicon (M1 or later) and macOS 14 Sonoma or
 later. Intel Macs aren't supported.
 
+### Linux
+
+From [Releases](https://github.com/R44VC0RP/isocast/releases), download
+`SHA256SUMS` and **one** `.deb` into a new, empty folder. Match your
+distro and the architecture printed by `dpkg --print-architecture`
+(`amd64` or `arm64`), then run the commands below in that folder. The
+checksum verifies the download; the packages aren't signed.
+
+**Ubuntu 24.04:**
+
+```sh
+sha256sum --ignore-missing -c SHA256SUMS && sudo apt install ./isocast-*-ubuntu24.04-$(dpkg --print-architecture).deb
+```
+
+**Debian 12 (bookworm):** screen and audio capture need PipeWire 1.0.5 or
+later from bookworm-backports. If it isn't enabled yet, add it first:
+
+```sh
+echo 'deb https://deb.debian.org/debian bookworm-backports main' | sudo tee /etc/apt/sources.list.d/bookworm-backports.list
+sudo apt update
+sudo apt install -t bookworm-backports libpipewire-0.3-0 pipewire wireplumber
+sha256sum --ignore-missing -c SHA256SUMS && sudo apt install ./isocast-*-debian12-$(dpkg --print-architecture).deb
+```
+
+The Debian 12 package has no browser sources; use Ubuntu 24.04 if you
+need them. The tarballs are Ubuntu 24.04 builds with a per-user
+`install.sh`; don't install one over a `.deb`.
+
+**First launch:** open Isocast from your app menu and choose **Download**
+to get Cisco's OpenH264 for H.264 encoding and live previews. It
+downloads and checks the codec as your user, never as root. You can skip
+it and run `isocast-openh264-install` later (`--remove` removes it).
+OpenH264 Video Codec provided by Cisco Systems, Inc. When screen capture
+starts, your desktop asks which screen to share; if no picker opens,
+install `xdg-desktop-portal` and your desktop's backend
+(`xdg-desktop-portal-gnome` or `xdg-desktop-portal-kde`). `isocast doctor`
+reports capture and codec problems.
+
+**Updating:** finish any recording or stream, quit Isocast, run
+`isocast engine shutdown`, then download the newer `.deb` and
+`SHA256SUMS` into an empty folder and repeat the commands above. Settings
+and recordings stay in place.
+
 Isocast is in alpha: expect rough edges, and keep a backup recorder for
 anything you can't redo.
 
 ## First steps
 
-1. **Open Isocast and allow access.** The permissions step asks for
+1. **Open Isocast and allow access.** On a Mac, the permissions step asks for
    screen recording, camera and microphone access; macOS may ask you to
-   reopen Isocast after granting screen recording.
-2. **Pick a start.** *Start with this Mac* builds ready-made scenes from
+   reopen Isocast after granting screen recording. On Linux, your desktop
+   asks which screen to share when capture starts.
+2. **Pick a start.** *Start with this Mac* (*this computer* on Linux) builds ready-made scenes from
    your screen, camera and microphone. *Import from OBS* brings an OBS
    scene collection over.
 3. **Record.** Press **Start Recording**, then **Stop**. **File › Show
@@ -254,7 +319,7 @@ More in [Getting started](docs/getting-started.md).
 **Can I import my OBS scenes?**
 Yes. *Import from OBS* (or `isocast setup import-obs`) reads OBS scene
 collections and profiles from `~/Library/Application Support/obs-studio`
-or an exported `.json`, and lists anything without an Isocast equivalent.
+on a Mac, `~/.config/obs-studio` on Linux, or an exported `.json`, and lists anything without an Isocast equivalent.
 The [OBS parity table](docs/obs-parity.md) shows how each OBS source,
 filter and transition maps.
 
@@ -282,8 +347,8 @@ Yes: Twitch, YouTube, Kick, Facebook or any RTMP/RTMPS server, or
 several at once, while recording if you like. See [Streaming](docs/streaming.md).
 
 **Where do my recordings go?**
-To `~/Movies/Isocast` unless you choose another folder in Settings ›
-Output, one folder per recording. Each take holds the program video, one
+To `~/Movies/Isocast` on a Mac and `~/Videos/Isocast` on Linux, unless
+you choose another folder in Settings › Output, one folder per recording. Each take holds the program video, one
 file per ISO source (`SCREEN-…`, `CAMERA-…`) and a `.session.json`.
 Files are committed every half second, so a crash loses about the last
 0.5 s, and Isocast repairs the files on its next launch (a power cut can
@@ -295,7 +360,8 @@ Yes and yes: free, MIT or Apache 2.0. It's a new app written in Rust, not
 a fork of OBS, and no OBS code was read or copied.
 
 **Does it work on Windows or Linux?**
-Not yet. Mac first; the engine is built so other platforms can follow.
+Linux, yes, from 0.0.10: Ubuntu 24.04 and Debian 12 (see
+[Download](#download)). Windows comes in the next release.
 
 ## Docs
 
