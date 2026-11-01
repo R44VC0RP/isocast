@@ -97,6 +97,10 @@ jobs:
         if: env.MODE == 'full'
         run: python3 .github/scripts/pr_checks_test.py
 
+      - name: Merge train (isolated Git and fake GitHub)
+        if: env.MODE == 'full'
+        run: python3 scripts/tests/train_sim.py
+
       - name: Third-party notices up to date
         if: env.MODE == 'full'
         run: scripts/third-party-notices.sh --check

@@ -34,8 +34,9 @@ After interruption, repeat the same merge-pr.sh command. Under $ISOCAST_CI_DIR
 (default /Volumes/IsocastBuild/ci), merge-<command hash>.json checkpoints the
 remaining groups, tips, candidate, run IDs and landing receipt. A restart checks
 live provenance and CI; the journal is not a green verdict. After main advances
-it retries only publication/PR closure, not the merge. Pass skipped PRs again
-once fixed. Dry runs neither write nor consume checkpoints.
+it retries only publication/PR closure, not the merge. Every command first
+finishes (or refuses) interrupted landings, even from other commands. A dry
+run reports such a journal without changing it. Pass skipped PRs again once fixed.
 
 REPORT.md (default /Volumes/IsocastBuild/<lane>/scratch/REPORT.md):
 
@@ -53,6 +54,7 @@ import argparse
 import contextlib
 import datetime
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -206,7 +208,7 @@ def snapshot_runs(sha, branch):
     runs = gh_json("run", "list", "--repo", REPO, "--commit", sha, "--branch", branch, "--event", "push", "--limit", "50",
                    "--json", "databaseId,workflowName,status,conclusion,headBranch,headSha,url,createdAt") or []
     newest = {}
-    for r in sorted(runs, key=lambda r: r["createdAt"]):
+    for r in sorted(runs, key=lambda r: (r["createdAt"], r["databaseId"])):
         if r["headBranch"] == branch and r["headSha"] == sha:
             newest[r["workflowName"]] = r
     return newest
@@ -379,20 +381,73 @@ def cmd_pr(a):
 
 # ----------------------------------------------------------------- prs ----
 
+QA_FIELDS = {
+    'comments': 'body createdAt authorAssociation isMinimized',
+    'reviews': 'body submittedAt authorAssociation isMinimized state',
+}
+PR_FIELDS = """
+    number title url isDraft body state createdAt baseRefName headRefName headRefOid
+    labels(first: 20) { nodes { name } }
+    commits(last: 1) { nodes { commit { oid message committedDate } } }
+""" + '\n'.join(name + '(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { ' + fields + ' } }'
+                 for name, fields in QA_FIELDS.items())
+
 PRS_QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     pullRequests(states: OPEN, baseRefName: "main", first: 100, orderBy: {field: CREATED_AT, direction: ASC}) {
-      nodes {
-        number title url isDraft body createdAt headRefName headRefOid reviewDecision
-        labels(first: 20) { nodes { name } }
-        comments(last: 30) { nodes { body createdAt } }
-        reviews(last: 30) { nodes { body submittedAt } }
-        commits(last: 1) { nodes { commit { oid message } } }
-      }
+      nodes { """ + PR_FIELDS + """ }
     }
   }
 }"""
+
+
+def query_pr(number, fields, before=None):
+    owner, name = REPO.split('/')
+    args = ['-F', f'owner={owner}', '-F', f'name={name}', '-F', f'n={number}']
+    cursor = ''
+    if before is not None:
+        cursor = ', $before: String!'
+        args += ['-f', f'before={before}']
+    query = ('query($owner: String!, $name: String!, $n: Int!' + cursor + ') { repository(owner:$owner, name:$name) '
+             '{ pullRequest(number:$n) { ' + fields + ' } } }')
+    return gh_json('api', 'graphql', *args, '-f', 'query=' + query)['data']['repository']['pullRequest']
+
+
+def head_commit(pr):
+    last = (pr['commits']['nodes'] or [{}])[-1].get('commit') or {}
+    return last if last.get('oid') == pr['headRefOid'] else {}
+
+
+def qa_verdict(pr):
+    """Same head, cutoff, trusted authors and latest-verdict rule for listing and landing."""
+    committed = head_commit(pr).get('committedDate')
+    if not committed:
+        return None
+    cutoff = datetime.datetime.fromisoformat(committed.replace('Z', '+00:00'))
+    verdicts = []
+    for name, fields in QA_FIELDS.items():
+        page = pr[name]
+        while True:
+            for c in page['nodes']:
+                m = QA_VERDICT.match(c.get('body') or '')
+                stamp = c.get('submittedAt') if name == 'reviews' else c.get('createdAt')
+                if (not m or not stamp or c['authorAssociation'] not in ('OWNER', 'MEMBER', 'COLLABORATOR') or
+                        c['isMinimized'] or c.get('state') in ('DISMISSED', 'PENDING')):
+                    continue
+                when = datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+                if when > cutoff:
+                    # On a same-second tie, changes requested wins, not approval.
+                    verdicts.append((when, 'approved' if m[1].lower() == 'approved' else 'changes'))
+            if not page['pageInfo']['hasPreviousPage']:
+                break
+            more = query_pr(pr['number'], 'headRefOid ' + name + '(last:100, before:$before) '
+                            '{ pageInfo { hasPreviousPage startCursor } nodes { ' + fields + ' } }',
+                            page['pageInfo']['startCursor'])
+            if more['headRefOid'] != pr['headRefOid']:
+                return None
+            page = more[name]
+    return max(verdicts)[1] if verdicts else None
 
 
 def cmd_prs(a):
@@ -405,26 +460,14 @@ def cmd_prs(a):
     rows = []
     for pr in prs:
         pr["labels"] = pr["labels"]["nodes"]
-        pr["comments"] = pr["comments"]["nodes"]
-        pr["reviews"] = pr["reviews"]["nodes"]
         mk = marker_of(pr["body"]) or {}
-        trail = {}
-        last = (pr["commits"]["nodes"] or [{}])[-1].get("commit") or {}
-        if last.get("oid") == pr["headRefOid"]:
-            trail = trailers_of(last.get("message", ""))
+        trail = trailers_of(head_commit(pr).get('message', '')) if head_commit(pr) else {}
         newest = {}
-        for r in sorted((r for r in runs if r["headSha"] == pr["headRefOid"]), key=lambda r: r["createdAt"]):
+        for r in sorted((r for r in runs if r["headSha"] == pr["headRefOid"] and r['headBranch'] == pr['headRefName']),
+                        key=lambda r: (r['createdAt'], r['databaseId'])):
             newest[r["workflowName"]] = r
         state, marks = ci_state(newest)
-        review = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes"}.get(pr["reviewDecision"] or "")
-        if not review:
-            notes = [(c["createdAt"], c["body"]) for c in pr["comments"]] + \
-                    [(r["submittedAt"], r["body"]) for r in pr["reviews"] if r.get("submittedAt")]
-            for _, b in sorted(notes, reverse=True):
-                m = QA_VERDICT.match(b or "")
-                if m:
-                    review = "approved" if m.group(1).lower() == "approved" else "changes"
-                    break
+        review = qa_verdict(pr)
         hw = ",".join(l["name"][6:] for l in pr["labels"] if l["name"].startswith("needs:")) or "?"
         branch_tip = rev(mk["branch"]) if mk.get("branch") else None
         fresh = "-" if not trail else (
@@ -454,9 +497,15 @@ def cmd_prs(a):
 # --------------------------------------------------------------- merge ----
 
 def load(number, batch=False):
-    pr = gh_json("pr", "view", str(number), "--repo", REPO, "--json",
-                 "number,title,body,url,state,isDraft,baseRefName,headRefName,headRefOid,labels" +
-                 (",comments,reviews" if batch else ""))
+    if batch:
+        pr = query_pr(number, PR_FIELDS)
+        if not pr:
+            raise Refused(f'no such PR: #{number}')
+        pr['labels'] = pr['labels']['nodes']
+        pr['approved'] = qa_verdict(pr) == 'approved'
+    else:
+        pr = gh_json("pr", "view", str(number), "--repo", REPO, "--json",
+                     "number,title,body,url,state,isDraft,baseRefName,headRefName,headRefOid,labels")
     n = f"#{number}"
     if pr["state"] != "OPEN":
         raise Refused(f"{n} is {pr['state'].lower()}")
@@ -482,15 +531,6 @@ def load(number, batch=False):
     pr["tip"] = rev(mk["branch"])
     if not pr["tip"]:
         raise Refused(f"{n}'s branch {mk['branch']} isn't in this repo")
-    if batch:
-        # A passer-by's comment is not QA. The latest maintainer verdict wins.
-        verdicts = []
-        for c in pr["comments"] + pr["reviews"]:
-            m = QA_VERDICT.match(c.get("body") or "")
-            if (m and c.get("authorAssociation") in ("OWNER", "MEMBER", "COLLABORATOR") and
-                    not c.get("isMinimized") and c.get("state") != "DISMISSED"):
-                verdicts.append((c.get("submittedAt") or c.get("createdAt") or "", m[1].lower()))
-        pr["approved"] = bool(verdicts and max(verdicts)[1] == "approved")
     refresh(pr, pr['headRefOid'])
     if pr["trail"].get("source") != pr["tip"]:
         raise Refused(f"{n}: {mk['branch']} ({pr['tip'][:12]}) has moved since its snapshot "
@@ -522,15 +562,19 @@ ALLOW_WORKFLOWS = []
 
 class Train(dict):
     """Atomic, command-scoped journal. The merger lock serializes all writers."""
-    def __init__(self, args, lock):
-        key = hashlib.sha256(json.dumps(vars(args), sort_keys=True).encode()).hexdigest()[:24]
-        self.path = os.path.join(CI_DIR, f"merge-{key}.json")
+    def __init__(self, path, lock, numbers=()):
+        self.path = path
         self.lock = (lock.f.fileno(),) if lock else ()
-        super().__init__(phase="new", numbers=list(dict.fromkeys(args.numbers)), refused=[])
-        if self.lock and os.path.isfile(self.path):
-            with open(self.path) as f:
-                self.update(json.load(f))
-            log(f"merge: resuming {self.path} ({self['phase']})")
+        super().__init__(phase="new", numbers=list(dict.fromkeys(numbers)), refused=[])
+        if os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                if 'phase' not in data:
+                    raise ValueError('missing phase')
+                self.update(data)
+            except (OSError, ValueError, TypeError) as e:
+                raise Refused(f"merge: cannot inspect journal {path}: {e}") from e
 
     def save(self, **changes):
         self.update(changes)
@@ -730,6 +774,8 @@ def green(pr, batch=False, lock=()):
     state, marks = ci_state(runs)
     log(f"merge: #{pr['number']} snapshot {pr['snapshot'][:12]}: {state} {marks}")
     pr["own_green"] = state == "green"
+    if state == 'red' and batch:
+        pr['red_reason'] = red_reason({w: runs[w] for w in WORKFLOWS if w in runs and ci_state({w: runs[w]})[0] == 'red'})
     if state == "red" and pr["number"] in KNOWN_FLAKES:
         note = accepted_flake(pr["snapshot"], runs, [pr], own=batch)
         if note:
@@ -822,10 +868,74 @@ def staging_tree(base):
         git('worktree', 'remove', '--force', wt, check=False)
 
 
+def ancestor(old, new, cwd=None):
+    code = subprocess.run(['git', 'merge-base', '--is-ancestor', old, new], cwd=cwd or SCRIPTS).returncode
+    if code not in (0, 1):
+        raise Refused(f'merge: could not check ancestry of {old} and {new}')
+    return code == 0
+
+
+def published_landing(train, main):
+    """Recovery proof across two unrelated histories; never push to obtain it."""
+    merged = train['receipt']['merged']
+    if not ancestor(merged, main):
+        raise Refused(f'merge: {merged} is not on main; inspect {train.path}')
+    if train['phase'] == 'closing':
+        # This receipt was written only after verifying the push.
+        published = train['published']
+    else:
+        # publish-snapshot records the private ref BEFORE pushing. Neither that
+        # marker nor local public HEAD alone proves anything reached GitHub.
+        try:
+            with open(os.path.join(PUBLIC_DIR, '.git', 'isocast-published')) as f:
+                private = f.read().strip()
+        except FileNotFoundError:
+            log('merge: no private-to-public publication marker')
+            return None
+        if not re.fullmatch('[0-9a-f]{40}', private) or not rev(private) or not ancestor(merged, private):
+            log(f'merge: last publication marker does not include {merged[:12]}')
+            return None
+        published = rev('HEAD', cwd=PUBLIC_DIR)
+        if not published:
+            return None
+        # Bind the marker to an actual public tree, including export-ignore;
+        # this also works when a later publication included the private merge.
+        with tempfile.TemporaryDirectory(dir=CI_DIR) as d:
+            top = git('rev-parse', '--show-toplevel')  # git archive from scripts/ would export only that subtree
+            with subprocess.Popen(['git', 'archive', private], cwd=top, stdout=subprocess.PIPE) as archive:
+                unpack = subprocess.run(['tar', '-xf', '-'], cwd=d, stdin=archive.stdout)
+                archive.stdout.close()
+                if archive.wait() or unpack.returncode:
+                    raise Refused(f'merge: could not verify public export of {private}')
+            git('init', '-q', cwd=d)
+            git('add', '--force', '-A', cwd=d)
+            expected = git('write-tree', cwd=d)
+            actual = git('rev-parse', f'{published}^{{tree}}', cwd=PUBLIC_DIR)
+            if expected != actual:
+                log(f'merge: marker exports tree {expected[:12]}, public checkout has {actual[:12]}')
+                return None
+    remote = remote_head('main')
+    if not remote:
+        return None
+    if not rev(remote, cwd=PUBLIC_DIR):
+        git('fetch', '--quiet', '--no-tags', REMOTE, remote, cwd=PUBLIC_DIR)
+    if not ancestor(published, remote, PUBLIC_DIR):
+        log(f'merge: {published[:12]} is not on public main {remote[:12]}')
+        return None
+    return published
+
+
 def finish_landing(train, wt=None):
     """After the checked ff, publishing the same tree is idempotent. Never merge here."""
     receipt = train['receipt']
     merged, snapshot = receipt['merged'], receipt['snapshot']
+    if wt is None:
+        main = rev('main')
+        published = published_landing(train, main)
+        if published:
+            train.save(phase='closing', published=published)
+        elif train['phase'] == 'closing' or main != merged:
+            raise Refused(f'merge: cannot prove {merged} was published; inspect {train.path} before another train')
     if train['phase'] == 'landing':
         if rev('main') != merged:
             raise Refused(f"merge: cannot recover publication of {merged}: main moved; inspect {train.path}")
@@ -842,12 +952,12 @@ def finish_landing(train, wt=None):
         n = str(pr['number'])
         actual = gh_json('pr', 'view', n, '--repo', REPO, '--json', 'state,headRefOid')
         if actual['state'] == 'OPEN':
-            if actual['headRefOid'] != pr['snapshot']:
-                raise Refused(f"merge: #{n} moved after landing; refusing to close its new tip")
             others = ', '.join(f"#{p['number']}" for p in receipt['prs'] if p != pr)
             comment = (f"Merged into main as `{merged[:12]}`" + (f" with {others}" if others else '') +
                        f" and published as {url}.\n\nCI on snapshot `{snapshot[:12]}`: {receipt['links']}.")
-            gh('pr', 'close', n, '--repo', REPO, '--comment', comment, '--delete-branch')
+            # Close for the proven, published merge but preserve a newer branch.
+            delete = ['--delete-branch'] if actual['headRefOid'] == pr['snapshot'] else []
+            gh('pr', 'close', n, '--repo', REPO, '--comment', comment, *delete)
             log(f"merge: closed #{n}")
         if pr['state_notes'] and not receipt['notes']:
             print(f"STATE notes from #{n} (apply to docs/STATE.md with the next batch's --notes):\n{pr['state_notes']}\n")
@@ -945,8 +1055,10 @@ def admit(train, hw_evidence):
             skip(train, n, 'no QA: approved verdict')
             continue
         if batch:
-            if not green(pr, batch=True):
-                skip(train, n, 'red')
+            # Once admitted, the candidate is the proof. Do not silently redo
+            # initial admission during a bisect/resume and evict unrelated reds.
+            if train.get('admitted', {}).get(str(n)) != pr['snapshot'] and not green(pr, batch=True):
+                skip(train, n, pr['red_reason'])
                 continue
             tip = pr['tip']
             base, head = prefixes[0][1], prefixes[-1][1]
@@ -976,15 +1088,24 @@ def skip(train, number, reason):
         train['refused'].append(message)
 
 
-def evict_red(train, group):
-    if len(train['numbers']) == 1:
+def red_reason(runs):
+    return 'red: ' + ', '.join(f"{w} {r['url']}" for w, r in runs.items())
+
+
+def evict_red(train, group, candidate_runs):
+    failed = {w for w in WORKFLOWS if w in candidate_runs and ci_state({w: candidate_runs[w]})[0] == 'red'
+              and candidate_runs[w]['conclusion'] != 'skipped'}
+    if not failed or len(train['numbers']) == 1:
         return False
     remaining = []
     for p in group:
-        if green(p, batch=True):
-            remaining.append(p['number'])
+        own = snapshot_runs(p['snapshot'], p['headRefName'])
+        matches = {w: r for w, r in own.items() if w in failed and ci_state({w: r})[0] == 'red'
+                   and r['conclusion'] != 'skipped' and not accepted_flake(p['snapshot'], {w: r}, [p], own=True)}
+        if matches:
+            skip(train, p['number'], red_reason(matches))
         else:
-            skip(train, p['number'], 'red')
+            remaining.append(p['number'])
     if len(remaining) == len(group):
         return False
     train.save(phase='ready', inputs=None, queue=([remaining] if remaining else []) + train['queue'][1:])
@@ -1015,7 +1136,7 @@ def land(train, group, hw_evidence, dry_run):
     lane = train['lane']
     branch = f'ci/{lane}'
     if not ok:
-        if evict_red(train, group):
+        if evict_red(train, group, snapshot_runs(snapshot, branch)):
             drop_candidate(train, snapshot)
             return True
         ok = rerun_failed_once(train, snapshot)
@@ -1036,7 +1157,7 @@ def land(train, group, hw_evidence, dry_run):
         if not land_tested(train, group, snapshot, trailers_of(msg), hw_evidence, dry_run, branch):
             return False
     else:
-        if evict_red(train, group):
+        if evict_red(train, group, runs):
             drop_candidate(train, snapshot)
             return True
         if len(numbers) == 1:
@@ -1079,19 +1200,29 @@ def cmd_merge(a):
     if a.allow_workflow_changes:
         ALLOW_WORKFLOWS.append("--allow-workflow-changes")
     with (contextlib.nullcontext() if a.dry_run else MergeLock()) as lock:
-        train = Train(a, lock)
+        key = hashlib.sha256(json.dumps(vars(a), sort_keys=True).encode()).hexdigest()[:24]
+        path = os.path.join(CI_DIR, f'merge-{key}.json')
+        for other in sorted(glob.glob(os.path.join(CI_DIR, 'merge-*.json'))):
+            prior = Train(other, lock)
+            if prior['phase'] not in ('landing', 'closing'):
+                continue
+            if a.dry_run:
+                raise Refused(f'merge: dry run: unfinished {prior["phase"]} in {other}; recovery required')
+            if prior['phase'] == 'landing' and rev('main') == prior['receipt']['base']:
+                if other != path:
+                    raise Refused(f'merge: unfinished pre-fast-forward journal {other}; repeat its original command')
+                # Re-qualify before the ff using the original command's flags.
+                prior.save(phase='waiting' if prior.get('candidate') else 'ready', receipt=None)
+            else:
+                log(f'merge: finishing {other} ({prior["phase"]})')
+                finish_landing(prior)
+        train = Train(path, lock, a.numbers)
         if train['phase'] == 'new':
             train.save(phase='ready', queue=[train['numbers']], notes=state_notes_ref(a.notes) if a.notes else None)
         elif train['phase'] == 'done' and train['refused']:
             # Retry the outstanding subset after fixes, never PRs already landed.
             pending = [n for n in train['numbers'] if n not in train.get('landed', [])]
-            train.save(phase='ready', queue=[pending] if pending else [], refused=[], inputs=None)
-        if train['phase'] in ('landing', 'closing'):
-            if train['phase'] == 'landing' and rev('main') == train['receipt']['base']:
-                # Died just before the ff. Re-qualify; the receipt is not permission to move main.
-                train.save(phase='waiting' if train.get('candidate') else 'ready', receipt=None)
-            else:
-                finish_landing(train)
+            train.save(phase='ready', queue=[pending] if pending else [], refused=[], inputs=None, admitted={})
         if train['notes'] and state_notes_ref(a.notes) != train['notes']:
             raise Refused('merge: --notes moved since this train started; pass its intended SHA')
         while train['queue']:
@@ -1101,7 +1232,8 @@ def cmd_merge(a):
                     train.save(phase='ready', queue=train['queue'][1:])
                     break
                 train.save(queue=[[p['number'] for p in group]] + train['queue'][1:],
-                           tips={str(p['number']): p['tip'] for p in group})
+                           tips={str(p['number']): p['tip'] for p in group},
+                           admitted={**train.get('admitted', {}), **{str(p['number']): p['snapshot'] for p in group}})
                 if land(train, group, hw_evidence, a.dry_run):
                     if a.dry_run:
                         train.save(queue=train['queue'][1:])
