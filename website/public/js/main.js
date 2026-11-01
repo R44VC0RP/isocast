@@ -360,7 +360,7 @@ for (const chip of chips) {
 }
 
 // One slow pulse travels the wires on one clock: from the sources into the
-// mark, then out to all four files at once.
+// mark, then out to all three files at once.
 const PULSE = 4.8; // seconds per cycle
 const hubGlow = flow.querySelector(".flow-hub-glow");
 const pulses = wires.map((w) => {

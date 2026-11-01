@@ -1,10 +1,10 @@
-// The four files of one take, and the small parts they're built from.
+// The three files of one take and its mic audio, and the small parts they're built from.
 
 export const FILES = [
   { kind: "program", name: "program.mov" },
   { kind: "screen", name: "screen.mov" },
   { kind: "camera", name: "camera.mov" },
-  { kind: "mic", name: "mic.mov" },
+  { kind: "mic", name: "mic audio" },
 ];
 
 export function h(tag, cls) {
@@ -54,7 +54,7 @@ export function tcBadge() {
   return { el, set(tc) { t.set(tc.mmss); } };
 }
 
-// The mic file's waveform from real peaks (0-100): one bar per bucket, the
+// The mic's waveform from real peaks (0-100): one bar per bucket, the
 // loudest peak in it. Bars stay at least `bar` tall so silence still reads.
 export function peakWave(peaks, w, hgt, { bar = 3.4, gap = 2.6, color = "#56ad9b" } = {}) {
   const n = Math.floor((w + gap) / (bar + gap));

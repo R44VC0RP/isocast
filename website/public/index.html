@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Isocast · Open-source screen and camera recorder for Mac</title>
-<meta name="description" content="Records your screen, camera and mic as separate files that line up in your editor. Open source, for Mac.">
+<meta name="description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac.">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0a0a0a">
 <link rel="canonical" href="https://isocast.com/">
@@ -24,14 +24,14 @@
 <meta property="og:url" content="https://isocast.com/">
 <meta property="og:site_name" content="Isocast">
 <meta property="og:title" content="Isocast · Open-source screen and camera recorder for Mac">
-<meta property="og:description" content="Records your screen, camera and mic as separate files that line up in your editor. Open source, for Mac.">
+<meta property="og:description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac.">
 <meta property="og:image" content="https://isocast.com/img/og.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="The Isocast website: a recording shown as four separate files, program.mov, screen.mov, camera.mov and mic.mov, playing in sync.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Isocast · Open-source screen and camera recorder for Mac">
-<meta name="twitter:description" content="Records your screen, camera and mic as separate files that line up in your editor. Open source, for Mac.">
+<meta name="twitter:description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac.">
 <meta name="twitter:image" content="https://isocast.com/img/og.jpg">
 <script type="module" src="js/main.js"></script>
 </head>
@@ -66,8 +66,8 @@
     <div class="hero-light" aria-hidden="true"></div>
 
     <div class="hero-copy">
-      <h1 id="headline">Record your screen, camera and mic as separate files.</h1>
-      <p class="lede">Open source and made for Mac. The files line up in your editor without any syncing.</p>
+      <h1 id="headline">Record your screen and camera as separate files.</h1>
+      <p class="lede">Your mic is recorded alongside them, and the files line up in your editor without any syncing. Open source and made for Mac.</p>
       <div class="download" id="download">
         <a class="btn-download" href="https://github.com/R44VC0RP/isocast/releases/latest" data-download>
           <span class="btn-face">
@@ -83,7 +83,7 @@
 
     <div class="hero-object">
       <div class="stage" id="stage" role="group" aria-roledescription="interactive demo"
-           aria-label="A recording shown as four separate files, program.mov, screen.mov, camera.mov and mic.mov, playing in sync. Drag or use the arrow keys to move through it.">
+           aria-label="A recording shown as three separate files, program.mov, screen.mov and camera.mov, with the mic audio, playing in sync. Drag or use the arrow keys to move through it.">
         <div class="stage-inner" id="stage-inner"></div>
       </div>
     </div>
@@ -113,17 +113,15 @@
             <path d="M580.57 426H788A32 32 0 0 1 788 490H598.79A200 200 0 0 0 580.57 426ZM598.79 534H788A32 32 0 0 1 788 598H580.57A200 200 0 0 0 598.79 534Z" fill="url(#g-verd)"/>
           </svg>
         </div>
-        <svg class="flow-out" viewBox="0 0 84 196" preserveAspectRatio="none" aria-hidden="true">
-          <path data-out="program" d="M0 98.5H14C54 98.5 48 20.5 84 20.5"/>
-          <path data-out="screen" d="M14 98.5C54 98.5 48 72.5 84 72.5"/>
-          <path data-out="camera" d="M14 98.5C54 98.5 48 124.5 84 124.5"/>
-          <path data-out="mic" d="M14 98.5C54 98.5 48 176.5 84 176.5"/>
+        <svg class="flow-out" viewBox="0 0 84 144" preserveAspectRatio="none" aria-hidden="true">
+          <path data-out="program" d="M0 72.5H14C54 72.5 48 20.5 84 20.5"/>
+          <path data-out="screen" d="M14 72.5H84"/>
+          <path data-out="camera" d="M14 72.5C54 72.5 48 124.5 84 124.5"/>
         </svg>
         <ul class="flow-files" aria-label="Files">
           <li class="chip chip-file is-program" data-out="program">program.mov<span class="chip-dot" aria-hidden="true"></span></li>
           <li class="chip chip-file" data-out="screen">screen.mov</li>
           <li class="chip chip-file" data-out="camera">camera.mov</li>
-          <li class="chip chip-file" data-out="mic">mic.mov</li>
         </ul>
       </div>
     </div>

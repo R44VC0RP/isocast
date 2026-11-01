@@ -407,7 +407,7 @@ h1 {
 .chip.is-hot svg { color: var(--copper-hi); }
 .flow-in, .flow-out { flex: none; overflow: visible; }
 .flow-in { width: 84px; height: 148px; }
-.flow-out { width: 84px; height: 196px; }
+.flow-out { width: 84px; height: 144px; }
 .flow-in path, .flow-out path { fill: none; stroke: #3a3836; stroke-width: 1; transition: stroke 160ms ease; }
 .flow-in path.is-hot, .flow-out path.is-hot { stroke: var(--copper); }
 /* One pulse travels the wires on one clock: sources → mark → files. */
@@ -540,6 +540,7 @@ code {
   .flow-hub::before { bottom: 100%; }
   .flow-hub::after { top: 100%; }
   .flow-files { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-2); width: 100%; }
+  .flow-files .is-program { grid-column: 1 / -1; }
   .chip-file { width: auto; height: 40px; font-size: 13.5px; }
 
   .facts { flex-direction: column; align-items: stretch; gap: var(--s-6); width: auto; padding: 0 max(20px, env(safe-area-inset-right)) 0 max(20px, env(safe-area-inset-left)); }
