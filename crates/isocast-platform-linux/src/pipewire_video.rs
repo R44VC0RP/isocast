@@ -139,6 +139,22 @@ fn run(
                 .get_or_insert_with(|| format!("remote error on object {id} ({code}): {message}"));
         })
         .register();
+    // A vanished portal node (the portal restarted, or dropped the stream
+    // without closing the session) sends no portal `Closed`: report it here
+    // rather than rely on the session manager destroying our node.
+    let registry = core.get_registry_rc()?;
+    let node_failure = failure.clone();
+    let _registry_listener = registry
+        .add_listener_local()
+        .global_remove(move |id| {
+            if id == node {
+                node_failure.borrow_mut().get_or_insert_with(|| {
+                    "the desktop's screen-sharing stream ended (its portal may have restarted)"
+                        .into()
+                });
+            }
+        })
+        .register();
     let stream = mainloop.stream(pw::stream::StreamBox::new(
         &core,
         "Isocast screen capture",
@@ -147,6 +163,11 @@ fn run(
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Screen",
             "node.name" => "isocast-screen-capture",
+            // With DONT_RECONNECT at connect: bind to the portal's node
+            // only, never falling back, moving or relinking to another
+            // source when it goes away.
+            "node.dont-fallback" => "true",
+            "node.dont-move" => "true",
         },
     )?);
     let state = State {
@@ -205,7 +226,9 @@ fn run(
     stream.connect(
         spa::utils::Direction::Input,
         Some(node),
-        pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+        pw::stream::StreamFlags::AUTOCONNECT
+            | pw::stream::StreamFlags::MAP_BUFFERS
+            | pw::stream::StreamFlags::DONT_RECONNECT,
         &mut [Pod::from_bytes(&format).context("invalid video format pod")?],
     )?;
     while !cancel.load(Ordering::Acquire) {
@@ -219,8 +242,8 @@ fn run(
         }
         mainloop.iterate(LOOP_WAIT)?;
     }
-    // Locals drop in order: listener, stream (disconnected and its queued
-    // callbacks flushed on this thread), core listener, core, context, loop.
+    // Locals drop in reverse order; the stream disconnects and flushes its
+    // queued callbacks on this thread.
     Ok(())
 }
 
