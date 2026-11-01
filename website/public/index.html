@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Isocast · Open-source screen and camera recorder for Mac</title>
-<meta name="description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac.">
+<title>Isocast · Open-source screen and camera recorder for Mac and Linux</title>
+<meta name="description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac and Linux.">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0a0a0a">
 <link rel="canonical" href="https://isocast.com/">
@@ -23,15 +23,16 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://isocast.com/">
 <meta property="og:site_name" content="Isocast">
-<meta property="og:title" content="Isocast · Open-source screen and camera recorder for Mac">
-<meta property="og:description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac.">
+<meta property="og:title" content="Isocast · Open-source screen and camera recorder for Mac and Linux">
+<meta property="og:description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac and Linux.">
 <meta property="og:image" content="https://isocast.com/img/og.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="The Isocast website: a recording shown as four separate files, program.mov, screen.mov, camera.mov and mic.mov, playing in sync.">
+<meta property="og:image:alt" content="The Isocast website: the headline “Record your screen and camera as separate files.”, a Download for Mac button over the line “Version 0.0.10 · Apple silicon · macOS 14 or later · Also on Linux”, and a recording shown as program.mov, screen.mov and camera.mov with the mic audio, playing in sync.">
+<meta name="twitter:image:alt" content="The Isocast website: the headline “Record your screen and camera as separate files.”, a Download for Mac button over the line “Version 0.0.10 · Apple silicon · macOS 14 or later · Also on Linux”, and a recording shown as program.mov, screen.mov and camera.mov with the mic audio, playing in sync.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Isocast · Open-source screen and camera recorder for Mac">
-<meta name="twitter:description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac.">
+<meta name="twitter:title" content="Isocast · Open-source screen and camera recorder for Mac and Linux">
+<meta name="twitter:description" content="Records your screen and camera as separate files that line up in your editor, with your mic recorded alongside. Open source, for Mac and Linux.">
 <meta name="twitter:image" content="https://isocast.com/img/og.jpg">
 <script type="module" src="js/main.js"></script>
 </head>
@@ -67,9 +68,9 @@
 
     <div class="hero-copy">
       <h1 id="headline">Record your screen and camera as separate files.</h1>
-      <p class="lede">Your mic is recorded alongside them, and the files line up in your editor without any syncing. Open source and made for Mac.</p>
+      <p class="lede">Your mic is recorded alongside them, and the files line up in your editor without any syncing. Open source, for Mac and Linux.</p>
       <div class="download" id="download">
-        <a class="btn-download" href="https://github.com/R44VC0RP/isocast/releases/latest" data-download>
+        <a class="btn-download" href="https://github.com/R44VC0RP/isocast/releases/latest" data-download data-primary>
           <span class="btn-face">
             <span class="btn-dot" aria-hidden="true"></span>
             <span class="btn-label">Download for Mac</span>
@@ -77,7 +78,7 @@
           </span>
         </a>
         <!-- The release this page offers. After publishing a new version, change only data-version (docs/releasing.md). -->
-        <p class="meta" data-version="0.0.9">Apple silicon · macOS 14 or later</p>
+        <p class="meta" data-version="0.0.10"><span class="for-mac">Apple silicon · macOS 14 or later · <a href="#linux">Also on Linux</a></span><span class="for-linux">Ubuntu 24.04 · Debian 12 · <a href="https://github.com/R44VC0RP/isocast/releases/latest" data-download>Also on Mac</a></span></p>
       </div>
     </div>
 
@@ -129,9 +130,9 @@
 
   <section class="facts" aria-label="Why Isocast">
     <ul class="points" data-reveal>
-      <li>If your Mac crashes mid-recording, you lose half a second, not the take.</li>
+      <li>If your computer crashes mid-recording, you lose half a second, not the take.</li>
       <li>Anything the app does, you can do from the terminal or hand to an agent with <code>isocast mcp</code>.</li>
-      <li>Free and open source. Windows is on the way.</li>
+      <li>Free and open source, for Mac and Linux. Windows is on the way.</li>
     </ul>
     <figure class="panel cpu" aria-labelledby="cpu-cap" data-reveal>
       <figcaption id="cpu-cap">CPU while recording, compared with OBS</figcaption>
@@ -146,6 +147,43 @@
         <span class="cpu-val">58–71%</span>
       </div>
     </figure>
+  </section>
+
+  <section class="install" id="linux" aria-labelledby="linux-title">
+    <h2 id="linux-title">Install on Linux</h2>
+    <p>Isocast comes as a <code>.deb</code> for Ubuntu 24.04 and Debian 12, on x86-64 and Arm. Pick your distro and the architecture <code>dpkg --print-architecture</code> prints, then download that package and <code>SHA256SUMS</code> into a new, empty folder.</p>
+    <div class="panel pkgs">
+      <div class="pkg-row">
+        <span class="pkg-name">Ubuntu 24.04</span>
+        <a class="chip" href="https://github.com/R44VC0RP/isocast/releases/latest" data-deb="ubuntu24.04-amd64">amd64</a>
+        <a class="chip" href="https://github.com/R44VC0RP/isocast/releases/latest" data-deb="ubuntu24.04-arm64">arm64</a>
+      </div>
+      <div class="pkg-row">
+        <span class="pkg-name">Debian 12</span>
+        <a class="chip" href="https://github.com/R44VC0RP/isocast/releases/latest" data-deb="debian12-amd64">amd64</a>
+        <a class="chip" href="https://github.com/R44VC0RP/isocast/releases/latest" data-deb="debian12-arm64">arm64</a>
+      </div>
+      <div class="pkg-row">
+        <span class="pkg-name">Checksums</span>
+        <a class="chip" href="https://github.com/R44VC0RP/isocast/releases/latest" data-sums>SHA256SUMS</a>
+      </div>
+    </div>
+    <p>In that folder, on Ubuntu 24.04:</p>
+    <pre><code>sha256sum --ignore-missing -c SHA256SUMS &amp;&amp; \
+  sudo apt install ./isocast-*-ubuntu24.04-$(dpkg --print-architecture).deb</code></pre>
+    <p>On Debian 12, screen and audio capture need PipeWire 1.0.5 or later from bookworm-backports. If backports isn’t enabled yet, add it first:</p>
+    <pre><code>echo 'deb https://deb.debian.org/debian bookworm-backports main' | \
+  sudo tee /etc/apt/sources.list.d/bookworm-backports.list
+sudo apt update
+sudo apt install -t bookworm-backports libpipewire-0.3-0 pipewire wireplumber
+sha256sum --ignore-missing -c SHA256SUMS &amp;&amp; \
+  sudo apt install ./isocast-*-debian12-$(dpkg --print-architecture).deb</code></pre>
+    <p>The Debian 12 package has no browser sources; use Ubuntu 24.04 if you need them. The checksum verifies the download, not a package signature.</p>
+    <h3>First launch</h3>
+    <p>Open Isocast from your app menu. It offers to download Cisco’s OpenH264 for software H.264 and live previews; the codec is downloaded and checked as your user, never installed by apt as root. Skip it if you like and run <code>isocast-openh264-install</code> later. OpenH264 Video Codec provided by Cisco Systems, Inc.</p>
+    <p>If no screen picker opens, install <code>xdg-desktop-portal</code> and your desktop’s backend (<code>xdg-desktop-portal-gnome</code> or <code>xdg-desktop-portal-kde</code>). <code>isocast doctor</code> reports capture and codec problems.</p>
+    <h3>Updates</h3>
+    <p>Isocast doesn’t update itself on Linux. Finish any recording, quit the app, run <code>isocast engine shutdown</code>, then download the new package and <code>SHA256SUMS</code> and install them the same way. Your settings and recordings stay. More in the <a href="https://github.com/R44VC0RP/isocast/blob/main/packaging/deb/README.Debian">package README</a>.</p>
   </section>
 </main>
 
@@ -164,8 +202,8 @@
 <div class="dock" id="dock" aria-hidden="true">
   <div class="dock-inner">
     <img src="img/icon-64.png" srcset="img/icon-64.png 64w, img/icon-192.png 192w" sizes="36px" width="36" height="36" alt="" loading="lazy" decoding="async">
-    <div class="dock-text"><strong>Isocast</strong><span>Free · macOS 14+</span></div>
-    <a class="dock-get" href="https://github.com/R44VC0RP/isocast/releases/latest" data-download tabindex="-1">Download</a>
+    <div class="dock-text"><strong>Isocast</strong><span class="for-mac">Free · macOS 14+</span><span class="for-linux">Free · Ubuntu and Debian</span></div>
+    <a class="dock-get" href="https://github.com/R44VC0RP/isocast/releases/latest" data-download data-primary tabindex="-1">Download</a>
   </div>
 </div>
 </body>

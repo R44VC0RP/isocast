@@ -6,12 +6,24 @@ import { TAKE, SIZES, createTake, loadPeaks } from "./take.js";
 const root = document.documentElement;
 
 // The release on offer: index.html writes the version once (.meta's
-// data-version); both download links point at that version's DMG. Without
-// this script they open the latest release's page.
+// data-version); the Mac links point at that version's DMG and the Linux
+// section's links at its .deb files and SHA256SUMS (the asset names
+// scripts/release-finalize.py attaches). Without this script they open the
+// latest release's page.
 const version = document.querySelector(".meta[data-version]")?.dataset.version;
 if (version && /^\d+\.\d+\.\d+$/.test(version)) {
-  const dmg = `https://github.com/R44VC0RP/isocast/releases/download/v${version}/Isocast-${version}-arm64.dmg`;
-  for (const a of document.querySelectorAll("a[data-download]")) a.href = dmg;
+  const dl = `https://github.com/R44VC0RP/isocast/releases/download/v${version}/`;
+  for (const a of document.querySelectorAll("a[data-download]")) a.href = `${dl}Isocast-${version}-arm64.dmg`;
+  for (const a of document.querySelectorAll("a[data-deb]")) a.href = `${dl}isocast-${version}-${a.dataset.deb}.deb`;
+  for (const a of document.querySelectorAll("a[data-sums]")) a.href = `${dl}SHA256SUMS`;
+}
+// Desktop Linux (not Android or ChromeOS): the main Download keys lead to the
+// install section, and the meta line offers the Mac download instead.
+if (/\bLinux\b/.test(navigator.userAgent) && !/Android|CrOS/.test(navigator.userAgent)) {
+  root.dataset.os = "linux";
+  for (const a of document.querySelectorAll("a[data-primary]")) a.href = "#linux";
+  const label = document.querySelector(".btn-label");
+  if (label) label.textContent = "Download for Linux";
 }
 
 // Scroll-in sections start hidden (site.css) and show themselves after 2.5 s
