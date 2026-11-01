@@ -3646,18 +3646,56 @@ fn permissions(
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(ExitCode::SUCCESS);
     }
-    for detail in &report.details {
-        println!(
+    write_permissions(std::io::stdout().lock(), &report)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn write_permissions(
+    mut out: impl std::io::Write,
+    report: &isocast_protocol::devices::PermissionsReport,
+) -> std::io::Result<()> {
+    for kind in isocast_protocol::devices::PermissionKind::ALL {
+        // Linux only includes a detail when the user can act on it.
+        let Some(detail) = report.details.iter().find(|d| d.permission == kind) else {
+            writeln!(
+                out,
+                "{}: {}",
+                kind.label(),
+                report.permissions.get(kind).label()
+            )?;
+            continue;
+        };
+        writeln!(
+            out,
             "{}: {} (for {})",
             detail.permission.label(),
             detail.state.label(),
             detail.needed_for
-        );
+        )?;
         if let Some(step) = &detail.next_step {
-            println!("  next: {step}");
+            writeln!(out, "  next: {step}")?;
         }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(())
+}
+
+#[test]
+fn linux_permissions_with_an_accessible_camera_print_every_state() {
+    use isocast_protocol::devices::{Permission, Permissions, PermissionsReport};
+
+    let report = PermissionsReport {
+        permissions: Permissions {
+            screen_recording: Permission::Unknown,
+            camera: Permission::Granted,
+            microphone: Permission::Unknown,
+            system_audio: Permission::Unknown,
+        },
+        app: "Isocast".into(),
+        details: vec![],
+    };
+    let mut output = Vec::new();
+    write_permissions(&mut output, &report).unwrap();
+    assert_eq!(output, b"screen recording: unknown\ncamera: granted\nmicrophone: unknown\nsystem audio recording: unknown\n");
 }
 
 /// `--open`: a permission by its API name.

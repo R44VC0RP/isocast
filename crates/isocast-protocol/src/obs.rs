@@ -1010,10 +1010,9 @@ pub struct Options<'a> {
 /// (isolated engines and tests, so they never read the user's OBS).
 pub const FOLDER_ENV: &str = "ISOCAST_OBS_FOLDER";
 
-/// Recordings folder for an import whose OBS profile names none: Linux's
-/// XDG videos folder by its usual name, Movies elsewhere.
-const FALLBACK_FOLDER: &str =
-    crate::platform_text::select_linux("~/Movies", "~/Movies", "~/Videos");
+/// Recordings folder for an import whose OBS profile names none. On Windows
+/// `~/Videos` resolves to the Videos known folder, even when redirected.
+const FALLBACK_FOLDER: &str = crate::platform_text::select("~/Movies", "~/Videos");
 
 /// Where OBS keeps its settings on this computer: `$ISOCAST_OBS_FOLDER` if
 /// set.
@@ -4849,8 +4848,8 @@ mod tests {
                 .iter()
                 .any(|note| note.ends_with(&format!("using {FALLBACK_FOLDER}")))
         );
-        if cfg!(target_os = "linux") {
-            assert_eq!(FALLBACK_FOLDER, "~/Videos");
+        if cfg!(any(windows, target_os = "linux")) {
+            assert_eq!(folderless.setup.recording.folder, "~/Videos");
         }
         assert_eq!(setup.recording.program.filename, "{date} {time}");
         let encoder = &setup.recording.program.encoder;
