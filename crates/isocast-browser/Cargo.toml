@@ -4,19 +4,59 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Isocast's browser source renderer on Linux: a helper process isocastd starts per page (WebKitGTK 6, offscreen)."
+description = "Isocast's browser source renderer: a helper process isocastd starts per page (WebKitGTK 6 on Linux, WebView2 on Windows, offscreen)."
 publish = false
 
 [[bin]]
 name = "isocast-browser"
 path = "src/main.rs"
 
-# Linux only (elsewhere the binary is a stub). The system's WebKitGTK 6 and
-# GTK 4 (LGPL, linked dynamically) run in this process, never in isocastd:
-# a missing library, crash or hang costs one browser source, not the engine.
+# Linux and Windows only (elsewhere the binary is a stub). The browser
+# engine runs in this process (and its children), never in isocastd: a
+# missing library or runtime, a crash or a hang costs one browser source,
+# not the engine.
+#
+# Linux: the system's WebKitGTK 6 and GTK 4 (LGPL, linked dynamically).
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit6 = "=0.6.1"
 # v4_10: webkit6 needs gtk::Accessible (GTK 4.10; Ubuntu 24.04 has 4.14).
 gtk4 = { version = "=0.11.5", features = ["v4_10"] }
 libc = "0.2"
 base64 = "0.22.1"
+
+# Windows: the Microsoft Edge WebView2 Runtime (preinstalled on Windows 10
+# and 11), through webview2-com (MIT; its static loader is Microsoft's
+# WebView2 SDK, BSD-3-Clause). The windows crate is the one wgpu and the
+# platform crate already lock.
+[target.'cfg(windows)'.dependencies]
+isocast-browser-protocol = { path = "../isocast-browser-protocol" }
+base64 = "0.22.1"
+webview2-com = "=0.39.1"
+windows-numerics = "0.3.1"
+windows = { version = "0.62.2", features = [
+    "Foundation",
+    "Foundation_Numerics",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "System",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
