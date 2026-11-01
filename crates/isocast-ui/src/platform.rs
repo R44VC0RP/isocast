@@ -153,24 +153,37 @@ pub fn choose(_options: Choose) -> Option<Vec<String>> {
     None
 }
 
-/// Ask for files (or a folder) with the desktop's open panel, through the
-/// xdg-desktop-portal FileChooser: their paths (empty if cancelled), or
-/// none if there's no portal to ask (no xdg-desktop-portal, or one
-/// without a FileChooser). Blocks until the person answers: call it off
-/// the window's thread.
 #[cfg(target_os = "linux")]
-pub fn portal_choose(
-    folders: bool,
-    multiple: bool,
-    title: &str,
-    prompt: &str,
-    types: &[String],
-) -> Option<Vec<String>> {
-    use ashpd::desktop::file_chooser::{FileChooserProxy, FileFilter, SelectedFiles};
+pub enum PortalDialog {
+    Open { folders: bool, multiple: bool },
+    Save { suggested: std::path::PathBuf },
+}
 
-    // One runtime for every ask: the portal binding keeps its D-Bus
-    // connection (and the tasks driving it) from the first, so a runtime
-    // per ask left the second waiting for ever.
+/// FileChooser's `current_name` is a basename, not a path. An absent
+/// or unusable parent lets the desktop pick its normal starting folder.
+#[cfg(target_os = "linux")]
+fn save_location(suggested: &std::path::Path) -> (Option<&str>, Option<&std::path::Path>) {
+    (
+        suggested.file_name().and_then(|name| name.to_str()),
+        suggested
+            .parent()
+            .filter(|dir| dir.is_absolute() && dir.is_dir()),
+    )
+}
+
+/// Ask the local desktop, never the engine. None means no chooser;
+/// cancellation is a successful, empty selection and must not open a fallback.
+#[cfg(target_os = "linux")]
+pub fn ask_portal(
+    dialog: PortalDialog,
+    prompt: &str,
+    types: &[&str],
+    done: impl FnOnce(Option<Vec<String>>) + 'static,
+) {
+    use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
+    use ashpd::zbus::Connection;
+
+    // Drive all desktop requests off the window thread on one runtime.
     static RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
         std::sync::OnceLock::new();
     let runtime = RUNTIME.get_or_init(|| {
@@ -180,72 +193,116 @@ pub fn portal_choose(
             .enable_all()
             .build()
             .inspect_err(|error| {
-                isocast_diagnostics::diagnostic!("warn"; "open panel: no runtime for the portal: {error}");
+                isocast_diagnostics::diagnostic!("warn"; "file panel: no runtime for the portal: {error}");
             })
             .ok()
     });
-    let runtime = runtime.as_ref()?;
-    // A portal that's there but stuck (its backend never starts) would
-    // leave the open panel waiting for ever: ask it its version first.
-    let probe = runtime.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(3), FileChooserProxy::new()).await
-    });
-    match probe {
-        Ok(Ok(proxy)) if proxy.version() > 0 => {}
-        Ok(Ok(_)) => {
-            isocast_diagnostics::diagnostic!("info"; "open panel: the desktop portal has no file chooser; using the engine's file browser");
-            return None;
-        }
-        Ok(Err(error)) => {
-            isocast_diagnostics::diagnostic!("info"; "open panel: no desktop portal ({error}); using the engine's file browser");
-            return None;
-        }
-        Err(_) => {
-            isocast_diagnostics::diagnostic!("warn"; "open panel: the desktop portal didn't answer within 3 s; using the engine's file browser");
-            return None;
-        }
-    }
-    let result = runtime.block_on(async {
-        let mut request = SelectedFiles::open_file()
-            .title(title)
-            .accept_label(prompt)
-            .modal(true)
-            .multiple(multiple)
-            .directory(folders);
-        if !folders && !types.is_empty() {
-            // Globs match case as written: both cases of each extension.
-            let mut filter = FileFilter::new("Supported files");
-            for extension in types {
-                filter = filter
-                    .glob(&format!("*.{}", extension.to_lowercase()))
-                    .glob(&format!("*.{}", extension.to_uppercase()));
+    let Some(runtime) = runtime else {
+        return done(None);
+    };
+    let filters = (!types.is_empty()).then(|| {
+        let label = match dialog {
+            PortalDialog::Open { .. } => "Supported files".to_string(),
+            PortalDialog::Save { .. } => types.join(", ").to_uppercase(),
+        };
+        types.iter().fold(FileFilter::new(&label), |filter, ext| {
+            let filter = filter.glob(&format!("*.{ext}"));
+            match dialog {
+                PortalDialog::Open { .. } => filter.glob(&format!("*.{}", ext.to_uppercase())),
+                PortalDialog::Save { .. } => filter,
             }
-            request = request.filter(filter);
-        }
-        request.send().await?.response()
+        })
     });
-    match result {
-        Ok(files) => Some(
-            files
+    let prompt = if prompt.is_empty() { "Choose" } else { prompt }.to_owned();
+    let request = runtime.spawn(async move {
+        // Ask for FileChooser itself. ashpd's proxy.version() defaults to 1
+        // on some D-Bus errors. Bound only this probe (including activation
+        // of a stuck service), never the time a person takes in the dialog.
+        let probe = async {
+            let bus = Connection::session().await?;
+            bus.call_method(
+                Some("org.freedesktop.portal.Desktop"),
+                "/org/freedesktop/portal/desktop",
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.freedesktop.portal.FileChooser", "version"),
+            )
+            .await?;
+            Ok::<_, ashpd::zbus::Error>(bus)
+        };
+        let bus = tokio::time::timeout(std::time::Duration::from_millis(250), probe)
+            .await
+            .map_err(|_| anyhow::anyhow!("FileChooser did not answer"))??;
+        let request = match dialog {
+            PortalDialog::Open { folders, multiple } => {
+                let title = if folders {
+                    "Choose a Folder"
+                } else {
+                    "Choose a File"
+                };
+                SelectedFiles::open_file()
+                    .connection(Some(bus))
+                    .title(title)
+                    .accept_label(prompt.as_str())
+                    .modal(true)
+                    .directory(folders)
+                    .multiple(multiple)
+                    .filters(filters)
+                    .send()
+                    .await
+            }
+            PortalDialog::Save { suggested } => {
+                let (name, folder) = save_location(&suggested);
+                // ashpd encodes the folder's native bytes as NUL-terminated `ay`.
+                SelectedFiles::save_file()
+                    .connection(Some(bus))
+                    .title(prompt.as_str())
+                    .accept_label(prompt.as_str())
+                    .modal(true)
+                    .current_name(name)
+                    .current_folder::<&std::path::Path>(folder)?
+                    .filters(filters)
+                    .send()
+                    .await
+            }
+        };
+        match request.and_then(|r| r.response()) {
+            Ok(files) => files
                 .uris()
                 .iter()
-                .filter_map(|uri| file_path(uri.as_str()))
+                .map(|uri| {
+                    file_path(uri.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("FileChooser did not return a local file"))
+                })
                 .collect(),
-        ),
-        Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => Some(Vec::new()),
-        Err(error) => {
-            isocast_diagnostics::diagnostic!("info"; "open panel: no desktop portal ({error}); using the engine's file browser");
-            None
+            // GTK's Cancel returns 1; closing the same panel with Escape
+            // can return 2 (interaction ended otherwise). Neither means
+            // the chooser is missing or warrants opening a second dialog.
+            Err(ashpd::Error::Response(_)) => Ok(Vec::new()),
+            Err(error) => Err(error.into()),
         }
-    }
+    });
+    slint::spawn_local(async move {
+        let result = request.await.map_err(anyhow::Error::from).and_then(|r| r);
+        done(
+            result
+                .inspect_err(|error| {
+                    isocast_diagnostics::diagnostic!("info"; "file panel unavailable: {error}");
+                })
+                .ok(),
+        );
+    })
+    .expect("file panels are requested on the window thread");
 }
 
 /// A `file://` URI's path, percent-decoded (none for another scheme).
 #[cfg(any(target_os = "linux", test))]
 fn file_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
-    // An authority (normally empty, or localhost) before the path.
-    let path = &rest[rest.find('/')?..];
+    let (authority, path) = rest.split_at(rest.find('/')?);
+    if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
     let bytes = path.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -310,7 +367,7 @@ pub fn save(name: &str, types: &[&str], prompt: &str) -> Option<Option<String>> 
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn save(_name: &str, _types: &[&str], _prompt: &str) -> Option<Option<String>> {
     None
 }
@@ -535,6 +592,26 @@ pub(crate) unsafe fn rust_string(string: &objc2::runtime::AnyObject) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn save_options_separate_basename_from_existing_directory() {
+        use std::path::Path;
+        let dir = std::env::temp_dir();
+        let name = "Studio export.toml";
+        assert_eq!(
+            super::save_location(&dir.join(name)),
+            (Some(name), Some(dir.as_path()))
+        );
+        assert_eq!(super::save_location(Path::new(name)), (Some(name), None));
+        // A regular file or a nonexistent directory cannot be opened as the starting folder.
+        let file = std::env::current_exe().unwrap();
+        assert_eq!(super::save_location(&file.join(name)), (Some(name), None));
+        assert_eq!(
+            super::save_location(&file.join("missing").join(name)),
+            (Some(name), None)
+        );
+    }
+
     #[test]
     fn portal_uris_become_paths() {
         assert_eq!(
@@ -546,6 +623,7 @@ mod tests {
             Some("/tmp/a")
         );
         assert_eq!(super::file_path("https://example.com/a"), None);
+        assert_eq!(super::file_path("file://another-computer/tmp/a"), None);
         // A stray percent stays as it is.
         assert_eq!(
             super::file_path("file:///tmp/100%").as_deref(),

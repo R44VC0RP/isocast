@@ -285,6 +285,8 @@ struct Pairing {
 
 /// The engine file browser's state.
 struct Browser {
+    /// No native chooser: list this computer, even in a remote window.
+    desktop_fallback: bool,
     roots: Vec<(String, String)>,
     path: String,
     parent: Option<String>,
@@ -653,6 +655,7 @@ impl Area for Remote {
                     ("lower-third.png", false, "212 KB"),
                 ];
                 *self.browser.borrow_mut() = Some(Browser {
+                    desktop_fallback: false,
                     roots: vec![
                         (r"C:\Users\Ryan\Videos".into(), "Videos".into()),
                         (r"C:\Users\Ryan\Pictures".into(), "Pictures".into()),
@@ -1200,11 +1203,12 @@ impl Remote {
         if app.mode.offscreen {
             return;
         }
-        match crate::platform::choose(Choose {
+        let options = Choose {
             folders: true,
             prompt: "Add",
             ..Choose::default()
-        }) {
+        };
+        choose_here(app, options, move |app, chosen| match chosen {
             Some(chosen) => add(app, Some(chosen)),
             // No open panel here (Windows): this engine's own disk, from
             // the home folder.
@@ -1216,7 +1220,7 @@ impl Remote {
                 if cfg!(windows) {
                     roots.push((r"C:\".into(), "C:".into()));
                 }
-                self.open_browser(
+                app.remote.open_browser(
                     app,
                     "Add a Folder",
                     "Add",
@@ -1227,7 +1231,7 @@ impl Remote {
                     Box::new(add),
                 );
             }
-        }
+        });
     }
 
     fn remove_folder(&self, app: &Rc<App>, shown: &str) {
@@ -1493,6 +1497,7 @@ impl Remote {
                 .join(" ")
         };
         *self.browser.borrow_mut() = Some(Browser {
+            desktop_fallback: false,
             roots,
             path: String::new(),
             parent: None,
@@ -1537,7 +1542,7 @@ impl Remote {
             extensions: (!extensions.is_empty()).then_some(extensions),
             folders_only: folders,
         };
-        app.call_as::<FilesList>(Method::FilesList(params), move |app, result| {
+        let show = move |app: &Rc<App>, result: Result<FilesList, crate::daemon::CallError>| {
             let remote = &app.remote;
             if let Some(b) = remote.browser.borrow_mut().as_mut() {
                 b.busy = false;
@@ -1564,7 +1569,35 @@ impl Remote {
                 }
             }
             remote.show_browser(app);
-        });
+        };
+        #[cfg(target_os = "linux")]
+        if self.remote_window.get()
+            && self
+                .browser
+                .borrow()
+                .as_ref()
+                .is_some_and(|b| b.desktop_fallback)
+        {
+            // A client-side import in a remote window must never read a path
+            // supplied by the remote engine. List with this computer's engine.
+            background(
+                move || {
+                    isocast_client::Client::connect_local_or_launch()?
+                        .call(Method::FilesList(params))
+                },
+                move |app, result| {
+                    show(
+                        app,
+                        result.map_err(|err| crate::daemon::CallError {
+                            message: err.to_string(),
+                            code: None,
+                        }),
+                    )
+                },
+            );
+            return;
+        }
+        app.call_as::<FilesList>(Method::FilesList(params), show);
     }
 
     fn open_entry(&self, app: &Rc<App>, path: &str) {
@@ -1627,7 +1660,7 @@ impl Remote {
             area.set_browser_open(false);
             return;
         };
-        let place = if self.remote_window.get() {
+        let place = if self.remote_window.get() && !b.desktop_fallback {
             area.get_engine_name().to_string()
         } else {
             this_machine().0.to_string()
@@ -1660,7 +1693,15 @@ impl Remote {
         area.set_browser_selected(b.selected.as_str().into());
         area.set_browser_folders(b.folders);
         area.set_browser_show_only(b.show_only);
-        area.set_browser_note(b.note.as_str().into());
+        area.set_browser_note(if b.desktop_fallback {
+            format!(
+                "A desktop portal provides the native file dialog.  {}",
+                b.note
+            )
+            .into()
+        } else {
+            b.note.as_str().into()
+        });
         area.set_browser_busy(b.busy);
         area.set_browser_open(true);
     }
@@ -1760,10 +1801,8 @@ pub fn choose(
     options: Choose,
     done: impl FnOnce(&Rc<App>, Option<Vec<String>>) + 'static,
 ) {
-    if !is_remote(app) && !cfg!(target_os = "linux") {
-        let chosen = crate::platform::choose(options);
-        done(app, chosen);
-        return;
+    if !is_remote(app) {
+        return choose_here(app, options, done);
     }
     let title = if options.folders {
         "Choose a Folder".to_string()
@@ -1777,63 +1816,7 @@ pub fn choose(
     };
     let extensions: Vec<String> = options.types.iter().map(|t| t.to_string()).collect();
     let folders = options.folders;
-    // Linux, this machine's engine: the desktop's open panel (the portal's
-    // FileChooser, asked off the window's thread); without a portal, the
-    // engine's file browser as for another computer's engine.
-    #[cfg(target_os = "linux")]
-    if !is_remote(app) {
-        let fallback: Fallback = Box::new(move |app, done| {
-            browse_engine(app, &title, &prompt, folders, extensions, done)
-        });
-        ask_portal(app, &options, Box::new(done), fallback);
-        return;
-    }
     browse_engine(app, &title, &prompt, folders, extensions, Box::new(done));
-}
-
-/// What `ask_portal` does without a portal: gets the `done` back.
-#[cfg(target_os = "linux")]
-type Fallback = Box<dyn FnOnce(&Rc<App>, Chosen)>;
-
-/// Linux: ask the desktop's open panel (the portal's FileChooser) on a
-/// thread of its own, then `done` with the paths on the window's thread;
-/// without a portal, `fallback`.
-#[cfg(target_os = "linux")]
-fn ask_portal(_app: &Rc<App>, options: &Choose, done: Chosen, fallback: Fallback) {
-    thread_local! {
-        /// What to do with each portal answer still to come, by ask.
-        static WAITING: std::cell::RefCell<std::collections::HashMap<u64, (Chosen, Fallback)>> =
-            Default::default();
-    }
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ask = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    WAITING.with(|waiting| waiting.borrow_mut().insert(ask, (done, fallback)));
-    let (folders, multiple) = (options.folders, options.multiple);
-    let title = if folders {
-        "Choose a Folder"
-    } else {
-        "Choose a File"
-    }
-    .to_string();
-    let prompt = match options.prompt {
-        "" => "Choose".to_string(),
-        prompt => prompt.to_string(),
-    };
-    let types: Vec<String> = options.types.iter().map(|t| t.to_string()).collect();
-    // The answer comes whenever the person closes the panel.
-    std::thread::spawn(move || {
-        let answer = crate::platform::portal_choose(folders, multiple, &title, &prompt, &types);
-        let _ = slint::invoke_from_event_loop(move || {
-            let Some((done, fallback)) = WAITING.with(|waiting| waiting.borrow_mut().remove(&ask))
-            else {
-                return;
-            };
-            crate::window::with_app(|app| match answer {
-                Some(paths) => done(app, Some(paths)),
-                None => fallback(app, done),
-            });
-        });
-    });
 }
 
 /// Ask for files on this computer (to read here, not on the engine): the
@@ -1846,12 +1829,57 @@ pub fn choose_here(
 ) {
     #[cfg(target_os = "linux")]
     {
-        ask_portal(
-            app,
-            &options,
-            Box::new(done),
-            Box::new(|app, done| done(app, None)),
-        );
+        let folders = options.folders;
+        let dialog = crate::platform::PortalDialog::Open {
+            folders,
+            multiple: options.multiple,
+        };
+        let extensions = options.types.iter().map(|s| s.to_string()).collect();
+        let title = if folders {
+            "Choose a Folder"
+        } else {
+            "Choose a File"
+        };
+        let prompt = if options.prompt.is_empty() {
+            "Choose"
+        } else {
+            options.prompt
+        }
+        .to_string();
+        let app = Rc::downgrade(app);
+        crate::platform::ask_portal(dialog, options.prompt, options.types, move |paths| {
+            let Some(app) = app.upgrade() else { return };
+            if paths.is_some() {
+                return done(&app, paths);
+            }
+            if !is_remote(&app) && !folders {
+                browse_engine(&app, title, &prompt, folders, extensions, Box::new(done));
+            } else {
+                let home = isocast_protocol::api::home_folder()
+                    .to_string_lossy()
+                    .into_owned();
+                app.remote.open_browser(
+                    &app,
+                    title,
+                    &prompt,
+                    vec![(home.clone(), "Home".into())],
+                    "",
+                    folders,
+                    extensions,
+                    Box::new(done),
+                );
+                if let Some(b) = app.remote.browser.borrow_mut().as_mut() {
+                    b.desktop_fallback = true;
+                    b.home = home.clone();
+                }
+                app.remote.list(&app, &home, None);
+                return;
+            }
+            if let Some(b) = app.remote.browser.borrow_mut().as_mut() {
+                b.desktop_fallback = true;
+            }
+            app.remote.show_browser(&app);
+        });
     }
     #[cfg(not(target_os = "linux"))]
     done(app, crate::platform::choose(options));

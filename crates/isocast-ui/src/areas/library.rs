@@ -59,6 +59,8 @@ pub struct Library {
     naming: Cell<Option<(LibraryKind, Naming)>>,
     /// The kind Remove's confirmation is for while it is open.
     removing: Cell<Option<LibraryKind>>,
+    #[cfg(target_os = "linux")]
+    export_target: RefCell<Option<LibraryTarget>>,
     /// The link as last seen, to read the library again when it connects.
     link: Cell<Option<Link>>,
 }
@@ -444,7 +446,12 @@ impl Library {
             prompt: "Import",
             ..Choose::default()
         };
-        crate::areas::remote::choose(app, options, move |app, chosen| match chosen {
+        // import_path reads the file in the app, not on a remote engine.
+        #[cfg(not(target_os = "linux"))]
+        use crate::areas::remote::choose as choose_import;
+        #[cfg(target_os = "linux")]
+        use crate::areas::remote::choose_here as choose_import;
+        choose_import(app, options, move |app, chosen| match chosen {
             Some(paths) => {
                 if let Some(path) = paths.into_iter().next() {
                     app.library.import_path(app, kind, &path);
@@ -487,10 +494,64 @@ impl Library {
         };
         app.close_dialog();
         let name = format!("{}.toml", label(&now).replace(['/', ':'], "-"));
+        #[cfg(target_os = "linux")]
+        {
+            let app = Rc::downgrade(app);
+            platform::ask_portal(
+                platform::PortalDialog::Save {
+                    suggested: isocast_protocol::api::home_folder()
+                        .join("Videos")
+                        .join(&name),
+                },
+                "Export",
+                &["toml", "json"],
+                move |paths| {
+                    let Some(app) = app.upgrade() else { return };
+                    if let Some(paths) = paths {
+                        if let Some(path) = paths.first() {
+                            app.library.export_to(&app, kind, &now.id, path);
+                        }
+                    } else if let Some(window) = app.window() {
+                        app.open_dialog("library-export-path", kind.command());
+                        let area = window.global::<LibraryArea>();
+                        area.set_export_path(format!("~/{name}").into());
+                        area.set_replace_path("".into());
+                        *app.library.export_target.borrow_mut() =
+                            Some(LibraryTarget { kind, id: now.id });
+                    }
+                },
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
         match platform::save(&name, &["toml", "json"], "Export") {
             Some(Some(path)) => self.export_to(app, kind, &now.id, &path),
             Some(None) => {}
             None => no_panel(app),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn export_path_accept(&self, app: &Rc<App>) {
+        let Some(window) = app.window() else { return };
+        let area = window.global::<LibraryArea>();
+        let entered = area.get_export_path();
+        let expanded = platform::expand_home(&entered);
+        let path = Path::new(&expanded);
+        if !path.is_absolute() || path.file_name().is_none() || path.is_dir() {
+            app.toast(
+                ToastKind::Error,
+                "Choose a file path",
+                "Enter a file name starting with / or ~/.",
+            );
+            return;
+        }
+        if path.symlink_metadata().is_ok() && area.get_replace_path() != entered {
+            area.set_replace_path(entered);
+            return;
+        }
+        if let Some(target) = self.export_target.take() {
+            app.close_dialog();
+            self.export_to(app, target.kind, &target.id, &expanded);
         }
     }
 
@@ -616,6 +677,15 @@ fn no_panel(app: &Rc<App>) {
 impl Area for Library {
     fn connect(&self, app: &Rc<App>, window: &AppWindow) {
         let area = window.global::<LibraryArea>();
+        #[cfg(target_os = "linux")]
+        {
+            let weak = Rc::downgrade(app);
+            area.on_export_path_accept(move || {
+                if let Some(app) = weak.upgrade() {
+                    app.library.export_path_accept(&app);
+                }
+            });
+        }
         let weak = Rc::downgrade(app);
         area.on_switch_to(move |kind, id| {
             // On the next turn of the event loop, once the menu is done with

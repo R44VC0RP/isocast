@@ -70,6 +70,28 @@ component LibraryRemoveDialog inherits Dialog {
 }
 
 export component LibraryDialogs inherits Rectangle {
+    if Ui.dialog == "library-export-path": Dialog {
+        title: Ui.dialog-arg == "profile" ? "Export Profile" : "Export Scene Collection";
+        subtitle: replacing ? "This file exists. Replace it?" : "A desktop portal provides the native file dialog.";
+        icon: LibraryGlyph.of(Ui.dialog-arg);
+        dialog-width: 480px;
+        property <bool> replacing: LibraryArea.replace-path != "" && LibraryArea.replace-path == LibraryArea.export-path;
+        ok-text: replacing ? "Replace" : "Export";
+        ok-danger: replacing;
+        ok-enabled: LibraryArea.export-path != "";
+        accepted => { LibraryArea.export-path-accept(); }
+        cancelled => { Ui.close-dialog(); }
+        VerticalLayout {
+            padding-left: Theme.sheet-pad;
+            padding-right: Theme.sheet-pad;
+            if true: TextField {
+                label: "Save path (.toml or .json)";
+                text: LibraryArea.export-path;
+                auto-focus: true;
+                edited(text) => { LibraryArea.export-path = text; LibraryArea.replace-path = ""; }
+            }
+        }
+    }
     if Ui.dialog == "library-name": LibraryNameDialog { }
     if Ui.dialog == "library-remove": LibraryRemoveDialog { }
 }

@@ -41,5 +41,9 @@ export global LibraryArea {
     // An entry of a menu's list: kind ("collection" or "profile"), id.
     callback switch-to(string, string);
     callback name-accept();
+    // Export on a Linux desktop without a FileChooser portal.
+    in-out property <string> export-path;
+    in-out property <string> replace-path;
+    callback export-path-accept();
     callback remove-accept();
 }
