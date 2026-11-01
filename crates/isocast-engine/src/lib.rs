@@ -380,6 +380,27 @@ pub trait Platform: Clone + Send + Sync + 'static {
         height: u32,
     ) -> anyhow::Result<(Self::SharedSurface, wgpu::Texture)>;
 
+    /// Whether shared surfaces live in CPU memory (Linux's memfds): each
+    /// frame drawn into the texture is then read back and written with
+    /// [`Self::write_shared_surface`] before it's announced. GPU surfaces
+    /// (IOSurfaces, D3D12 resources) are the texture itself.
+    fn shared_surface_in_memory(&self) -> bool {
+        false
+    }
+
+    /// Copy a drawn picture into `surface`: `rows` holds its rows `stride`
+    /// bytes apart, RGBA (BGRA if `bgra`, swapped on the way). Only for
+    /// [`Self::shared_surface_in_memory`].
+    fn write_shared_surface(
+        &self,
+        _surface: &Self::SharedSurface,
+        _rows: &[u8],
+        _stride: usize,
+        _bgra: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("this platform's shared surfaces are drawn in place")
+    }
+
     /// `frame` as a JPEG of `quality` (0 to 1), scaled down to at most
     /// `max_width` wide, for clients' live monitors: the bytes, width and
     /// height.

@@ -1046,12 +1046,19 @@ impl App {
                     EditChange::Setup(setup) => match serde_json::from_value(setup.clone()) {
                         Ok(setup) => Change::Setup(Box::new(setup)),
                         Err(error) => {
+                            // Never sent, so `applied` won't see it: settle
+                            // it here.
+                            s.recompute();
                             drop(s);
                             self.toast(
                                 ToastKind::Error,
                                 "Couldn’t apply the change",
                                 format!("The setup isn’t valid: {error}"),
                             );
+                            self.changed(Changed::SETUP);
+                            for done in edit.done {
+                                done(self, false);
+                            }
                             continue;
                         }
                     },

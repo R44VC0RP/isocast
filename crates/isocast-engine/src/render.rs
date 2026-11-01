@@ -401,6 +401,17 @@ impl Affine {
         Self([s, 0.0, 0.0, 0.0, s, 0.0])
     }
 
+    /// Scaled by `x` across and `y` down (negative mirrors).
+    pub fn scale_xy(x: f32, y: f32) -> Self {
+        Self([x, 0.0, 0.0, 0.0, y, 0.0])
+    }
+
+    /// Mirrored left to right, top to bottom, or both, about the origin.
+    pub fn flip(horizontal: bool, vertical: bool) -> Self {
+        let sign = |flip: bool| if flip { -1.0 } else { 1.0 };
+        Self::scale_xy(sign(horizontal), sign(vertical))
+    }
+
     /// Clockwise by `degrees` (y points down).
     pub fn rotate(degrees: f32) -> Self {
         let (sin, cos) = degrees.to_radians().sin_cos();
@@ -1599,6 +1610,17 @@ mod tests {
             2.0,
         );
         assert_eq!((x, y), (4.0, 6.0));
+    }
+
+    #[test]
+    fn flips_mirror_about_the_origin() {
+        assert_eq!(apply(Affine::flip(true, false), 3.0, 4.0), (-3.0, 4.0));
+        assert_eq!(apply(Affine::flip(false, true), 3.0, 4.0), (3.0, -4.0));
+        assert_eq!(Affine::flip(false, false), Affine::IDENTITY);
+        // Both ways is a half turn.
+        assert_eq!(apply(Affine::flip(true, true), 3.0, 4.0), (-3.0, -4.0));
+        let (x, y) = apply(Affine::rotate(180.0), 3.0, 4.0);
+        assert!((x + 3.0).abs() < 1e-5 && (y + 4.0).abs() < 1e-5, "{x}, {y}");
     }
 
     #[test]

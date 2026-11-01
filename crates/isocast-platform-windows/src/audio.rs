@@ -30,8 +30,17 @@ use windows::core::{BOOL, BSTR, GUID, HRESULT, Interface, PCWSTR, PWSTR, impleme
 
 use crate::native::{Apartment, Event};
 
+mod application;
+mod rate;
+pub use application::{capture_application_audio, probe_application_audio};
+
 const MAX_FRAMES: u32 = 48_000;
 const MAX_CHANNELS: u32 = 32;
+// One millisecond of timestamp phase uncertainty is not lost PCM.
+const MAX_PHASE_ERROR: u32 = SAMPLE_RATE / 1000;
+// Some USB microphone clocks advance in ~1 ms phase steps even with
+// contiguous positions. Slew through that quantization, not across PCM loss.
+const MIC_PHASE_ERROR: u32 = 2 * MAX_PHASE_ERROR;
 
 /// Active endpoint metadata. Channels and rate describe the native mix, not
 /// the selected channels delivered by a capture (always 48 kHz).
@@ -49,7 +58,7 @@ pub struct AudioDevice {
 pub struct AudioCaptureStats {
     /// Acquired packets, including any rejected before delivery.
     pub packets: u64,
-    /// Frames passed to sample callbacks that returned normally.
+    /// Rate-corrected output frames passed to callbacks that returned normally.
     pub delivered_frames: u64,
     /// Acquired silent frames, including any rejected before delivery.
     pub silent_frames: u64,
@@ -64,6 +73,14 @@ pub struct AudioCaptureStats {
     /// Native 48 kHz microphone packets whose QPC phase spike exceeded 2 ms and was
     /// filtered using continuous device positions. Not missing PCM frames.
     pub qpc_corrections: u64,
+    /// Frames of tolerated process-loopback QPC overlap, not discarded PCM.
+    pub qpc_overlap_frames: u64,
+    /// Endpoint rate-follower re-anchors after its initial packet.
+    pub rate_resets: u64,
+    /// Packets reaching the endpoint rate correction's +/-200 ppm bound.
+    pub rate_clamped: u64,
+    /// Maximum endpoint clock phase error observed before a correction/reset.
+    pub rate_error_nanos: u64,
 }
 
 struct State {
@@ -78,9 +95,33 @@ struct State {
     gap_frames: AtomicU64,
     timestamp_errors: AtomicU64,
     qpc_corrections: AtomicU64,
+    qpc_overlap_frames: AtomicU64,
+    rate_resets: AtomicU64,
+    rate_clamped: AtomicU64,
+    rate_error_nanos: AtomicU64,
 }
 
 impl State {
+    fn new() -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            stop: Event::new()?,
+            data: Event::new()?,
+            stopping: AtomicBool::new(false),
+            invalidated: AtomicU32::new(0),
+            packets: AtomicU64::new(0),
+            delivered_frames: AtomicU64::new(0),
+            silent_frames: AtomicU64::new(0),
+            discontinuities: AtomicU64::new(0),
+            gap_frames: AtomicU64::new(0),
+            timestamp_errors: AtomicU64::new(0),
+            qpc_corrections: AtomicU64::new(0),
+            qpc_overlap_frames: AtomicU64::new(0),
+            rate_resets: AtomicU64::new(0),
+            rate_clamped: AtomicU64::new(0),
+            rate_error_nanos: AtomicU64::new(0),
+        }))
+    }
+
     fn check_device(&self) -> Result<()> {
         match self.invalidated.load(Ordering::Acquire) {
             0 => Ok(()),
@@ -122,6 +163,10 @@ impl AudioCapture {
             gap_frames: self.state.gap_frames.load(Ordering::Relaxed),
             timestamp_errors: self.state.timestamp_errors.load(Ordering::Relaxed),
             qpc_corrections: self.state.qpc_corrections.load(Ordering::Relaxed),
+            qpc_overlap_frames: self.state.qpc_overlap_frames.load(Ordering::Relaxed),
+            rate_resets: self.state.rate_resets.load(Ordering::Relaxed),
+            rate_clamped: self.state.rate_clamped.load(Ordering::Relaxed),
+            rate_error_nanos: self.state.rate_error_nanos.load(Ordering::Relaxed),
         }
     }
 }
@@ -136,9 +181,10 @@ impl Drop for AudioCapture {
             let _ = worker.join();
             let stats = self.stats();
             isocast_diagnostics::diagnostic!("info";
-                "Windows audio capture ended: device={}, native_rate={}, packets={}, delivered_frames={}, gap_frames={}, timestamp_errors={}, qpc_corrections={}",
+                "Windows audio capture ended: device={}, native_rate={}, packets={}, delivered_frames={}, gap_frames={}, timestamp_errors={}, qpc_corrections={}, qpc_overlap_frames={}, rate_resets={}, rate_clamped={}, rate_error_nanos={}",
                 self.device.name, self.device.sample_rate, stats.packets,
-                stats.delivered_frames, stats.gap_frames, stats.timestamp_errors, stats.qpc_corrections
+                stats.delivered_frames, stats.gap_frames, stats.timestamp_errors, stats.qpc_corrections, stats.qpc_overlap_frames,
+                stats.rate_resets, stats.rate_clamped, stats.rate_error_nanos
             );
         }
         // A callback may itself drop the handle. It cannot join itself; the
@@ -283,19 +329,7 @@ fn capture(
     sink: AudioSink,
     thread_start: fn(),
 ) -> Result<(AudioCapture, u32)> {
-    let state = Arc::new(State {
-        stop: Event::new()?,
-        data: Event::new()?,
-        stopping: AtomicBool::new(false),
-        invalidated: AtomicU32::new(0),
-        packets: AtomicU64::new(0),
-        delivered_frames: AtomicU64::new(0),
-        silent_frames: AtomicU64::new(0),
-        discontinuities: AtomicU64::new(0),
-        gap_frames: AtomicU64::new(0),
-        timestamp_errors: AtomicU64::new(0),
-        qpc_corrections: AtomicU64::new(0),
-    });
+    let state = State::new()?;
     let (started, ready) = mpsc::sync_channel(1);
     let query = query.to_owned();
     let worker = {
@@ -327,7 +361,7 @@ fn capture(
                             return Ok(());
                         }
                         running = true;
-                        capture.run(&state, &sink)
+                        capture.run(&state, &sink, None)
                     }));
                 let error = match result {
                     Ok(Ok(())) => return,
@@ -692,7 +726,7 @@ impl Drop for SessionNotifications {
 
 struct Session {
     // Unregister before releasing the client; callbacks retain only State.
-    _notifications: SessionNotifications,
+    _notifications: Option<SessionNotifications>,
     client: IAudioClient,
     capture: IAudioCaptureClient,
     channels: usize,
@@ -700,28 +734,14 @@ struct Session {
     frames: u32,
     native_rate: u32,
     microphone: bool,
+    process_loopback: bool,
 }
 
 impl Session {
     fn new(endpoint: &Endpoint, channels: Option<&[u32]>, state: &Arc<State>) -> Result<Self> {
         let input = endpoint.device.input;
         let (count, pick) = channel_selection(&endpoint.device, channels)?;
-        let format = WAVEFORMATEXTENSIBLE {
-            Format: WAVEFORMATEX {
-                wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
-                nChannels: count as u16,
-                nSamplesPerSec: SAMPLE_RATE,
-                nAvgBytesPerSec: SAMPLE_RATE * count * 4,
-                nBlockAlign: (count * 4) as u16,
-                wBitsPerSample: 32,
-                cbSize: 22,
-            },
-            Samples: WAVEFORMATEXTENSIBLE_0 {
-                wValidBitsPerSample: 32,
-            },
-            dwChannelMask: if input { endpoint.mask } else { 3 },
-            SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
-        };
+        let format = capture_format(count, if input { endpoint.mask } else { 3 });
         // Reuse the selected client's fresh mix-format query, not a listing
         // snapshot or a second activation that could observe a different mix.
         let client = endpoint.client.clone();
@@ -737,14 +757,16 @@ impl Session {
         // IsFormatSupported S_FALSE/closest native format for our PCM format.
         unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, &format.Format, None) }
             .with_context(|| format!("WASAPI Initialize {:?}: shared {count}-channel 48000 Hz float32 with OS conversion{}", endpoint.device.name, if input { "" } else { " and loopback" }))?;
-        let frames = unsafe { client.GetBufferSize() }?;
-        if !(1..=MAX_FRAMES).contains(&frames) {
-            bail!("WASAPI buffer size {frames}; supported frames: 1..={MAX_FRAMES}");
-        }
-        unsafe { client.SetEventHandle(state.data.handle()) }.context("WASAPI SetEventHandle")?;
-        let capture = unsafe { client.GetService() }.context("WASAPI capture service")?;
+        let mut session = Self::initialized(
+            client,
+            count,
+            pick,
+            endpoint.device.sample_rate,
+            input,
+            state,
+        )?;
         let notifications = SessionNotifications {
-            control: unsafe { client.GetService() }.context("WASAPI session control")?,
+            control: unsafe { session.client.GetService() }.context("WASAPI session control")?,
             events: SessionEvents {
                 state: state.clone(),
             }
@@ -756,49 +778,112 @@ impl Session {
                 .RegisterAudioSessionNotification(&notifications.events)
         }
         .context("WASAPI session-disconnection notifications")?;
+        session._notifications = Some(notifications);
+        Ok(session)
+    }
+
+    fn initialized(
+        client: IAudioClient,
+        count: u32,
+        pick: Vec<usize>,
+        native_rate: u32,
+        microphone: bool,
+        state: &Arc<State>,
+    ) -> Result<Self> {
+        let frames = unsafe { client.GetBufferSize() }?;
+        Self::with_buffer(client, count, pick, native_rate, microphone, frames, state)
+    }
+
+    fn with_buffer(
+        client: IAudioClient,
+        count: u32,
+        pick: Vec<usize>,
+        native_rate: u32,
+        microphone: bool,
+        frames: u32,
+        state: &Arc<State>,
+    ) -> Result<Self> {
+        if !(1..=MAX_FRAMES).contains(&frames) {
+            bail!("WASAPI buffer size {frames}; supported frames: 1..={MAX_FRAMES}");
+        }
+        unsafe { client.SetEventHandle(state.data.handle()) }.context("WASAPI SetEventHandle")?;
+        let capture = unsafe { client.GetService() }.context("WASAPI capture service")?;
         Ok(Self {
-            _notifications: notifications,
+            _notifications: None,
             client,
             capture,
             channels: count as usize,
             pick,
             frames,
-            native_rate: endpoint.device.sample_rate,
-            microphone: input,
+            native_rate,
+            microphone,
+            process_loopback: false,
         })
     }
 
-    fn run(&self, state: &State, sink: &AudioSink) -> Result<()> {
+    fn run(
+        &self,
+        state: &State,
+        sink: &AudioSink,
+        process: Option<windows::Win32::Foundation::HANDLE>,
+    ) -> Result<()> {
         let mut samples = Vec::with_capacity(self.frames as usize * self.pick.len());
         let mut clock = PacketClock::new(self.native_rate, self.frames, self.microphone);
-        loop {
+        // Endpoint oscillators drift relative to QPC even after Windows SRC.
+        // Feed the validated, phase-filtered/debt-corrected timestamp below,
+        // not raw microphone noise or the virtual process clock.
+        let phase_limit = if self.microphone {
+            MIC_PHASE_ERROR
+        } else {
+            MAX_PHASE_ERROR
+        };
+        let mut rate = (!self.process_loopback)
+            .then(|| rate::RateFollower::new(self.pick.len(), self.frames as usize, phase_limit));
+        let mut emit = |samples: &[f32], time| {
+            // A callback may itself drop capture. A gap can flush the old tail
+            // and deliver new PCM, so observe stop before each callback.
             if state.stopping.load(Ordering::Acquire) {
-                return Ok(());
+                return;
+            }
+            (sink.samples)(samples, time);
+            state
+                .delivered_frames
+                .fetch_add((samples.len() / self.pick.len()) as u64, Ordering::Relaxed);
+        };
+        let mut handles = vec![state.stop.handle(), state.data.handle()];
+        if let Some(process) = process {
+            handles.push(process);
+        }
+        'capture: loop {
+            if state.stopping.load(Ordering::Acquire) {
+                break;
             }
             state.check_device()?;
             // Windows 10 1703+ loopback and capture signal the event for data.
-            // Endpoint changes signal `data` too, and Drop signals `stop`;
-            // an idle render endpoint needs no periodic GetNextPacketSize.
-            let wait = unsafe {
-                WaitForMultipleObjects(&[state.stop.handle(), state.data.handle()], false, INFINITE)
-            };
+            // Endpoint changes signal `data` too, and Drop signals `stop`.
+            // Process loopback additionally wakes when its pinned process exits.
+            let wait = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
             if wait == WAIT_OBJECT_0 {
-                return Ok(());
+                break;
             }
             if wait == WAIT_FAILED {
                 return Err(windows::core::Error::from_thread()).context("WASAPI wait");
             }
-            if wait.0 != WAIT_OBJECT_0.0 + 1 {
+            let exited = process.is_some() && wait.0 == WAIT_OBJECT_0.0 + 2;
+            if wait.0 != WAIT_OBJECT_0.0 + 1 && !exited {
                 bail!("unexpected WASAPI wait result: {}", wait.0);
             }
             loop {
                 if state.stopping.load(Ordering::Acquire) {
-                    return Ok(());
+                    break 'capture;
                 }
                 state.check_device()?;
                 let next = unsafe { self.capture.GetNextPacketSize() }
                     .context("WASAPI GetNextPacketSize")?;
                 if next == 0 {
+                    if exited {
+                        break 'capture;
+                    }
                     break;
                 }
                 if next > self.frames {
@@ -840,8 +925,13 @@ impl Session {
                         .silent_frames
                         .fetch_add(u64::from(frames), Ordering::Relaxed);
                 }
-                let (time, gap) = clock
-                    .timestamp(frames, position, qpc, flags)
+                let previous_overlaps = clock.qpc_overlap_frames;
+                let timestamp = if self.process_loopback {
+                    clock.process_timestamp(frames, qpc, flags)
+                } else {
+                    clock.timestamp(frames, position, qpc, flags)
+                };
+                let (time, gap) = timestamp
                     .inspect_err(|_| {
                         state.timestamp_errors.fetch_add(1, Ordering::Relaxed);
                     })
@@ -852,6 +942,10 @@ impl Session {
                         )
                     })?;
                 state.gap_frames.fetch_add(gap, Ordering::Relaxed);
+                state.qpc_overlap_frames.fetch_add(
+                    clock.qpc_overlap_frames - previous_overlaps,
+                    Ordering::Relaxed,
+                );
                 state
                     .qpc_corrections
                     .store(clock.qpc_corrections, Ordering::Relaxed);
@@ -874,27 +968,68 @@ impl Session {
                     }
                     // WASAPI owns this checked, bounded region until ReleaseBuffer.
                     let source = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), length) };
-                    for frame in source.chunks_exact(self.channels) {
-                        if frame.iter().any(|sample| !sample.is_finite()) {
-                            bail!("WASAPI returned non-finite float32 samples");
-                        }
-                        for &channel in &self.pick {
-                            samples.push(frame[channel]);
-                        }
-                    }
+                    copy_float_samples(source, self.channels, &self.pick, &mut samples)?;
                 }
                 // Never hold the native packet while user code runs or stalls.
                 lease.release()?;
                 if state.stopping.load(Ordering::Acquire) {
-                    return Ok(());
+                    break 'capture;
                 }
                 state.check_device()?;
-                (sink.samples)(&samples, time);
-                state
-                    .delivered_frames
-                    .fetch_add(u64::from(frames), Ordering::Relaxed);
+                if let Some(rate) = &mut rate {
+                    rate.push(
+                        &samples,
+                        time,
+                        gap > 0 || flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0,
+                        &mut emit,
+                    );
+                    state.rate_resets.store(rate.resets, Ordering::Relaxed);
+                    state.rate_clamped.store(rate.clamped, Ordering::Relaxed);
+                    state
+                        .rate_error_nanos
+                        .store(rate.max_error_nanos, Ordering::Relaxed);
+                } else {
+                    emit(&samples, time);
+                }
             }
         }
+        Ok(())
+    }
+}
+
+fn copy_float_samples(
+    source: &[f32],
+    channels: usize,
+    pick: &[usize],
+    samples: &mut Vec<f32>,
+) -> Result<()> {
+    for frame in source.chunks_exact(channels) {
+        if frame.iter().any(|sample| !sample.is_finite()) {
+            bail!("WASAPI returned non-finite float32 samples");
+        }
+        for &channel in pick {
+            samples.push(frame[channel]);
+        }
+    }
+    Ok(())
+}
+
+fn capture_format(count: u32, mask: u32) -> WAVEFORMATEXTENSIBLE {
+    WAVEFORMATEXTENSIBLE {
+        Format: WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
+            nChannels: count as u16,
+            nSamplesPerSec: SAMPLE_RATE,
+            nAvgBytesPerSec: SAMPLE_RATE * count * 4,
+            nBlockAlign: (count * 4) as u16,
+            wBitsPerSample: 32,
+            cbSize: 22,
+        },
+        Samples: WAVEFORMATEXTENSIBLE_0 {
+            wValidBitsPerSample: 32,
+        },
+        dwChannelMask: mask,
+        SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
     }
 }
 
@@ -927,6 +1062,7 @@ struct PacketClock {
     previous: Option<ClockPacket>,
     first_qpc_nanos: Option<i64>,
     qpc_corrections: u64,
+    qpc_overlap_frames: u64,
     phases: [i64; 5],
     phase_count: usize,
     phase_next: usize,
@@ -944,6 +1080,7 @@ impl PacketClock {
             previous: None,
             first_qpc_nanos: None,
             qpc_corrections: 0,
+            qpc_overlap_frames: 0,
             phases: [0; 5],
             phase_count: 0,
             phase_next: 0,
@@ -1120,6 +1257,59 @@ impl PacketClock {
         });
         Ok((Time::from_nanos(nanos), gap))
     }
+
+    /// The process-loopback virtual device on Windows 10 19045 reports zero
+    /// device positions even as its packet QPC advances. Use that QPC directly,
+    /// as endpoint loopback does, never a fabricated hardware sample counter.
+    /// Bounded QPC overlap is phase noise, not a reason to end a recording:
+    /// retain its PCM and raw time, and count the overlap. An unmeasurable
+    /// discontinuity otherwise remains unknown loss and fails closed.
+    fn process_timestamp(&mut self, frames: u32, qpc: u64, flags: u32) -> Result<(Time, u64)> {
+        if qpc == 0 || flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0 {
+            bail!("WASAPI reported an invalid process-loopback timestamp; lost frames are unknown");
+        }
+        let nanos = qpc
+            .checked_mul(100)
+            .and_then(|v| i64::try_from(v).ok())
+            .context("WASAPI QPC timestamp overflow")?;
+        let gap = if let Some(previous) = self.previous {
+            let ticks = qpc
+                .checked_sub(previous.qpc)
+                .filter(|&v| v > 0)
+                .context("WASAPI process-loopback QPC did not advance")?;
+            let elapsed = (u128::from(ticks) * u128::from(SAMPLE_RATE) + 5_000_000) / 10_000_000;
+            let delta = i128::try_from(elapsed)? - i128::from(previous.frames);
+            if delta < -i128::from(MAX_PHASE_ERROR) {
+                bail!(
+                    "WASAPI process-loopback packet timestamps overlap by {} frames (maximum {MAX_PHASE_ERROR})",
+                    -delta,
+                );
+            }
+            // A bounded negative overlap describes repeated timestamp phase,
+            // even when flagged; without that evidence a flagged zero gap
+            // still has unknown loss rather than a measurable overlap.
+            if (0..=2).contains(&delta)
+                && flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0
+            {
+                bail!(
+                    "WASAPI process-loopback discontinuity without a measurable QPC gap; lost frames are unknown"
+                );
+            }
+            if delta < 0 {
+                self.qpc_overlap_frames += u64::try_from(-delta)?;
+            }
+            if delta > 2 { u64::try_from(delta)? } else { 0 }
+        } else {
+            0
+        };
+        self.previous = Some(ClockPacket {
+            position: 0,
+            qpc,
+            nanos,
+            frames,
+        });
+        Ok((Time::from_nanos(nanos), gap))
+    }
 }
 
 struct Packet<'a> {
@@ -1246,6 +1436,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn process_clock_tolerates_bounded_qpc_overlap_without_ending_capture() {
+        let base = 1_000_000;
+        for flags in [0, AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32] {
+            for overlap in [1, 2, 3, 48] {
+                let mut clock = PacketClock::new(SAMPLE_RATE, MAX_FRAMES, false);
+                clock.process_timestamp(480, base, 0).unwrap();
+                let qpc = base + 100_000 - overlap * 10_000_000 / u64::from(SAMPLE_RATE);
+                let (time, gap) = clock.process_timestamp(480, qpc, flags).unwrap();
+                assert_eq!(time.as_nanos(), qpc as i64 * 100);
+                assert_eq!(gap, 0);
+                assert_eq!(clock.qpc_overlap_frames, overlap);
+            }
+        }
+        let mut clock = PacketClock::new(SAMPLE_RATE, MAX_FRAMES, false);
+        clock.process_timestamp(480, base, 0).unwrap();
+        let excessive = base + 100_000 - 49 * 10_000_000 / u64::from(SAMPLE_RATE);
+        assert!(clock.process_timestamp(480, excessive, 0).is_err());
+        assert_eq!(clock.qpc_overlap_frames, 0);
+        assert!(
+            clock
+                .process_timestamp(
+                    480,
+                    base + 100_000,
+                    AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32,
+                )
+                .is_err()
+        );
+        let (_, gap) = clock.process_timestamp(480, base + 110_000, 0).unwrap();
+        assert_eq!(gap, 48);
+    }
+
+    #[test]
+    fn converted_float_packets_preserve_stereo_and_channel_selection() {
+        let source = [-1.0, 0.25, 0.5, 1.0];
+        let mut samples = Vec::with_capacity(source.len());
+        copy_float_samples(&source, 2, &[0, 1], &mut samples).unwrap();
+        assert_eq!(samples, source);
+        samples.clear();
+        copy_float_samples(&source, 2, &[1], &mut samples).unwrap();
+        assert_eq!(samples, [0.25, 1.0]);
+        samples.clear();
+        assert!(copy_float_samples(&[f32::NAN, 0.0], 2, &[0, 1], &mut samples).is_err());
+        assert!(copy_float_samples(&[0.0, f32::INFINITY], 2, &[0, 1], &mut samples).is_err());
+    }
+
+    #[test]
     fn native_clock_rejects_short_phase_spikes_without_losing_samples() {
         let mut clock = PacketClock::new(48_000, 480, true);
         let base = 1_000_000_000;
@@ -1323,6 +1559,45 @@ mod tests {
     }
 
     #[test]
+    fn microphone_and_resampled_clocks_follow_drift_without_iso_steps() {
+        for native_rate in [24_000, SAMPLE_RATE] {
+            for ppm in [-90_i64, 90] {
+                let mut clock = PacketClock::new(native_rate, 1440, true);
+                let mut rate = rate::RateFollower::new(1, 480, MIC_PHASE_ERROR);
+                let base = Time::from_nanos(1_000_000_000);
+                let debt = if native_rate == SAMPLE_RATE { 0 } else { 63 };
+                let mut received = 0_u64;
+                let mut emit = |samples: &[f32], time: Time| {
+                    assert_eq!(time.ticks_since(base, SAMPLE_RATE), received as i64);
+                    received += samples.len() as u64;
+                };
+                for packet in 0..60_000_i64 {
+                    let frames = if packet == 0 { 480 - debt } else { 480 };
+                    let noise = if packet == 0 {
+                        0
+                    } else {
+                        (packet * 17 % 13 - 6) * 1000
+                    };
+                    let nanos = base.as_nanos() + packet * (10_000_000 + ppm * 10) + noise;
+                    let position = packet as u64 * u64::from(native_rate / 100);
+                    let (time, gap) = clock
+                        .timestamp(frames, position, (nanos / 100) as u64, 0)
+                        .unwrap();
+                    assert_eq!(gap, 0);
+                    rate.push(&[0.0; 480][..frames as usize], time, false, &mut emit);
+                }
+                rate.finish(&mut emit);
+                let input = 28_800_000 - i64::from(debt);
+                let expected = input + input * ppm / 1_000_000;
+                assert!((received as i64 - expected).abs() <= 2);
+                assert_eq!(rate.resets, 0);
+                assert_eq!(rate.clamped, 0);
+                assert!(rate.max_error_nanos < 400_000);
+            }
+        }
+    }
+
+    #[test]
     fn loopback_preserves_sparse_raw_timing() {
         let mut clock = PacketClock::new(48_000, 480, false);
         let base = 1_000_000_000;
@@ -1336,5 +1611,28 @@ mod tests {
         assert_eq!(at.as_nanos(), qpc as i64 * 100);
         assert_eq!(gap, 0);
         assert_eq!(clock.qpc_corrections, 0);
+    }
+
+    #[test]
+    fn microphone_clock_quantization_does_not_step_the_iso_timeline() {
+        let mut clock = PacketClock::new(SAMPLE_RATE, 1056, true);
+        let mut rate = rate::RateFollower::new(1, 480, MIC_PHASE_ERROR);
+        let base = Time::from_nanos(1_000_000_000);
+        let mut received = 0_u64;
+        let mut emit = |samples: &[f32], time: Time| {
+            assert_eq!(time.ticks_since(base, SAMPLE_RATE), received as i64);
+            received += samples.len() as u64;
+        };
+        for packet in 0..60_000_u64 {
+            // Wave XLR's measured contiguous native packets have persistent
+            // ~1 ms clock steps every ~20.48 s, not isolated QPC spikes.
+            let qpc = base.as_nanos() as u64 / 100 + packet * 100_004 + packet / 2048 * 10_000;
+            let (time, gap) = clock.timestamp(480, packet * 480, qpc, 0).unwrap();
+            assert_eq!(gap, 0);
+            rate.push(&[0.0; 480], time, false, &mut emit);
+        }
+        rate.finish(&mut emit);
+        assert_eq!(rate.resets, 0);
+        assert!(rate.max_error_nanos < 2_000_000);
     }
 }

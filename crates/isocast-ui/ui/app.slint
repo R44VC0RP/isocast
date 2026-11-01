@@ -496,6 +496,9 @@ export component AppWindow inherits Window {
                 MenuItem { title: "Rotate 90° Counterclockwise"; activated => { Ui.menu("rotate_ccw"); } }
                 MenuItem { title: "Rotate 180°"; activated => { Ui.menu("rotate_180"); } }
                 MenuSeparator { }
+                MenuItem { title: "Flip Horizontal"; activated => { Ui.menu("flip_horizontal"); } }
+                MenuItem { title: "Flip Vertical"; activated => { Ui.menu("flip_vertical"); } }
+                MenuSeparator { }
                 MenuItem { title: "Fit to Screen"; shortcut: @keys(Control + F); activated => { Ui.menu("fit_screen"); } }
                 MenuItem { title: "Stretch to Screen"; shortcut: @keys(Control + S); activated => { Ui.menu("stretch_screen"); } }
                 MenuItem { title: "Center to Screen"; shortcut: @keys(Control + D); activated => { Ui.menu("center_screen"); } }

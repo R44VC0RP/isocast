@@ -24,7 +24,7 @@ use isocast_protocol::ScaleFilter;
 
 use super::frame_stream::{MAX_FPS, Pace, Source, stamp_at};
 use crate::filter::Filters;
-use crate::gpu::{FrameImporter, Gpu, InFlight};
+use crate::gpu::{FrameImporter, Gpu, GpuPixels, InFlight};
 use crate::render::{Layer, Renderer};
 use crate::{Platform, Time};
 
@@ -89,6 +89,9 @@ struct Control {
     fps: AtomicU32,
     closed: AtomicBool,
     pending: Mutex<Pending>,
+    /// In-memory readbacks the GPU finished mapping (Linux), by sequence
+    /// number: the viewer's thread writes and announces them in order.
+    mapped: Mutex<Vec<(u64, Result<(), String>)>>,
     /// Signalled when a slot comes back or the feed closes.
     changed: Condvar,
 }
@@ -153,6 +156,7 @@ impl SharedControl {
             |pending| {
                 pending.released.is_empty()
                     && pending.size.is_none()
+                    && self.0.mapped.lock().is_empty()
                     && !self.0.closed.load(Ordering::SeqCst)
             },
             timeout,
@@ -189,6 +193,7 @@ pub(crate) fn watch<P: Platform>(
         fps: AtomicU32::new(request.fps.clamp(1, MAX_FPS)),
         closed: AtomicBool::new(false),
         pending: Mutex::new(Pending::default()),
+        mapped: Mutex::new(Vec::new()),
         changed: Condvar::new(),
     }));
     let platform = platform.clone();
@@ -217,10 +222,73 @@ struct Ring<S> {
     generation: u64,
     size: (u32, u32),
     surfaces: Vec<(S, wgpu::Texture)>,
+    /// Per slot, where a frame is read back to on platforms whose surfaces
+    /// are in memory (Linux); empty elsewhere.
+    readback: Vec<wgpu::Buffer>,
     /// Slots the viewer holds.
     held: Vec<bool>,
     /// No frame was drawn into it yet.
     fresh: bool,
+    /// How its frames are made was logged (in memory: copied or drawn).
+    said: bool,
+}
+
+/// A frame read back into a slot's buffer (in memory, Linux), waiting for
+/// the GPU to map it; written into the slot and announced by the viewer's
+/// thread, in order.
+struct Readback<S, F> {
+    seq: u64,
+    buffer: wgpu::Buffer,
+    surface: S,
+    bgra: bool,
+    width: u32,
+    event: SharedEvent<S>,
+    /// The source frame and its GPU picture, kept until the GPU is done.
+    _held: F,
+}
+
+/// Write and announce the readbacks at the front of `queue` the GPU has
+/// mapped, in order. A failed map ends the stream (the slot would stay
+/// taken for good; its buffer was never mapped, so isn't unmapped).
+fn publish<P: Platform, F>(
+    platform: &P,
+    control: &SharedControl,
+    tx: &Sender<SharedEvent<P::SharedSurface>>,
+    queue: &mut std::collections::VecDeque<Readback<P::SharedSurface, F>>,
+) -> Result<(), String> {
+    let mut mapped = std::mem::take(&mut *control.0.mapped.lock());
+    if mapped.is_empty() {
+        return Ok(());
+    }
+    while let Some(front) = queue.front() {
+        let Some(at) = mapped.iter().position(|(seq, _)| *seq == front.seq) else {
+            break;
+        };
+        let (_, result) = mapped.swap_remove(at);
+        let read = queue.pop_front().expect("the front readback");
+        result.map_err(|err| format!("could not read a shared frame back: {err}"))?;
+        let written = read
+            .buffer
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|err| anyhow::anyhow!("could not read a shared frame back: {err}"))
+            .and_then(|view| {
+                platform.write_shared_surface(
+                    &read.surface,
+                    &view,
+                    padded_row(read.width) as usize,
+                    read.bgra,
+                )
+            });
+        read.buffer.unmap();
+        written.map_err(|err| format!("{err:#}"))?;
+        if tx.send(read.event).is_err() {
+            return Ok(());
+        }
+    }
+    // Mapped out of order: kept until those before them are.
+    control.0.mapped.lock().extend(mapped);
+    Ok(())
 }
 
 /// Draw frames for one viewer until it leaves (`Ok`) or the stream can't
@@ -249,10 +317,13 @@ fn run<P: Platform>(
     let mut drawn_filters: Vec<Filter> = Vec::new();
     let mut filtering: Option<Filters> = None;
     let mut in_flight = InFlight::default();
+    let mut readbacks = std::collections::VecDeque::new();
+    let mut next_seq = 0u64;
     loop {
         if control.0.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
+        publish(platform, control, tx, &mut readbacks)?;
         if !in_flight.available().map_err(failed)? {
             control.wait(Duration::from_millis(1));
             continue;
@@ -363,12 +434,28 @@ fn run<P: Platform>(
             if tx.send(event).is_err() {
                 return Ok(());
             }
+            let readback = if platform.shared_surface_in_memory() {
+                (0..slots)
+                    .map(|_| {
+                        gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("shared frame readback"),
+                            size: u64::from(padded_row(size.0)) * u64::from(size.1),
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             retired = ring.replace(Ring {
                 generation,
                 size,
                 surfaces,
+                readback,
                 held: vec![false; slots],
                 fresh: true,
+                said: false,
             });
         }
         let ring = ring.as_mut().expect("made above");
@@ -381,22 +468,50 @@ fn run<P: Platform>(
         let mut layer = Layer::full(&picture, size.0, size.1);
         layer.scale_filter = if size.0 < input.0 {
             ScaleFilter::Area
+        } else if size == input {
+            // The same size (the target was drawn at the viewer's size):
+            // pixel for pixel, the cheapest pass (a software GPU spent
+            // three cores on a bicubic one).
+            ScaleFilter::Point
         } else {
             ScaleFilter::Bicubic
         };
         let target = &ring.surfaces[index].1;
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        renderer.encode(
-            &gpu,
-            &mut encoder,
-            target,
-            &[layer],
-            size,
-            wgpu::Color::BLACK,
-        );
-        let done = in_flight.submit(&gpu, encoder.finish());
-        ring.held[index] = true;
-        ring.fresh = false;
+        // In memory, a canvas already at the slot's size in 8-bit RGB is
+        // copied as it is (red and blue swapped on the way if BGRA): no
+        // render pass, which on a software GPU costs more than the H.264
+        // encode it replaces.
+        let direct = (!ring.readback.is_empty() && input == size)
+            .then_some(&picture.pixels)
+            .and_then(|pixels| match pixels {
+                // A canvas (the program, the preview): opaque over black
+                // as it is. Sources (`Rgb`, maybe with straight alpha) take
+                // the render pass, which composites them over black.
+                GpuPixels::Premultiplied(texture)
+                    if texture.usage().contains(wgpu::TextureUsages::COPY_SRC) =>
+                {
+                    match texture.format() {
+                        wgpu::TextureFormat::Rgba8Unorm => Some((texture.clone(), false)),
+                        wgpu::TextureFormat::Bgra8Unorm => Some((texture.clone(), true)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            });
+        if !ring.readback.is_empty() && !std::mem::replace(&mut ring.said, true) {
+            isocast_diagnostics::diagnostic!("info"; "shared frames of {}: {}×{} in memory, {}", request.target, size.0, size.1, if direct.is_some() { "copied as drawn" } else { "drawn to size" });
+        }
+        if direct.is_none() {
+            renderer.encode(
+                &gpu,
+                &mut encoder,
+                target,
+                &[layer],
+                size,
+                wgpu::Color::BLACK,
+            );
+        }
         let stamp = drawn.and_then(|drawn| stamp_at(&drawn, at));
         let event = SharedEvent::Frame {
             generation: ring.generation,
@@ -405,6 +520,67 @@ fn run<P: Platform>(
             revision: stamp.map(|stamp| stamp.revision),
             layout_generation: stamp.map(|stamp| stamp.generation),
         };
+        if let Some(buffer) = ring.readback.get(index).cloned() {
+            // In memory (Linux): copy the picture into the slot's readback
+            // buffer in the same submission. Once the GPU has mapped it,
+            // this thread writes it into the slot's memory and announces it
+            // (`publish`, in tick order). Pipelined like the GPU path: the
+            // viewer's thread never waits for the GPU.
+            let (source, bgra) = match &direct {
+                Some((texture, bgra)) => (texture, *bgra),
+                None => (target, false),
+            };
+            encoder.copy_texture_to_buffer(
+                source.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_row(size.0)),
+                        rows_per_image: Some(size.1),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let _done = in_flight.submit(&gpu, encoder.finish());
+            ring.held[index] = true;
+            ring.fresh = false;
+            // The callback runs on whichever thread polls or submits next
+            // (wgpu fires mapping callbacks from any submit): it only says
+            // so; this thread writes the memory and announces the frame.
+            let seq = next_seq;
+            next_seq += 1;
+            let mapped = control.clone();
+            buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let _pending = mapped.0.pending.lock();
+                    mapped
+                        .0
+                        .mapped
+                        .lock()
+                        .push((seq, result.map_err(|err| err.to_string())));
+                    mapped.0.changed.notify_all();
+                });
+            gpu.nudge();
+            readbacks.push_back(Readback {
+                seq,
+                buffer,
+                surface: ring.surfaces[index].0.clone(),
+                bgra,
+                width: size.0,
+                event,
+                _held: (frame, picture),
+            });
+            continue;
+        }
+        let done = in_flight.submit(&gpu, encoder.finish());
+        ring.held[index] = true;
+        ring.fresh = false;
         let tx = tx.clone();
         let control = control.clone();
         let surface = ring.surfaces[index].0.clone();
@@ -417,6 +593,11 @@ fn run<P: Platform>(
             }
         });
     }
+}
+
+/// A readback row: `width` RGBA pixels, padded to wgpu's copy alignment.
+fn padded_row(width: u32) -> u32 {
+    (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
 }
 
 /// `input` scaled down to fit in `max_size` (either side unbounded if

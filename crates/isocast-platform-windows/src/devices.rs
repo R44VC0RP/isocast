@@ -236,13 +236,18 @@ pub(crate) fn devices() -> Result<Devices> {
          manufacturer are not reported."
             .into(),
     );
+    let audio_apps = crate::audio_apps::audio_apps().unwrap_or_else(|error| {
+        notes.push(format!("Audio applications could not be listed: {error:#}"));
+        Vec::new()
+    });
+    notes.push("Audio application id is the executable path; listed names and binaries also match. Use the full executable path to select an app before launch. Process-loopback capture requires Windows 10 2004 (build 19041) or later and follows the selected process tree across restarts. Long-take alignment is unqualified: application audio drifted about 46 ppm relative to desktop audio (about 165 ms/hour) on the tested Windows host; absolute video alignment remains unverified.".into());
     Ok(Devices {
         displays: displays.into_iter().map(|info| info.display).collect(),
         windows,
         cameras,
         microphones,
         audio_outputs,
-        audio_apps: Vec::new(),
+        audio_apps,
         permissions: crate::permissions::states(),
         notes,
     })

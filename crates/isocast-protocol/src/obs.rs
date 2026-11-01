@@ -1670,8 +1670,9 @@ struct Placed {
     rect: Rect,
     crop: Crop,
     rotate: f32,
-    /// Mirrored on one axis, which Isocast can't show.
-    mirrored: bool,
+    /// Mirrored on one axis. Mirrored on both is a half turn, in `rotate`.
+    flip_horizontal: bool,
+    flip_vertical: bool,
     /// The content's size in Isocast pixels before rounding.
     size: (f64, f64),
 }
@@ -3273,13 +3274,6 @@ impl<'a, 'v> Importer<'a, 'v> {
                 }
             };
             let placed = self.place(&label, item, size, space);
-            if placed.mirrored {
-                self.unsupported(
-                    label.clone(),
-                    "scene_item",
-                    "it is flipped, which isn't available; shown unflipped",
-                );
-            }
             self.item_extras(&label, item);
             let natural = source
                 .clone()
@@ -3327,6 +3321,8 @@ impl<'a, 'v> Importer<'a, 'v> {
                 style: Style {
                     transform: Transform {
                         rotate: placed.rotate,
+                        flip_horizontal: placed.flip_horizontal,
+                        flip_vertical: placed.flip_vertical,
                         ..Transform::default()
                     },
                     ..Style::default()
@@ -3570,7 +3566,8 @@ impl<'a, 'v> Importer<'a, 'v> {
                 bottom: round(crop[3] + extra[3]),
             },
             rotate: if rotate == -180.0 { 180.0 } else { rotate } as f32,
-            mirrored: flip_x != flip_y,
+            flip_horizontal: flip_x && !flip_y,
+            flip_vertical: flip_y && !flip_x,
             size: (w, h),
         }
     }
@@ -4257,12 +4254,40 @@ mod tests {
     }
 
     #[test]
-    fn a_flip_on_one_axis_is_listed() {
-        let items = json!([{ "name": "A", "source_uuid": "a", "align": 5,
-                             "scale": { "x": -1, "y": 1 }, "pos": { "x": 200, "y": 0 } }]);
+    fn a_flip_on_one_axis_is_kept() {
+        let items = json!([
+            // Mirrored about its top left, so it lies left of `pos`.
+            { "name": "A", "source_uuid": "a", "align": 5,
+              "scale": { "x": -1, "y": 1 }, "pos": { "x": 200, "y": 0 } },
+            { "name": "A", "source_uuid": "a", "align": 5,
+              "scale": { "x": 1, "y": -1 }, "pos": { "x": 0, "y": 100 } },
+            // Mirrored, then turned a quarter: its centre is (250, 100).
+            { "name": "A", "source_uuid": "a", "align": 5, "rot": 90,
+              "scale": { "x": -1, "y": 1 }, "pos": { "x": 300, "y": 200 } },
+        ]);
         let imported = run(collection(json!([image("A", "a"), scene("S", items)])));
-        assert_eq!(rect(&imported.setup.scenes[0].items[0]), [0, 0, 200, 100]);
-        assert!(imported.unsupported[0].reason.contains("flipped"));
+        let items = &imported.setup.scenes[0].items;
+        let rects: Vec<[i64; 4]> = items.iter().map(rect).collect();
+        assert_eq!(
+            rects,
+            [[0, 0, 200, 100], [0, 0, 200, 100], [150, 50, 200, 100]]
+        );
+        let flips: Vec<(bool, bool, f32)> = items
+            .iter()
+            .map(|item| {
+                let t = item.style.transform;
+                (t.flip_horizontal, t.flip_vertical, t.rotate)
+            })
+            .collect();
+        assert_eq!(
+            flips,
+            [(true, false, 0.0), (false, true, 0.0), (true, false, 90.0)]
+        );
+        assert!(
+            imported.unsupported.is_empty(),
+            "{:?}",
+            imported.unsupported
+        );
     }
 
     #[test]
