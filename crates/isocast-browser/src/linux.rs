@@ -968,7 +968,12 @@ mod tests {
         // The sweep removes dead helpers' folders only (pid 7 isn't an
         // isocast-browser), never what a symlink points at.
         let stale = base.join("broadway901.socket");
-        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        // Make the node a dead listener leaves behind, without opening an fd
+        // that another test's concurrently forked child could keep alive.
+        let path = std::ffi::CString::new(stale.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: path is NUL-terminated; a socket node needs no device number.
+        let rc = unsafe { libc::mknod(path.as_ptr(), libc::S_IFSOCK | 0o600, 0) };
+        assert_eq!(rc, 0, "mknod: {}", std::io::Error::last_os_error());
         let live = base.join("broadway902.socket");
         let _listening = std::os::unix::net::UnixListener::bind(&live).unwrap();
         sweep(&base);
