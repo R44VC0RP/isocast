@@ -307,15 +307,24 @@ pub fn display_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
         };
         choice(v, &d.name, format!("{}×{}", d.width, d.height))
     }));
-    if PICKED_IN_DIALOG {
+    if can_pick() {
         options.push(pick_option("screen"));
     }
     keep(options, value, "not connected")
 }
 
-/// Screens and windows are chosen in the desktop's sharing dialog
-/// (`screen_pick`), since the engine can't list them (Linux).
-pub const PICKED_IN_DIALOG: bool = cfg!(target_os = "linux");
+/// Whether the engine (Linux) has screens and windows chosen in the
+/// desktop's sharing dialog (`screen_pick`) because it can't list them.
+/// Follows the engine's OS, not this app's.
+pub fn picked_in_dialog() -> bool {
+    crate::engine::os() == isocast_protocol::hello::EngineOs::Linux
+}
+
+/// Whether this app can open that dialog: `screen_pick` shows it on the
+/// engine's own screen, so only for an engine on this machine.
+pub fn can_pick() -> bool {
+    picked_in_dialog() && crate::engine::is_local()
+}
 
 /// The choice that opens the desktop's sharing dialog for the source.
 pub const PICK: &str = "\u{200b}pick in the dialog";
@@ -327,13 +336,14 @@ fn pick_option(what: &str) -> Choice {
 }
 
 /// A window source's choices where the desktop's dialog chooses the window
-/// (`PICKED_IN_DIALOG`): the one it has, named by `app` (a label there),
-/// and the dialog.
+/// (`picked_in_dialog`): the one it has, named by `app` (a label there),
+/// and the dialog where this app can open it (`can_pick`).
 pub fn picked_window_options(app: &str) -> Vec<Choice> {
-    vec![
-        choice(app, "Chosen in the desktop’s dialog", app),
-        pick_option("window"),
-    ]
+    let mut options = vec![choice(app, "Chosen in the desktop’s dialog", app)];
+    if can_pick() {
+        options.push(pick_option("window"));
+    }
+    options
 }
 
 /// An app with windows that can be captured.

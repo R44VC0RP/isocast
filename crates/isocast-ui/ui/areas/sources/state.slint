@@ -52,6 +52,15 @@ export struct FilterRow {
     enabled: bool,
 }
 
+// A display or window source waiting for its screen or window to be chosen
+// in the desktop's sharing dialog (Choose screens and windows). `what`:
+// "window" or "screen".
+export struct UnchosenRow {
+    id: string,
+    name: string,
+    what: string,
+}
+
 // A choice in Create/Select Source's list of existing sources or scenes.
 export struct PickRow {
     id: string,
@@ -199,6 +208,12 @@ export global SourcesArea {
     in property <color> background-swatch;
     in property <[DropdownOption]> align-options;
     in property <[DropdownOption]> fit-options;
+
+    // ---- Choose screens and windows ("choose-screens")
+    in property <[UnchosenRow]> unchosen;
+    // The source whose sharing dialog is open ("" for none; one at a time).
+    in property <string> unchosen-picking;
+    callback choose-unchosen(string);
 
     // ---- Rename ("rename")
     in property <string> rename-heading;
