@@ -4923,8 +4923,8 @@ fn screen_pick(source: String, json: bool) -> Result<ExitCode> {
     }
     if !picked.remembered {
         println!(
-            "The desktop didn't keep the choice: the source runs on it until it stops, then \
-             waits to be chosen again (on Hyprland, tick \"Allow a restore token\" to keep it)."
+            "The desktop didn't keep the choice: the source shows it until the source stops, \
+             then waits to be chosen again."
         );
     }
     Ok(ExitCode::SUCCESS)

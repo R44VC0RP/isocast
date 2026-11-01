@@ -2852,11 +2852,12 @@ impl Daemon {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
                 message: format!(
-                    "{} started recording while the dialog was open, and the desktop didn't \
-                     keep the choice, so it can't switch to it when the recording stops; choose \
-                     again once it stops (on Hyprland, tick \"Allow a restore token\" in the \
-                     dialog)",
-                    kept.join(", ")
+                    "{} started recording while the dialog was open and the desktop didn't keep \
+                     the choice; choose again once the recording stops",
+                    kept.iter()
+                        .map(|id| format!("{id:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             });
         }

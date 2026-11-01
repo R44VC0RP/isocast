@@ -3579,9 +3579,8 @@ pub struct ScreenPicked {
     /// The size the desktop shares, in pixels; 0 if it didn't say.
     pub width: u32,
     pub height: u32,
-    /// Whether the desktop remembers the choice. If not, the source runs
-    /// on it until it stops, then waits to be chosen again (on Hyprland,
-    /// tick "Allow a restore token" in the dialog).
+    /// Whether the desktop remembers the choice. If not, the source shows it
+    /// until the source stops, then waits to be chosen again.
     pub remembered: bool,
     /// Sources showing the choice that a recording started during the dialog
     /// keeps; they switch when it stops.

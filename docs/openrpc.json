@@ -16348,7 +16348,7 @@
             "type": "integer"
           },
           "remembered": {
-            "description": "Whether the desktop remembers the choice. If not, its dialog asks\nagain each time the source starts (on Hyprland, tick \"Allow a\nrestore token\" in it).",
+            "description": "Whether the desktop remembers the choice. If not, the source shows it\nuntil the source stops, then waits to be chosen again.",
             "type": "boolean"
           },
           "source": {
