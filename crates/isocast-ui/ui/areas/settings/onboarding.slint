@@ -331,10 +331,11 @@ component PermissionsStep inherits VerticalLayout {
     spacing: 0;
     alignment: start;
     StepTitle {
-        title: PlatformText.engine-windows ? "Turn on camera and microphone access" : "Let Isocast see and hear";
-        lead: PlatformText.engine-windows ? "A Windows privacy setting is keeping desktop apps like Isocast from using them. Open its page in Settings, turn access on, and this updates by itself. You can skip this and turn it on later."
+        title: PlatformText.engine-linux ? "Let Isocast open the camera" : PlatformText.engine-windows ? "Turn on camera and microphone access" : "Let Isocast see and hear";
+        lead: PlatformText.engine-linux ? "Your user can’t open the camera devices (/dev/video*). Follow the step below; you can skip this and fix it later. The screen is chosen when capture starts, and PipeWire audio needs no permission."
+            : PlatformText.engine-windows ? "A Windows privacy setting is keeping desktop apps like Isocast from using them. Open its page in Settings, turn access on, and this updates by itself. You can skip this and turn it on later."
             : PermissionsArea.unknown-access
-            ? "Access is checked when capture starts; no per-app permission prompt is available. See each item for guidance."
+            ? "Access is checked when capture starts. See each item for guidance; allow access in System Settings › Privacy & Security."
             : "macOS asks you once for each. You can skip any of them now; your setup leaves out what it can’t use, and you can allow it later.";
     }
     Rectangle {
@@ -353,7 +354,7 @@ component DevicesStep inherits VerticalLayout {
     alignment: start;
     StepTitle {
         title: "Choose your devices";
-        lead: "What to capture. You can add more sources, and change these, once you’re in.";
+        lead: PlatformText.engine-linux ? "What to capture. On Linux the screen itself is picked in the desktop’s screen-sharing dialog when capture starts. You can add more sources, and change these, once you’re in." : "What to capture. You can add more sources, and change these, once you’re in.";
     }
     HorizontalLayout {
         spacing: Theme.space-5;

@@ -27,6 +27,9 @@ export enum ConnectionState { connecting, connected, disconnected, failed, misma
 export global PlatformText {
     in property <bool> windows;
     in property <bool> engine-windows;
+    // The engine runs Linux (`engine-windows` is set too): its own
+    // permission words (portal, /dev/video*, PipeWire).
+    in property <bool> engine-linux;
     // The engine machine's nouns, from Rust (`platform_text::Words`).
     in property <string> machine: "Mac";
     in property <string> credential-store: "Keychain";

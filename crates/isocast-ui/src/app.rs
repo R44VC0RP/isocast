@@ -90,6 +90,7 @@ pub struct WorkLog {
 /// manager).
 fn set_engine_words(words: &crate::PlatformText<'_>) {
     words.set_engine_windows(crate::engine::windows());
+    words.set_engine_linux(crate::engine::os() == isocast_protocol::hello::EngineOs::Linux);
     let nouns = crate::engine::words();
     words.set_machine(nouns.machine.into());
     words.set_credential_store(nouns.credential_store.into());

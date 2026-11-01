@@ -768,7 +768,10 @@ fn row_windows(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> Permis
         String::new()
     } else if status == "blocked" {
         d.next_step.clone().unwrap_or_else(|| {
-            "A policy on this PC blocks it; only its administrator can allow it.".into()
+            format!(
+                "A policy on this {} blocks it; only its administrator can allow it.",
+                crate::engine::words().machine
+            )
         })
     } else {
         d.next_step.clone().unwrap_or_default()

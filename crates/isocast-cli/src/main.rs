@@ -560,6 +560,12 @@ enum Command {
             about = "Report Windows capture, camera, microphone and system audio access. --request checks/requests access supported by the backend; --open opens its Windows Settings page. Camera and Microphone must allow desktop apps (isocastd.exe), not an individual app switch."
         )
     )]
+    #[cfg_attr(
+        target_os = "linux",
+        command(
+            about = "Report what isocastd can capture on Linux. The screen is chosen in the desktop's screen-sharing dialog when capture starts (--request screen_recording lets a dismissed dialog ask again); cameras are /dev/video* devices your user must be able to open; PipeWire audio needs no permission. --open isn't available on Linux."
+        )
+    )]
     Permissions {
         /// screen_recording, camera, microphone or system_audio; all if
         /// left out.
@@ -1219,6 +1225,12 @@ enum SetupCommand {
             about = "Make a starting setup from this PC's display, camera, microphone and desktop audio, with program and ISO recording. Print TOML, write --output, or make it live with --apply. Runs in isocastd.exe."
         )
     )]
+    #[cfg_attr(
+        target_os = "linux",
+        command(
+            about = "Make a starting setup from this computer's display, camera, microphone and desktop audio, with program and ISO recording. Print TOML, write --output, or make it live with --apply. Runs in isocastd; the desktop asks which screen to share when capture starts."
+        )
+    )]
     Init {
         /// Write the setup to this file (it must not exist yet).
         #[arg(long, short)]
@@ -1252,7 +1264,10 @@ enum SetupCommand {
         #[arg(long, value_name = "WxH[@FPS]")]
         canvas: Option<String>,
         /// Recording folder; ~/Movies/Isocast by default.
-        #[cfg_attr(windows, arg(help = "Recording folder; ~/Videos/Isocast by default."))]
+        #[cfg_attr(
+            not(target_os = "macos"),
+            arg(help = "Recording folder; ~/Videos/Isocast by default.")
+        )]
         #[arg(long)]
         folder: Option<String>,
         /// The setup's name.
@@ -1293,6 +1308,12 @@ enum SetupCommand {
         windows,
         command(
             about = "Import an OBS scene collection, matching sources against this PC's devices in isocastd.exe. Print the setup as TOML or write --output, and list what could not come over."
+        )
+    )]
+    #[cfg_attr(
+        target_os = "linux",
+        command(
+            about = "Import an OBS scene collection, matching sources against this computer's devices in isocastd. Print the setup as TOML or write --output, and list what could not come over."
         )
     )]
     ImportObs {

@@ -257,10 +257,12 @@ export component PermissionsSheet inherits Rectangle {
                     accessible-role: AccessibleRole.text;
                 }
                 Text {
-                    text: PlatformText.engine-windows
+                    text: PlatformText.engine-linux
+                        ? "The recording engine is isocastd. Cameras need your user to be able to open /dev/video*; Linux asks which screen to share when capture starts, and PipeWire audio needs no permission. Isocast only records the sources you add to a scene."
+                        : PlatformText.engine-windows
                         ? "The recording engine is isocastd.exe. In Windows Settings, Camera and Microphone must allow desktop apps. Isocast only records the sources you add to a scene."
                         : PermissionsArea.unknown-access
-                        ? "Access is checked when capture starts; no per-app permission prompt is available. See each item for guidance."
+                        ? "Access is checked when capture starts. See each item for guidance; allow access in System Settings › Privacy & Security."
                         : "macOS asks once for each. " + PermissionsArea.app-name + " only records the screens, cameras and microphones you add to a scene.";
                     color: Theme.text-2;
                     line-height-factor: Theme.leading-welcome;

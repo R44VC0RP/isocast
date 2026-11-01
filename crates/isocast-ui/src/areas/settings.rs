@@ -2432,14 +2432,26 @@ impl Settings {
         );
         area.set_summary_codec(
             if on {
-                let codec = codec(files);
+                // A Linux engine's files are H.264 (its default, and the
+                // only codec its writer takes).
+                let linux = crate::engine::os() == isocast_protocol::hello::EngineOs::Linux;
+                let codec = match files["codec"].as_str() {
+                    None if linux => "h264".to_string(),
+                    _ => codec(files),
+                };
                 let label = CODECS
                     .iter()
                     .find(|(v, _)| *v == codec)
                     .map(|(_, label)| *label)
                     .unwrap_or(codec.as_str());
                 let container = files["container"].as_str().unwrap_or("mov").to_uppercase();
-                format!("{label} · {container}")
+                if linux && codec != "h264" {
+                    // Short, to fit the footer: "HEVC (unsupported) · MOV".
+                    let name = label.split(' ').next().unwrap_or(label);
+                    format!("{name} (unsupported) · {container}")
+                } else {
+                    format!("{label} · {container}")
+                }
             } else {
                 "Nothing recorded".to_string()
             }
@@ -2500,9 +2512,13 @@ impl Settings {
 
     /// Ask for a setup file (TOML or JSON) and make it the live setup.
     fn open_setup_file(&self, app: &Rc<App>) {
-        choose_file(app, &["toml", "json"], "Open", |app, path| {
-            app.settings.open_setup_path(app, &path)
-        });
+        choose_file(
+            app,
+            &["toml", "json"],
+            "Open",
+            "Apply it from the command line instead: isocast apply FILE --revision 0.",
+            |app, path| app.settings.open_setup_path(app, &path),
+        );
     }
 
     /// Make the setup file at `path` the live setup.
@@ -2525,9 +2541,14 @@ impl Settings {
             app.wizard.open_obs(app);
             return;
         }
-        choose_file(app, &["json"], "Import", |app, path| {
-            app.settings.import_obs_path(app, &path)
-        });
+        choose_file(
+            app,
+            &["json"],
+            "Import",
+            "Import it from the command line instead: isocast setup import-obs FILE --output \
+             setup.toml, then isocast apply setup.toml --revision 0.",
+            |app, path| app.settings.import_obs_path(app, &path),
+        );
     }
 
     /// Import the OBS scene collection at `path` as the live setup.
@@ -3171,18 +3192,19 @@ fn choose_folder(app: &Rc<App>, done: impl FnOnce(&Rc<App>, String) + 'static) {
         ..Choose::default()
     };
     crate::areas::remote::choose(app, options, move |app, chosen| {
-        if let Some(folder) = first_chosen(app, chosen) {
+        if let Some(folder) = first_chosen(app, chosen, "Type the path into the field instead.") {
             done(app, folder);
         }
     });
 }
 
 /// Ask for a file on this computer (a setup to read here), then `done`
-/// with its path.
+/// with its path; `fallback` says what to do where there is no file panel.
 fn choose_file(
     app: &Rc<App>,
     types: &[&str],
     prompt: &str,
+    fallback: &'static str,
     done: impl FnOnce(&Rc<App>, String) + 'static,
 ) {
     let options = Choose {
@@ -3191,21 +3213,17 @@ fn choose_file(
         ..Choose::default()
     };
     crate::areas::remote::choose_here(app, options, move |app, chosen| {
-        if let Some(path) = first_chosen(app, chosen) {
+        if let Some(path) = first_chosen(app, chosen, fallback) {
             done(app, path);
         }
     });
 }
 
-fn first_chosen(app: &Rc<App>, chosen: Option<Vec<String>>) -> Option<String> {
+fn first_chosen(app: &Rc<App>, chosen: Option<Vec<String>>, fallback: &str) -> Option<String> {
     match chosen {
         Some(paths) => paths.into_iter().next(),
         None => {
-            app.toast(
-                ToastKind::Info,
-                "No file panel here",
-                "Type the path into the field instead.",
-            );
+            app.toast(ToastKind::Info, "No file panel here", fallback);
             None
         }
     }

@@ -180,12 +180,13 @@ export component GeneralPage inherits SetPage {
     }
     SetGroup {
         title: "Permissions";
-        hint: PlatformText.engine-windows ? "Windows asks no permission for screens and what this PC plays. Its privacy settings can turn off the camera and microphone for desktop apps; Review shows whether they do."
+        hint: PlatformText.engine-linux ? "Linux asks which screen to share when capture starts, and PipeWire audio needs no permission. Cameras need your user to be able to open /dev/video*; Review shows whether it can."
+            : PlatformText.engine-windows ? "Windows asks no permission for screens and what this PC plays. Its privacy settings can turn off the camera and microphone for desktop apps; Review shows whether they do."
             : PermissionsArea.unknown-access
-            ? "Access is checked when capture starts. Review the status and Windows privacy settings here."
+            ? "Access is checked when capture starts. Review the status here; allow access in System Settings › Privacy & Security."
             : "What macOS lets Isocast record. Each is asked for once; what you skipped or turned off can be allowed here.";
         GroupRow {
-            label: PlatformText.engine-windows ? "Camera, Microphone" : "Screen, Camera, Microphone";
+            label: PlatformText.engine-linux ? "Camera" : PlatformText.engine-windows ? "Camera, Microphone" : "Screen, Camera, Microphone";
             place: RowPlace.only;
             trailing-pad: Theme.space-2;
             Centred {

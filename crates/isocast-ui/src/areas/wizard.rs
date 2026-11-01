@@ -743,11 +743,12 @@ fn verdict(o: &Optimized) -> String {
     } else {
         String::new()
     };
+    let machine = crate::engine::words().machine;
     let base = match t.capacity {
-        Some(Capacity::Fits) => "This Mac keeps up with room to spare",
-        Some(Capacity::NoMargin) => "This Mac keeps up, with nothing to spare",
-        Some(Capacity::CannotKeepUp) => "This Mac can't keep up with all of it",
-        None => "Not benchmarked",
+        Some(Capacity::Fits) => format!("This {machine} keeps up with room to spare"),
+        Some(Capacity::NoMargin) => format!("This {machine} keeps up, with nothing to spare"),
+        Some(Capacity::CannotKeepUp) => format!("This {machine} can't keep up with all of it"),
+        None => "Not benchmarked".into(),
     };
     match (&t.recommendation, &t.change) {
         // The settings it picked didn't fit; what was applied does.

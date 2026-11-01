@@ -175,6 +175,20 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
                 found.name,
                 if found.main { ", the main display" } else { "" }
             ));
+            if permissions.screen_recording == Permission::Unknown {
+                notes.push(
+                    crate::platform_text::select_linux(
+                        "Screen recording access can't be checked without capturing, so it is \
+                         tried when recording starts.",
+                        "Screen capture access can't be checked without capturing, so it is \
+                         tried when recording starts.",
+                        "Linux asks which screen to share (the desktop's screen-sharing dialog) \
+                         when capture starts, for the preview or a recording; pick the one to \
+                         record there.",
+                    )
+                    .into(),
+                );
+            }
             iso.push("screen".to_string());
             SourceKind::Display(DisplaySource {
                 display: query,
@@ -259,10 +273,18 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
                 }
                 if permissions.camera == Permission::Unknown {
                     notes.push(
-                        "Camera access can't be checked without using the camera, so it is \
-                         tried when recording starts; if it shows no picture, allow camera \
-                         access in the system's privacy settings."
-                            .into(),
+                        crate::platform_text::select_linux(
+                            "Camera access can't be checked without using the camera, so it is \
+                             tried when recording starts; if it shows no picture, allow camera \
+                             access in the system's privacy settings.",
+                            "Camera access can't be checked without using the camera, so it is \
+                             tried when recording starts; if it shows no picture, turn on camera \
+                             access for desktop apps in Settings › Privacy & security › Camera.",
+                            "Camera access can't be checked without opening the camera, so it is \
+                             tried when recording starts; if it shows no picture, check that your \
+                             user can open /dev/video* (`isocast permissions` reports access).",
+                        )
+                        .into(),
                     );
                 }
                 SourceKind::Camera(CameraSource {
@@ -338,10 +360,17 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             }
             if permissions.microphone == Permission::Unknown {
                 notes.push(
-                    "Microphone access can't be checked without using it, so it is tried \
-                     when recording starts; if it records silence, allow microphone access \
-                     in the system's privacy settings."
-                        .into(),
+                    crate::platform_text::select_linux(
+                        "Microphone access can't be checked without using it, so it is tried \
+                         when recording starts; if it records silence, allow microphone access \
+                         in the system's privacy settings.",
+                        "Microphone access can't be checked without using it, so it is tried \
+                         when recording starts; if it records silence, turn on microphone \
+                         access for desktop apps in Settings › Privacy & security › Microphone.",
+                        "Linux records microphones through PipeWire, which asks no permission; \
+                         if it records silence, check the input in the desktop's sound settings.",
+                    )
+                    .into(),
                 );
             }
             sources.push(source(
@@ -381,8 +410,12 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
         .clone()
         .unwrap_or_else(|| DEFAULT_FOLDER.into());
     notes.push(format!(
-        "Records to {folder}: the program ({width}×{height} at {fps} fps, HEVC on the media \
-         engine){}.",
+        "Records to {folder}: the program ({width}×{height} at {fps} fps, {}){}.",
+        crate::platform_text::select_linux(
+            "HEVC on the media engine",
+            "HEVC on the media engine",
+            "H.264"
+        ),
         if iso.is_empty() {
             String::new()
         } else {
@@ -774,6 +807,54 @@ mod tests {
                 system_audio: permission,
             },
             notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unknown_access_notes_speak_for_this_os_only() {
+        let cameras = vec![camera("Webcam", CameraKind::External, false)];
+        let made = init(
+            &devices(cameras, Permission::Unknown),
+            &InitOptions::default(),
+        )
+        .unwrap();
+        let notes = made.notes.join("\n");
+        let (own, others): (&[&str], &[&str]) = if cfg!(target_os = "macos") {
+            (
+                &["system's privacy settings", "HEVC on the media engine"],
+                &["Windows", "Linux", "/dev/video"],
+            )
+        } else if cfg!(windows) {
+            (
+                &[
+                    "Privacy & security › Camera",
+                    "Privacy & security › Microphone",
+                    "HEVC on the media engine",
+                ],
+                &["macOS", "Linux", "/dev/video", "system's privacy settings"],
+            )
+        } else {
+            (
+                &[
+                    "screen-sharing dialog",
+                    "/dev/video*",
+                    "PipeWire, which asks no permission",
+                    "fps, H.264)",
+                ],
+                &[
+                    "macOS",
+                    "Windows",
+                    "privacy settings",
+                    "Privacy & security",
+                    "HEVC",
+                ],
+            )
+        };
+        for words in own {
+            assert!(notes.contains(words), "{words:?} missing from {notes}");
+        }
+        for words in others {
+            assert!(!notes.contains(words), "{words:?} in {notes}");
         }
     }
 

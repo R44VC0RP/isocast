@@ -2056,7 +2056,12 @@ impl<'a, 'v> Importer<'a, 'v> {
             }
             "coreaudio_output_capture" | "wasapi_output_capture" | "pulse_output_capture" => {
                 self.notes.push(format!(
-                    "{label}: OBS captured an output device; Isocast records what the Mac plays"
+                    "{label}: OBS captured an output device; Isocast records {}",
+                    crate::platform_text::select_linux(
+                        "what the Mac plays",
+                        "what this PC plays",
+                        "what this computer plays",
+                    )
                 ));
                 SourceKind::SystemAudio(SystemAudioSource::default())
             }
@@ -2134,7 +2139,14 @@ impl<'a, 'v> Importer<'a, 'v> {
             "browser_source" => self.browser(&label, s)?,
             "syphon-input" => return Err("Syphon sources aren't available yet".into()),
             "ndi_source" => return Err("NDI sources aren't available yet".into()),
-            "game_capture" => return Err("Game Capture is Windows-only".into()),
+            "game_capture" => {
+                return Err(crate::platform_text::select_linux(
+                    "Game Capture is Windows-only",
+                    "Game Capture isn't available yet; add a display or window capture instead",
+                    "Game Capture is Windows-only",
+                )
+                .into());
+            }
             _ => {
                 return Err(format!(
                     "Isocast has no {:?} source (a plugin or another system's kind)",
