@@ -183,7 +183,7 @@ impl Daemon {
         if !cfg!(target_os = "macos") {
             if calibration.status.profile.is_none() {
                 calibration.status.summary =
-                    "Calibration is not available on this platform yet; using the capacity table"
+                    "The self-test runs only on macOS for now, so Isocast uses its built-in encoder estimates."
                         .into();
             }
             return;

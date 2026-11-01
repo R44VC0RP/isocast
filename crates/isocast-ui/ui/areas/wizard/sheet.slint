@@ -72,14 +72,20 @@ component StepTitle inherits VerticalLayout {
         wrap: word-wrap;
         accessible-role: AccessibleRole.text;
     }
-    if root.lead != "": Text {
-        max-width: 600px;
-        text: root.lead;
-        color: Theme.text-2;
-        font-size: Theme.fs;
-        letter-spacing: Theme.tracking;
-        line-height-factor: Theme.leading-welcome;
-        wrap: word-wrap;
+    // In a row, so the 600px cap is the width the lead wraps at and is
+    // measured at: capped across a column, a second line was cut off.
+    if root.lead != "": HorizontalLayout {
+        alignment: start;
+        Text {
+            horizontal-stretch: 1;
+            max-width: 600px;
+            text: root.lead;
+            color: Theme.text-2;
+            font-size: Theme.fs;
+            letter-spacing: Theme.tracking;
+            line-height-factor: Theme.leading-welcome;
+            wrap: word-wrap;
+        }
     }
 }
 
@@ -348,7 +354,8 @@ component GoalStep inherits VerticalLayout {
             goal: "recording";
             icon: Icons.record;
             title: "Recording";
-            hint: "Best quality: HEVC High, and every screen and camera in its own ISO file.";
+            // A Linux engine records H.264 only.
+            hint: "Best quality: " + (PlatformText.engine-linux ? "H.264" : "HEVC") + " High, and every screen and camera in its own ISO file.";
         }
         GoalTile {
             goal: "streaming";

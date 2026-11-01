@@ -417,8 +417,10 @@ export component FieldRow inherits GroupRow {
             }
         }
         // The caption, under the control: 11px, `text-2` with figures (a
-        // live reading), amber when it warns.
+        // live reading), amber when it warns. As wide as the controls'
+        // column: unwrapped, a long one took the label's room ("…").
         if root.f.hint != "": Text {
+            width: root.wide;
             text: root.f.hint;
             color: root.f.hint-warn ? Theme.warning : Theme.text-2;
             font-size: Theme.fs-xs;

@@ -297,8 +297,8 @@ const SHORTCUTS: &[(&str, &[Shortcut])] = &[
     ),
     (
         "Window",
-        // Windows: full screen is F11, and Alt+F4 exits (the File menu's).
-        if cfg!(windows) {
+        // Off macOS: full screen is F11, and Alt+F4 exits (the File menu's).
+        if !cfg!(target_os = "macos") {
             &[
                 (&["⌘", ","], "Settings"),
                 (&["F11"], "Full screen"),
@@ -2782,12 +2782,14 @@ impl Settings {
                         d.name.as_str().into()
                     },
                     title: d.name.as_str().into(),
-                    meta: format!(
-                        "{}{}×{}",
-                        if d.main { "Main display · " } else { "" },
-                        d.width,
-                        d.height
-                    )
+                    // Linux's portal names a screen only once it's
+                    // chosen: no size yet (0×0), so none is shown.
+                    meta: match (d.main, d.width > 0 && d.height > 0) {
+                        (true, true) => format!("Main display · {}×{}", d.width, d.height),
+                        (true, false) => "Main display".into(),
+                        (false, true) => format!("{}×{}", d.width, d.height),
+                        (false, false) => String::new(),
+                    }
                     .into(),
                     disabled: false,
                 }

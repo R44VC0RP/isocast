@@ -56,6 +56,37 @@ pub(crate) fn with_app(f: impl FnOnce(&Rc<App>)) {
 #[cfg(target_os = "linux")]
 const APP_ID: &str = "dev.isocast.Isocast";
 
+/// Linux: the app's colour scheme is dark, whatever the desktop's. Slint's
+/// winit backend hands each window the scheme it holds for the app (the
+/// desktop's, from the settings portal, or none) as the theme of the title
+/// bar a window draws itself where the compositor draws none (GNOME,
+/// weston), so it came out white over a dark app. Held dark here, and put
+/// back whenever the desktop's setting arrives or changes, as long as the
+/// returned tracker lives.
+#[cfg(target_os = "linux")]
+fn keep_dark(app: &AppWindow) -> slint::private_unstable_api::re_exports::ChangeTracker {
+    use slint::private_unstable_api::re_exports::{ChangeTracker, ColorScheme, WindowInner};
+    let context = WindowInner::from_pub(app.window()).context().clone();
+    context.set_color_scheme(ColorScheme::Dark);
+    let window = app.as_weak();
+    let tracker = ChangeTracker::default();
+    tracker.init(
+        context,
+        |context| context.color_scheme(None),
+        move |context, scheme| {
+            if *scheme == ColorScheme::Dark {
+                return;
+            }
+            context.set_color_scheme(ColorScheme::Dark);
+            if let Some(app) = window.upgrade() {
+                app.window()
+                    .with_winit_window(|window| window.set_theme(Some(winit::window::Theme::Dark)));
+            }
+        },
+    );
+    tracker
+}
+
 /// The window draws with Skia on the CPU (set before the app is made).
 static CPU_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -248,6 +279,8 @@ pub fn run(options: &Options) -> Result<()> {
             crate::chrome_windows::fit_first_window(app.window(), (1280.0, 800.0));
         }
     }
+    #[cfg(target_os = "linux")]
+    let _dark = keep_dark(&app);
     app.show()?;
     // Keys pressed in the window go to the daemon's hotkeys too.
     crate::keys::start();

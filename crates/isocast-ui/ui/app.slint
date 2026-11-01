@@ -611,7 +611,7 @@ export component AppWindow inherits Window {
         Menu {
             title: "Tools";
             MenuItem { title: "Auto-Configuration Wizard…"; activated => { Ui.menu("auto_config"); } }
-            MenuItem { title: "Set Up from This " + PlatformText.machine + "…"; activated => { Ui.menu("start_over"); } }
+            MenuItem { title: "Set Up from This " + (PlatformText.machine == "computer" ? "Computer" : PlatformText.machine) + "…"; activated => { Ui.menu("start_over"); } }
         }
         // Developer mode (#47, src/areas/developer.rs): only while the
         // profile has it on.

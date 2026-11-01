@@ -200,7 +200,14 @@ fn iso_depth_group(
     }
     let screen = matches!(kind, "display" | "window" | "application");
     let no_ten = if codec == Codec::H264 {
-        Some("H.264 ISO files are 8-bit only; choose HEVC in Settings → Recording for 10-bit.")
+        // A Linux engine has no HEVC to choose.
+        Some(
+            if crate::engine::os() == isocast_protocol::hello::EngineOs::Linux {
+                "H.264 ISO files are 8-bit only."
+            } else {
+                "H.264 ISO files are 8-bit only; choose HEVC in Settings → Recording for 10-bit."
+            },
+        )
     } else if screen && !crate::areas::settings::engine_is_mac() {
         Some("This engine captures screens in 8 bits only.")
     } else {

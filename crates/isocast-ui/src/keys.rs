@@ -235,23 +235,24 @@ pub fn chord_text(modifiers: u32, name: &str) -> String {
     parts.join("+")
 }
 
-/// A chord as macOS writes shortcuts: ⌃⌥⇧⌘ and the key, one cap each
-/// ("ctrl+alt+cmd+r" → ⌃ ⌥ ⌘ R).
+/// A chord as this OS writes shortcuts, one cap each: ⌃⌥⇧⌘ and the key
+/// on macOS ("ctrl+alt+cmd+r" → ⌃ ⌥ ⌘ R), names elsewhere (Ctrl Alt Win R,
+/// Super on Linux).
 pub fn chord_caps(chord: &str) -> Vec<String> {
     let mut caps = Vec::new();
     let parts: Vec<&str> = chord.split('+').collect();
     let Some((key, modifiers)) = parts.split_last() else {
         return caps;
     };
-    let modifiers_shown = if cfg!(windows) {
+    let modifiers_shown = if cfg!(target_os = "macos") {
+        [("ctrl", "⌃"), ("alt", "⌥"), ("shift", "⇧"), ("cmd", "⌘")]
+    } else {
         [
             ("ctrl", "Ctrl"),
             ("alt", "Alt"),
             ("shift", "Shift"),
-            ("cmd", "Win"),
+            ("cmd", SUPER),
         ]
-    } else {
-        [("ctrl", "⌃"), ("alt", "⌥"), ("shift", "⇧"), ("cmd", "⌘")]
     };
     for (name, glyph) in modifiers_shown {
         if modifiers.iter().any(|m| m.eq_ignore_ascii_case(name)) {
@@ -262,8 +263,11 @@ pub fn chord_caps(chord: &str) -> Vec<String> {
     caps
 }
 
+/// The logo key's name off macOS.
+const SUPER: &str = if cfg!(windows) { "Win" } else { "Super" };
+
 fn key_label(key: &str) -> String {
-    if cfg!(windows) {
+    if !cfg!(target_os = "macos") {
         match key {
             "return" => return "Enter".into(),
             "tab" => return "Tab".into(),
@@ -324,15 +328,16 @@ fn key_label(key: &str) -> String {
 }
 
 /// Static UI shortcuts use Slint's logical modifiers: Control is Command
-/// on Mac and Ctrl on Windows; Meta is Control on Mac and Win on Windows.
-/// This is distinct from a configured physical `cmd` hotkey (shown as Win).
+/// on Mac and Ctrl elsewhere; Meta is Control on Mac, Win on Windows and
+/// Super on Linux. This is distinct from a configured physical `cmd`
+/// hotkey (shown as Win or Super).
 pub fn ui_key_cap(mac: &str) -> &str {
-    if !cfg!(windows) {
+    if cfg!(target_os = "macos") {
         return mac;
     }
     match mac {
         "⌘" => "Ctrl",
-        "⌃" => "Win",
+        "⌃" => SUPER,
         "⌥" => "Alt",
         "⇧" => "Shift",
         "⌫" => "Backspace",
@@ -345,14 +350,15 @@ pub fn ui_key_cap(mac: &str) -> &str {
 
 /// A trusted, compact UI hint such as ⇧⌘Z, not user text or a saved binding.
 pub fn ui_shortcut(mac: &str) -> String {
-    if !cfg!(windows) {
+    if cfg!(target_os = "macos") {
         return mac.to_string();
     }
-    mac.replace("⌃⌘", "Win+Ctrl+")
+    let logo = format!("{SUPER}+");
+    mac.replace("⌃⌘", &format!("{logo}Ctrl+"))
         .replace("⇧⌘", "Ctrl+Shift+")
         .replace("⌥⌘", "Ctrl+Alt+")
         .replace('⌘', "Ctrl+")
-        .replace('⌃', "Win+")
+        .replace('⌃', &logo)
         .replace('⌥', "Alt+")
         .replace('⇧', "Shift+")
         .replace('⌫', "Backspace")

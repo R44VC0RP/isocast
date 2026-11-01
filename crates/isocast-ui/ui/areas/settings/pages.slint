@@ -143,7 +143,7 @@ export component GeneralPage inherits SetPage {
                     on-control: true;
                     // The engine measures only on macOS so far.
                     enabled: !PlatformText.engine-windows;
-                    tooltip: PlatformText.engine-windows ? "Not available on Windows yet: Isocast uses its built-in capacity table." : "";
+                    tooltip: PlatformText.engine-linux ? "Not available on Linux yet: Isocast uses its built-in encoder estimates." : PlatformText.engine-windows ? "Not available on Windows yet: Isocast uses its built-in capacity table." : "";
                     clicked => { Ui.menu(SettingsArea.machine-calibrating ? "machine_cancel" : "machine_calibrate"); }
                 }
             }
