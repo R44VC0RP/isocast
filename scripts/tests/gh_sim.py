@@ -55,6 +55,10 @@ def runs(sha, branch):
             if n == "7" and w == "Windows" and (root / "red").exists():
                 status = "completed"
                 conclusion = "failure"
+            if (root / "lightweight").exists() and w != "Windows" and not lane.startswith("full/"):
+                if w == "CI":
+                    continue  # branch-filtered: no push run at all
+                status, conclusion = "completed", "skipped"
         else:
             trail = bare("log", "-1", "--format=%B", sha)
             if (root / "hold").exists():
@@ -62,6 +66,8 @@ def runs(sha, branch):
                 conclusion = None
             elif (root / "cancel-candidate").exists() and w == "CI":
                 conclusion = "cancelled"
+            elif (root / "skip-candidate").exists() and w == "Engine E2E":
+                conclusion = "skipped"
             elif db["7"]["tip"] in trail and w == "Windows" and (root / "late-failure").exists():
                 (root / "red").touch()
                 conclusion = "failure"
@@ -75,7 +81,7 @@ def runs(sha, branch):
             elif (
                 (root / "bad-combination").exists()
                 and all(db[n]["tip"] in trail for n in ("1", "2"))
-                and w == "CI"
+                and w == ("Engine E2E" if (root / "lightweight").exists() else "CI")
             ):
                 conclusion = "failure"
             elif (root / "flake").exists() and w == "Engine E2E":

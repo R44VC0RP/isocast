@@ -185,7 +185,7 @@ def marker_of(body):
 def trailers_of(message):
     out = {"include": []}
     for line in (message or "").splitlines():
-        m = re.match(r"^Isocast-(Source|Include|Main|Tree|Dirty):\s*(\S+)\s*$", line)
+        m = re.match(r"^Isocast-(Source|Include|Main|Tree|Dirty|CI):\s*(\S+)\s*$", line)
         if m:
             key = m.group(1).lower()
             if key == "include":
@@ -214,14 +214,16 @@ def snapshot_runs(sha, branch):
     return newest
 
 
-def ci_state(runs):
-    """'green', 'red', 'pending', 'missing' or 'cancelled' over WORKFLOWS, plus a
-    per-workflow summary. A cancelled run is no verdict (a newer snapshot or a
-    batch candidate superseded it), never red."""
+def ci_state(runs, plan=None):
+    """Aggregate exact push runs. Skipped (including intentionally untriggered)
+    and cancelled workflows are no verdict. A plan never supplies a pass."""
     marks, states = [], []
     for w in WORKFLOWS:
         r = runs.get(w)
-        if r is None:
+        if (r is None and plan == 'windows' and w in MACOS_WORKFLOWS) or (
+                r and r['status'] == 'completed' and r['conclusion'] == 'skipped'):
+            marks.append("–"); states.append("skipped")
+        elif r is None:
             marks.append("·"); states.append("missing")
         elif r["status"] != "completed":
             marks.append("●"); states.append("pending")
@@ -231,7 +233,7 @@ def ci_state(runs):
             marks.append("○"); states.append("cancelled")
         else:
             marks.append("✗"); states.append("red")
-    for s in ("red", "pending", "missing", "cancelled"):
+    for s in ("red", "pending", "missing", "cancelled", "skipped"):
         if s in states:
             return s, "".join(marks)
     return "green", "".join(marks)
@@ -322,7 +324,7 @@ def cmd_pr(a):
                   "## Commits", "", commits, "",
                   "## Snapshot", "",
                   f"`{snapshot[:12]}` on `ci/{lane}`: `{branch}` at `{source[:12]}`, containing main "
-                  f"`{(trail.get('main') or '')[:12]}`. CI, Engine E2E and Windows run from the push.", "",
+                   f"`{(trail.get('main') or '')[:12]}`. Windows runs on lane pushes; the train tests all three workflows.", "",
                   "<!-- isocast-pr " + json.dumps({"session": session, "branch": branch, "lane": lane}) + " -->"]
         return "\n".join(parts) + "\n"
 
@@ -466,7 +468,7 @@ def cmd_prs(a):
         for r in sorted((r for r in runs if r["headSha"] == pr["headRefOid"] and r['headBranch'] == pr['headRefName']),
                         key=lambda r: (r['createdAt'], r['databaseId'])):
             newest[r["workflowName"]] = r
-        state, marks = ci_state(newest)
+        state, marks = ci_state(newest, trail.get('ci'))
         review = qa_verdict(pr)
         hw = ",".join(l["name"][6:] for l in pr["labels"] if l["name"].startswith("needs:")) or "?"
         branch_tip = rev(mk["branch"]) if mk.get("branch") else None
@@ -489,7 +491,7 @@ def cmd_prs(a):
         print(f"{r['number']:>4}  {r['ci_marks']:3}  {r['ci']:7}  {r['main']:5}  {r['review']:8}  "
               f"{r['hardware']:11}  {r['age']:5}  {(r['session'] or '-'):30}  {(r['branch'] or '-'):24}  "
               f"{'[draft] ' if r['draft'] else ''}{r['title']}")
-    print("CEW: CI, Engine E2E, Windows (✓ green, ✗ red, ● running, ○ cancelled, · none). main: ok, stale (older main), "
+    print("CEW: CI, Engine E2E, Windows (✓ green, ✗ red, ● running, ○ cancelled, – skipped, · none). main: ok, stale (older main), "
           "moved (branch has commits since its snapshot).")
     return 0
 
@@ -553,7 +555,8 @@ def refresh(pr, snapshot=None):
 def ci_wait(lane, snapshot, lock=()):
     """ci.sh --wait: True when every workflow passed on SNAPSHOT."""
     log(f"merge: waiting for CI on {snapshot[:12]} (ci/{lane})")
-    return subprocess.run([os.path.join(SCRIPTS, "ci.sh"), "--wait", snapshot, "--lane", lane], pass_fds=lock).returncode == 0
+    required = [arg for name in WORKFLOWS for arg in ('--workflow', name)]
+    return subprocess.run([os.path.join(SCRIPTS, "ci.sh"), "--wait", snapshot, "--lane", lane, *required], pass_fds=lock).returncode == 0
 
 
 # Set by merge-pr --allow-workflow-changes: QA reviewed the PRs' .github/ changes.
@@ -766,12 +769,17 @@ def rerun_failed_once(train, snapshot):
 
 
 def green(pr, batch=False, lock=()):
-    """The PR's own latest snapshot: True when it may merge, False red. Alone,
-    every workflow must pass (waits while running). In a batch, whose
-    candidate is tested anyway, only a relevant red excludes the PR.
-    Sets pr["own_green"] to whether all three passed."""
+    """Is the snapshot admissible? Only an exact three-workflow pass also sets
+    own_green (eligible to land directly). No evidence requires a candidate."""
     runs = snapshot_runs(pr["snapshot"], pr['headRefName'])
-    state, marks = ci_state(runs)
+    # A single PR with a full set of runs in flight can still use its own CI.
+    # Don't wait on absent Mac workflows. Re-read after waiting: a pending run
+    # can finish skipped, which isn't a failure (or proof for the fast path).
+    if not batch and ci_state(runs)[0] == 'pending' and all(
+            w in runs and runs[w]['conclusion'] not in ('cancelled', 'skipped') for w in WORKFLOWS):
+        ci_wait(pr['lane'], pr['snapshot'], lock)
+        runs = snapshot_runs(pr['snapshot'], pr['headRefName'])
+    state, marks = ci_state(runs, pr['trail'].get('ci'))
     log(f"merge: #{pr['number']} snapshot {pr['snapshot'][:12]}: {state} {marks}")
     pr["own_green"] = state == "green"
     if state == 'red' and batch:
@@ -781,16 +789,7 @@ def green(pr, batch=False, lock=()):
         if note:
             log(f"merge: #{pr['number']}: its own red run is a known flake ({note}); a candidate tests it")
             return True
-    if state in ("green", "red"):
-        return state == "green"
-    if state == "cancelled":
-        # Superseded, never judged: it may merge, through a fresh candidate.
-        log(f"merge: #{pr['number']}: its own runs were cancelled; a new candidate tests it")
-        return True
-    if not batch:
-        pr["own_green"] = ci_wait(pr["lane"], pr["snapshot"], lock)
-        return pr["own_green"]
-    return True
+    return state != 'red'
 
 
 def main_worktree():
@@ -1093,15 +1092,14 @@ def red_reason(runs):
 
 
 def evict_red(train, group, candidate_runs):
-    failed = {w for w in WORKFLOWS if w in candidate_runs and ci_state({w: candidate_runs[w]})[0] == 'red'
-              and candidate_runs[w]['conclusion'] != 'skipped'}
+    failed = {w for w in WORKFLOWS if w in candidate_runs and ci_state({w: candidate_runs[w]})[0] == 'red'}
     if not failed or len(train['numbers']) == 1:
         return False
     remaining = []
     for p in group:
         own = snapshot_runs(p['snapshot'], p['headRefName'])
         matches = {w: r for w, r in own.items() if w in failed and ci_state({w: r})[0] == 'red'
-                   and r['conclusion'] != 'skipped' and not accepted_flake(p['snapshot'], {w: r}, [p], own=True)}
+                   and not accepted_flake(p['snapshot'], {w: r}, [p], own=True)}
         if matches:
             skip(train, p['number'], red_reason(matches))
         else:
@@ -1147,7 +1145,7 @@ def land(train, group, hw_evidence, dry_run):
             FLAKE_NOTES[snapshot] = note
             ok = True
         elif ci_state(runs)[0] != 'red':
-            if ci_state(runs)[0] == 'cancelled':
+            if ci_state(runs)[0] in ('cancelled', 'skipped'):
                 train.save(phase='ready')
             raise Refused(f'merge: {snapshot} has no final CI verdict; repeat this command')
     if ok:

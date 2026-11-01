@@ -2,8 +2,8 @@ name: CI
 
 on:
   push:
-    # ci/<lane>: candidates published by scripts/ci.sh before they merge.
-    branches: [main, 'ci/**']
+    # The train tests the merged tree; a lane can opt in early with ci.sh --full.
+    branches: [main, 'ci/batch-*', 'ci/full/*']
   pull_request:
   workflow_dispatch:
 
@@ -27,9 +27,7 @@ jobs:
   # passed CI, Engine E2E and Windows. Its summary says why each job runs.
   gate:
     name: what to run
-    # Pull requests from this repo come from ci/<lane> (scripts/pr.sh), whose
-    # push already ran this workflow on the same snapshot: only fork pull
-    # requests run it here, so a candidate never takes the runners twice.
+    # Same-repo snapshots are tested by the train. Keep fork PR checks.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5

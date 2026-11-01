@@ -8,6 +8,7 @@ cases = ("resume", "single", "guards", "ff", "stale", "bisect", "flake", "two", 
 cases += ("post-push", "later-publication", "closing")
 cases += ("unrelated-red", "newest")
 cases += ("verdicts", "moving-workspace")
+cases += ("skipped-macos", "skipped-batch")
 if not sys.argv[1:]:
     for case in cases:
         subprocess.run([sys.executable, __file__, case], check=True)
@@ -248,6 +249,36 @@ elif mode == "single":
     assert (root / "events").read_text().count("close 10") == 1
     assert git("rev-list", "--count", "main", cwd=pub) == "2"
     print("PASS: single current green uses 0 candidates, repeat no-op")
+elif mode == "skipped-macos":
+    (root / "lightweight").touch()
+    # Use the real publisher for both policies. An opt-in does not move the PR.
+    cmd("scripts/ci.sh", "--source", "agent/p10", "--lane", "p10")
+    own = prs["10"]["sha"] = (ci / "p10/pushed").read_text().strip()
+    (root / "prs.json").write_text(json.dumps(prs))
+    cmd("scripts/ci.sh", "--full", "--source", "agent/p10", "--lane", "p10")
+    full = git("rev-parse", "refs/heads/ci/full/p10", cwd=root / "origin")
+    assert git("rev-parse", "refs/heads/ci/p10", cwd=root / "origin") == own
+    assert len((ci / "full/p10/runs" / full / "run-ids.txt").read_text().split()) == 3
+    assert len((ci / "p10/runs" / own / "run-ids.txt").read_text().split()) == 1
+    row = next(r for r in json.loads(cmd("scripts/prs.sh", "--json")) if r["number"] == 10)
+    assert (row["ci"], row["ci_marks"]) == ("skipped", "––✓"), row
+    (root / "skip-candidate").touch()
+    assert "no final CI verdict" in go(["10"], "no-macos-proof", 1)
+    assert git("rev-parse", "main") == main and not (root / "closed-10").exists()
+    (root / "skip-candidate").unlink()
+    go(["10"], "green-candidate", 0)
+    candidate = journal()["candidate"]
+    assert len(journal()["run_ids"]) == 3 and (root / "closed-10").exists()
+    assert git("rev-parse", candidate + "^{tree}", cwd=root / "origin") == git("rev-parse", "main^{tree}", cwd=pub)
+    print("PASS: Windows-only waits for 1, --full for 3; a skipped Mac is no proof; single PR lands the exact green candidate tree")
+elif mode == "skipped-batch":
+    (root / "lightweight").touch()
+    (root / "need-hw").unlink()
+    (root / "bad-combination").touch()
+    result = go(["1", "2", "3"], "admission-and-eviction", 1)
+    assert "skipped: #3 red: Windows" in result and "bisecting" in result, result
+    assert all((root / f"closed-{n}").exists() for n in (1, 2))
+    print("PASS: skipped Macs neither denied admission nor evicted a PR on candidate failure; real Windows red still excluded")
 elif mode == "guards":
     assert "needs mac hardware" in go(["--dry-run", "1", "2"], "nohardware", 1)
     assert "must change docs/ only" in go(["--dry-run", "1", "2", "--notes", "agent/p1"], "badnotes", 1)

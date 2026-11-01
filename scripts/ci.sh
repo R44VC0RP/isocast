@@ -1,12 +1,11 @@
 #!/bin/bash
-# Run the hosted workflows (CI, Engine E2E, Windows) on a candidate before
-# it merges: publish a snapshot of it to ci/<lane> on the public repo and
-# wait for every workflow to finish on that exact snapshot.
+# Publish a scanned snapshot and wait for its hosted checks. Lane pushes run
+# Windows; train candidates and explicit --full snapshots also run CI and Engine E2E.
 #
 #   scripts/ci.sh [--dry-run] [--worktree | --source REF] [--include REF]…
 #                 [--merge-main] [--lane NAME] [--workflow NAME]…
-#                 [--allow-workflow-changes] [--no-wait]
-#   scripts/ci.sh --wait SNAPSHOT [--lane NAME] [--workflow NAME]…
+#                 [--full] [--allow-workflow-changes] [--no-wait]
+#   scripts/ci.sh --wait SNAPSHOT [--full] [--lane NAME] [--workflow NAME]…
 #
 #   --dry-run    build, check and scan the snapshot only (no commit or
 #                push); it stays in $ISOCAST_CI_DIR/<lane>/dry-run
@@ -25,9 +24,11 @@
 #                candidate that doesn't contain main is refused.
 #   --lane NAME  publish to ci/NAME (default: this branch's name after its
 #                last "/", e.g. agent/ci-green -> ci/ci-green)
+#   --full       opt into early macOS checks on ci/full/NAME, without
+#                replacing a PR head. Use --full again to --wait on that ref.
 #   --workflow NAME
-#                wait for these workflows only (repeatable; default "CI",
-#                "Engine E2E" and "Windows")
+#                wait for these workflows only (repeatable; default Windows,
+#                plus CI and Engine E2E for --full and batch-* lanes)
 #   --allow-workflow-changes
 #                publish even though the snapshot's .github/ differs from
 #                this repo's main (otherwise refused: a candidate's
@@ -65,6 +66,7 @@ worktree=0
 merge_main=0
 allow_workflows=0
 no_wait=0
+full=0
 lane=
 source_ref=
 wait_for=
@@ -81,10 +83,11 @@ while [ $# -gt 0 ]; do
         --source) [ $# -ge 2 ] || { echo "ci: --source needs a commit" >&2; exit 2; }; source_ref="$2"; shift 2 ;;
         --include) [ $# -ge 2 ] || { echo "ci: --include needs a commit" >&2; exit 2; }; includes+=("$2"); shift 2 ;;
         --no-wait) no_wait=1; shift ;;
+        --full) full=1; shift ;;
         --wait) [ $# -ge 2 ] || { echo "ci: --wait needs a snapshot commit" >&2; exit 2; }; wait_for="$2"; shift 2 ;;
         -h|--help) sed -n 2,56p "$0"; exit 0 ;;
         *) echo "ci: unknown option $1 (valid: --dry-run, --worktree, --source REF, --include REF, --merge-main," \
-                "--lane NAME, --workflow NAME, --allow-workflow-changes, --no-wait, --wait SNAPSHOT)" >&2; exit 2 ;;
+                "--lane NAME, --workflow NAME, --full, --allow-workflow-changes, --no-wait, --wait SNAPSHOT)" >&2; exit 2 ;;
     esac
 done
 if [ -n "$source_ref" ] && [ "$worktree" = 1 ]; then
@@ -96,10 +99,9 @@ if [ -n "$wait_for" ]; then
     esac
     [ ${#wait_for} = 40 ] || { echo "ci: --wait needs a full 40-character snapshot id" >&2; exit 2; }
     [ "$dry_run$worktree$merge_main$no_wait" = 0000 ] && [ -z "$source_ref" ] && [ ${#includes[@]} = 0 ] || {
-        echo "ci: --wait only combines with --lane and --workflow" >&2; exit 2;
+        echo "ci: --wait only combines with --lane, --full and --workflow" >&2; exit 2;
     }
 fi
-[ ${#workflows[@]} -gt 0 ] || workflows=("CI" "Engine E2E" "Windows")
 if [ -z "$lane" ]; then
     if [ -n "$source_ref" ]; then
         lane="$source_ref"
@@ -113,7 +115,15 @@ case "$lane" in
         echo "ci: --lane must be letters, digits, '.', '_' or '-', not starting or ending with '.' or '-'," \
              "not ending in .lock, and not main: '$lane'" >&2; exit 2 ;;
 esac
+[ "$full" = 0 ] || lane="full/$lane"
 branch="ci/$lane"
+case "$lane" in
+    batch-*|full/*) plan=full ;;
+    *) plan=windows ;;
+esac
+if [ ${#workflows[@]} -eq 0 ]; then
+    if [ "$plan" = full ]; then workflows=("CI" "Engine E2E" "Windows"); else workflows=("Windows"); fi
+fi
 scratch="${ISOCAST_CI_DIR:-/Volumes/IsocastBuild/ci}/$lane"
 g() { git -C "$here" "$@"; }
 
@@ -201,6 +211,7 @@ if [ "$merge_main" = 1 ] && [ -n "$main_ref" ] && ! g merge-base --is-ancestor "
     label="$label merged with main ${main_ref:0:12}"
 fi
 trailers="$trailers"$'\n'"Isocast-Main: $main_ref"$'\n'"Isocast-Tree: $export_tree"
+trailers="$trailers"$'\n'"Isocast-CI: $plan"
 [ "$dirty" = 0 ] || trailers="$trailers"$'\n'"Isocast-Dirty: yes"
 
 # Workflows run with the public repo's token and settings: a candidate may

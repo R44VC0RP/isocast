@@ -23,7 +23,8 @@ concurrency:
 jobs:
   report:
     name: comment, judge and status
-    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    # A same-repo lane PR intentionally produced no artifact or visual verdict.
+    if: github.event.workflow_run.event == 'pull_request' && (github.event.workflow_run.head_repository.full_name != github.repository || !startsWith(github.event.workflow_run.head_branch, 'ci/'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # OPENCODE_API_KEY lives in this environment, which only main may use,
