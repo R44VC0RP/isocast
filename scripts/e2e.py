@@ -95,14 +95,58 @@ from fractions import Fraction
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "nle",
-             "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
-             "plugin_files", "replay", "vertical", "remote_files",
-             # The frame oracle (#124), defined below.
-             "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
-             "oracle_canvases", "oracle_replay", "oracle_governor",
-             # The same model on the engine's test pattern; win_media plays a real file.
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture", "linux_browser") if sys.platform.startswith("linux") else ()) + (("win_media", "win_metadata") if sys.platform == "win32" else ())
+
+# one scenario per line, so concurrent PRs don't conflict
+SCENARIOS = (
+    "setup",
+    "record",
+    "iso",
+    "split",
+    "scenes",
+    "stream",
+    "webrtc",
+    "nle",
+    "data",
+    "plugin",
+    "hotkeys",
+    "shutdown",
+    "pause",
+    "bug_report",
+    "projects",
+    "plugin_files",
+    "replay",
+    "vertical",
+    "remote_files",
+    # The frame oracle (#124), defined below.
+    "oracle_record",
+    "oracle_scenes",
+    "oracle_takes",
+    "oracle_masks",
+    "oracle_canvases",
+    "oracle_replay",
+    "oracle_governor",
+    # These Windows scenarios are listed on every platform.
+    "win_record",
+    "win_takes",
+    "win_scenes",
+    "win_recovery",
+    "win_preview_recording",
+    "win_monitor",
+)
+if sys.platform == "win32":
+    SCENARIOS += (
+        "win_media",
+        "win_metadata",
+    )
+elif sys.platform.startswith("linux"):
+    SCENARIOS += (
+        "linux_record",
+        "linux_recovery",
+        "linux_media",
+        "linux_capture",
+        "linux_browser",
+    )
+
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -5559,6 +5603,7 @@ def main():
     if args.selftest:
         args.work.mkdir(parents=True, exist_ok=True)
         try:
+            require(len(SCENARIOS) == len(set(SCENARIOS)), "duplicate name in SCENARIOS")
             print(json.dumps(oracle_selftest(args.work), indent=2))
         except Failure as exc:
             print(f"FAIL selftest: {exc}")
