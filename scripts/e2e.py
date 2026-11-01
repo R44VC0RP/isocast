@@ -4807,6 +4807,50 @@ setInterval(() => {
     require(counts == evidence["live_dropouts"], f"manifest disagrees with live dropouts: {counts}")
     evidence["manifest_dropouts"] = counts
 
+    # A second take exercises the injected tap, not synthetic PCM. Leave
+    # one short hole on suspend and one during a close -> secondary handoff.
+    # Both must survive in the recording, not disappear into a stitched run.
+    render(0)
+    started = e.rpc("start", {})
+    page.write_text("""<body style='background:green'><script>
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+function tone() {
+  const ctx = new AudioContext({sampleRate:48000}), osc = ctx.createOscillator();
+  osc.connect(ctx.destination); osc.start(); return ctx;
+}
+(async () => {
+  const a = tone(); await a.resume(); await wait(700);
+  await a.suspend(); await wait(75); await a.resume(); await wait(700);
+  const b = tone(); await b.resume(); await wait(300);
+  // Give the new primary a known module-loading delay at handoff.
+  const load = b.audioWorklet.addModule.bind(b.audioWorklet);
+  b.audioWorklet.addModule = async (...args) => { await wait(75); return load(...args); };
+  await a.close();
+})();
+</script>""")
+    e.rpc("refresh_browser", {"source": "web"})
+    time.sleep(4)
+    e.rpc("stop")
+    path = Path(started["manifest"])
+    manifest = read_json(path)
+    evidence["lifecycle"] = {}
+    for source in ("web", "program"):
+        file, entry = manifest_file(path, manifest, source)
+        require(entry["audio_dropouts"] == 0, f"{source}: lifecycle counted as a dropout")
+        samples = pcm(file)
+        # Interior quiet runs only: exclude recorder startup and shutdown.
+        last = None
+        holes = []
+        for i, sample in enumerate(samples):
+            if abs(sample) > 0.02:
+                if last is not None and i - last > RATE * 0.04:
+                    holes.append((round(last / RATE, 3), round((i - last) / RATE, 3)))
+                last = i
+        require(len(holes) == 2 and all(0.04 < duration < 0.25 for _, duration in holes)
+                and 0.8 < holes[1][0] - holes[0][0] < 1.4,
+                f"{source}: expected distinct suspend and handoff holes, got {holes}")
+        evidence["lifecycle"][source] = {"dropouts": entry["audio_dropouts"], "holes_s": holes}
+
 
 def scenario_linux_browser(e, cfg, evidence):
     """A browser source on Linux (the isocast-browser helper next to the

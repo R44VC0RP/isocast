@@ -58,7 +58,7 @@
         this.write = chunker(sampleRate, buffer => this.port.postMessage(buffer, [buffer]));
       }
       process(inputs) {
-        if (this.active) this.write(inputs[0][0], inputs[0][1], 128);
+        if (this.active) this.write(inputs[0][0], inputs[0][1], inputs[0][0]?.length || 128);
         return this.active;
       }
     });
@@ -148,10 +148,13 @@
     guarded(() => {
       if (primary?.context.state === 'running') return;
       const live = [...routes.values()];
-      const next = live.find(route => route.context.state === 'running') || live[0];
+      const next = live.find(route => route.context.state === 'running');
       if (primary === next) return;
       const mix = next && createGain.call(next.context);
       primary?.stop?.();
+      // Retire the old tap (including its partial chunk) before the host
+      // stamps another run. A suspended page has no primary until resume.
+      if (primary) send('48000:');
       for (const route of live) {
         disconnect.call(route.bus);
         if (route.bridge) disconnect.call(route.bridge);
