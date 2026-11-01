@@ -113,6 +113,9 @@ for name, path, url in fonts:
     print(f"- {name}: SIL Open Font License 1.1, see {path}")
     print(f"  {url}")
 
+print("\nLinux and Windows text sources embed the same four Mona Sans faces as the app.")
+print("\n".join(line.rstrip() for line in (root / "crates/isocast-ui/ui/fonts/LICENSE-mona-sans").read_text().splitlines()))
+
 section("WebAssembly runtime")
 print("""WebAssembly plugins run in Wasmtime (https://wasmtime.dev) from the
 Bytecode Alliance, licensed under Apache-2.0 WITH LLVM-exception. Its crates

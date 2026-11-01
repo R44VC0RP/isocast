@@ -48,9 +48,80 @@ pub(crate) fn surround(settings: &TextSource) -> (f32, f32) {
 
 fn fonts_found() -> (FontSystem, SwashCache) {
     let mut font_system = FontSystem::new();
-    // cosmic-text's default sans serif isn't on Macs.
+    #[cfg(target_os = "macos")]
     font_system.db_mut().set_sans_serif_family("Helvetica Neue");
+    #[cfg(not(target_os = "macos"))]
+    install_text_fonts(font_system.db_mut());
     (font_system, SwashCache::new())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_text_fonts(db: &mut cosmic_text::fontdb::Database) {
+    use cosmic_text::fontdb::{Database, Language, Source};
+    use std::sync::Arc;
+
+    // A private lookup name keeps a different system copy of Mona Sans from
+    // taking precedence over our faces. The font files themselves are unmodified.
+    const BUNDLED: &str = "Isocast bundled sans";
+    let mut bundled = Database::new();
+    let files: &[&[u8]] = &[
+        include_bytes!("../../isocast-ui/ui/fonts/MonaSans-Light.ttf"),
+        include_bytes!("../../isocast-ui/ui/fonts/MonaSans-Regular.ttf"),
+        include_bytes!("../../isocast-ui/ui/fonts/MonaSans-Medium.ttf"),
+        include_bytes!("../../isocast-ui/ui/fonts/MonaSans-SemiBold.ttf"),
+    ];
+    for &bytes in files {
+        bundled.load_font_source(Source::Binary(Arc::new(bytes)));
+    }
+    for mut face in bundled.faces().cloned() {
+        face.families = vec![(BUNDLED.into(), Language::English_UnitedStates)];
+        db.push_face_info(face);
+    }
+    db.set_sans_serif_family(BUNDLED);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve_family<'a>(db: &cosmic_text::fontdb::Database, attrs: Attrs<'a>) -> Attrs<'a> {
+    use cosmic_text::fontdb::Query;
+    use cosmic_text::skrifa::{FontRef, MetadataProvider, Tag};
+
+    let face = db
+        .query(&Query {
+            families: &[attrs.family, Family::SansSerif],
+            weight: attrs.weight,
+            style: attrs.style,
+            stretch: attrs.stretch,
+        })
+        .and_then(|id| db.face(id))
+        .expect("bundled sans faces registered");
+    let family = if face
+        .families
+        .iter()
+        .any(|(name, _)| name == db.family_name(&attrs.family))
+    {
+        attrs.family
+    } else {
+        Family::SansSerif
+    };
+    // cosmic-text skips a static family entirely if it lacks the requested
+    // weight. Use the nearest face (e.g. Mona SemiBold for a 700 title),
+    // but keep intermediate weights when the selected face has a weight axis.
+    let weight = if family != Family::SansSerif && face.weight != attrs.weight {
+        db.with_face_data(face.id, |bytes, index| {
+            let axis = FontRef::from_index(bytes, index)
+                .ok()?
+                .axes()
+                .get_by_tag(Tag::new(b"wght"))?;
+            (axis.min_value()..=axis.max_value())
+                .contains(&f32::from(attrs.weight.0))
+                .then_some(attrs.weight)
+        })
+        .flatten()
+        .unwrap_or(face.weight)
+    } else {
+        face.weight
+    };
+    attrs.family(family).weight(weight)
 }
 
 /// Text shaped for drawing, and the picture's size.
@@ -118,6 +189,8 @@ fn buffer(
         } else {
             Style::Normal
         });
+    #[cfg(not(target_os = "macos"))]
+    let attrs = resolve_family(font_system.db(), attrs);
     let align = match settings.align {
         TextAlign::Left => Align::Left,
         TextAlign::Center => Align::Center,
@@ -297,6 +370,43 @@ impl Canvas {
             width: self.width,
             height: self.height,
             rgba,
+        }
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+#[test]
+fn missing_text_families_shape_with_the_bundled_faces() {
+    use cosmic_text::fontdb::Database;
+
+    // Put an unrelated installed face first. A platform-dependent last-resort
+    // match must not win, even when Mona lacks the exact weight requested.
+    let mut db = Database::new();
+    db.load_font_data(include_bytes!("../../isocast-ui/ui/fonts/HubotSans-Medium.ttf").to_vec());
+    install_text_fonts(&mut db);
+    let mut fs = FontSystem::new_with_locale_and_db("en-US".into(), db);
+    let mut settings: TextSource = serde_json::from_str(r#"{"text":"Starting soon"}"#).unwrap();
+    for (family, weight, expected) in [
+        (settings.font.clone(), 400, "MonaSans-Regular"),
+        ("Arial".into(), 600, "MonaSans-SemiBold"),
+        ("Unknown".into(), 700, "MonaSans-SemiBold"),
+        ("Unknown".into(), 100, "MonaSans-Light"),
+        ("Hubot Sans".into(), 700, "HubotSans-Medium"),
+    ] {
+        settings.font = family;
+        settings.weight = weight;
+        let shaped = shape(&mut fs, &settings, "Starting soon");
+        let mut glyphs = shaped
+            .buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs)
+            .peekable();
+        assert!(glyphs.peek().is_some());
+        for glyph in glyphs {
+            assert_eq!(
+                fs.db().face(glyph.font_id).unwrap().post_script_name,
+                expected
+            );
         }
     }
 }
