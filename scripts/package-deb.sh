@@ -31,7 +31,7 @@ root=$work/root
 maintainer=${DEB_MAINTAINER:-Ryan Vogel <ryan@anoma.ly>}
 rm -rf "$work" "dist/$name.deb"
 mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/doc/isocast" \
-  "$root/usr/share/applications" "$root/usr/share/icons/hicolor/512x512/apps"
+  "$root/usr/share/applications" "$root/usr/share/icons"
 
 # The browser source helper ships beside isocastd in the Ubuntu 24.04
 # package only, with its AppArmor profile and the maintainer scripts that
@@ -79,7 +79,10 @@ install -m 755 packaging/linux/install.sh "$root/usr/bin/isocast-openh264-instal
   echo 'Exec=isocast-ui'
 } >"$root/usr/share/applications/dev.isocast.Isocast.desktop"
 chmod 644 "$root/usr/share/applications/dev.isocast.Isocast.desktop"
-install -m 644 packaging/linux/dev.isocast.Isocast.png "$root/usr/share/icons/hicolor/512x512/apps/"
+# The icon at every size (hicolor-icon-theme's dpkg trigger updates the
+# icon cache).
+cp -R packaging/linux/icons/hicolor "$root/usr/share/icons/"
+find "$root/usr/share/icons" -type d -exec chmod 755 {} + -o -type f -exec chmod 644 {} +
 doc=$root/usr/share/doc/isocast
 install -m 644 packaging/deb/copyright packaging/deb/README.Debian packaging/linux/CISCO_H264_LICENSE.txt "$doc/"
 gzip -9n -c THIRD_PARTY_NOTICES >"$doc/THIRD_PARTY_NOTICES.gz"

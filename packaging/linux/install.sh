@@ -24,7 +24,9 @@ prefix=${XDG_DATA_HOME:-$HOME/.local/share}
 lib=$HOME/.local/lib/isocast
 bin=$HOME/.local/bin
 apps=$prefix/applications
-icons=$prefix/icons/hicolor/512x512/apps
+icons=$prefix/icons/hicolor
+# The icon at every size the tarball carries (icons/hicolor/<size>/apps).
+icon_sizes="16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512 scalable"
 license=CISCO_H264_LICENSE.txt
 attribution="OpenH264 Video Codec provided by Cisco Systems, Inc."
 # The commands that turn OpenH264 on and off, as this copy is run.
@@ -169,7 +171,10 @@ fi
 
 case "${1:-}" in
 --uninstall)
-  rm -f "$bin/isocast" "$bin/isocast-ui" "$apps/dev.isocast.Isocast.desktop" "$icons/dev.isocast.Isocast.png"
+  rm -f "$bin/isocast" "$bin/isocast-ui" "$apps/dev.isocast.Isocast.desktop"
+  for size in $icon_sizes; do
+    rm -f "$icons/$size/apps/dev.isocast.Isocast.png" "$icons/$size/apps/dev.isocast.Isocast.svg"
+  done
   rm -rf "$lib"
   echo "Isocast and Cisco's OpenH264 removed. Recordings (~/Videos/Isocast unless you chose another folder) and settings ($prefix/isocast) are kept."
   exit 0
@@ -189,7 +194,7 @@ case "${1:-}" in
   ;;
 esac
 
-mkdir -p "$lib" "$bin" "$apps" "$icons"
+mkdir -p "$lib" "$bin" "$apps"
 # The installed copy, run again, has nothing to copy (and copying a file
 # onto itself fails): it refreshes the links and OpenH264.
 if [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
@@ -200,7 +205,12 @@ if [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
     install -m 755 "$here/$name" "$lib/$name"
   done
   chmod 644 "$lib/$license"
-  install -m 644 "$here/dev.isocast.Isocast.png" "$icons/dev.isocast.Isocast.png"
+  for size in $icon_sizes; do
+    for icon in "$here/icons/hicolor/$size/apps/dev.isocast.Isocast."*; do
+      mkdir -p "$icons/$size/apps"
+      install -m 644 "$icon" "$icons/$size/apps/"
+    done
+  done
   # Exec's path quoted (a home folder with spaces), with the characters the
   # desktop entry spec reserves inside quotes escaped (\\ in the file's
   # string value is one backslash).
@@ -210,7 +220,7 @@ if [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
     printf 'Exec="%s"\n' "$exec_path"
   } >"$apps/dev.isocast.Isocast.desktop"
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$apps" >/dev/null 2>&1 || true
-  command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$prefix/icons/hicolor" >/dev/null 2>&1 || true
+  command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$icons" >/dev/null 2>&1 || true
 fi
 ln -sf "$lib/isocast" "$bin/isocast"
 ln -sf "$lib/isocast-ui" "$bin/isocast-ui"
