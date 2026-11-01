@@ -51,17 +51,23 @@ wait_for() {
 
 deps() {
     local apt=(sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30)
-    "${apt[@]}" update
-    "${apt[@]}" install -y --no-install-recommends \
+    local install=("${apt[@]}" install -y --no-install-recommends)
+    # Hosted CI: its slow-mirror-proof installer (.github/scripts/apt-install.sh).
+    if [ -n "${ISOCAST_APT_INSTALL:-}" ]; then
+        install=("$ISOCAST_APT_INSTALL")
+    else
+        "${apt[@]}" update
+    fi
+    "${install[@]}" \
         dbus-daemon sway xdg-desktop-portal xdg-desktop-portal-wlr \
         pipewire pipewire-pulse wireplumber pulseaudio-utils mpv ffmpeg v4l-utils \
         meson ninja-build pkg-config libpipewire-0.3-dev libwayland-dev wayland-protocols \
         libinih-dev libgbm-dev libdrm-dev libsystemd-dev
     # The camera: best effort, the scenario skips the camera without it.
     # v4l2loopback needs videodev, which Ubuntu ships in linux-modules-extra.
-    "${apt[@]}" install -y --no-install-recommends "linux-modules-extra-$(uname -r)" ||
+    "${install[@]}" "linux-modules-extra-$(uname -r)" ||
         echo "linux-capture-fixture: no linux-modules-extra for $(uname -r)" >&2
-    if ! "${apt[@]}" install -y --no-install-recommends "linux-headers-$(uname -r)" v4l2loopback-dkms; then
+    if ! "${install[@]}" "linux-headers-$(uname -r)" v4l2loopback-dkms; then
         echo "linux-capture-fixture: v4l2loopback-dkms could not be installed; the camera will be skipped" >&2
     fi
 }
