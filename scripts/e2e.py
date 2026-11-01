@@ -225,11 +225,9 @@ def until(fn, seconds=30, description="condition", interval=0.05):
     raise Failure(f"timed out after {seconds}s waiting for {description}")
 
 
-def open_shared(path):
-    """Share deletion with publishers and close promptly after reading.
-    Python's open() on Windows shares read and write but not delete, so a
-    manifest held open here would make the engine's rename-over fail. Ask
-    CreateFileW for FILE_SHARE_DELETE too, as Rust's File::open does."""
+def open_shared(path, *, share_delete=True):
+    """By default share deletion with publishers, as Rust's File::open does.
+    Use CreateFileW to preserve the native error when sharing is denied."""
     if not WINDOWS:
         return open(path, "rb")
     import ctypes
@@ -240,8 +238,9 @@ def open_shared(path):
                                      wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
     kernel32.CreateFileW.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    generic_read, share_all, open_existing, normal = 0x80000000, 0x7, 3, 0x80
-    handle = kernel32.CreateFileW(os.fspath(path), generic_read, share_all, None,
+    generic_read, share_read_write, open_existing, normal = 0x80000000, 0x3, 3, 0x80
+    sharing = share_read_write | (0x4 if share_delete else 0)
+    handle = kernel32.CreateFileW(os.fspath(path), generic_read, sharing, None,
                                   open_existing, normal, None)
     if handle is None or handle == wintypes.HANDLE(-1).value:
         code = ctypes.get_last_error()
@@ -5314,6 +5313,18 @@ def scenario_win_metadata(e, cfg, evidence):
     watch = Watch(e, ["take_finished", "stopped"], stop_after="stopped")
     held = {}
 
+    def hold_manifest(path):
+        # A just-renamed manifest can still have the publisher's DELETE handle.
+        # Retry acquisition only; once open, this reader must block publication.
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                return open_shared(path, share_delete=False)
+            except PermissionError as exc:
+                if exc.winerror != 32 or time.monotonic() >= deadline:  # ERROR_SHARING_VIOLATION
+                    raise
+                time.sleep(0.01)
+
     def pending(path, status=None):
         status = status or e.rpc("status")
         entries = (status.get("diagnostics") or {}).get("metadata_pending") or []
@@ -5348,11 +5359,11 @@ def scenario_win_metadata(e, cfg, evidence):
 
     try:
         first = Path(e.rpc("start", {})["manifest"])
-        held[first] = open(first, "rb")  # shares read and write, not delete
+        held[first] = hold_manifest(first)
         time.sleep(1.5)
         split = e.rpc("split")
         second = Path(split["manifest"])
-        held[second] = open(second, "rb")
+        held[second] = hold_manifest(second)
         evidence["split"] = blocked(1, first)
         require(evidence["split"]["state"] == "recording", f"recording stopped behind take 1: {evidence['split']}")
         require(not evidence["split"]["finalizing"], "a pending earlier take must not disable Stop on the current take")
@@ -5385,7 +5396,7 @@ def scenario_win_metadata(e, cfg, evidence):
     for mode in ("kill", "shutdown"):
         e.apply(cfg)
         path = Path(e.rpc("start", {"seconds": 2})["manifest"])
-        with open(path, "rb"):
+        with hold_manifest(path):
             until(lambda: pending(path), 30, f"{mode}: terminal metadata pending")
             saved = read_json(str(path) + ".final")
             require(saved["status"] == "complete", f"{mode}: sidecar has no complete outcome")
