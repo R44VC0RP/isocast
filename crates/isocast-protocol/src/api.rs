@@ -526,8 +526,10 @@ pub enum Method {
     /// Choose the screen or window a `display` or `window` source records,
     /// in the desktop's sharing dialog, where apps can't list screens and
     /// windows themselves (Linux). Waits up to 3 minutes for the choice.
-    /// The source then opens that screen or window without asking again
-    /// while the desktop remembers it; a running source switches to it.
+    /// A source never shows the dialog by itself: one with nothing chosen
+    /// waits (`needs_pick` in `status`). The source then opens that screen
+    /// or window without asking again while the desktop remembers it; a
+    /// running source switches to it.
     /// Returns [`ScreenPicked`]. Only on this machine; refused where
     /// `devices` lists screens and windows instead (macOS, Windows).
     ScreenPick(ScreenPickParams),
@@ -2900,6 +2902,11 @@ pub struct SourceStatus {
     /// Why it couldn't open, or stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Nothing is chosen for it in the desktop's sharing dialog yet (a
+    /// Linux display or window source), so it waits (`waiting_for_permission`)
+    /// without showing the dialog; `screen_pick` chooses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_pick: bool,
     /// Its picture's size and rate, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,

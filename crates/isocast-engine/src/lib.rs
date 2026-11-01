@@ -195,8 +195,13 @@ pub trait Platform: Clone + Send + Sync + 'static {
 
     /// Ask the desktop which screen or window `target` shows, where apps
     /// can't list them (Linux's sharing dialog), and remember the choice
-    /// for it. Refused where `devices` lists screens and windows.
-    fn pick_screen(&self, _target: ScreenTarget<'_>) -> anyhow::Result<PickedScreen> {
+    /// for it; `cursor` is whether the source shows the pointer. Refused
+    /// where `devices` lists screens and windows.
+    fn pick_screen(
+        &self,
+        _target: ScreenTarget<'_>,
+        _cursor: bool,
+    ) -> anyhow::Result<PickedScreen> {
         anyhow::bail!(
             "screen_pick: only Linux chooses screens and windows in the desktop's sharing \
              dialog; here `isocast devices` (method `devices`) lists them: give a display \
@@ -750,6 +755,23 @@ pub struct PickedScreen {
     /// Whether the desktop remembers the choice for later starts.
     pub remembered: bool,
 }
+
+/// A screen capture has nothing chosen in the desktop's sharing dialog yet.
+/// [`Platform::pick_screen`] chooses it; the engine reports the source with
+/// `needs_pick`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotChosen {
+    /// "screen" or "window".
+    pub what: &'static str,
+}
+
+impl std::fmt::Display for NotChosen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no {} is chosen for it yet", self.what)
+    }
+}
+
+impl std::error::Error for NotChosen {}
 
 /// What a screen capture shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

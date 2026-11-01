@@ -2064,7 +2064,7 @@ Choose screens and windows in the desktop's sharing dialog, where they can't be 
 Usage: isocast screen [OPTIONS] <COMMAND>
 
 Commands:
-  pick  Choose the window a window source records (or the screen of a display source) in the desktop's sharing dialog. The source then opens it without asking while the desktop remembers the choice; a running source switches to it. Waits up to 3 minutes. Linux only: elsewhere `isocast devices` lists the screens and windows
+  pick  Choose the window a window source records (or the screen of a display source) in the desktop's sharing dialog; a source with nothing chosen waits for this. The source then opens it without asking while the desktop remembers the choice; a running source switches to it. Waits up to 3 minutes. Linux only: elsewhere `isocast devices` lists the screens and windows
   help  Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2075,7 +2075,7 @@ Options:
 ## isocast screen pick
 
 ```text
-Choose the window a window source records (or the screen of a display source) in the desktop's sharing dialog. The source then opens it without asking while the desktop remembers the choice; a running source switches to it. Waits up to 3 minutes. Linux only: elsewhere `isocast devices` lists the screens and windows
+Choose the window a window source records (or the screen of a display source) in the desktop's sharing dialog; a source with nothing chosen waits for this. The source then opens it without asking while the desktop remembers the choice; a running source switches to it. Waits up to 3 minutes. Linux only: elsewhere `isocast devices` lists the screens and windows
 
 Usage: isocast screen pick [OPTIONS] <SOURCE>
 

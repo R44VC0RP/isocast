@@ -18523,6 +18523,10 @@
               "null"
             ]
           },
+          "needs_pick": {
+            "description": "Nothing is chosen for it in the desktop's sharing dialog yet (a\nLinux display or window source), so it waits (`waiting_for_permission`)\nwithout showing the dialog; `screen_pick` chooses it.",
+            "type": "boolean"
+          },
           "received_fps": {
             "description": "Frames it actually delivered per second over the last second,\nmeasured (`fps` is the rate it was opened at); 0 for a still\npicture or a device that stopped sending. In `status` only.",
             "format": "double",
@@ -22396,7 +22400,7 @@
         "type": "object"
       },
       "WindowSource": {
-        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit. On Linux the\ndesktop's sharing dialog chooses the window instead, when the source\nfirst starts or with `isocast screen pick` (method `screen_pick`), and\nthe source reopens it by its id; `app` and `title` only name it there.",
+        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit. On Linux the\ndesktop's sharing dialog chooses the window instead, with `isocast\nscreen pick` (method `screen_pick`); until then the source waits\n(`needs_pick` in `status`). It reopens the window by its id; `app` and\n`title` only name it there.",
         "properties": {
           "app": {
             "description": "The app's name or bundle id, or part of the name. On Linux, a name\nfor the window chosen in the desktop's sharing dialog.",
@@ -22421,7 +22425,7 @@
         "type": "object"
       },
       "WindowSourceResult": {
-        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit. On Linux the\ndesktop's sharing dialog chooses the window instead, when the source\nfirst starts or with `isocast screen pick` (method `screen_pick`), and\nthe source reopens it by its id; `app` and `title` only name it there.",
+        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit. On Linux the\ndesktop's sharing dialog chooses the window instead, with `isocast\nscreen pick` (method `screen_pick`); until then the source waits\n(`needs_pick` in `status`). It reopens the window by its id; `app` and\n`title` only name it there.",
         "properties": {
           "app": {
             "description": "The app's name or bundle id, or part of the name. On Linux, a name\nfor the window chosen in the desktop's sharing dialog.",
@@ -27072,7 +27076,7 @@
       "summary": "End this connection's WebRTC viewer (WHEP DELETE semantics)."
     },
     {
-      "description": "Choose the screen or window a `display` or `window` source records,\nin the desktop's sharing dialog, where apps can't list screens and\nwindows themselves (Linux). Waits up to 3 minutes for the choice.\nThe source then opens that screen or window without asking again\nwhile the desktop remembers it; a running source switches to it.\nReturns [`ScreenPicked`]. Only on this machine; refused where\n`devices` lists screens and windows instead (macOS, Windows).",
+      "description": "Choose the screen or window a `display` or `window` source records,\nin the desktop's sharing dialog, where apps can't list screens and\nwindows themselves (Linux). Waits up to 3 minutes for the choice.\nA source never shows the dialog by itself: one with nothing chosen\nwaits (`needs_pick` in `status`). The source then opens that screen\nor window without asking again while the desktop remembers it; a\nrunning source switches to it.\nReturns [`ScreenPicked`]. Only on this machine; refused where\n`devices` lists screens and windows instead (macOS, Windows).",
       "name": "screen_pick",
       "paramStructure": "by-name",
       "params": [

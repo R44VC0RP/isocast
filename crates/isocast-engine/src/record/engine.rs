@@ -845,6 +845,9 @@ struct Live<P: Platform> {
     definition: serde_json::Value,
     run: SourceRun,
     error: Option<String>,
+    /// Waiting for `screen_pick`: nothing is chosen for it in the desktop's
+    /// sharing dialog ([`crate::NotChosen`]).
+    needs_pick: bool,
     video: Option<Video<P::Frame>>,
     audio: Option<AudioRun<P::Frame>>,
     /// Keeps it running; dropped last.
@@ -2088,6 +2091,7 @@ fn statuses<P: Platform>(state: &State<P>) -> Vec<SourceStatus> {
             source: id.clone(),
             state: live.run,
             error: live.error.clone(),
+            needs_pick: live.needs_pick,
             width: live.video.as_ref().map(|v| v.width),
             height: live.video.as_ref().map(|v| v.height),
             fps: live.video.as_ref().map(|v| v.fps),
@@ -2322,6 +2326,8 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
                     }
                 }
                 Some(live) if live.definition == definition && live.run == SourceRun::Running => {}
+                // Only `screen_pick` (which reopens it) can open it now.
+                Some(live) if live.definition == definition && live.needs_pick => {}
                 Some(live) if live.definition == definition => {
                     opening.push((id.clone(), definition));
                 }
@@ -2391,6 +2397,9 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
             let event = if wanted {
                 let live = match result {
                     Ok(opened) => Live::running(&inner, &current, &id, definition, opened),
+                    Err(err) if err.is::<crate::NotChosen>() => {
+                        Live::waiting_for_pick(definition, &id, err)
+                    }
                     Err(err) => {
                         let mut live = Live::failed(definition, format!("source {id:?}: {err:#}"));
                         let message = format!("{err:#}").to_lowercase();
@@ -2545,6 +2554,7 @@ impl<P: Platform> Live<P> {
             definition,
             run: SourceRun::Running,
             error: None,
+            needs_pick: false,
             video,
             audio,
             opened: Some(opened),
@@ -2556,9 +2566,30 @@ impl<P: Platform> Live<P> {
             definition,
             run: SourceRun::Failed,
             error: Some(error),
+            needs_pick: false,
             video: None,
             audio: None,
             opened: None,
+        }
+    }
+
+    /// Nothing is chosen for this screen or window source yet: it waits for
+    /// `screen_pick`.
+    fn waiting_for_pick(
+        definition: serde_json::Value,
+        id: &str,
+        why: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            run: SourceRun::WaitingForPermission,
+            needs_pick: true,
+            ..Self::failed(
+                definition,
+                format!(
+                    "source {id:?}: {why}; choose one with `isocast screen pick {id}` (method \
+                     `screen_pick`)"
+                ),
+            )
         }
     }
 
@@ -2568,6 +2599,7 @@ impl<P: Platform> Live<P> {
             definition: serde_json::Value::Null,
             run: SourceRun::Failed,
             error: None,
+            needs_pick: false,
             video: None,
             audio: None,
             opened: Some(opened),
@@ -2579,6 +2611,7 @@ impl<P: Platform> Live<P> {
             source: id.to_string(),
             state: self.run,
             error: self.error.clone(),
+            needs_pick: self.needs_pick,
             width: self.video.as_ref().map(|v| v.width),
             height: self.video.as_ref().map(|v| v.height),
             fps: self.video.as_ref().map(|v| v.fps),
@@ -3727,7 +3760,8 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                     matches!(
                         live.run,
                         SourceRun::Failed | SourceRun::WaitingForPermission
-                    ) && !state.pins.contains(id)
+                    ) && !live.needs_pick
+                        && !state.pins.contains(id)
                 });
                 let mut wanted = inner.wanted.lock();
                 if failed && wanted.is_none() {
@@ -4275,12 +4309,14 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         // the old one until it reopens: wait for it, or the recording would
         // keep the old one to the end.
         let reopening = |id: &str, live: &Live<P>| live.definition != definition_of(setup, id);
+        // One waiting for `screen_pick` waits for a person: fail at once.
         let pending = required.iter().any(|id| {
             state.sources.get(*id).is_none_or(|live| {
-                matches!(
+                (matches!(
                     live.run,
                     SourceRun::Opening | SourceRun::WaitingForPermission
-                ) || reopening(id, live)
+                ) && !live.needs_pick)
+                    || reopening(id, live)
             })
         });
         if !pending || platform.now().saturating_since(waiting_since) >= source_wait {
@@ -6159,6 +6195,8 @@ iso = {iso}
             fn create_writer(&self, _spec: &WriterSpec) -> Result<Never> {
                 bail!("inert")
             }
+            /// As Linux answers before anything is chosen in its sharing
+            /// dialog.
             fn capture_screen(
                 &self,
                 _target: ScreenTarget<'_>,
@@ -6167,7 +6205,7 @@ iso = {iso}
                 _cursor: bool,
                 _sink: VideoSink<()>,
             ) -> Result<(Never, CaptureFormat)> {
-                bail!("inert")
+                Err(crate::NotChosen { what: "window" }.into())
             }
             fn capture_camera(
                 &self,
@@ -6279,5 +6317,59 @@ encoder = { codec = "hevc", quality = 70 }
             Ok(_) => panic!("a monitor started on a stopped engine"),
             Err(why) => assert_eq!(why, "engine stopped"),
         }
+    }
+
+    /// A window source with nothing chosen for it waits for `screen_pick`,
+    /// naming the command, instead of failing like a missing device.
+    #[test]
+    fn a_window_with_nothing_chosen_waits_for_a_pick() {
+        let setup = Setup::from_toml(
+            r##"
+version = 1
+name = "t"
+[canvas]
+width = 64
+height = 64
+fps = 30
+[[sources]]
+id = "terminal"
+kind = "window"
+app = "foot"
+[[scenes]]
+id = "main"
+[[scenes.items]]
+id = "terminal"
+source = "terminal"
+rect = { x = 0, y = 0, width = 64, height = 64 }
+[recording]
+folder = "/nonexistent/isocast-engine-test"
+[recording.program]
+encoder = { codec = "hevc", quality = 70 }
+"##,
+        )
+        .unwrap();
+        let engine = Engine::start(&inert::Inert, &setup, None, None).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            let status = engine
+                .sources()
+                .into_iter()
+                .find(|s| s.source == "terminal");
+            match status {
+                Some(status) if status.state != SourceRun::Opening => break status,
+                _ if std::time::Instant::now() > deadline => panic!("terminal never left opening"),
+                _ => thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        engine.stop();
+        assert_eq!(status.state, SourceRun::WaitingForPermission);
+        assert!(status.needs_pick);
+        assert_eq!(
+            status.error.as_deref(),
+            Some(
+                "source \"terminal\": no window is chosen for it yet; choose one with `isocast \
+                 screen pick terminal` (method `screen_pick`)"
+            )
+        );
     }
 }

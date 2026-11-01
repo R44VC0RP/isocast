@@ -186,15 +186,16 @@ impl Platform for LinuxPlatform {
             _ => 8,
         })
     }
-    fn pick_screen(&self, target: ScreenTarget<'_>) -> Result<isocast_engine::PickedScreen> {
-        portal::pick(&target)
+    fn pick_screen(
+        &self,
+        target: ScreenTarget<'_>,
+        cursor: bool,
+    ) -> Result<isocast_engine::PickedScreen> {
+        portal::pick(&target, cursor)
     }
-    fn request_permissions(&self, only: Option<PermissionKind>) -> Result<PermissionsReport> {
-        if only.is_none() || only == Some(PermissionKind::ScreenRecording) {
-            // Consent belongs to a selection, not a global permission bit.
-            // Permit a failed source's next retry to show the portal again.
-            portal::allow_prompt();
-        }
+    fn request_permissions(&self, _only: Option<PermissionKind>) -> Result<PermissionsReport> {
+        // Consent belongs to a selection, not a global permission bit:
+        // `screen_pick` asks for a source's screen or window.
         self.permissions()
     }
     fn open_permission_settings(&self, _permission: PermissionKind) -> Result<String> {

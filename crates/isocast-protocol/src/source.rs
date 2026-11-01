@@ -44,9 +44,10 @@ impl Kind for DisplaySource {
 /// One window (OBS's macOS Screen Capture, window mode), matched by its
 /// app and optionally its title; the largest match wins. It keeps its size
 /// if the window is resized, scaling the window to fit. On Linux the
-/// desktop's sharing dialog chooses the window instead, when the source
-/// first starts or with `isocast screen pick` (method `screen_pick`), and
-/// the source reopens it by its id; `app` and `title` only name it there.
+/// desktop's sharing dialog chooses the window instead, with `isocast
+/// screen pick` (method `screen_pick`); until then the source waits
+/// (`needs_pick` in `status`). It reopens the window by its id; `app` and
+/// `title` only name it there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WindowSource {
     /// The app's name or bundle id, or part of the name. On Linux, a name

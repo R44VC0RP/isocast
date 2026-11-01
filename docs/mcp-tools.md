@@ -475,7 +475,7 @@ Pause the same recording files on a shared video/audio boundary. Streaming conti
 
 ## pick_screen
 
-Linux only, where screens and windows can't be listed: show the desktop's screen-sharing dialog so the person at the computer chooses the window a window source records, or the screen of a display source (`source`: its id). The source then opens that choice without the dialog while the desktop remembers it (`remembered`); a running source switches to it. Waits up to 3 minutes for the choice; fails if it is cancelled.
+Linux only, where screens and windows can't be listed: show the desktop's screen-sharing dialog so the person at the computer chooses the window a window source records, or the screen of a display source (`source`: its id). A source never shows the dialog by itself: one with nothing chosen waits (`needs_pick` in `get_status`). The source then opens that choice without the dialog while the desktop remembers it (`remembered`); a running source switches to it. Waits up to 3 minutes for the choice; fails if it is cancelled.
 
 | Argument | Type | Description |
 |---|---|---|

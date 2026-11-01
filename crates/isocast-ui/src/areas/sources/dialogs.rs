@@ -2207,8 +2207,8 @@ pub fn pick_screen(app: &Rc<App>, id: String) {
                         app.toast(
                             ToastKind::Warning,
                             "The desktop won’t remember this choice",
-                            "Its sharing dialog asks again each time the source starts. On \
-                             Hyprland, tick “Allow a restore token” in it.",
+                            "The source runs on it until it stops, then waits to be chosen \
+                             again. On Hyprland, tick “Allow a restore token” in the dialog.",
                         );
                     }
                     Ok(_) => {}

@@ -4,11 +4,12 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use ashpd::desktop::{
@@ -17,7 +18,7 @@ use ashpd::desktop::{
 };
 use ashpd::enumflags2::BitFlags;
 use futures_util::StreamExt;
-use isocast_engine::{CaptureFormat, PickedScreen, ScreenTarget, VideoSink};
+use isocast_engine::{CaptureFormat, NotChosen, PickedScreen, ScreenTarget, VideoSink};
 use isocast_protocol::devices::Display;
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +26,10 @@ use crate::{frames::Frame, pipewire_video};
 
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-static DECLINED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
+/// Held while a source start or a pick talks to the portal, so at most one
+/// sharing dialog is open at a time: the dialog doesn't say which source
+/// it is for, and the person answers them one after another.
+static DIALOG: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const MAX_SETTINGS: u64 = 64 * 1024;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -69,7 +73,23 @@ fn save(key: &str, saved: Saved) -> Result<()> {
         "at most 32 saved portal selections are supported"
     );
     all.insert(key.to_owned(), saved);
-    let bytes = serde_json::to_vec(&all)?;
+    write(&all)
+}
+
+/// Forget the choice saved under `key`, so its source waits for a pick.
+fn forget(key: &str) -> Result<()> {
+    let _lock = SETTINGS_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("capture settings lock poisoned"))?;
+    let mut all = load()?;
+    if all.remove(key).is_some() {
+        write(&all)?;
+    }
+    Ok(())
+}
+
+fn write(all: &BTreeMap<String, Saved>) -> Result<()> {
+    let bytes = serde_json::to_vec(all)?;
     ensure!(
         bytes.len() <= MAX_SETTINGS as usize,
         "Linux capture settings exceed 64 KiB"
@@ -126,12 +146,8 @@ pub fn displays() -> Result<Vec<Display>> {
         .collect())
 }
 
-pub fn allow_prompt() {
-    DECLINED
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clear();
-}
+/// Called once if the portal closes a share after it started.
+type OnClosed = Box<dyn FnOnce(String) + Send>;
 
 /// Read the ScreenCast capabilities, never create a session or ask for a grant.
 pub fn doctor_check() -> isocast_protocol::api::Check {
@@ -168,27 +184,38 @@ pub fn doctor_check() -> isocast_protocol::api::Check {
             CheckStatus::Warning
         },
         detail: result.err().map_or_else(
-            || "Screen sharing available; the desktop asks when capture starts.".into(),
+            || {
+                "Screen sharing available; choose each screen or window with `isocast screen pick`."
+                    .into()
+            },
             |e| e.to_string(),
         ),
         fix,
     }
 }
 
-pub struct Capture {
-    // Stop PipeWire before closing its portal session.
-    video: Option<pipewire_video::Capture>,
+/// One open portal share: its PipeWire remote and what was chosen, and
+/// the thread that keeps its session open until the share is dropped or
+/// the portal closes it.
+struct Share {
+    /// Taken by the capture that starts PipeWire on it.
+    remote: Option<OwnedFd>,
+    selected: Selected,
+    /// Whether it shows the cursor (a pick hands a share only to a start
+    /// that asks the same).
+    cursor: bool,
+    on_closed: Arc<Mutex<Option<OnClosed>>>,
+    /// The portal closed it.
+    closed: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl Drop for Capture {
+impl Drop for Share {
     fn drop(&mut self) {
-        // Disconnecting PipeWire can itself make the compositor close the
-        // session. That is our shutdown, not a revoked grant.
+        // Closing our own session is our shutdown, not a revoked grant.
         self.stopping.store(true, Ordering::Release);
-        drop(self.video.take());
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -196,6 +223,32 @@ impl Drop for Capture {
             let _ = thread.join();
         }
     }
+}
+
+/// A running screen or window capture. Its fields drop in order: PipeWire
+/// stops before the portal session closes.
+pub struct Capture {
+    _video: pipewire_video::Capture,
+    share: Share,
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        // Disconnecting PipeWire can itself make the compositor close the
+        // session. That is our shutdown, not a revoked grant.
+        self.share.stopping.store(true, Ordering::Release);
+    }
+}
+
+/// Shares `screen_pick` opened, each kept a few seconds (with a number
+/// telling them apart) for its source to take over when it reopens, so the
+/// person chooses once even where the desktop keeps no restore token.
+static HANDOFF: Mutex<BTreeMap<String, (u64, Share)>> = Mutex::new(BTreeMap::new());
+const HANDOFF_FOR: Duration = Duration::from_secs(15);
+static NEXT_HANDOFF: AtomicU64 = AtomicU64::new(0);
+
+fn handoff() -> std::sync::MutexGuard<'static, BTreeMap<String, (u64, Share)>> {
+    HANDOFF.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 /// Saved window selections are kept under `window:` and the source's id,
@@ -216,6 +269,13 @@ impl Kind {
         match self {
             Kind::Screen => SourceType::Monitor,
             Kind::Window => SourceType::Window,
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Kind::Screen => "screen",
+            Kind::Window => "window",
         }
     }
 }
@@ -276,9 +336,8 @@ enum Asked {
 
 /// Refuse a stream of the wrong kind. Some desktops' dialogs offer every
 /// kind whatever the source asks for (xdg-desktop-portal-hyprland ignores
-/// the requested types and opens on its Windows tab), so the error names
-/// the tab to use there. A portal that doesn't say what it shared is
-/// trusted.
+/// the requested types and shows every tab), so the error names the tab to
+/// use there. A portal that doesn't say what it shared is trusted.
 fn check_shared(
     kind: Kind,
     shared: Option<SourceType>,
@@ -389,9 +448,10 @@ async fn select(
     let stream = &response.streams()[0];
     if let Err(error) = check_shared(kind, stream.source_type(), asked, hyprland()) {
         // A start spent the saved token on the wrong kind; forget it so the
-        // next start asks. A pick used no token, so the earlier choice stays.
+        // source waits for a pick. A pick used no token, so the earlier
+        // choice stays.
         if let Asked::Start = asked {
-            let _ = save(key, Saved::default());
+            let _ = forget(key);
         }
         return Err(error);
     }
@@ -414,46 +474,138 @@ async fn select(
     Ok(selected)
 }
 
-/// Show the desktop's sharing dialog for `target` and keep the choice for
-/// it, replacing any it had. Waits up to 3 minutes for the person.
-pub fn pick(target: &ScreenTarget<'_>) -> Result<PickedScreen> {
-    let (key, kind) = target_key(target)?;
-    let thread_key = key.clone();
-    let selected = std::thread::Builder::new()
-        .name("linux-screen-pick".into())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
+/// Open a portal share for `key`. A start restores `token` where the
+/// portal can, else the portal shows its sharing dialog; a pick always
+/// shows it. Waits for the person up to 70 s for a start, 3 minutes for a
+/// pick; fails if another dialog of ours stays open past 10 s.
+fn open(
+    key: String,
+    kind: Kind,
+    asked: Asked,
+    cursor: bool,
+    token: Option<String>,
+    closed_reason: String,
+) -> Result<Share> {
+    let answer = Duration::from_secs(match asked {
+        Asked::Start => 70,
+        Asked::Pick => 180,
+    });
+    let on_closed: Arc<Mutex<Option<OnClosed>>> = Arc::default();
+    let closed = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let (thread_closed, thread_on_closed, thread_stopping) =
+        (closed.clone(), on_closed.clone(), stopping.clone());
+    let (send, receive) = mpsc::sync_channel(1);
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let thread = std::thread::Builder::new().name("linux-screen-portal".into()).spawn(move || {
+        let result = (|| -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             runtime.block_on(async {
-                let (portal, session) = connect().await?;
-                let selected = tokio::time::timeout(
-                    Duration::from_secs(180),
-                    select(
-                        &portal,
-                        &session,
-                        &thread_key,
-                        kind,
-                        Asked::Pick,
-                        None,
-                        None,
-                    ),
-                )
-                .await
-                .context("nothing was chosen within 3 minutes")
-                .and_then(|result| result);
+                let (portal, session) = tokio::select! {
+                    _ = &mut stopped => return Ok(()),
+                    result = connect() => result?,
+                };
+                let mut closed = tokio::time::timeout(Duration::from_secs(5), session.receive_closed())
+                    .await.context("desktop portal signal subscription timed out")??;
+                let dialog = tokio::select! {
+                    _ = &mut stopped => return Ok(()),
+                    dialog = tokio::time::timeout(Duration::from_secs(10), DIALOG.lock()) => dialog
+                        .context("another source's sharing dialog is open; answer it first")?,
+                };
+                let opening = async {
+                    let available = portal.available_cursor_modes().await?;
+                    let requested = if cursor { CursorMode::Embedded } else { CursorMode::Hidden };
+                    ensure!(available.contains(requested), "desktop portal cannot provide the requested cursor mode");
+                    let selected = select(&portal, &session, &key, kind, asked, Some(requested), token.as_deref()).await?;
+                    let fd = portal.open_pipe_wire_remote(&session, Default::default()).await?;
+                    Ok::<_, anyhow::Error>((fd, selected))
+                };
+                let opened = tokio::select! {
+                    _ = &mut stopped => Err(anyhow::anyhow!("screen sharing cancelled")),
+                    result = tokio::time::timeout(answer, opening) => result
+                        .with_context(|| format!(
+                            "nothing was chosen in the desktop's sharing dialog within {} s",
+                            answer.as_secs()
+                        ))
+                        .and_then(|result| result),
+                };
+                drop(dialog);
+                // The portal couldn't restore a start's saved choice, and its
+                // dialog was cancelled or left: forget the spent token, so the
+                // source waits for a pick instead of showing the dialog again.
+                // A pick used no token, so the earlier choice stays.
+                if let Asked::Start = asked
+                    && let Err(error) = &opened
+                    && (error.is::<tokio::time::error::Elapsed>() || error.chain().any(|cause| matches!(cause.downcast_ref::<ashpd::Error>(), Some(ashpd::Error::Response(_))))) {
+                        let _ = forget(&key);
+                }
+                let succeeded = opened.is_ok();
+                if send.send(opened).is_ok() && succeeded {
+                    tokio::select! {
+                        biased;
+                        _ = stopped => {},
+                        _ = closed.next() => {
+                            if !thread_stopping.load(Ordering::Acquire) {
+                                // Its window closed, or sharing was revoked:
+                                // the grant is spent.
+                                let _ = forget(&key);
+                                thread_closed.store(true, Ordering::Release);
+                                let on_closed = thread_on_closed.lock().unwrap_or_else(|error| error.into_inner()).take();
+                                if let Some(on_closed) = on_closed {
+                                    on_closed(closed_reason);
+                                }
+                            }
+                        },
+                    }
+                }
                 let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
-                selected
+                Ok(())
             })
-        })?
-        .join()
-        .map_err(|_| anyhow::anyhow!("screen_pick: the portal thread panicked"))?
-        .context("screen_pick")?;
-    // A choice made now overrides an earlier decline.
-    DECLINED
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .remove(&key);
+        })();
+        if let Err(error) = result { let _ = send.send(Err(error)); }
+    })?;
+    // 10 s connect + 5 s subscription + 10 s for another dialog + the answer,
+    // and 5 s to spare. For a start that is 100 s; with 15 s for PipeWire it
+    // fits the 120 s open budget.
+    let (remote, selected) = match receive.recv_timeout(answer + Duration::from_secs(30)) {
+        Ok(Ok(opened)) => opened,
+        result => {
+            stopping.store(true, Ordering::Release);
+            let _ = stop.send(());
+            let _ = thread.join();
+            return Err(match result {
+                Ok(Err(error)) => error,
+                _ => anyhow::anyhow!("desktop portal did not respond"),
+            });
+        }
+    };
+    Ok(Share {
+        remote: Some(remote),
+        selected,
+        cursor,
+        on_closed,
+        closed,
+        stopping,
+        stop: Some(stop),
+        thread: Some(thread),
+    })
+}
+
+/// Show the desktop's sharing dialog for `target` and keep the choice for
+/// it, replacing any it had. Waits up to 3 minutes for the person. The
+/// share stays open for a few seconds, so the source reopening on it
+/// doesn't ask again.
+pub fn pick(target: &ScreenTarget<'_>, cursor: bool) -> Result<PickedScreen> {
+    let (key, kind) = target_key(target)?;
+    let share = open(
+        key.clone(),
+        kind,
+        Asked::Pick,
+        cursor,
+        None,
+        closed_reason(target),
+    )
+    .context("screen_pick")?;
     // The size it records at: even, or 0 if the portal didn't say.
     let even = |size: u32| {
         if size == 0 {
@@ -462,11 +614,30 @@ pub fn pick(target: &ScreenTarget<'_>) -> Result<PickedScreen> {
             pipewire_video::even(size)
         }
     };
-    Ok(PickedScreen {
-        width: even(selected.width),
-        height: even(selected.height),
-        remembered: selected.remembered,
-    })
+    let picked = PickedScreen {
+        width: even(share.selected.width),
+        height: even(share.selected.height),
+        remembered: share.selected.remembered,
+    };
+    let number = NEXT_HANDOFF.fetch_add(1, Ordering::Relaxed);
+    // The expiry starts first: a share is never kept without one.
+    let expiring = key.clone();
+    std::thread::Builder::new()
+        .name("linux-screen-handoff".into())
+        .spawn(move || {
+            std::thread::sleep(HANDOFF_FOR);
+            let mut shares = handoff();
+            let expired = match shares.get(&expiring) {
+                Some((kept, _)) if *kept == number => shares.remove(&expiring),
+                _ => None,
+            };
+            // Drop the share after unlocking: its Drop joins the portal thread.
+            drop(shares);
+            drop(expired);
+        })?;
+    let replaced = handoff().insert(key, (number, share));
+    drop(replaced);
+    Ok(picked)
 }
 
 pub fn capture(
@@ -481,93 +652,86 @@ pub fn capture(
         "Linux screen capture: 10-bit capture is not supported; select 8-bit ISO recording"
     );
     let (key, kind) = target_key(&target)?;
-    {
-        let mut declined = DECLINED.lock().unwrap_or_else(|error| error.into_inner());
-        declined.retain(|_, when| when.elapsed() < Duration::from_secs(600));
-        ensure!(
-            !declined.contains_key(&key),
-            "screen sharing was declined or stopped; request screen permission to try again, or wait ten minutes"
-        );
-    }
-    let on_stopped = Arc::new(sink.stopped);
+    // A share picked for this key, if it shows the cursor as this source
+    // does; another source on the same display may take one that doesn't.
+    let picked = {
+        let mut shares = handoff();
+        match shares.get(&key) {
+            Some((_, share)) if share.cursor == cursor => shares.remove(&key),
+            _ => None,
+        }
+    };
+    let mut share = match picked {
+        Some((_, share)) => share,
+        None => {
+            let token = {
+                let _lock = SETTINGS_LOCK
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("capture settings lock poisoned"))?;
+                load()?.remove(&key).and_then(|saved| saved.token)
+            };
+            // A start never shows the dialog by itself: `screen_pick` does,
+            // for the source the person named.
+            let Some(token) = token else {
+                return Err(NotChosen { what: kind.noun() }.into());
+            };
+            open(
+                key,
+                kind,
+                Asked::Start,
+                cursor,
+                Some(token),
+                closed_reason(&target),
+            )?
+        }
+    };
+    let on_stopped: Arc<dyn Fn(String) + Send + Sync> = Arc::from(sink.stopped);
     let portal_stopped = on_stopped.clone();
-    let sink = VideoSink {
-        frame: sink.frame,
-        stopped: Box::new(move |reason| on_stopped(reason)),
-    };
-    let token = {
-        let _lock = SETTINGS_LOCK
-            .lock()
-            .map_err(|_| anyhow::anyhow!("capture settings lock poisoned"))?;
-        load()?.remove(&key).and_then(|saved| saved.token)
-    };
-    let (send, receive) = mpsc::sync_channel(1);
-    let (stop, mut stopped) = tokio::sync::oneshot::channel();
-    let stopping = Arc::new(AtomicBool::new(false));
-    let portal_stopping = stopping.clone();
-    let thread = std::thread::Builder::new().name("linux-screen-portal".into()).spawn(move || {
-        let result = (|| -> Result<()> {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            runtime.block_on(async {
-                let (portal, session) = tokio::select! {
-                    _ = &mut stopped => return Ok(()),
-                    result = connect() => result?,
-                };
-                let mut closed = tokio::time::timeout(Duration::from_secs(5), session.receive_closed())
-                    .await.context("desktop portal signal subscription timed out")??;
-                let opening = async {
-                    let available = portal.available_cursor_modes().await?;
-                    let requested = if cursor { CursorMode::Embedded } else { CursorMode::Hidden };
-                    ensure!(available.contains(requested), "desktop portal cannot provide the requested cursor mode");
-                    let selected = select(&portal, &session, &key, kind, Asked::Start, Some(requested), token.as_deref()).await?;
-                    let fd = portal.open_pipe_wire_remote(&session, Default::default()).await?;
-                    Ok::<_, anyhow::Error>((fd, selected.node))
-                };
-                let opened = tokio::select! {
-                    _ = &mut stopped => Err(anyhow::anyhow!("screen sharing cancelled")),
-                    result = tokio::time::timeout(Duration::from_secs(70), opening) => result
-                        .context("screen sharing timed out; approve the desktop portal dialog").and_then(|result| result),
-                };
-                if let Err(error) = &opened
-                    && error.chain().any(|cause| matches!(cause.downcast_ref::<ashpd::Error>(), Some(ashpd::Error::Response(_)))) {
-                        let mut declined = DECLINED.lock().unwrap_or_else(|error| error.into_inner());
-                        if declined.len() < 32 { declined.insert(key.clone(), Instant::now()); }
-                }
-                let succeeded = opened.is_ok();
-                if send.send(opened).is_ok() && succeeded {
-                    tokio::select! {
-                        biased;
-                        _ = stopped => {},
-                        _ = closed.next() => {
-                            if !portal_stopping.load(Ordering::Acquire) {
-                            let mut declined = DECLINED.lock().unwrap_or_else(|error| error.into_inner());
-                            if declined.len() < 32 { declined.insert(key.clone(), Instant::now()); }
-                            drop(declined);
-                            portal_stopped("desktop portal stopped screen sharing; request screen permission to try again, or wait ten minutes".into());
-                            }
-                        },
-                    }
-                }
-                let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
-                Ok(())
-            })
-        })();
-        if let Err(error) = result { let _ = send.send(Err(error)); }
-    })?;
-    let mut capture = Capture {
-        video: None,
-        stopping,
-        stop: Some(stop),
-        thread: Some(thread),
-    };
-    // 10s connect + 5s subscription + 70s consent + 15s PipeWire = 100s;
-    // even the caller's 90s portal watchdog + 15s fits the 120s open budget.
-    let (remote, node) = receive
-        .recv_timeout(Duration::from_secs(90))
-        .context("desktop portal did not respond")??;
-    let (video, format) = pipewire_video::start(remote, node, fps, sink)?;
-    capture.video = Some(video);
-    Ok((capture, format))
+    *share
+        .on_closed
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) =
+        Some(Box::new(move |reason| portal_stopped(reason)));
+    ensure!(
+        !share.closed.load(Ordering::Acquire),
+        "{}",
+        closed_reason(&target)
+    );
+    let remote = share
+        .remote
+        .take()
+        .context("desktop portal share has no remote")?;
+    let (video, format) = pipewire_video::start(
+        remote,
+        share.selected.node,
+        fps,
+        VideoSink {
+            frame: sink.frame,
+            stopped: Box::new(move |reason| on_stopped(reason)),
+        },
+    )?;
+    Ok((
+        Capture {
+            _video: video,
+            share,
+        },
+        format,
+    ))
+}
+
+/// The stop reason when the portal closes a running share.
+fn closed_reason(target: &ScreenTarget<'_>) -> String {
+    match *target {
+        ScreenTarget::Window { source, .. } => format!(
+            "the window shared for source {source:?} was closed, or its sharing was stopped; \
+             choose a window with `isocast screen pick {source}` (method `screen_pick`)"
+        ),
+        ScreenTarget::Display(display) => format!(
+            "sharing display {display:?} was stopped; choose a screen with `isocast screen pick` \
+             and the display source's id (method `screen_pick`)"
+        ),
+        _ => "screen sharing was stopped".into(),
+    }
 }
 
 #[cfg(test)]
@@ -618,6 +782,24 @@ mod tests {
             error.starts_with("display: a display id must be at most 128 bytes"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_closed_share_names_the_pick_that_chooses_again() {
+        assert_eq!(
+            closed_reason(&window("terminal")),
+            "the window shared for source \"terminal\" was closed, or its sharing was stopped; \
+             choose a window with `isocast screen pick terminal` (method `screen_pick`)"
+        );
+        assert_eq!(
+            closed_reason(&ScreenTarget::Display("main")),
+            "sharing display \"main\" was stopped; choose a screen with `isocast screen pick` \
+             and the display source's id (method `screen_pick`)"
+        );
+        let not_chosen = NotChosen {
+            what: Kind::Window.noun(),
+        };
+        assert_eq!(not_chosen.to_string(), "no window is chosen for it yet");
     }
 
     #[test]

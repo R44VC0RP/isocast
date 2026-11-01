@@ -2796,9 +2796,9 @@ impl Daemon {
     /// keep the choice for it, and reopen the sources it shows so they
     /// switch to it. The state lock is not held while the dialog waits.
     fn screen_pick(&self, params: ScreenPickParams) -> Result<ScreenPicked, RpcError> {
-        let target = {
+        let (target, cursor) = {
             let state = self.state.read();
-            let target = pick_target(state.setup.as_ref(), &params.source)?;
+            let (target, cursor) = pick_target(state.setup.as_ref(), &params.source)?;
             if let (Some(engine), Some(setup)) = (&state.engine, &state.setup)
                 && let Some(id) = target
                     .showing(setup)
@@ -2813,9 +2813,11 @@ impl Daemon {
                     ),
                 });
             }
-            target
+            (target, cursor)
         };
-        let picked = native().pick_screen(target.target()).map_err(failed)?;
+        let picked = native()
+            .pick_screen(target.target(), cursor)
+            .map_err(failed)?;
         let state = self.state.read();
         if let (Some(engine), Some(setup)) = (&state.engine, &state.setup) {
             for id in target.showing(setup) {
@@ -6076,8 +6078,9 @@ impl PickTarget {
 }
 
 /// The screen target `screen_pick` chooses for source `id`, which must be
-/// a display or window source of the live `setup`.
-fn pick_target(setup: Option<&Setup>, id: &str) -> Result<PickTarget, RpcError> {
+/// a display or window source of the live `setup`, and whether that source
+/// shows the cursor.
+fn pick_target(setup: Option<&Setup>, id: &str) -> Result<(PickTarget, bool), RpcError> {
     let invalid = |message: String| RpcError {
         code: RpcError::INVALID_PARAMS,
         message,
@@ -6109,12 +6112,17 @@ fn pick_target(setup: Option<&Setup>, id: &str) -> Result<PickTarget, RpcError> 
         )));
     };
     match &source.kind {
-        SourceKind::Display(display) => Ok(PickTarget::Display(display.display.clone())),
-        SourceKind::Window(window) => Ok(PickTarget::Window {
-            source: source.id.clone(),
-            app: window.app.clone(),
-            title: window.title.clone(),
-        }),
+        SourceKind::Display(display) => {
+            Ok((PickTarget::Display(display.display.clone()), display.cursor))
+        }
+        SourceKind::Window(window) => Ok((
+            PickTarget::Window {
+                source: source.id.clone(),
+                app: window.app.clone(),
+                title: window.title.clone(),
+            },
+            window.cursor,
+        )),
         other => Err(invalid(format!(
             "source: {id:?} is a {} source; screen_pick chooses for display and window sources: {}",
             other.label(),
@@ -6171,11 +6179,11 @@ mod tests {
         .unwrap();
         // A display's choice is kept for its `display`: every display
         // source giving it switches.
-        let main = pick_target(Some(&setup), "left").unwrap();
+        let (main, _) = pick_target(Some(&setup), "left").unwrap();
         assert_eq!(main, PickTarget::Display("main".into()));
         assert_eq!(main.showing(&setup), ["left", "right"]);
         // A window source keeps its own window.
-        let slides = pick_target(Some(&setup), "slides").unwrap();
+        let (slides, _) = pick_target(Some(&setup), "slides").unwrap();
         assert_eq!(
             slides.target(),
             ScreenTarget::Window {

@@ -563,7 +563,7 @@ enum Command {
     #[cfg_attr(
         target_os = "linux",
         command(
-            about = "Report what isocastd can capture on Linux. The screen is chosen in the desktop's screen-sharing dialog when capture starts (--request screen_recording lets a dismissed dialog ask again); cameras are /dev/video* devices your user must be able to open; PipeWire audio needs no permission. --open isn't available on Linux."
+            about = "Report what isocastd can capture on Linux. Screens and windows are chosen in the desktop's screen-sharing dialog with `isocast screen pick SOURCE`; cameras are /dev/video* devices your user must be able to open; PipeWire audio needs no permission. --open isn't available on Linux."
         )
     )]
     Permissions {
@@ -908,9 +908,10 @@ enum StreamCommand {
 #[derive(Subcommand)]
 enum ScreenCommand {
     /// Choose the window a window source records (or the screen of a
-    /// display source) in the desktop's sharing dialog. The source then
-    /// opens it without asking while the desktop remembers the choice; a
-    /// running source switches to it. Waits up to 3 minutes. Linux only:
+    /// display source) in the desktop's sharing dialog; a source with
+    /// nothing chosen waits for this. The source then opens it without
+    /// asking while the desktop remembers the choice; a running source
+    /// switches to it. Waits up to 3 minutes. Linux only:
     /// elsewhere `isocast devices` lists the screens and windows.
     Pick {
         /// The display or window source's id.
@@ -4919,8 +4920,8 @@ fn screen_pick(source: String, json: bool) -> Result<ExitCode> {
     }
     if !picked.remembered {
         println!(
-            "The desktop didn't keep the choice, so its dialog asks again each time the source \
-             starts (on Hyprland, tick \"Allow a restore token\")."
+            "The desktop didn't keep the choice: the source runs on it until it stops, then \
+             waits to be chosen again (on Hyprland, tick \"Allow a restore token\" to keep it)."
         );
     }
     Ok(ExitCode::SUCCESS)
