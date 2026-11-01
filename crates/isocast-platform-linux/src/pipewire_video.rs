@@ -609,6 +609,10 @@ fn scale_bgra(
         )
     };
     let (left, top) = ((out_width - width) / 2, (out_height - height) / 2);
+    // Byte offset in an input row of each output column.
+    let columns: Vec<usize> = (0..width)
+        .map(|x| x * in_width / width * layout.pixel_bytes)
+        .collect();
     for (y, output) in target
         .chunks_exact_mut(out_width * 4)
         .take(out_height)
@@ -621,8 +625,7 @@ fn scale_bgra(
         }
         let start = row_start(layout, (y - top) * in_height / height);
         let input = &source[start..start + layout.row];
-        for (x, dst) in output[left..left + width].iter_mut().enumerate() {
-            let at = x * in_width / width * layout.pixel_bytes;
+        for (dst, &at) in output[left..left + width].iter_mut().zip(&columns) {
             *dst = convert(&input[at..at + layout.pixel_bytes]);
         }
     }
