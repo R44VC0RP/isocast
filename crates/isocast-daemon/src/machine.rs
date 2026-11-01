@@ -58,7 +58,7 @@ impl Calibration {
                 .open(&temporary)?;
             file.write_all(crate::daemon_build().build.as_bytes())?;
             file.sync_all()?;
-            fs::rename(&temporary, self.failure_path())
+            isocast_protocol::fs::replace(&temporary, self.failure_path())
         })();
         if let Err(error) = result {
             self.status
@@ -359,7 +359,7 @@ impl Daemon {
                     .open(&temporary)?;
                 file.write_all(&serde_json::to_vec_pretty(profile)?)?;
                 file.sync_all()?;
-                fs::rename(&temporary, &calibration.path)?;
+                isocast_protocol::fs::replace(&temporary, &calibration.path)?;
                 Ok(())
             });
             let failed = !matches!(saved, Some(Ok(())));

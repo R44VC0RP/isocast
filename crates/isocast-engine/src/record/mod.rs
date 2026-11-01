@@ -142,8 +142,9 @@ pub struct RecordOptions<'a> {
     /// Called about once a second while recording, with live counters.
     pub on_status: Option<OnStatus<'a>>,
     /// Called as each take finishes (a split's take once its files are
-    /// finished, the last at the end), in take order, with its final
-    /// manifest once written.
+    /// finished, the last at the end), with its final manifest once written.
+    /// Normally in take order; a failed publication retried at Stop can arrive
+    /// after a later take. Use the supplied take number, not arrival order.
     pub on_take: Option<OnTake<'a>>,
     /// Markers, scene switches and live settings from another thread.
     pub control: Option<Arc<SessionControl>>,
@@ -156,6 +157,11 @@ pub struct RecordOptions<'a> {
 #[derive(Default)]
 pub struct SessionControl {
     state: Mutex<ControlState>,
+    /// Final manifests waiting on external readers/permissions. Kept separate
+    /// from live controls: retrying publication must never hold their lock.
+    metadata_pending: Mutex<BTreeMap<PathBuf, String>>,
+    #[cfg(windows)]
+    metadata_shutdown: AtomicBool,
     #[cfg(windows)]
     recording_wake: parking_lot::Condvar,
     /// While a recording stops, complete mix blocks through its last frame
@@ -326,6 +332,54 @@ impl ControlState {
 }
 
 impl SessionControl {
+    /// Publication failures still being retried by the recording worker.
+    /// Media is already finished; the session must not report completion yet.
+    pub fn metadata_pending(&self) -> Vec<String> {
+        self.metadata_pending.lock().values().cloned().collect()
+    }
+
+    /// A stopped session waiting for metadata, not an earlier split take.
+    /// Clients must still offer Stop while the next take is recording.
+    pub fn metadata_finalizing(&self) -> bool {
+        self.state.lock().finished && !self.metadata_pending.lock().is_empty()
+    }
+
+    /// Stop waiting for external readers after saving a durable final sidecar.
+    /// This is engine shutdown, not an ordinary Stop request.
+    #[cfg(windows)]
+    pub fn shutdown_metadata(&self) {
+        self.metadata_shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(windows)]
+    fn metadata_result(&self, path: &Path, error: Option<&anyhow::Error>) {
+        if let Some(error) = error {
+            let message = format!(
+                "{}: final metadata publication is pending: {error:#}; retrying in the background; \
+                 close applications holding the manifest open or restore folder write permission; \
+                 keep Isocast running to allow publication retries",
+                path.display()
+            );
+            let changed = {
+                let mut pending = self.metadata_pending.lock();
+                if pending.get(path) == Some(&message) {
+                    false
+                } else {
+                    pending.insert(path.to_owned(), message.clone());
+                    true
+                }
+            };
+            if changed {
+                isocast_diagnostics::diagnostic!("warn"; "{message}");
+            }
+        } else {
+            let removed = self.metadata_pending.lock().remove(path).is_some();
+            if removed {
+                isocast_diagnostics::diagnostic!("info"; "metadata publication no longer pending: {}", path.display());
+            }
+        }
+    }
+
     /// Wake the coordinator after its caller sets the recording's stop flag.
     /// The same lock guards entering the wait, so the notification cannot be
     /// lost between checking the atomic flag and sleeping.
@@ -991,6 +1045,11 @@ struct Take {
     end: Option<Time>,
     /// Its final manifest has been written.
     finalized: bool,
+    // A non-contention failure must be reported, not replayed every tick (or
+    // replayed after a successful publication whose final flush failed).
+    metadata_error: Option<String>,
+    #[cfg(windows)]
+    metadata_retry_at: Option<std::time::Instant>,
     /// The final manifest, once made (for [`OnTake`]).
     manifest: Option<SessionManifest>,
     /// The audio-stop errors its final manifest was made with.
@@ -1016,6 +1075,9 @@ impl Take {
             plans: plan.plans,
             end: None,
             finalized: false,
+            metadata_error: None,
+            #[cfg(windows)]
+            metadata_retry_at: None,
             manifest: None,
             audio_errors: Vec::new(),
         }
@@ -1920,6 +1982,86 @@ impl FolderLock {
             durable,
         )
     }
+
+    /// Already on the recording's background finalizer, after its writers have
+    /// joined. Retain this pinned folder lease and the exact final counts until
+    /// publication succeeds. Shutdown/the deadline leaves a durable sidecar
+    /// when possible; if that is blocked too, try the primary before returning.
+    pub(crate) fn finish(
+        &self,
+        path: &Path,
+        manifest: &SessionManifest,
+        control: &SessionControl,
+    ) -> Result<()> {
+        self.finish_until(
+            path,
+            manifest,
+            control,
+            std::time::Instant::now() + Duration::from_secs(300),
+        )
+    }
+
+    pub(crate) fn save_final(&self, path: &Path, manifest: &SessionManifest) -> Result<()> {
+        isocast_mux::recovery::save_final_in(
+            &self.directory,
+            path.file_name().context("manifest has no file name")?,
+            manifest,
+        )
+    }
+
+    fn finish_until(
+        &self,
+        path: &Path,
+        manifest: &SessionManifest,
+        control: &SessionControl,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
+        let mut final_saved = false;
+        let mut delay = Duration::from_millis(500);
+        loop {
+            let result = (|| {
+                if !final_saved {
+                    self.save_final(path, manifest)?;
+                    final_saved = true;
+                }
+                self.write(path, manifest, true)
+            })();
+            match result {
+                Ok(()) => {
+                    control.metadata_result(path, None);
+                    return Ok(());
+                }
+                Err(error) if isocast_mux::file::metadata_blocked(&error) => {
+                    control.metadata_result(path, Some(&error));
+                    if control.metadata_shutdown.load(Ordering::SeqCst)
+                        || std::time::Instant::now() >= deadline
+                    {
+                        control.metadata_result(path, None);
+                        if !final_saved {
+                            // A held sidecar must not prevent a last attempt at
+                            // the primary when shutdown/deadline stops retries.
+                            return self.write(path, manifest, true).with_context(|| format!(
+                                "could not save final metadata sidecar for {}: {error:#}; primary publication also failed",
+                                path.display()
+                            ));
+                        }
+                        return Err(error).with_context(|| format!(
+                            "final metadata saved durably in {}.final; publication stopped at shutdown or the five-minute retry limit; recovery adopts it if the primary is still recording",
+                            path.display()
+                        ));
+                    }
+                    thread::sleep(
+                        delay.min(deadline.saturating_duration_since(std::time::Instant::now())),
+                    );
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                }
+                Err(error) => {
+                    control.metadata_result(path, None);
+                    return Err(error);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -2341,5 +2483,245 @@ pub fn expand_home(folder: &str) -> PathBuf {
             }
         }
         _ => PathBuf::from(folder),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod metadata_finalization {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn retries_after_the_short_budget_and_keeps_final_counts() {
+        for hold_sidecar in [false, true] {
+            let folder = std::env::temp_dir().join(format!(
+                "isocast-final-metadata-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&folder).unwrap();
+            let lock = FolderLock::hold(&folder).unwrap();
+            let path = folder.join("take.session.json");
+            let mut manifest: SessionManifest = serde_json::from_value(serde_json::json!({
+                "version": 1, "setup": "held reader", "status": "recording",
+                "started_at": "2026-10-25T12:00:00Z", "host_time_ns": 0,
+                "files": [], "errors": []
+            }))
+            .unwrap();
+            manifest.status = SessionStatus::Complete;
+            manifest.duration_seconds = Some(18.0);
+            manifest.files.push(
+                serde_json::from_value(serde_json::json!({
+                    "path": "program.mov", "source": "program", "kind": "program",
+                    "width": 320, "height": 180, "fps": 30, "audio": [],
+                    "start_offset_seconds": 0.0, "duration_seconds": 18.0, "frames": 540,
+                    "repeated_frames": 0, "dropped_frames": 0, "audio_dropouts": 0
+                }))
+                .unwrap(),
+            );
+            let mut initial = manifest.clone();
+            initial.status = SessionStatus::Recording;
+            initial.duration_seconds = None;
+            initial.files[0].frames = None;
+            lock.write(&path, &initial, true).unwrap();
+            let held_path = if hold_sidecar {
+                let mut earlier = manifest.clone();
+                earlier.files[0].frames = Some(1);
+                lock.save_final(&path, &earlier).unwrap();
+                folder.join("take.session.json.final")
+            } else {
+                path.clone()
+            };
+            let control = SessionControl::default();
+            let reader = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(&held_path)
+                .unwrap();
+            let (pending, result) = thread::scope(|scope| {
+                let worker = scope.spawn(|| lock.finish(&path, &manifest, &control));
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while control.metadata_pending().is_empty()
+                    && !worker.is_finished()
+                    && Instant::now() < deadline
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let pending = control.metadata_pending();
+                let split_kept_controls = !control.metadata_finalizing();
+                control.finish_recording();
+                let was_finalizing = control.metadata_finalizing();
+                let before: SessionManifest =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let was_recording = before.status == SessionStatus::Recording;
+                let was_running = !worker.is_finished();
+                // Always release the external blocker before asserting or joining.
+                drop(reader);
+                let result = worker.join().unwrap();
+                assert!(
+                    was_running && was_recording && split_kept_controls && was_finalizing,
+                    "completion reported before publication"
+                );
+                (pending, result)
+            });
+            result.unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(pending[0].contains("retrying in the background"));
+            assert!(control.metadata_pending().is_empty());
+            assert!(!control.metadata_finalizing());
+            let saved: SessionManifest =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved, manifest);
+            // Hard links are invalid destinations, not contention to retry forever.
+            std::fs::hard_link(&path, folder.join("alias")).unwrap();
+            assert!(lock.finish(&path, &manifest, &control).is_err());
+            assert!(control.metadata_pending().is_empty());
+            drop(lock);
+            std::fs::remove_dir_all(folder).unwrap();
+        }
+    }
+
+    #[test]
+    fn shutdown_with_a_blocked_sidecar_still_publishes_the_primary() {
+        let folder = std::env::temp_dir().join(format!(
+            "isocast-held-final-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("take.session.json");
+        let lock = FolderLock::hold(&folder).unwrap();
+        let mut manifest: SessionManifest = serde_json::from_value(serde_json::json!({
+            "version":1,"setup":"shutdown","status":"recording",
+            "started_at":"2026-10-25T12:00:00Z","host_time_ns":123,"files":[],"errors":[]
+        }))
+        .unwrap();
+        lock.write(&path, &manifest, true).unwrap();
+        manifest.status = SessionStatus::Interrupted;
+        manifest.duration_seconds = Some(18.0);
+        manifest
+            .errors
+            .push("recording interrupted: emergency stop".into());
+        lock.save_final(&path, &manifest).unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(folder.join("take.session.json.final"))
+            .unwrap();
+        let control = SessionControl::default();
+        control.shutdown_metadata();
+        let began = Instant::now();
+        lock.finish(&path, &manifest, &control).unwrap();
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(control.metadata_pending().is_empty());
+        let saved: SessionManifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, manifest);
+        // If both names are held, shutdown remains bounded and reports the
+        // unsaved outcome instead of claiming a durable fallback was saved.
+        let primary = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let began = Instant::now();
+        let error = lock.finish(&path, &manifest, &control).unwrap_err();
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(format!("{error:#}").contains("primary publication also failed"));
+        assert!(control.metadata_pending().is_empty());
+        drop(primary);
+        drop(reader);
+        drop(lock);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn shutdown_and_retry_deadline_leave_an_exact_recoverable_outcome() {
+        for shutdown in [true, false] {
+            let folder = std::env::temp_dir().join(format!(
+                "isocast-final-exit-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&folder).unwrap();
+            let path = folder.join("take.session.json");
+            let lock = FolderLock::hold(&folder).unwrap();
+            let mut manifest: SessionManifest = serde_json::from_value(serde_json::json!({
+                "version": 1, "setup": "shutdown", "status": "recording",
+                "started_at": "2026-10-25T12:00:00Z", "host_time_ns": 123,
+                "files": [{"path":"program.mov", "source":"program", "kind":"program",
+                    "width":320,"height":180,"fps":30,"audio":[]}], "errors":[]
+            }))
+            .unwrap();
+            lock.write(&path, &manifest, true).unwrap();
+            manifest.status = SessionStatus::Complete;
+            manifest.duration_seconds = Some(18.0);
+            manifest.files[0].frames = Some(540);
+            manifest.files[0].dropped_frames = Some(0);
+            manifest.files[0].repeated_frames = Some(0);
+            manifest.files[0].audio_dropouts = Some(0);
+            manifest.files[0].duration_seconds = Some(18.0);
+            let control = SessionControl::default();
+            if shutdown {
+                control.shutdown_metadata();
+            }
+            let reader = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(&path)
+                .unwrap();
+            let began = Instant::now();
+            let deadline = began
+                + if shutdown {
+                    Duration::from_secs(300)
+                } else {
+                    Duration::ZERO
+                };
+            let error = lock
+                .finish_until(&path, &manifest, &control, deadline)
+                .unwrap_err();
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "shutdown/deadline did not bound retries"
+            );
+            assert!(format!("{error:#}").contains("saved durably"));
+            assert!(control.metadata_pending().is_empty());
+            drop(lock); // model the process ending; recovery obtains a new lease
+            assert!(
+                isocast_mux::recovery::interrupted_sessions(&folder, false)
+                    .unwrap()
+                    .is_empty()
+            );
+            let held = isocast_mux::recovery::recover_directory(&folder).unwrap();
+            assert!(held.sessions.is_empty());
+            assert_eq!(
+                held.warnings.len(),
+                1,
+                "the reader still blocks publication"
+            );
+            drop(reader);
+            assert!(
+                isocast_mux::recovery::interrupted_sessions(&folder, true)
+                    .unwrap()
+                    .is_empty()
+            );
+            let saved: SessionManifest =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                saved, manifest,
+                "recovery must not downgrade complete to interrupted or lose counts"
+            );
+            std::fs::remove_dir_all(folder).unwrap();
+        }
     }
 }

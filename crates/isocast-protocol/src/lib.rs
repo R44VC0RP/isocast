@@ -17,6 +17,7 @@ pub mod devices;
 pub mod diagnostics;
 mod fields;
 mod filter;
+pub mod fs;
 pub mod governor;
 pub mod h264;
 pub mod hello;

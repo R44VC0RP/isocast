@@ -998,8 +998,14 @@ impl Controls {
         } else {
             SharedString::new()
         });
+        let pending = metadata_pending(s.status.as_ref().and_then(|x| x.diagnostics.as_ref()));
         area.set_rec_tooltip(
-            if s.finalizing() || (recording && s.busy_record) {
+            if s.finalizing() && !pending.is_empty() {
+                format!(
+                    "Finishing recording files. Final metadata is still pending:\n{}",
+                    pending.join("\n")
+                )
+            } else if s.finalizing() || (recording && s.busy_record) {
                 "Finishing recording files. Waiting for the completed outcome.".to_string()
             } else if paused {
                 format!(
@@ -1232,8 +1238,15 @@ impl Controls {
         };
         let link = s.link_error.as_str();
         let load_warning = s.status.as_ref().and_then(|s| s.load_warning.as_ref());
+        // Why a stopped take is still finishing: its final metadata
+        // couldn't be written yet (the engine retries; the reason says
+        // what to close or fix).
+        let pending = metadata_pending(s.status.as_ref().and_then(|x| x.diagnostics.as_ref()));
+        let pending = pending.first().filter(|_| s.finalizing()).cloned();
         let mut line = if !link.is_empty() && s.status.is_none() {
             link.to_string()
+        } else if let Some(reason) = &pending {
+            format!("Finishing recording files · {reason}")
         } else if s.finalizing() || (recording && s.busy_record) {
             format!(
                 "Finishing recording files{isos}{}",
@@ -1320,7 +1333,11 @@ impl Controls {
         let held = governor.is_some_and(|g| g.error.is_some() || g.enabled && g.limited_by_pins);
         area.set_status_line(line.into());
         area.set_status_warn(
-            load_warning.is_some() || (streaming && health != "ok") || vertical_bad || held,
+            load_warning.is_some()
+                || (streaming && health != "ok")
+                || vertical_bad
+                || held
+                || pending.is_some(),
         );
 
         // The readouts: the take's drops, else the stream's (with its
@@ -1791,7 +1808,23 @@ fn current_transition(app: &Rc<App>) -> Value {
         .unwrap_or_else(|| json!({ "kind": "cut" }))
 }
 
-/// 3725 s → "01:02:05".
+/// The final metadata the engine is still retrying to write for a
+/// stopped take (`status.diagnostics.metadata_pending`): each says the
+/// file, the error and what to do. Empty when the daemon omits it.
+fn metadata_pending(diagnostics: Option<&Value>) -> Vec<String> {
+    diagnostics
+        .and_then(|d| d.get("metadata_pending"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The LCD's frame rate in two whole digits at least, the unused leading
 /// zero apart to be dimmed: ("0", "7.71"), ("", "29.93"); dimmed "00.00"
 /// while the engine isn't running.
@@ -1809,6 +1842,7 @@ fn lcd_fps(fps: Option<f64>) -> (String, String) {
     }
 }
 
+/// 3725 s → "01:02:05".
 fn clock(seconds: u64) -> String {
     format!(
         "{:02}:{:02}:{:02}",
@@ -3334,6 +3368,18 @@ mod tests {
             Some(40)
         );
         assert_eq!(stream_drops("the stream reconnected"), None);
+    }
+
+    #[test]
+    fn pending_metadata_is_read_from_diagnostics() {
+        let reason = "C:\\rec\\take.isocast.json: final metadata publication is pending: denied";
+        assert_eq!(
+            metadata_pending(Some(&json!({ "metadata_pending": [reason] }))),
+            vec![reason.to_string()]
+        );
+        assert!(metadata_pending(Some(&json!({ "metadata_pending": [] }))).is_empty());
+        assert!(metadata_pending(Some(&json!({ "frame_budget": null }))).is_empty());
+        assert!(metadata_pending(None).is_empty());
     }
 
     #[test]

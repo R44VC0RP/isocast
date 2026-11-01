@@ -1495,8 +1495,13 @@ fn start_engine(
 impl Daemon {
     /// Signals, quit Apple Events and the shutdown API share this path. A
     /// timeout is diagnostic, never permission to exit during an active take.
+    /// Finished media can leave blocked metadata in its durable final sidecar.
     fn graceful_shutdown(&self) {
         let _shutdown = self.begin_shutdown();
+        #[cfg(windows)]
+        if let Some(control) = self.state.read().control() {
+            control.shutdown_metadata();
+        }
         let _ = self.cancel_calibration("Calibration cancelled by shutdown");
         loop {
             let result = self.stop(None);
@@ -1716,6 +1721,16 @@ impl Daemon {
                         .is_ok()
                 };
                 let mut report = doctor(setup.as_ref(), params.folder.as_deref(), &may_write);
+                if let Some(control) = self.state.read().control() {
+                    for detail in control.metadata_pending() {
+                        report.checks.push(isocast_protocol::api::Check {
+                            name: "recording metadata publication".into(),
+                            status: isocast_protocol::api::CheckStatus::Problem,
+                            detail,
+                            fix: Some("Close readers or restore folder write permission; keep Isocast running while it retries.".into()),
+                        });
+                    }
+                }
                 if let Some(setup) = setup
                     && let Ok(estimate) = self.estimate_capacity(CapacityParams {
                         setup: Some(setup),
@@ -1865,13 +1880,20 @@ impl Daemon {
             Method::Stop(params) => self
                 .stop(params.unwrap_or_default().session.as_deref())
                 .and_then(to_json),
-            Method::Shutdown => match self.stop(None) {
-                // Shutting down while idle is fine.
-                Err(err) if shutdown && err.code == RpcError::WRONG_STATE => {
-                    to_json(serde_json::Value::Null)
+            Method::Shutdown => {
+                self.shutting_down.store(true, Ordering::SeqCst);
+                #[cfg(windows)]
+                if let Some(control) = self.state.read().control() {
+                    control.shutdown_metadata();
                 }
-                result => result.and_then(to_json),
-            },
+                match self.stop(None) {
+                    // Shutting down while idle is fine.
+                    Err(err) if shutdown && err.code == RpcError::WRONG_STATE => {
+                        to_json(serde_json::Value::Null)
+                    }
+                    result => result.and_then(to_json),
+                }
+            }
         };
         match result {
             Ok(value) => Response::ok(id, value),
@@ -3096,10 +3118,18 @@ impl Daemon {
 
     fn status(&self) -> Status {
         let state = self.state.read();
+        let control = state.control();
+        let metadata_pending = control
+            .as_ref()
+            .map(|control| control.metadata_pending())
+            .unwrap_or_default();
         let finalizing = state
             .session
             .as_ref()
-            .is_some_and(|session| session.stop.load(Ordering::SeqCst));
+            .is_some_and(|session| session.stop.load(Ordering::SeqCst))
+            || control
+                .as_ref()
+                .is_some_and(|control| control.metadata_finalizing());
         let (engine, mut live, files) = match &state.session {
             None => (EngineState::Idle, None, Vec::new()),
             Some(session) => match session.files.lock().clone() {
@@ -3157,6 +3187,7 @@ impl Daemon {
             diagnostics: Some({
                 let mut health = isocast_diagnostics::health();
                 health["frame_budget"] = native().frame_budget().unwrap_or(serde_json::Value::Null);
+                health["metadata_pending"] = serde_json::json!(metadata_pending);
                 health
             }),
             interrupted: self.interrupted.lock().clone(),
@@ -4395,7 +4426,7 @@ impl Daemon {
             }),
             None => Err(RpcError {
                 code: RpcError::FAILED,
-                message: "the recording did not stop in time".into(),
+                message: "the recording did not stop in time; inspect status.diagnostics.metadata_pending or run `isocast doctor` for blocked final metadata publication".into(),
             }),
         }
     }

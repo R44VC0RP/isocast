@@ -14,13 +14,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT,
-    FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation, NtCreateFile,
-    NtSetInformationFile,
+    FILE_CREATE, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
+    FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
+    FILE_RENAME_REPLACE_IF_EXISTS, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation,
+    FileRenameInformationEx, NtCreateFile, NtSetInformationFile,
 };
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
-    UNICODE_STRING,
+    ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, NTSTATUS, OBJ_CASE_INSENSITIVE,
+    RtlNtStatusToDosError, STATUS_INVALID_INFO_CLASS, STATUS_INVALID_PARAMETER,
+    STATUS_NOT_SUPPORTED, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
@@ -34,7 +36,15 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
-use super::OpenMode;
+use super::{MetadataBlocked, OpenMode};
+
+fn publication_error(error: io::Error) -> anyhow::Error {
+    if isocast_protocol::fs::is_replace_busy(&error) {
+        MetadataBlocked(error).into()
+    } else {
+        error.into()
+    }
+}
 
 pub(super) fn open_directory(path: &Path) -> io::Result<File> {
     // Only this initial resolution may follow a symlink/junction. Permit a
@@ -215,7 +225,9 @@ pub(super) fn replace_metadata(
                 .sync_all()
                 .context("could not flush metadata temporary before publication")?;
         }
-        let replace = match open_child(directory, name, OpenMode::Read) {
+        let replace = match isocast_protocol::fs::retry_replace(|| {
+            open_child(directory, name, OpenMode::Read)
+        }) {
             Ok(existing) => {
                 // Refuse existing reparse/hard links (open_child), and short-name
                 // or case aliases here. Only compare this handle's normalized
@@ -228,14 +240,20 @@ pub(super) fn replace_metadata(
                 true
             }
             Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => false,
-            Err(error) => return Err(error).context("metadata destination is not safe to replace"),
+            Err(error) => {
+                return Err(publication_error(error))
+                    .context("metadata destination is not safe to replace");
+            }
         };
         // This replaces the directory entry, never writes through the target.
         // A newly appearing target is refused if inspection found no target.
         // Other processes can still change an existing entry after inspection;
         // rename does not follow its final symlink or modify other hard links.
-        rename_metadata(directory, &temporary, name, replace)
-            .context("could not publish metadata temporary")
+        isocast_protocol::fs::retry_replace(|| {
+            rename_metadata(directory, &temporary, name, replace)
+        })
+        .map_err(publication_error)
+        .context("could not publish metadata temporary")
     })();
     if let Err(error) = publish {
         // Only the owned create-new handle is eligible for cleanup. In
@@ -284,6 +302,39 @@ fn create_metadata_temp(directory: &File, destination: &OsStr) -> Result<File> {
 }
 
 fn rename_metadata(directory: &File, file: &File, name: &OsStr, replace: bool) -> io::Result<()> {
+    rename_metadata_with(directory, name, replace, |info, bytes, class| {
+        let mut status_block = IO_STATUS_BLOCK::default();
+        // Windows 10 rejected our non-NULL RootDirectory rename through
+        // SetFileInformationByHandle(FileRenameInfo) with ERROR_INVALID_PARAMETER.
+        // Both native classes preserve the pinned, handle-relative destination.
+        // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+        //
+        // SAFETY: rename_metadata_with supplies an initialized, aligned buffer
+        // that remains live throughout this call. This private temporary was
+        // opened with FILE_SYNCHRONOUS_IO_NONALERT and SYNCHRONIZE (in
+        // FILE_GENERIC_*). NtCreateFile's contract makes ALL subsequent I/O
+        // synchronous: the I/O manager waits non-alertably for completion even
+        // if a driver pends its IRP. No pending I/O retains the IOSB or buffer.
+        // Do not pass an asynchronous/alertable handle or change those flags.
+        // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile
+        unsafe {
+            NtSetInformationFile(
+                file.as_raw_handle(),
+                &mut status_block,
+                info.cast(),
+                bytes,
+                class,
+            )
+        }
+    })
+}
+
+fn rename_metadata_with(
+    directory: &File,
+    name: &OsStr,
+    replace: bool,
+    mut set_info: impl FnMut(*const FILE_RENAME_INFORMATION, u32, FILE_INFORMATION_CLASS) -> NTSTATUS,
+) -> io::Result<()> {
     let wide: Vec<u16> = name.encode_wide().collect();
     let name_bytes = wide
         .len()
@@ -295,10 +346,13 @@ fn rename_metadata(directory: &File, file: &File, name: &OsStr, replace: bool) -
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     // SAFETY: the zeroed allocation has sufficient size and alignment for the
     // structure, its counted UTF-16 name, and a trailing NUL. Both handles are
-    // live throughout the call; only one validated child is used. The WDK
-    // binding's ReplaceIfExists is a one-byte BOOLEAN (Rust bool), not BOOL.
+    // live throughout the call; only one validated child is used.
     unsafe {
-        (*info).Anonymous.ReplaceIfExists = replace;
+        (*info).Anonymous.Flags = if replace {
+            FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS
+        } else {
+            0
+        };
         (*info).RootDirectory = directory.as_raw_handle();
         (*info).FileNameLength = name_bytes as u32;
         std::ptr::copy_nonoverlapping(
@@ -307,29 +361,23 @@ fn rename_metadata(directory: &File, file: &File, name: &OsStr, replace: bool) -
             wide.len(),
         );
     }
-    let mut status_block = IO_STATUS_BLOCK::default();
-    // Windows 10 rejected our non-NULL RootDirectory rename through
-    // SetFileInformationByHandle(FileRenameInfo) with ERROR_INVALID_PARAMETER.
-    // Use the native class/structure with documented handle-relative semantics:
-    // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
-    //
-    // SAFETY: this private temporary was opened by open_child with
-    // FILE_SYNCHRONOUS_IO_NONALERT and SYNCHRONIZE (in FILE_GENERIC_*).
-    // NtCreateFile's contract makes ALL subsequent I/O on that file object
-    // synchronous: the I/O manager waits non-alertably for completion even if
-    // a driver pends its IRP. NtSetInformationFile therefore returns the final
-    // status, with no pending I/O retaining this stack IOSB or name buffer.
-    // Do not pass an asynchronous/alertable handle here or change those flags.
-    // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile
-    let status = unsafe {
-        NtSetInformationFile(
-            file.as_raw_handle(),
-            &mut status_block,
-            info.cast(),
-            bytes as u32,
-            FileRenameInformation,
-        )
-    };
+    // POSIX replacement lets a delete-sharing reader keep the old file open
+    // while new opens see the replacement. Ordinary readers still block it.
+    let mut status = set_info(info, bytes as u32, FileRenameInformationEx);
+    if matches!(
+        status,
+        STATUS_INVALID_INFO_CLASS | STATUS_INVALID_PARAMETER | STATUS_NOT_SUPPORTED
+    ) {
+        // Older kernels/filesystems may lack the extended class or flags.
+        // Never fall back for access/sharing failures or other operational errors.
+        // SAFETY: same live buffer; clear the entire flags union before setting
+        // the legacy one-byte BOOLEAN (Rust bool), not a Win32 BOOL.
+        unsafe {
+            (*info).Anonymous.Flags = 0;
+            (*info).Anonymous.ReplaceIfExists = replace;
+        }
+        status = set_info(info, bytes as u32, FileRenameInformation);
+    }
     if status < 0 {
         // SAFETY: a pure conversion of the completed NT error status. For a
         // non-pending return, the API's status (not the IOSB) is authoritative.
@@ -616,4 +664,161 @@ pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<us
 
 pub(super) fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<usize> {
     file.seek_write(buf, offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file::{Directory, metadata_blocked};
+    use std::io::Read;
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{
+        STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND,
+        STATUS_SHARING_VIOLATION,
+    };
+
+    #[test]
+    fn metadata_rename_fallback() {
+        let folder = std::env::temp_dir().join(format!(
+            "isocast-metadata-fallback-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        let directory = open_directory(&folder).unwrap();
+        let name = OsStr::new("take.session.json");
+        let path = folder.join(name);
+        for status in [
+            STATUS_INVALID_INFO_CLASS,
+            STATUS_INVALID_PARAMETER,
+            STATUS_NOT_SUPPORTED,
+            STATUS_ACCESS_DENIED,
+            STATUS_SHARING_VIOLATION,
+            STATUS_OBJECT_NAME_COLLISION,
+            STATUS_OBJECT_NAME_NOT_FOUND,
+        ] {
+            std::fs::write(&path, b"old").unwrap();
+            let mut temporary = create_metadata_temp(&directory, name).unwrap();
+            temporary.write_all(b"new").unwrap();
+            let mut calls = Vec::new();
+            let result = rename_metadata_with(&directory, name, true, |info, bytes, class| {
+                calls.push(class);
+                if class == FileRenameInformationEx {
+                    // Simulate an older kernel/filesystem at the native seam.
+                    return status;
+                }
+                assert_eq!(class, FileRenameInformation);
+                let mut status_block = IO_STATUS_BLOCK::default();
+                // SAFETY: the helper owns the initialized buffer for this call;
+                // the temporary is a live synchronous handle, as in production.
+                unsafe {
+                    NtSetInformationFile(
+                        temporary.as_raw_handle(),
+                        &mut status_block,
+                        info.cast(),
+                        bytes,
+                        class,
+                    )
+                }
+            });
+            if [
+                STATUS_INVALID_INFO_CLASS,
+                STATUS_INVALID_PARAMETER,
+                STATUS_NOT_SUPPORTED,
+            ]
+            .contains(&status)
+            {
+                result.unwrap();
+                assert_eq!(calls, [FileRenameInformationEx, FileRenameInformation]);
+                drop(temporary);
+                assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            } else {
+                let error = result.unwrap_err();
+                // SAFETY: pure conversion of the injected NT error status.
+                let code = unsafe { RtlNtStatusToDosError(status) } as i32;
+                assert_eq!(error.raw_os_error(), Some(code));
+                assert_eq!(calls, [FileRenameInformationEx]);
+                assert_eq!(std::fs::read(&path).unwrap(), b"old");
+                delete_metadata_temp(&temporary).unwrap();
+            }
+        }
+        drop(directory);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn metadata_locked_reader() {
+        let folder = std::env::temp_dir().join(format!(
+            "isocast-metadata-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        let directory = Directory::for_recording(&folder).unwrap();
+        let name = OsStr::new("take.session.json");
+        let path = folder.join(name);
+        let old = br#"{"status":"recording"}"#;
+        let final_bytes = br#"{"status":"complete","frames":540}"#;
+        directory.replace_metadata(name, old, true).unwrap();
+        let mut shared_reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&path)
+            .unwrap();
+        directory.replace_metadata(name, final_bytes, true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), final_bytes);
+        let mut held_bytes = Vec::new();
+        shared_reader.read_to_end(&mut held_bytes).unwrap();
+        assert_eq!(held_bytes, old, "the held handle still reads the old file");
+        drop(shared_reader);
+        directory.replace_metadata(name, old, true).unwrap();
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+        let error = directory
+            .replace_metadata(name, final_bytes, true)
+            .unwrap_err();
+        eprintln!("held-reader finalization: {error:#}");
+        assert!(metadata_blocked(&error));
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        assert!(!std::fs::read_dir(&folder).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "partial")
+        }));
+        // Real Windows contention clears inside the bounded retry window.
+        let published = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                drop(reader);
+            });
+            directory.replace_metadata(name, final_bytes, true)
+        });
+        published.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), final_bytes);
+        // Unsafe destinations are not a transient publication failure.
+        let alias = folder.join("alias");
+        std::fs::hard_link(&path, &alias).unwrap();
+        let error = directory
+            .replace_metadata(name, b"unsafe", true)
+            .unwrap_err();
+        assert!(!metadata_blocked(&error));
+        assert_eq!(std::fs::read(&alias).unwrap(), final_bytes);
+        // Even a raw sharing error after publication must not be replayed.
+        let flush = anyhow::Error::from(io::Error::from_raw_os_error(5))
+            .context("metadata was published, but its post-publication flush failed");
+        assert!(!metadata_blocked(&flush));
+        drop(directory);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 }

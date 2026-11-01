@@ -102,7 +102,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "n
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern; win_media plays a real file.
-             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture", "linux_browser") if sys.platform.startswith("linux") else ()) + (("win_media",) if sys.platform == "win32" else ())
+             "win_record", "win_takes", "win_scenes", "win_recovery", "win_preview_recording", "win_monitor") + (("linux_record", "linux_recovery", "linux_media", "linux_capture", "linux_browser") if sys.platform.startswith("linux") else ()) + (("win_media", "win_metadata") if sys.platform == "win32" else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -179,8 +179,44 @@ def until(fn, seconds=30, description="condition", interval=0.05):
     raise Failure(f"timed out after {seconds}s waiting for {description}")
 
 
+def open_shared(path):
+    """Share deletion with publishers and close promptly after reading.
+    Python's open() on Windows shares read and write but not delete, so a
+    manifest held open here would make the engine's rename-over fail. Ask
+    CreateFileW for FILE_SHARE_DELETE too, as Rust's File::open does."""
+    if not WINDOWS:
+        return open(path, "rb")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    generic_read, share_all, open_existing, normal = 0x80000000, 0x7, 3, 0x80
+    handle = kernel32.CreateFileW(os.fspath(path), generic_read, share_all, None,
+                                  open_existing, normal, None)
+    if handle is None or handle == wintypes.HANDLE(-1).value:
+        code = ctypes.get_last_error()
+        # OSError maps the Windows error to FileNotFoundError/PermissionError.
+        raise OSError(None, ctypes.FormatError(code), os.fspath(path), code)
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+    try:
+        return os.fdopen(fd, "rb")  # owns fd, and through it the handle
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def read_json(path):
-    return json.loads(Path(path).read_text())
+    with open_shared(path) as file:
+        raw = file.read()
+    return json.loads(raw)
 
 
 def write_json(path, value):
@@ -5052,6 +5088,123 @@ def scenario_win_takes(e, cfg, evidence):
     check_pattern_take(e, *takes[1], cfg, layout, evidence, t0=(t0 + slots) % pattern_period(cfg["canvas"]["fps"]),
                        label="take 2 (split)")
     evidence.update(t0=t0, first_take_slots=slots)
+
+
+def scenario_win_metadata(e, cfg, evidence):
+    """#157: a reader holding a take's manifest open without FILE_SHARE_DELETE
+    (Python's ordinary open) blocks its final publication. The finished media
+    waits: status lists the take in diagnostics.metadata_pending, doctor
+    names the problem and take_finished is withheld; once the reader closes,
+    the manifest publishes complete with the final counts. Both an earlier
+    split take (while recording goes on) and the last take (finalizing)."""
+    if not WINDOWS:
+        raise Skip("Windows rename-over sharing semantics")
+    cfg["recording"]["iso"]["enabled"] = False
+    e.apply(cfg)
+    # `stopped` follows the final take_finished. End the synchronous Windows
+    # pipe read there: closing its file from here during a read can deadlock.
+    watch = Watch(e, ["take_finished", "stopped"], stop_after="stopped")
+    held = {}
+
+    def pending(path, status=None):
+        status = status or e.rpc("status")
+        entries = (status.get("diagnostics") or {}).get("metadata_pending") or []
+        return [m for m in entries if path.name in m]
+
+    def status_when(test):
+        status = e.rpc("status")
+        return status if test(status) else None
+
+    def blocked(number, path):
+        status = until(lambda: status_when(lambda s: pending(path, s)), 30,
+                       f"take {number}'s metadata to be pending")
+        checks = [c for c in e.rpc("doctor", {})["checks"]
+                  if c["name"] == "recording metadata publication" and path.name in c["detail"]]
+        require(checks and all(c["status"] == "problem" and c.get("fix") for c in checks),
+                f"doctor did not report take {number}'s pending metadata: {checks}")
+        require(read_json(path)["status"] == "recording", f"take {number}'s manifest published while held")
+        require(not [t for t in watch.of("take_finished") if t["take"] == number],
+                f"take_finished for take {number} before its manifest published")
+        return {"state": status["state"], "finalizing": status.get("finalizing"),
+                "pending": pending(path), "doctor": checks}
+
+    def release(number, path):
+        held.pop(path).close()
+        until(lambda: not pending(path), 30, f"take {number}'s metadata to publish")
+        events = until(lambda: [t for t in watch.of("take_finished") if t["take"] == number], 30,
+                       f"take_finished for take {number}")
+        require(len(events) == 1 and Path(events[0]["manifest"]) == path and events[0]["status"] == "complete",
+                f"take_finished for take {number}: {events}")
+        manifest = until(lambda: finished(path), 30, f"take {number}'s final manifest")
+        return check_take(path, manifest, evidence=evidence)
+
+    try:
+        first = Path(e.rpc("start", {})["manifest"])
+        held[first] = open(first, "rb")  # shares read and write, not delete
+        time.sleep(1.5)
+        split = e.rpc("split")
+        second = Path(split["manifest"])
+        held[second] = open(second, "rb")
+        evidence["split"] = blocked(1, first)
+        require(evidence["split"]["state"] == "recording", f"recording stopped behind take 1: {evidence['split']}")
+        require(not evidence["split"]["finalizing"], "a pending earlier take must not disable Stop on the current take")
+        evidence["files"] = release(1, first)
+        time.sleep(1.0)
+        accepted = e.rpc("request_stop", {})
+        require(accepted.get("finalizing"), f"request_stop: {accepted}")
+        evidence["stop"] = blocked(2, second)
+        require(evidence["stop"]["state"] != "idle" and evidence["stop"]["finalizing"] is True,
+                f"status while take 2's metadata is pending: {evidence['stop']}")
+        time.sleep(2.0)  # the finalizer keeps retrying, not giving up
+        evidence["stop_after_retry"] = blocked(2, second)
+        evidence["files"] += release(2, second)
+        status = until(lambda: status_when(lambda s: s["state"] == "idle"), 30, "idle recorder")
+        require(not status.get("finalizing") and not (status.get("diagnostics") or {}).get("metadata_pending"),
+                f"idle with metadata still pending: {status.get('diagnostics')}")
+        watch.thread.join(timeout=10)
+        require(not watch.thread.is_alive() and watch.of("stopped"), "watch did not finish at stopped")
+        require([t["take"] for t in watch.of("take_finished")] == [1, 2], "completion callbacks must arrive exactly once")
+    finally:
+        for file in held.values():
+            file.close()
+        # On an earlier assertion failure the worker shuts down the daemon;
+        # don't block reporting that failure by closing a still-reading pipe.
+        if not watch.thread.is_alive():
+            watch.close()
+
+    # Exact terminal facts must survive both an abrupt process loss and a
+    # graceful shutdown while the public manifest remains locked (#158 B1).
+    for mode in ("kill", "shutdown"):
+        e.apply(cfg)
+        path = Path(e.rpc("start", {"seconds": 2})["manifest"])
+        with open(path, "rb"):
+            until(lambda: pending(path), 30, f"{mode}: terminal metadata pending")
+            saved = read_json(str(path) + ".final")
+            require(saved["status"] == "complete", f"{mode}: sidecar has no complete outcome")
+            began = time.monotonic()
+            if mode == "kill":
+                e.process.kill()
+                e.process.wait(timeout=15)
+            else:
+                # A synchronous pipe read has no timeout on Windows. Bound the
+                # process exit while we still hold the manifest, then read the reply.
+                with engine_connection(e.sock, timeout=15) as sock:
+                    sock.sendall(b'{"jsonrpc":"2.0","id":1,"method":"shutdown"}\n')
+                    e.process.wait(timeout=15)
+                    with sock.makefile("rb") as reader:
+                        reply = json.loads(reader.readline())
+                    require("result" in reply, f"shutdown failed: {reply}")
+            elapsed = time.monotonic() - began
+            require((e.process.returncode == 0) == (mode == "shutdown"),
+                    f"{mode}: unexpected daemon exit {e.process.returncode}")
+            require(read_json(path)["status"] == "recording", "held manifest was unexpectedly replaced")
+        e.start()
+        recovered = until(lambda: finished(path), 30, f"{mode}: final sidecar adoption")
+        require(recovered == saved, f"{mode}: recovery changed the durable final outcome")
+        evidence.setdefault("restart", {})[mode] = {
+            "exit_seconds": elapsed, "manifest": str(path),
+            "files": check_take(path, recovered, evidence=evidence),
+        }
 
 
 def scenario_win_scenes(e, cfg, evidence):

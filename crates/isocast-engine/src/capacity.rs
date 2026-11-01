@@ -190,7 +190,7 @@ impl Memory {
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let temporary = path.with_extension("tune.json.tmp");
         std::fs::write(&temporary, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&temporary, path)?;
+        isocast_protocol::fs::replace(&temporary, path)?;
         Ok(())
     }
 

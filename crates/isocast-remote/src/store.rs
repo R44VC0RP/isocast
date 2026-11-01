@@ -66,7 +66,15 @@ impl Store {
         }
         file.write_all(&bytes)?;
         file.as_file().sync_all()?;
-        file.persist(&self.path).map_err(|error| error.error)?;
+        // A failed persist hands the temporary file back for the next try.
+        let mut file = Some(file);
+        isocast_protocol::fs::retry_replace(|| {
+            let temporary = file.take().expect("returned by the failed persist");
+            temporary.persist(&self.path).map_err(|error| {
+                file = Some(error.file);
+                error.error
+            })
+        })?;
         #[cfg(unix)]
         File::open(parent)?.sync_all()?;
         Ok(())

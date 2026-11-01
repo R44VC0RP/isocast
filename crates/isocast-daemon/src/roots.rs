@@ -321,7 +321,7 @@ impl Runtime {
         let partial = path.with_extension("json.partial");
         let bytes = serde_json::to_vec_pretty(&saved).map_err(|err| failed(err.into()))?;
         std::fs::write(&partial, bytes)
-            .and_then(|()| std::fs::rename(&partial, &path))
+            .and_then(|()| isocast_protocol::fs::replace(&partial, &path))
             .map_err(|err| failed(anyhow::anyhow!("could not save {}: {err}", path.display())))?;
         *self.saved.lock() = Some(saved);
         Ok(())

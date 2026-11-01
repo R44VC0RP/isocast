@@ -1890,6 +1890,9 @@ impl<P: Platform> Engine<P> {
         let result = isocast_diagnostics::contain("recording", || record(self, options))
             .map_err(anyhow::Error::msg)
             .and_then(|r| r);
+        // No finalizer remains after return, including a contained panic.
+        // Stale pending metadata must not leave the next session busy forever.
+        inner.control.metadata_pending.lock().clear();
         {
             let mut state = inner.state.lock();
             state.pins.clear();
@@ -4064,6 +4067,18 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     #[cfg(windows)]
     let write_manifest_durable =
         |path: &Path, manifest: &SessionManifest| folder_lock.write(path, manifest, true);
+    #[cfg(windows)]
+    let finish_manifest =
+        |path: &Path, manifest: &SessionManifest| folder_lock.finish(path, manifest, control);
+    #[cfg(not(windows))]
+    let finish_manifest = write_manifest;
+    #[cfg(windows)]
+    let publish_final = |path: &Path, manifest: &SessionManifest| {
+        folder_lock.save_final(path, manifest)?;
+        folder_lock.write(path, manifest, false)
+    };
+    #[cfg(not(windows))]
+    let publish_final = write_manifest;
 
     // The sources the files need: each must be running (a missing device or
     // permission fails here, before any file exists).
@@ -4636,8 +4651,10 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     write(&takes[0], SessionStatus::Recording, &[])?;
 
     let (done_tx, done_rx) = mpsc::channel::<Done>();
-    // Takes reported to `on_take` so far.
+    // Takes reported to `on_take` so far, and those before that cursor
+    // passed over because their metadata failed (the end tries them again).
     let mut reported = 0;
+    let mut withheld = Vec::new();
     let mut errors = thread::scope(|scope| {
         let shared = &shared;
         let mut split_senders = Vec::new();
@@ -5013,8 +5030,21 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 }
                 let earlier = takes.len() - 1;
                 for take in &mut takes[..earlier] {
-                    if !take.finalized && take.results.iter().all(Option::is_some) {
-                        take.finalized = true;
+                    if !take.finalized
+                        && take.metadata_error.is_none()
+                        && take.results.iter().all(Option::is_some)
+                    {
+                        // A blocked publication costs this thread one attempt
+                        // a second per take (rebuilding the manifest, then
+                        // REPLACE_BACKOFF's ~310 ms of synchronous retries
+                        // per inspection/rename), never a retry every tick.
+                        #[cfg(windows)]
+                        if take
+                            .metadata_retry_at
+                            .is_some_and(|at| std::time::Instant::now() < at)
+                        {
+                            continue;
+                        }
                         let mut errors = take.errors();
                         program_errors(inner, &take.plans, &mut errors);
                         let stops = stops();
@@ -5031,7 +5061,31 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             canvas_controls,
                             &formats.cameras,
                         );
-                        let _ = write_manifest(&take.manifest_path, &manifest);
+                        match publish_final(&take.manifest_path, &manifest) {
+                            Ok(()) => {
+                                take.finalized = true;
+                                #[cfg(windows)]
+                                control.metadata_result(&take.manifest_path, None);
+                            }
+                            Err(error) => {
+                                #[cfg(windows)]
+                                if isocast_mux::file::metadata_blocked(&error) {
+                                    control.metadata_result(&take.manifest_path, Some(&error));
+                                    take.metadata_retry_at =
+                                        Some(std::time::Instant::now() + Duration::from_secs(1));
+                                } else {
+                                    control.metadata_result(&take.manifest_path, None);
+                                    take.metadata_error = Some(format!("{error:#}"));
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    take.metadata_error = Some(format!("{error:#}"));
+                                }
+                                if take.metadata_error.is_some() {
+                                    isocast_diagnostics::diagnostic!("warn"; "could not finish take metadata: {error:#}");
+                                }
+                            }
+                        }
                         take.manifest = Some(manifest);
                     }
                 }
@@ -5052,16 +5106,24 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 }
                 // Finished takes, in order. One whose split comes after the
                 // recording's end isn't: the end rewrites it.
-                while reported < earlier
-                    && takes[reported].finalized
-                    && takes[reported].end.is_some_and(|end| end <= shared.end())
-                {
-                    let take = &takes[reported];
-                    if let (Some(on_take), Some(manifest)) = (options.on_take, &take.manifest) {
-                        on_take(reported as u32 + 1, &take.manifest_path, manifest);
-                    }
-                    reported += 1;
-                }
+                let ended_by = shared.end();
+                report_finished(
+                    |i| {
+                        let take = &takes[i];
+                        take.end
+                            .is_some_and(|end| end <= ended_by)
+                            .then(|| Publication::of(take))
+                    },
+                    earlier,
+                    &mut reported,
+                    &mut withheld,
+                    |i| {
+                        let take = &takes[i];
+                        if let (Some(on_take), Some(manifest)) = (options.on_take, &take.manifest) {
+                            on_take(i as u32 + 1, &take.manifest_path, manifest);
+                        }
+                    },
+                );
                 // Stop when asked (even just after a split's reply, every
                 // announced file gets a moment; checked again here for one
                 // asked for since the split above), or when every file has
@@ -5199,7 +5261,12 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         }
         // A manifest that can't be written (the disk is full) doesn't lose
         // the report: the files it would list are finished all the same.
+        // One that failed during the recording is tried once more here (the
+        // coordinator never replays it): rewriting even after a failed
+        // post-publication flush only replaces a complete file with one.
+        let failed = take.metadata_error.take();
         if i == last || !take.finalized || restated {
+            let published = take.finalized;
             let manifest = take_manifest(
                 platform,
                 setup,
@@ -5211,10 +5278,23 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 canvas_controls,
                 &formats.cameras,
             );
-            if let Err(err) = write_manifest(&take.manifest_path, &manifest) {
-                file_errors.push(format!("{err:#}"));
+            match finish_manifest(&take.manifest_path, &manifest) {
+                Ok(()) => {
+                    take.finalized = true;
+                    take.manifest = Some(manifest);
+                }
+                Err(err) => {
+                    let err = format!("{err:#}");
+                    file_errors.extend(failed.filter(|failed| *failed != err));
+                    file_errors.push(err);
+                    // A restatement that can't be written leaves the take's
+                    // published manifest in place: it stays finished, and is
+                    // reported with that manifest.
+                    if !published {
+                        take.manifest = Some(manifest);
+                    }
+                }
             }
-            take.manifest = Some(manifest);
         }
         manifests.push(take.manifest_path.clone());
         let reports: Vec<_> = take.results.iter_mut().map(|r| r.take()?.ok()).collect();
@@ -5251,8 +5331,11 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         }
     }
     if let Some(on_take) = options.on_take {
-        for (i, take) in takes.iter().enumerate().skip(reported) {
-            if let Some(manifest) = &take.manifest {
+        for (i, take) in takes.iter().enumerate() {
+            if (i >= reported || withheld.contains(&i))
+                && take.finalized
+                && let Some(manifest) = &take.manifest
+            {
                 on_take(i as u32 + 1, &take.manifest_path, manifest);
             }
         }
@@ -5287,6 +5370,49 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         warnings,
         errors,
     })
+}
+
+/// Where an ended take's final manifest is, for reporting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Publication {
+    Published,
+    /// Its write failed for good during the recording; the end tries again.
+    Failed,
+    /// Still being written (or waiting out a reader that holds it).
+    Pending,
+}
+
+impl Publication {
+    fn of(take: &Take) -> Self {
+        if take.finalized {
+            Self::Published
+        } else if take.metadata_error.is_some() {
+            Self::Failed
+        } else {
+            Self::Pending
+        }
+    }
+}
+
+/// Moves `reported` over the first `earlier` takes in order, calling
+/// `report` for each published one. A failed one is passed over into
+/// `withheld`, unreported, so later takes aren't held back by it; the cursor
+/// waits at the first take still pending, or not yet ended (`None`).
+fn report_finished(
+    state: impl Fn(usize) -> Option<Publication>,
+    earlier: usize,
+    reported: &mut usize,
+    withheld: &mut Vec<usize>,
+    mut report: impl FnMut(usize),
+) {
+    while *reported < earlier {
+        match state(*reported) {
+            Some(Publication::Published) => report(*reported),
+            Some(Publication::Failed) => withheld.push(*reported),
+            Some(Publication::Pending) | None => return,
+        }
+        *reported += 1;
+    }
 }
 
 /// The write speed of the disk holding `folder`, measured at most every
@@ -5371,6 +5497,48 @@ mod tests {
         );
         source.audio(&samples, Time::from_nanos(20_000_000));
         assert!(recorded.recv().is_ok());
+    }
+
+    #[test]
+    fn a_failed_take_manifest_does_not_hold_back_later_takes() {
+        use Publication::*;
+        let run = |states: &[Option<Publication>], reported: &mut usize, withheld: &mut Vec<_>| {
+            let mut out = Vec::new();
+            report_finished(
+                |i| states[i],
+                states.len(),
+                reported,
+                withheld,
+                |i| out.push(i),
+            );
+            out
+        };
+        let (mut reported, mut withheld) = (0, Vec::new());
+        // Take 1 failed for good: take 2 is still reported, take 3 waits.
+        let states = [
+            Some(Failed),
+            Some(Published),
+            Some(Pending),
+            Some(Published),
+        ];
+        assert_eq!(run(&states, &mut reported, &mut withheld), [1]);
+        assert_eq!((reported, withheld.as_slice()), (2, &[0][..]));
+        // Ticks while take 3 stays pending report nothing more.
+        assert!(run(&states, &mut reported, &mut withheld).is_empty());
+        assert_eq!(withheld, [0]);
+        // Once it's published, it and take 4 follow, each once.
+        let states = [
+            Some(Failed),
+            Some(Published),
+            Some(Published),
+            Some(Published),
+        ];
+        assert_eq!(run(&states, &mut reported, &mut withheld), [2, 3]);
+        assert_eq!((reported, withheld.as_slice()), (4, &[0][..]));
+        // A take that hasn't ended stops the cursor whatever comes after it.
+        let (mut reported, mut withheld) = (0, Vec::new());
+        assert!(run(&[None, Some(Published)], &mut reported, &mut withheld).is_empty());
+        assert_eq!((reported, withheld.len()), (0, 0));
     }
 
     #[test]

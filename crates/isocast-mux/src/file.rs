@@ -28,6 +28,31 @@ mod platform;
 
 const FOLDER_LOCK: &str = ".isocast.lock";
 
+/// True only when publication has not happened and a Windows reader or access
+/// policy blocked it. Never retries a post-publication durability failure.
+#[cfg(windows)]
+pub fn metadata_blocked(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<MetadataBlocked>())
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct MetadataBlocked(io::Error);
+
+#[cfg(windows)]
+impl std::fmt::Display for MetadataBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for MetadataBlocked {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum OpenMode {
     Create,

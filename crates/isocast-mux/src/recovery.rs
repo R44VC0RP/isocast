@@ -56,6 +56,75 @@ pub fn write_manifest_in(
     directory.replace_metadata(name, &bytes, durable)
 }
 
+/// Durable final outcome, written before attempting the publicly polled name.
+/// Keep this sidecar after publication: it also survives a process exit between
+/// the two writes. Recovery only adopts it for the same unfinished take.
+pub fn save_final_in(
+    directory: &Directory,
+    name: &OsStr,
+    manifest: &SessionManifest,
+) -> Result<()> {
+    if manifest.status == SessionStatus::Recording {
+        bail!("final manifest must have complete, failed or interrupted status");
+    }
+    write_manifest_in(directory, &final_name(name), manifest, true)
+}
+
+fn final_name(name: &OsStr) -> OsString {
+    let mut name = name.to_os_string();
+    name.push(".final");
+    name
+}
+
+fn read_final(
+    directory: &Directory,
+    name: &OsStr,
+    original: &SessionManifest,
+) -> Result<Option<(Value, SessionManifest)>> {
+    if original.status != SessionStatus::Recording {
+        return Ok(None);
+    }
+    let saved = match read_manifest(directory, &final_name(name)) {
+        Ok(saved) => saved,
+        Err(error)
+            if error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("could not read final manifest sidecar"),
+    };
+    let manifest = &saved.1;
+    // Failed handoffs can remove never-opened files from the original plan;
+    // every retained file must still belong to this same take.
+    if manifest.status == SessionStatus::Recording
+        || manifest.setup != original.setup
+        || manifest.started_at != original.started_at
+        || manifest.host_time_ns != original.host_time_ns
+        || !manifest.files.iter().all(|a| {
+            original
+                .files
+                .iter()
+                .any(|b| a.path == b.path && a.source == b.source)
+        })
+    {
+        bail!("final manifest sidecar does not describe the same finished take; left untouched");
+    }
+    Ok(Some(saved))
+}
+
+fn publish_document(directory: &Directory, name: &OsStr, document: &Value) -> Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(document)?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_MANIFEST {
+        bail!("manifest exceeds 4 MiB");
+    }
+    directory.replace_metadata(name, &bytes, true)
+}
+
 /// An emergency stop may have finished media normally. Preserve those known
 /// counts and unknown extension fields while changing only status and reason.
 pub fn mark_interrupted(path: &Path, why: &str) -> Result<()> {
@@ -68,6 +137,9 @@ pub fn mark_interrupted(path: &Path, why: &str) -> Result<()> {
         .unwrap_or(Path::new("."));
     let directory = Directory::for_recording(folder)?;
     let (mut value, mut manifest) = read_manifest(&directory, name)?;
+    if let Some((saved, _)) = read_final(&directory, name, &manifest)? {
+        return publish_document(&directory, name, &saved);
+    }
     if !manifest.errors.iter().any(|e| e == why) {
         manifest.errors.push(why.to_string());
     }
@@ -98,6 +170,13 @@ pub fn interrupted_sessions(folder: &Path, mark: bool) -> Result<Vec<PathBuf>> {
         .into_iter()
         .filter_map(|name| {
             let (_, manifest) = read_manifest(&directory, &name).ok()?;
+            if read_final(&directory, &name, &manifest)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                return None;
+            }
             (manifest.status == SessionStatus::Recording).then(|| folder.join(name))
         })
         .collect())
@@ -123,6 +202,29 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                 continue;
             }
         };
+        match read_final(&directory, &name, &manifest) {
+            Ok(Some((saved, finished))) => {
+                if let Err(error) = publish_document(&directory, &name, &saved) {
+                    result.warnings.push(format!(
+                        "{}: final outcome is safe in {} but publication is still pending: {error:#}",
+                        name.to_string_lossy(), final_name(&name).to_string_lossy()
+                    ));
+                }
+                // Never downgrade a durably finished take to interrupted, even
+                // if the external reader is still present on this startup.
+                if finished.status == SessionStatus::Complete || recording_only {
+                    continue;
+                }
+                // Failed writers may still have repairable fragments. Preserve
+                // the existing full-startup recovery of failed recordings.
+                document = saved;
+                manifest = finished;
+            }
+            Ok(None) => {}
+            Err(error) => result
+                .warnings
+                .push(format!("{}: {error:#}", name.to_string_lossy())),
+        }
         if recording_only && manifest.status != SessionStatus::Recording {
             continue;
         }
@@ -385,4 +487,130 @@ fn update_document(value: &mut Value, manifest: &SessionManifest) -> Result<()> 
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn final_sidecar_preserves_extensions_and_cannot_replace_another_take() {
+        let folder = std::env::temp_dir().join(format!(
+            "isocast-final-recovery-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        let name = OsStr::new("take.session.json");
+        let path = folder.join(name);
+        let initial: SessionManifest = serde_json::from_value(serde_json::json!({
+            "version":1,"setup":"sidecar","status":"recording",
+            "started_at":"2026-10-25T12:00:00Z","host_time_ns":1,"files":[],"errors":[]
+        }))
+        .unwrap();
+        let mut final_manifest = initial.clone();
+        final_manifest.status = SessionStatus::Complete;
+        final_manifest.duration_seconds = Some(18.0);
+        let mut final_value = serde_json::to_value(&final_manifest).unwrap();
+        final_value["extension"] = serde_json::json!({"kept": true});
+        {
+            let directory = Directory::for_recording(&folder).unwrap();
+            write_manifest_in(&directory, name, &initial, true).unwrap();
+            publish_document(&directory, &final_name(name), &final_value).unwrap();
+            assert!(save_final_in(&directory, name, &initial).is_err());
+        }
+        assert!(interrupted_sessions(&folder, false).unwrap().is_empty());
+        let recovered = recover_directory(&folder).unwrap();
+        assert!(recovered.sessions.is_empty() && recovered.warnings.is_empty());
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, final_value);
+        {
+            let directory = Directory::for_recording(&folder).unwrap();
+            let mut other = initial;
+            other.host_time_ns += 1;
+            write_manifest_in(&directory, name, &other, true).unwrap();
+        }
+        let recovered = recover_directory(&folder).unwrap();
+        assert!(
+            recovered
+                .warnings
+                .iter()
+                .any(|w| w.contains("does not describe the same finished take"))
+        );
+        let saved: SessionManifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.status, SessionStatus::Interrupted);
+        assert_ne!(saved.host_time_ns, final_manifest.host_time_ns);
+        // Complete and emergency-stopped outcomes can omit a planned file
+        // that never opened. Preserve their exact facts and interruption reason.
+        for status in [SessionStatus::Complete, SessionStatus::Interrupted] {
+            let mut finished = final_manifest.clone();
+            finished.status = status;
+            finished.files.push(serde_json::from_value(serde_json::json!({
+                "path":"program.mov","source":"program","kind":"program",
+                "width":320,"height":180,"fps":30,"audio":[],"frames":540,
+                "duration_seconds":18.0,"dropped_frames":0,"repeated_frames":0,"audio_dropouts":0
+            })).unwrap());
+            if status == SessionStatus::Interrupted {
+                finished
+                    .errors
+                    .push("recording interrupted: emergency stop".into());
+            }
+            {
+                let directory = Directory::for_recording(&folder).unwrap();
+                let mut initial = finished.clone();
+                initial.status = SessionStatus::Recording;
+                initial.files.push(
+                    serde_json::from_value(serde_json::json!({
+                        "path":"unopened.mov","source":"program","kind":"program",
+                        "width":320,"height":180,"fps":30,"audio":[]
+                    }))
+                    .unwrap(),
+                );
+                write_manifest_in(&directory, name, &initial, true).unwrap();
+                save_final_in(&directory, name, &finished).unwrap();
+            }
+            assert!(interrupted_sessions(&folder, true).unwrap().is_empty());
+            let saved: SessionManifest =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved, finished);
+        }
+        // A failed final outcome still needs the ordinary media inspection;
+        // adopting it must not silently disable fragment recovery.
+        let mut failed = final_manifest;
+        failed.status = SessionStatus::Failed;
+        failed.files.push(
+            serde_json::from_value(serde_json::json!({
+                "path":"missing.mov","source":"program","kind":"program",
+                "width":320,"height":180,"fps":30,"audio":[],"frames":540
+            }))
+            .unwrap(),
+        );
+        {
+            let directory = Directory::for_recording(&folder).unwrap();
+            let mut initial = failed.clone();
+            initial.status = SessionStatus::Recording;
+            // Failed handoffs are in the initial plan, but removed from the
+            // final file list when their writer never opened a media file.
+            let mut unopened = initial.files[0].clone();
+            unopened.path = "unopened.mov".into();
+            unopened.source = "unopened".into();
+            initial.files.push(unopened);
+            write_manifest_in(&directory, name, &initial, true).unwrap();
+            save_final_in(&directory, name, &failed).unwrap();
+        }
+        let recovered = recover_directory(&folder).unwrap();
+        assert_eq!(recovered.sessions.len(), 1);
+        assert_eq!(
+            recovered.sessions[0].recording.status,
+            SessionStatus::Failed
+        );
+        assert_eq!(recovered.sessions[0].recording.files[0].frames, Some(540));
+        assert!(!recovered.sessions[0].recording.errors.is_empty());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 }
