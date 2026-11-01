@@ -24,6 +24,9 @@ pub(super) struct Calibration {
     scratch: Option<PathBuf>,
     path: PathBuf,
     status: MachineStatus,
+    /// `path` is another engine's profile (`$ISOCAST_MACHINE_PROFILE`):
+    /// read it, never calibrate, write markers or sweep beside it.
+    inherited: bool,
     automatic: bool,
     /// The running helper was scheduled automatically, rather than requested.
     background: bool,
@@ -165,17 +168,31 @@ fn sweep_stale(parent: &Path) {
 impl Daemon {
     pub(super) fn load_machine(self: &Arc<Self>) {
         let path = capacity::profile_path(&capacity::memory_path(self.state.read().file.legacy()));
-        if let Some(parent) = path.parent() {
+        let inherited = capacity::inherited_profile().is_some();
+        // Another engine's folder is not ours to clean.
+        if !inherited && let Some(parent) = path.parent() {
             sweep_stale(parent);
         }
         let mut calibration = self.machine.lock();
         calibration.path = path;
+        calibration.inherited = inherited;
         if let Some(machine) = crate::this_machine() {
             calibration.status.profile =
                 capacity::load_profile(&calibration.path, machine, &crate::daemon_build().build);
         }
         if let Some(profile) = &calibration.status.profile {
             calibration.status.summary = profile.summary();
+        }
+        if inherited {
+            if calibration.status.profile.is_none() {
+                calibration.status.summary = format!(
+                    "No valid machine profile for this build at {}; using the capacity table",
+                    calibration.path.display()
+                );
+            }
+            // Read-only: no automatic calibration, and no poll thread,
+            // since nothing here can start a helper.
+            return;
         }
         // The disposable measurement worker is implemented only on macOS.
         // An unavailable backend is not a failed calibration; do not launch
@@ -259,6 +276,21 @@ impl Daemon {
     }
 
     fn begin_calibration(&self, automatic: bool) -> Result<MachineStatus, RpcError> {
+        // Read-only first, before busy and platform checks: the same answer
+        // on every platform and while this engine records.
+        {
+            let calibration = self.machine.lock();
+            if calibration.inherited {
+                return Err(RpcError {
+                    code: RpcError::WRONG_STATE,
+                    message: format!(
+                        "machine calibration: this engine only reads the machine profile {} that its main engine owns (${}); run `isocast machine calibrate` on that engine",
+                        calibration.path.display(),
+                        capacity::INHERITED_PROFILE
+                    ),
+                });
+            }
+        }
         // Start calls hold the read side until output state is published.
         // Taking the write side makes idle-check + helper launch atomic.
         let _gate = self.starting.try_write().ok_or_else(busy)?;

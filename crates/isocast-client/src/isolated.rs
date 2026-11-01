@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use isocast_protocol::api::{Method, Status};
+use isocast_protocol::api::{Method, Status, setup_path};
 
 use crate::{Client, SPAWN_TIMEOUT, UnixStream, daemon_path};
 
@@ -33,7 +33,7 @@ struct Exit {
 
 pub(super) struct SpawnOptions {
     pub input: PipeReader,
-    pub env: [(&'static str, PathBuf); 3],
+    pub env: [(&'static str, PathBuf); 4],
 }
 
 impl IsolatedDaemon {
@@ -75,6 +75,9 @@ impl IsolatedDaemon {
                 ("ISOCAST_SOCKET", socket),
                 ("ISOCAST_SETUP", workspace.join("setup.toml")),
                 ("ISOCAST_PLUGINS", workspace.join("plugins")),
+                // Read-only: estimates use the main engine's measurements,
+                // while setup, tune memory and calibration stay private.
+                ("ISOCAST_MACHINE_PROFILE", main_machine_profile()),
             ],
         };
         let (started_tx, started_rx) = mpsc::channel();
@@ -273,6 +276,16 @@ impl Drop for IsolatedDaemon {
             );
         }
     }
+}
+
+/// The machine profile the engine this client would otherwise use reads:
+/// its own inherited one, else the daemon's `capacity::profile_path` for
+/// [`setup_path`] (`setup.toml` -> `setup.machine.json`).
+fn main_machine_profile() -> PathBuf {
+    std::env::var_os("ISOCAST_MACHINE_PROFILE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| setup_path().with_extension("machine.json"))
 }
 
 #[cfg(target_os = "macos")]

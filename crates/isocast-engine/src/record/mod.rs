@@ -2255,6 +2255,9 @@ fn annotate_interrupted_pauses(manifest: &mut SessionManifest) {
     );
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+pub use isocast_mux::recovery::recover_directory;
+
 /// Repair orphaned manifests only under the recording folder's exclusive
 /// lock. Probe durable media for duration; never infer frame/drop counts.
 #[cfg(any(windows, target_os = "linux"))]

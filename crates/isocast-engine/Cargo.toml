@@ -12,7 +12,9 @@ anyhow = "1.0.104"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 isocast-protocol = { path = "../isocast-protocol" }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+# Machine profiles compare the saved hardware identity exactly, including RAM.
+# The default float parser can shift fractional Windows RAM by one ULP.
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 # O_NOFOLLOW for files made in project folders (already in the lock file).
 libc = "0.2"
 png = "0.18.1"

@@ -45,6 +45,51 @@ const MAX_FINAL_PATH: usize = 32_768;
 /// labels are far shorter; anything longer isn't what we asked for.
 const MAX_REGISTRY_BYTES: u32 = 1024;
 
+/// Creation time of a live process, in Windows FILETIME ticks. An absent or
+/// exited process is `None`; access/query failures are errors, never proof of death.
+pub fn process_started(pid: u32) -> Result<Option<u64>> {
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    // SAFETY: query/synchronize access only, no inherited handle or mutation.
+    let process = match unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+    } {
+        Ok(process) => process,
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let result = (|| {
+        // SAFETY: the handle stays open through both queries.
+        match unsafe { WaitForSingleObject(process, 0) } {
+            WAIT_OBJECT_0 => return Ok(None),
+            WAIT_TIMEOUT => {}
+            _ => bail!("could not check process {pid}"),
+        }
+        let (mut created, mut exited, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        // SAFETY: all four output structures are valid and writable.
+        unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }?;
+        Ok(Some(
+            (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
+        ))
+    })();
+    // SAFETY: this function owns the handle returned by OpenProcess.
+    let _ = unsafe { CloseHandle(process) };
+    result
+}
+
 /// The CPU, memory, logical cores and Windows version. Hardware encoders
 /// stay empty: listing them means loading Media Foundation transforms or
 /// GPU drivers, which this cheap startup query must not do.

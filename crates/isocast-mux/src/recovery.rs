@@ -24,6 +24,9 @@ const NOTE: &str = "Linux recovery: ";
 pub struct Recovery {
     pub sessions: Vec<InterruptedRecording>,
     pub warnings: Vec<String>,
+    /// At least one manifest/media file could not be verified and persisted,
+    /// or the bounded scan may have omitted a take. Retain recovery metadata.
+    pub incomplete: bool,
 }
 
 /// Atomic manifest replacement for live recording checkpoints. The caller's
@@ -192,10 +195,13 @@ pub fn recover_directory(folder: &Path) -> Result<Recovery> {
 fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
     let directory = Directory::for_repair(folder)?;
     let mut result = Recovery::default();
-    for name in names(&directory)? {
+    let names = names(&directory)?;
+    result.incomplete = names.len() == MAX_SESSIONS;
+    for name in names {
         let (mut document, mut manifest) = match read_manifest(&directory, &name) {
             Ok(value) => value,
             Err(error) => {
+                result.incomplete = true;
                 result
                     .warnings
                     .push(format!("{}: {error:#}", name.to_string_lossy()));
@@ -412,6 +418,7 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                 recording: manifest,
             });
         }
+        result.incomplete |= !all_verified || !persisted;
     }
     Ok(result)
 }
