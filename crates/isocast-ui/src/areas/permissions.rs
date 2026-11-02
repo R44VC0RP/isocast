@@ -865,10 +865,9 @@ fn row_linux(kind: PermissionKind, state: Permission, needed: bool) -> Permissio
         (_, Permission::Denied | Permission::Restricted) => (
             "denied",
             "No access",
-            format!(
-                "Your user can’t open any camera (/dev/video*). Log in at this computer’s own \
-                 screen, or run {VIDEO_GROUP} in a terminal and log in again."
-            ),
+            "Your user can’t open the camera. Log in at this computer’s own screen, or copy \
+             the command and run it in a terminal, then log in again."
+                .to_string(),
             "copy",
             "Copy Command",
         ),
@@ -1042,6 +1041,6 @@ mod tests {
             (denied.status.as_str(), denied.action.as_str()),
             ("denied", "copy")
         );
-        assert!(denied.detail.contains(VIDEO_GROUP));
+        assert!(!denied.detail.is_empty() && !denied.detail.contains("/dev/video"));
     }
 }

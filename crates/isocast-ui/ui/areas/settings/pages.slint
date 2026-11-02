@@ -180,7 +180,7 @@ export component GeneralPage inherits SetPage {
     }
     SetGroup {
         title: "Permissions";
-        hint: PlatformText.engine-linux ? "Linux asks which screen to share when capture starts, and PipeWire audio needs no permission. Cameras need your user to be able to open /dev/video*; Review shows whether it can."
+        hint: PlatformText.engine-linux ? "Linux asks which screen to share when recording starts. Cameras need access for your user: Review shows whether it has it and, if not, a command to copy that fixes it. The microphone needs no permission."
             : PlatformText.engine-windows ? "Windows asks no permission for screens and what this PC plays. Its privacy settings can turn off the camera and microphone for desktop apps; Review shows whether they do."
             : PermissionsArea.unknown-access
             ? "Access is checked when capture starts. Review the status here; allow access in System Settings › Privacy & Security."

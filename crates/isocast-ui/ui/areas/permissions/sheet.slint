@@ -92,6 +92,8 @@ component Detail inherits Text {
 // lanes on the right so they line up down the list; what happened, when
 // there is something to say, on the full width under it.
 component Rows inherits VerticalLayout {
+    // The width a row's detail wraps at: the row less its icon lane.
+    in property <length> detail-width;
     spacing: 0;
     for item[i] in PermissionsArea.items: VerticalLayout {
         spacing: 0;
@@ -126,6 +128,12 @@ component Rows inherits VerticalLayout {
                         font-weight: Theme.weight-semibold;
                     }
                     Text {
+                        // Its own width, as the detail's: a wrapped
+                        // purpose makes the row taller instead of running
+                        // into the detail under it. The row less the
+                        // status and action lanes (136px + 176px together,
+                        // whichever has the room) and the gaps around it.
+                        width: root.detail-width - 136px - 176px - 2 * Theme.space-4;
                         text: item.purpose;
                         color: Theme.text-3;
                         font-size: Theme.fs-sm;
@@ -152,7 +160,7 @@ component Rows inherits VerticalLayout {
                         // Its own width, not the layout's: wrapped lines are
                         // measured with it, so the row (and the card) is as
                         // tall as the lines it shows.
-                        width: PermissionsArea.detail-width;
+                        width: root.detail-width;
                         text: item.detail;
                     }
                     // The way round it, under what happened (Refused
@@ -178,6 +186,9 @@ component Rows inherits VerticalLayout {
 // (compared in real snapshots, 2026-10-15): the statuses and actions line
 // up down one lane, and a row's plain-words detail gets the full width.
 export component PermissionRows inherits VerticalLayout {
+    // The width the rows' text wraps at (see Rows), from the card around
+    // them, never from this layout.
+    in property <length> detail-width;
     if !PermissionsArea.checked: HorizontalLayout {
         min-height: 72px;
         spacing: Theme.space-3;
@@ -192,7 +203,9 @@ export component PermissionRows inherits VerticalLayout {
             vertical-alignment: center;
         }
     }
-    if PermissionsArea.checked: Rows { }
+    if PermissionsArea.checked: Rows {
+        detail-width: root.detail-width;
+    }
 }
 
 export component PermissionsSheet inherits Rectangle {
@@ -229,10 +242,6 @@ export component PermissionsSheet inherits Rectangle {
         clip: true;
         accessible-role: groupbox;
         accessible-label: "Permissions";
-
-        // The width a row's detail wraps at (see Rows).
-        changed width => { PermissionsArea.detail-width = self.width - 2 * Theme.space-8 - Theme.icon-lg - Theme.space-4; }
-        init => { PermissionsArea.detail-width = self.width - 2 * Theme.space-8 - Theme.icon-lg - Theme.space-4; }
 
         column := VerticalLayout {
             // Inside the 1px edge, as wide as the card less it, so wrapped
@@ -276,6 +285,7 @@ export component PermissionsSheet inherits Rectangle {
                 background: Theme.line;
             }
             PermissionRows {
+                detail-width: card.width - 2 * Theme.space-8 - Theme.icon-lg - Theme.space-4;
                 padding-left: Theme.space-8 - 1px;
                 padding-right: Theme.space-8 - 1px;
             }
