@@ -73,6 +73,8 @@ pub struct App {
     /// Remote control (R2): Settings → Remote, the engine picker,
     /// presence, the engine file browser.
     pub remote: areas::remote::Remote,
+    /// The menu bar drawn in the window (Linux), from ui/app.slint's.
+    pub menubar: areas::menubar::MenuBar,
     /// `--drag-test`: how long each flush (the areas showing a change) and
     /// each update from the daemon took on the window's thread.
     pub work_log: RefCell<Option<WorkLog>>,
@@ -141,6 +143,7 @@ impl App {
             wizard: areas::wizard::Wizard::default(),
             projectors: areas::projectors::Projectors::default(),
             remote: areas::remote::Remote::default(),
+            menubar: areas::menubar::MenuBar::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
         if !mode.offscreen {
@@ -185,7 +188,7 @@ impl App {
     }
 
     /// The areas, in the order they update.
-    pub fn areas(&self) -> [&dyn Area; 11] {
+    pub fn areas(&self) -> [&dyn Area; 12] {
         [
             &self.canvas,
             &self.sources,
@@ -198,6 +201,7 @@ impl App {
             &self.wizard,
             &self.projectors,
             &self.remote,
+            &self.menubar,
         ]
     }
 

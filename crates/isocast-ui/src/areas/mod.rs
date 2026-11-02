@@ -12,6 +12,7 @@
 //! | H the permissions step | `permissions.rs` (+ helper.rs) | `permissions/` | `PermissionsArea` |
 //! | I the setup wizard (OBS, optimize) | `wizard.rs` | `wizard/` | `WizardArea` |
 //! | J remote control | `remote.rs` | `remote/` | `RemoteArea` |
+//! | K the menu bar drawn in the window (Linux) | `menubar.rs` | `menubar.slint` | `MenuBarArea`, `Menus` |
 //!
 //! What is shared lives outside the areas and changes rarely: the widget
 //! kit (ui/kit.slint, ui/widgets/), the tokens (ui/theme.slint), icons
@@ -74,6 +75,7 @@ pub mod controls;
 pub mod developer;
 pub mod hotkeys;
 pub mod library;
+pub mod menubar;
 pub mod mixer;
 pub mod permissions;
 pub mod projectors;

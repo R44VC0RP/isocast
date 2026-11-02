@@ -65,6 +65,17 @@ export global Menus {
     // Bumped by `show` (MenuHost opens on it).
     in-out property <int> serial;
 
+    // The menu bar the app draws (Linux; ui/areas/menubar.slint): its
+    // titles, where their row is (window points), and which one's menu was
+    // opened last. While one of its menus shows, MenuHost lays the same
+    // titles over the bar, so moving along them switches menus and ← →
+    // go to the next one, as in a menu bar.
+    in-out property <[string]> bar-titles;
+    in-out property <length> bar-x;
+    in-out property <length> bar-y;
+    in-out property <length> bar-height;
+    in-out property <int> bar-open: -1;
+
     // Ask the app for `owner`'s menu at this anchor.
     callback request(owner: string, x: length, y: length, width: length, height: length);
     // An item was chosen.
@@ -86,6 +97,14 @@ export global Menus {
         root.anchor-height = height;
         root.open = true;
         root.serial += 1;
+    }
+
+    // Open the menu bar's menu `index` under its title (at `x`, `width`
+    // wide): hung from the bar's lower edge (a menu hangs 6px under its
+    // anchor).
+    public function open-bar(index: int, x: length, width: length) {
+        root.bar-open = index;
+        root.request("menubar:" + root.bar-titles[index], x, root.bar-y, width, root.bar-height - 6px);
     }
 
     public function close() {
@@ -238,6 +257,69 @@ export component MenuEntries inherits VerticalLayout {
     }
 }
 
+// The menu bar's titles in a row, each 22px high with 8px either side of
+// its label: `control-hover` under the pointer, `control-active` while its
+// menu shows (as a button whose menu is open). A press opens its menu.
+// `ghost`: drawn by the bar underneath, only taking the pointer (MenuHost's
+// copy over an open menu).
+export component MenuBarTitles inherits HorizontalLayout {
+    in property <[string]> titles;
+    in property <bool> ghost;
+    // Set to an index to open that title's menu (MenuHost's ← →).
+    in-out property <int> wanted: -1;
+    callback pressed(index: int, x: length, width: length);
+    callback entered(index: int, x: length, width: length);
+
+    spacing: 0;
+    alignment: start;
+
+    for title[i] in root.titles: cell := Rectangle {
+        property <bool> shown: Menus.open && Menus.owner == "menubar:" + title;
+        property <bool> want: root.wanted == i;
+        changed want => {
+            if self.want {
+                root.wanted = -1;
+                Menus.open-bar(i, self.absolute-position.x, self.width);
+            }
+        }
+        width: label.preferred-width + 2 * Theme.space-2;
+        accessible-role: none;
+
+        // Only the bar's own titles are drawn and exposed.
+        if !root.ghost: Rectangle {
+            height: 22px;
+            border-radius: Theme.r-compact;
+            background: cell.shown ? Theme.control-active : touch.has-hover ? Theme.control-hover : transparent;
+            accessible-role: button;
+            accessible-label: title;
+            accessible-expandable: true;
+            accessible-expanded: cell.shown;
+            accessible-action-default => { root.pressed(i, cell.absolute-position.x, cell.width); }
+        }
+        label := Text {
+            visible: !root.ghost;
+            text: title;
+            color: Theme.text;
+            font-size: Theme.fs;
+            letter-spacing: Theme.tracking;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        touch := TouchArea {
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                    root.pressed(i, cell.absolute-position.x, cell.width);
+                }
+            }
+            changed has-hover => {
+                if self.has-hover {
+                    root.entered(i, cell.absolute-position.x, cell.width);
+                }
+            }
+        }
+    }
+}
+
 // The window's menu: put one in AppWindow, over everything else. It covers
 // the window while a menu shows, so a click anywhere else closes it.
 export component MenuHost inherits Rectangle {
@@ -251,6 +333,15 @@ export component MenuHost inherits Rectangle {
     property <int> sub-active: -1;
     // Keyboard is in the submenu.
     property <bool> in-sub;
+    // The open menu is the menu bar's.
+    property <bool> bar-menu: Menus.bar-open >= 0 && Menus.bar-open < Menus.bar-titles.length
+        && Menus.owner == "menubar:" + Menus.bar-titles[Menus.bar-open];
+
+    // The menu bar's next menu (`by` 1) or previous one (-1), wrapping.
+    function bar-next(by: int) -> int {
+        return Menus.bar-open + by < 0 ? Menus.bar-titles.length - 1
+            : Menus.bar-open + by >= Menus.bar-titles.length ? 0 : Menus.bar-open + by;
+    }
 
     changed serial => {
         root.active = -1;
@@ -308,6 +399,30 @@ export component MenuHost inherits Rectangle {
             pointer-event(event) => {
                 if event.kind == PointerEventKind.down {
                     Menus.close();
+                }
+            }
+        }
+
+        // The menu bar's titles, over the bar, while one of its menus
+        // shows: the pointer moving to another opens that one's menu, a
+        // press on the open one closes it.
+        bar-row := MenuBarTitles {
+            visible: root.bar-menu;
+            ghost: true;
+            x: Menus.bar-x;
+            y: Menus.bar-y;
+            height: Menus.bar-height;
+            titles: Menus.bar-titles;
+            pressed(index, x, width) => {
+                if index == Menus.bar-open {
+                    Menus.close();
+                } else {
+                    Menus.open-bar(index, x, width);
+                }
+            }
+            entered(index, x, width) => {
+                if index != Menus.bar-open {
+                    Menus.open-bar(index, x, width);
                 }
             }
         }
@@ -428,6 +543,8 @@ export component MenuHost inherits Rectangle {
                         root.open-sub(root.active, entries.active-top);
                         root.in-sub = true;
                         root.sub-active = Menus.step(Menus.submenus[root.sub-list].entries, -1, 1);
+                    } else if root.bar-menu {
+                        bar-row.wanted = root.bar-next(1);
                     }
                     return accept;
                 }
@@ -436,6 +553,8 @@ export component MenuHost inherits Rectangle {
                         root.in-sub = false;
                         root.sub-list = -1;
                         root.opened = -1;
+                    } else if root.bar-menu {
+                        bar-row.wanted = root.bar-next(-1);
                     }
                     return accept;
                 }
