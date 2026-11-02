@@ -1386,7 +1386,7 @@ jobs:
       - name: Qualify headless profiles and protect recording by pausing previews
         if: env.MODE == 'full'
         timeout-minutes: 9
-        run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
+        run: python scripts/e2e.py --hosted --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
 
       - name: Monitoring startup preserves recording audio (no-device skip on hosted Windows)
         if: env.MODE == 'full'

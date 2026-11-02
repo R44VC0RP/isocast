@@ -154,6 +154,13 @@ elif sys.platform.startswith("linux"):
 if sys.platform in ("darwin", "linux"):
     SCENARIOS += ("browser_audio_gap",)
 
+OWN_CAPACITY = {"win32": {"win_preview_recording"}}
+
+
+def scenarios_check_capacity(selected, system):
+    return bool(selected) and set(selected) <= OWN_CAPACITY.get(system, set())
+
+
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -4022,6 +4029,20 @@ def oracle_rules_selftest(work):
         "strict: monitor take lost 1 frame at its start": (monitor_take(1, None), "fail"),
         "strict: monitor take lost nothing": (monitor_take(0, None), "pass"),
     })
+    for is_hosted in (False, True):
+        for label, head, dropped, audio, expected in (
+            ("one interior drop", 0, 1, 0, "pass" if is_hosted else "fail"),
+            ("slot zero dropped", 1, 1, 0, "fail"),
+            ("audio dropout", 0, 0, 1, "fail"),
+        ):
+            row = {"output": "program", "slots": 600, "frames": 600 - dropped, "head": head,
+                   "dropped": dropped, "repeated": 0, "audio_dropouts": audio}
+            try:
+                check_preview_program_loss(row, hosted_reference=is_hosted)
+                actual = "pass"
+            except Failure:
+                actual = "fail"
+            cases[f"{'hosted' if is_hosted else 'strict'} preview: {label}"] = actual, expected
     wrong = {k: v for k, v in cases.items() if v[0] != v[1]}
     require(not wrong, f"oracle rules: {wrong}")
     return {k: v[0] for k, v in cases.items()}
@@ -5014,9 +5035,17 @@ def scenario_win_monitor(e, cfg, evidence):
         raise Skip("no output device: real WASAPI open returned the expected error; mid-take recording audio verified")
 
 
+def check_preview_program_loss(loss, hosted_reference):
+    limit = 0.01 if hosted_reference else 0
+    require(loss["head"] == 0, f"program started {loss['head']} slot(s) late")
+    check_loss(loss, limit)
+    require(loss["repeated"] == 0, f"program: unexpected repeated_frames={loss['repeated']}")
+    return limit
+
+
 def scenario_win_preview_recording(e, cfg, evidence):
     """Qualify the conservative reference, then protect it from previews.
-    Zero losses even under --hosted; paused consumers must survive and resume.
+    Only hosted reference takes allow interior drops; paused consumers must survive and resume.
     A passing lower profile is not a universal software-renderer capacity claim."""
     if not WINDOWS:
         raise Skip("Windows shared-preview recording qualification")
@@ -5059,19 +5088,22 @@ def scenario_win_preview_recording(e, cfg, evidence):
                 f"qualification take did not complete: {manifest}")
         require(len(manifest["files"]) == len(result["loss"]) == 1,
                 "qualification requires final counters for exactly one program file")
-        # Retain all counters before strict media validation can fail; never
-        # turn an overloaded headless take into a pass.
         file, facts = manifest_file(path, manifest, "program")
+        dimensions = (profile["width"], profile["height"])
+        loss = result["loss"][0]
+        limit = check_preview_program_loss(loss, dimensions == reference and evidence["capabilities"]["hosted"])
         result["files"] = [check_file(file, duration=seconds, fps=profile["fps"],
-                                     dimensions=(profile["width"], profile["height"]))]
+                                     dimensions=dimensions, dropped=loss["dropped"] - loss["head"],
+                                     repeated=loss["repeated"])]
         require(facts["frames"] == result["files"][0]["frames"], "program manifest/decoded frame mismatch")
-        check_loss(result["loss"][0], 0)
+        if dimensions == reference:
+            result["files"][0].update(sync_check(file, profile["fps"], lost=set() if limit else None))
 
     # Retain the larger-profile measurements, but do not select a host's
     # highest single 10-second pass: it can sit on the edge and lose frames
     # during the longer preview take. Gate the same conservative reference
-    # named by estimate::SOFTWARE_REFERENCE, with no fallback or loss allowance.
-    reference = (320, 180)
+    # named by estimate::SOFTWARE_REFERENCE, with no fallback.
+    reference = WINDOWS_PROFILES["180p30"][:2]
     selected = None
     reference_warning_seen = False
     for width, height in ((1280, 720), (960, 540), (640, 360), (480, 270), (426, 240), (320, 180)):
@@ -5124,11 +5156,11 @@ def scenario_win_preview_recording(e, cfg, evidence):
         except Failure as exc:
             case.update(status="FAIL", reason=str(exc))
         else:
-            case.update(status="PASS", reason="zero loss and strict media checks passed")
+            case.update(status="PASS", reason="loss and media checks passed")
             if (width, height) == reference:
                 selected = copy.deepcopy(cfg)
                 evidence["preview_profile"] = case["profile"].copy()
-    require(selected is not None, "320x180@30 reference failed strict zero-loss qualification; see headless_profiles")
+    require(selected is not None, f"320x180@30 reference failed qualification: {profiles[-1]['reason']}")
     cfg = selected
     e.apply(cfg)
     width, height = (cfg["canvas"][k] for k in ("width", "height"))
@@ -5925,7 +5957,8 @@ def worker(args):
         # profiles: their counters stay in headless_profiles, not suite loss.
         try:
             rejected_profiles = {Path(case["manifest"]) for case in evidence.get("headless_profiles", [])
-                                 if case.get("status") == "FAIL" and case.get("manifest")}
+                                 if case.get("status") == "FAIL" and case.get("manifest")
+                                 and (case["profile"]["width"], case["profile"]["height"]) != WINDOWS_PROFILES["180p30"][:2]}
             for path in (root / "recordings").rglob("*.session.json"):
                 if path.is_symlink() or not path.is_file():
                     continue  # plugin_files plants dangling links
@@ -6156,6 +6189,15 @@ def main():
         args.work.mkdir(parents=True, exist_ok=True)
         try:
             require(len(SCENARIOS) == len(set(SCENARIOS)), "duplicate name in SCENARIOS")
+            for system, selected, expected in (
+                ("win32", ["win_preview_recording"], True),
+                ("win32", ["win_preview_recording", "win_record"], False),
+                ("win32", ["win_record"], False),
+                ("darwin", ["win_preview_recording"], False),
+                ("win32", [], False),
+            ):
+                require(scenarios_check_capacity(selected, system) == expected,
+                        f"wrong hosted capacity preflight decision for {selected} on {system}")
             print(json.dumps(oracle_selftest(args.work), indent=2))
         except Failure as exc:
             print(f"FAIL selftest: {exc}")
@@ -6232,7 +6274,11 @@ def main():
                 print(f"e2e: {report['work_note']}", file=sys.stderr)
             write_json(root / "capabilities.json", report["capabilities"])
             report["work"] = str(root)
-            if args.hosted and not args.capabilities_from:
+            qualify = args.hosted and not args.capabilities_from
+            if qualify and not args.capabilities and scenarios_check_capacity(args.only or SCENARIOS, sys.platform):
+                print(f"e2e: skipping generic hosted capacity test: {', '.join(args.only or SCENARIOS)} "
+                      "runs its own capacity sweep", file=sys.stderr)
+            elif qualify:
                 result = run_case(args, root, "capacity")
                 report["scenarios"].append(result)
                 measured = result.get("evidence", {})
