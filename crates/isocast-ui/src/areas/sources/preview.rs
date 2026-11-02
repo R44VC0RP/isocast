@@ -2,7 +2,9 @@
 //! SourcePreview): the daemon draws that source into a small ring of
 //! shared GPU surfaces (`shared_frames` with the source as its target), a
 //! thread of its own receives them, and the window shows the newest as a
-//! Slint image on the same GPU device, without copying it. It stops when
+//! Slint image on the same GPU device, without copying it. On Linux the
+//! local monitor feed copies pixels from the memfd ring instead, or
+//! decodes the engine's video if the ring is unavailable. It stops when
 //! the dialog closes. A window on another computer's engine shows its
 //! JPEG stills instead, a few a second (R2's interim previews).
 
@@ -18,12 +20,15 @@ use isocast_client::shared::SharedFrame;
 use isocast_protocol::api::SharedFramesParams;
 use slint::wgpu_30::wgpu;
 
+use crate::frames::{Feed, Incoming};
+
 type Slot = Arc<Mutex<Option<SharedFrame>>>;
 type StillSlot = Arc<Mutex<Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>>>;
 
 struct Watching {
     source: String,
     stop: Arc<AtomicBool>,
+    feed: Option<Feed>,
     newest: Slot,
     still: StillSlot,
     images: HashMap<(u64, u32), slint::Image>,
@@ -63,7 +68,26 @@ impl SourcePreview {
         let stop = Arc::new(AtomicBool::new(false));
         let newest: Slot = Arc::default();
         let still: StillSlot = Arc::default();
-        {
+        let feed = if cfg!(target_os = "linux") && crate::engine::is_local() {
+            // Both sheets have about 600 px for the picture: the same
+            // width ladder, slot release and H.264 fallback as a monitor.
+            let still = still.clone();
+            Some(Feed::start_with_filters(
+                Some(source),
+                (640, 360),
+                30,
+                true,
+                move |incoming| match incoming {
+                    Incoming::Still(frame) => {
+                        *still.lock().unwrap() = Some(frame.pixels);
+                    }
+                    Incoming::Lost(why) | Incoming::Unavailable(why) => {
+                        isocast_diagnostics::diagnostic!("warn"; "source preview: {why}");
+                    }
+                    _ => {}
+                },
+            ))
+        } else {
             let (stop, newest, target) = (stop.clone(), newest.clone(), source.to_string());
             let still = still.clone();
             let _ = thread::Builder::new()
@@ -75,10 +99,12 @@ impl SourcePreview {
                         receive_stills(&target, &stop, &still)
                     }
                 });
-        }
+            None
+        };
         *self.watching.borrow_mut() = Some(Watching {
             source: source.to_string(),
             stop,
+            feed,
             newest,
             still,
             images: HashMap::new(),
@@ -97,6 +123,9 @@ impl SourcePreview {
     pub fn stop(&self) {
         self.timer.stop();
         if let Some(w) = self.watching.borrow_mut().take() {
+            if let Some(feed) = w.feed {
+                feed.stop();
+            }
             w.stop.store(true, Ordering::Relaxed);
             #[cfg(windows)]
             if let Some(frame) = w.showing.as_ref().or(w.previous.as_ref()) {
