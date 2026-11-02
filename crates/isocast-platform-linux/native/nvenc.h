@@ -35,15 +35,20 @@ IcNvenc *ic_nvenc_open(uint32_t width, uint32_t height, uint32_t fps,
 int ic_nvenc_headers(IcNvenc *encoder, uint8_t *out, size_t capacity,
                      size_t *written, char *error, size_t error_cap);
 
-/* Exactly width*height*3/2 tightly packed NV12 bytes, limited-range BT.709.
+/* On a live encoder, borrow its initialized pinned input (NULL after failure).
+ * size and pitch must be non-NULL. End the borrow before any other call.
+ * Write width active bytes per row, height Y rows followed by height/2 UV rows.
+ */
+uint8_t *ic_nvenc_staging(IcNvenc *encoder, size_t *size, size_t *pitch);
+
+/* Submit the filled staging buffer, limited-range BT.709.
  * Success produces exactly one Annex-B access unit, with the supplied pts.
  * force_idr is 0 or 1; keyframe is 1 only for an IDR picture.
  * On ANY encode error the caller must stop this stream and close: a frame
  * may have been accepted, and retrying could lose or duplicate it. In
  * particular an undersized output buffer is fatal, not a resize/retry API.
  */
-int ic_nvenc_encode(IcNvenc *encoder, const uint8_t *nv12, size_t length,
-                    int64_t pts, uint32_t force_idr, uint8_t *out,
+int ic_nvenc_encode(IcNvenc *encoder, int64_t pts, uint32_t force_idr, uint8_t *out,
                     size_t capacity, size_t *written, int64_t *output_pts,
                     uint32_t *keyframe, char *error, size_t error_cap);
 
