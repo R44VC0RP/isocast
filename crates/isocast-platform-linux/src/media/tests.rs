@@ -542,38 +542,45 @@ fn has_parser(parser: &str) -> bool {
 }
 
 #[test]
-fn elementary_streams_play_with_a_parser_or_are_refused() {
-    // No container: only a parser (gstreamer1.0-plugins-bad) estimates a
-    // length. With it the stream plays at that length; without it the
-    // file is refused, never played at length zero.
-    for (name, parser, refused) in [
-        ("raw.mjpeg", "jpegparse", &["duration unknown"][..]),
-        (
-            "raw.h264",
-            "h264parse",
-            &["duration unknown", "no parser"][..],
-        ),
-    ] {
-        let result = media_info(&fixture(name));
-        if has_parser(parser) {
-            let info = result.unwrap_or_else(|err| panic!("{name} with {parser}: {err:#}"));
-            assert_eq!(info.video, Some((160, 120)), "{name}");
-            assert!(
-                close(
-                    info.duration,
-                    Duration::from_secs(1),
-                    Duration::from_millis(60)
-                ),
-                "{name}: {:?}",
-                info.duration
-            );
-        } else {
-            let text = format!("{:#}", result.unwrap_err());
-            assert!(
-                text.contains(name) && refused.iter().any(|r| text.contains(r)),
-                "{name} without {parser}: {text}"
-            );
-        }
+fn raw_motion_jpeg_is_refused_with_or_without_a_parser() {
+    // A JPEG stream carries no frame rate, so nothing can estimate its
+    // length. jpegparse (gstreamer1.0-plugins-bad) is autoplugged from
+    // GStreamer 1.26 (rank none before) and reports framerate 0/1: the
+    // file is refused either way, never played at length zero.
+    let text = format!("{:#}", media_info(&fixture("raw.mjpeg")).unwrap_err());
+    assert!(
+        text.contains("raw.mjpeg") && text.contains("duration unknown"),
+        "raw.mjpeg (jpegparse autoplugged: {}): {text}",
+        has_parser("jpegparse")
+    );
+}
+
+#[test]
+fn raw_h264_plays_with_a_parser_or_is_refused() {
+    // No container: only h264parse (gstreamer1.0-plugins-bad) estimates a
+    // length, from the stream's frame rate. With it the stream plays at
+    // that length; without it the file is refused, never played at length
+    // zero.
+    let result = media_info(&fixture("raw.h264"));
+    if has_parser("h264parse") {
+        let info = result.unwrap_or_else(|err| panic!("raw.h264 with h264parse: {err:#}"));
+        assert_eq!(info.video, Some((160, 120)));
+        assert!(
+            close(
+                info.duration,
+                Duration::from_secs(1),
+                Duration::from_millis(60)
+            ),
+            "raw.h264: {:?}",
+            info.duration
+        );
+    } else {
+        let text = format!("{:#}", result.unwrap_err());
+        assert!(
+            text.contains("raw.h264")
+                && (text.contains("duration unknown") || text.contains("no parser")),
+            "raw.h264 without h264parse: {text}"
+        );
     }
 }
 
