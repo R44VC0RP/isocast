@@ -342,7 +342,7 @@ fn iso_format<P: Platform>(platform: &P, setup: &Setup, id: &str) -> Result<(u32
         return Ok((pattern.width, pattern.height, pattern.fps));
     }
     let probe = platform
-        .probe(&source.kind, &setup.canvas)
+        .probe(id, &source.kind, &setup.canvas)
         .with_context(|| format!("source {id:?}"))?;
     if let Some(format) = probe.and_then(|p| p.video) {
         return Ok((format.width, format.height, format.fps));

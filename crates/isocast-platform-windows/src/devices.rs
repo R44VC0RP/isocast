@@ -351,14 +351,14 @@ pub(crate) fn camera_probe(query: &str) -> Result<Probe> {
 pub(crate) fn screen_target(target: ScreenTarget<'_>) -> Result<CaptureTarget> {
     match target {
         // Resolved by MonitorFromPoint, even if discovery left it out.
-        ScreenTarget::Display(name) if name.eq_ignore_ascii_case("main") => {
+        ScreenTarget::Display { display: name, .. } if name.eq_ignore_ascii_case("main") => {
             Ok(CaptureTarget::PrimaryDisplay)
         }
-        ScreenTarget::Display(name) => {
+        ScreenTarget::Display { display: name, .. } => {
             let displays = displays(&mut Vec::new())?;
             select_display(&displays, name).map(|info| CaptureTarget::Monitor(info.monitor))
         }
-        ScreenTarget::Window { app, title } => {
+        ScreenTarget::Window { app, title, .. } => {
             let windows = windows(&mut Vec::new())?;
             find_window(&windows, app, title).map(|window| CaptureTarget::Window(window.hwnd))
         }
@@ -370,7 +370,7 @@ pub(crate) fn screen_target(target: ScreenTarget<'_>) -> Result<CaptureTarget> {
 /// [`screen_target`], without capturing: physical pixels at `fps`.
 pub(crate) fn screen_probe(target: ScreenTarget<'_>, fps: u32) -> Result<Probe> {
     let (device, width, height) = match target {
-        ScreenTarget::Display(name) if name.eq_ignore_ascii_case("main") => {
+        ScreenTarget::Display { display: name, .. } if name.eq_ignore_ascii_case("main") => {
             // A mirrored source can still be captured as "main", even when
             // it has no single physical target to list under a stable id.
             let (paths, modes) = display_config()?;
@@ -385,7 +385,7 @@ pub(crate) fn screen_probe(target: ScreenTarget<'_>, fps: u32) -> Result<Probe> 
                 .context("screen.display: Windows did not report the primary source mode")?;
             (gdi, mode.width, mode.height)
         }
-        ScreenTarget::Display(name) => {
+        ScreenTarget::Display { display: name, .. } => {
             let displays = displays(&mut Vec::new())?;
             let info = select_display(&displays, name)?;
             (
@@ -394,7 +394,7 @@ pub(crate) fn screen_probe(target: ScreenTarget<'_>, fps: u32) -> Result<Probe> 
                 info.display.height,
             )
         }
-        ScreenTarget::Window { app, title } => {
+        ScreenTarget::Window { app, title, .. } => {
             let windows = windows(&mut Vec::new())?;
             let window = find_window(&windows, app, title)?;
             (window.label(), window.width, window.height)

@@ -304,7 +304,12 @@ impl Platform for MacPlatform {
         system::machine()
     }
 
-    fn probe(&self, source: &SourceKind, canvas: &Canvas) -> anyhow::Result<Option<Probe>> {
+    fn probe(
+        &self,
+        _id: &str,
+        source: &SourceKind,
+        canvas: &Canvas,
+    ) -> anyhow::Result<Option<Probe>> {
         system::probe(source, canvas)
     }
 

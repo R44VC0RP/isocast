@@ -89,7 +89,7 @@ pub fn capture_screen(
     };
     let window = matches!(target, ScreenTarget::Window { .. });
     let (filter, width, height, label) = match target {
-        ScreenTarget::Display(name) => {
+        ScreenTarget::Display { display: name, .. } => {
             let (sc_display, width, height, label) = display(name)?;
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingWindows(
@@ -100,7 +100,7 @@ pub fn capture_screen(
             };
             (filter, width, height, label)
         }
-        ScreenTarget::Window { app, title } => {
+        ScreenTarget::Window { app, title, .. } => {
             let window = find_window(&content, app, title)?;
             let filter = unsafe {
                 SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)

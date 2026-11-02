@@ -457,16 +457,21 @@ impl Platform for WindowsPlatform {
         crate::encoder::video_encoders(self.graphics().ok().as_ref())
     }
 
-    fn probe(&self, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
+    fn probe(&self, id: &str, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
         match source {
-            SourceKind::Display(display) => {
-                crate::devices::screen_probe(ScreenTarget::Display(&display.display), canvas.fps)
-                    .map(Some)
-            }
+            SourceKind::Display(display) => crate::devices::screen_probe(
+                ScreenTarget::Display {
+                    display: &display.display,
+                    source: id,
+                },
+                canvas.fps,
+            )
+            .map(Some),
             SourceKind::Window(window) => crate::devices::screen_probe(
                 ScreenTarget::Window {
                     app: &window.app,
                     title: window.title.as_deref(),
+                    source: id,
                 },
                 canvas.fps,
             )
@@ -942,14 +947,14 @@ mod tests {
         });
         assert!(
             platform
-                .probe(&mic, &canvas)
+                .probe("mic", &mic, &canvas)
                 .unwrap_err()
                 .to_string()
                 .contains("microphone.channels")
         );
 
         let source = SourceKind::SystemAudio(SystemAudioSource { exclude: vec![] });
-        let actual = platform.probe(&source, &canvas);
+        let actual = platform.probe("desktop", &source, &canvas);
         match crate::probe_loopback() {
             Ok((device, channels)) => {
                 let probe = actual.unwrap().unwrap();

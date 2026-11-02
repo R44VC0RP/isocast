@@ -23,7 +23,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use isocast_engine::Platform;
 use isocast_engine::Time;
 use isocast_engine::capacity;
 use isocast_engine::critical::{Critical, Transaction};
@@ -34,15 +33,17 @@ use isocast_engine::record::{
     interrupted_note, interrupted_sessions,
 };
 use isocast_engine::stream::{KEY_ENV, LEGACY_KEY_SERVICE, OnChange, Stream};
+use isocast_engine::{Platform, ScreenTarget};
 use isocast_protocol::api::InitParams;
 use isocast_protocol::api::{
     Applied, ApplyParams, CapacityEstimate, CapacityParams, EngineInfo, EngineState, Event,
     EventKind, EventKinds, Frame, FrameParams, FrameRate, FrameStream, FramesParams, GetParams,
     H264Profile, ImportObsParams, Live, LiveStatus, Marked, Method, Notification, Overload,
     OverloadedFile, Plan, Refreshed, Report, Request, Resolved, Response, RpcError,
-    SharedFrameStream, SharedFramesParams, Snapshot, SnapshotParams, StartParams, Started, Status,
-    StopAccepted, StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TakeCause, TuneParams,
-    Tuning, WatchParams, lock_path, shared, socket_path,
+    ScreenPickParams, ScreenPicked, SharedFrameStream, SharedFramesParams, Snapshot,
+    SnapshotParams, StartParams, Started, Status, StopAccepted, StreamKey, StreamKeyParams,
+    StreamKeyTarget, Switched, TakeCause, TuneParams, Tuning, WatchParams, lock_path, shared,
+    socket_path,
 };
 use isocast_protocol::caller::Caller;
 use isocast_protocol::change::{Change, diff, merge_patch, missing_removals};
@@ -1200,6 +1201,11 @@ trait LiveEngine: Send + Sync {
     fn canvas_stopped(&self, canvas: CanvasId) -> Option<String>;
     fn control(&self) -> Arc<SessionControl>;
     fn set_preview(&self, scene: Option<String>);
+    /// Close source `id` and reopen it as the setup has it; false if a
+    /// recording keeps it (it reopens when the recording ends).
+    fn reopen(&self, id: &str) -> bool;
+    /// Whether a recording uses source `id`, keeping it as it is.
+    fn recording_uses(&self, id: &str) -> bool;
     fn frame_jpeg(
         &self,
         target: &str,
@@ -1309,6 +1315,14 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
 
     fn set_preview(&self, scene: Option<String>) {
         LiveEngineOf::set_preview(self, scene);
+    }
+
+    fn reopen(&self, id: &str) -> bool {
+        LiveEngineOf::reopen(self, id)
+    }
+
+    fn recording_uses(&self, id: &str) -> bool {
+        LiveEngineOf::recording_uses(self, id)
     }
 
     fn frame_jpeg(
@@ -1682,6 +1696,7 @@ impl Daemon {
             Method::Pause => self.set_paused(true).and_then(to_json),
             Method::Resume => self.set_paused(false).and_then(to_json),
             Method::Devices => devices().map_err(failed).and_then(to_json),
+            Method::ScreenPick(params) => self.screen_pick(params).and_then(to_json),
             Method::Get(params) => self.get(params.unwrap_or_default()).and_then(to_json),
             Method::Plan(change) => {
                 let state = self.state.read();
@@ -2249,6 +2264,7 @@ impl Daemon {
                     message: callers::with_cleared(message, &cleared),
                 })?;
         }
+        let removes_window = removes_a_window(state.setup.as_ref(), plan.setup.as_ref());
         state.setup = plan.setup;
         // A local caller's recordings folder is one set on this machine: a
         // folder root for network callers (decision 26). Nobody else's is.
@@ -2289,6 +2305,9 @@ impl Daemon {
         let vertical_events = sync_canvases(&mut state, &vertical_before, false);
         let revision = state.revision;
         drop(state);
+        if removes_window {
+            self.forget_unused_windows();
+        }
         self.publish(Event::SetupChanged {
             revision,
             by: callers::by(),
@@ -2776,6 +2795,83 @@ impl Daemon {
                 "the recording did not split in time",
             )),
         }
+    }
+
+    /// Show the desktop's sharing dialog for a display or window source,
+    /// keep the choice for it, and reopen the sources it shows so they
+    /// switch to it. The state lock is not held while the dialog waits.
+    fn screen_pick(&self, params: ScreenPickParams) -> Result<ScreenPicked, RpcError> {
+        let (target, cursor) = {
+            let state = self.state.read();
+            let (target, cursor) = pick_target(state.setup.as_ref(), &params.source)?;
+            if let (Some(engine), Some(setup)) = (&state.engine, &state.setup)
+                && let Some(id) = target
+                    .showing(setup)
+                    .into_iter()
+                    .find(|id| engine.recording_uses(id))
+            {
+                return Err(RpcError {
+                    code: RpcError::WRONG_STATE,
+                    message: format!(
+                        "source {id:?} is being recorded, which keeps its screen or window; \
+                         choose again once the recording stops"
+                    ),
+                });
+            }
+            (target, cursor)
+        };
+        let picked = native()
+            .pick_screen(target.target(&params.source), cursor)
+            .map_err(failed)?;
+        // The source was removed while the dialog was open: its choice goes.
+        if matches!(target, PickTarget::Window { .. })
+            && !self
+                .state
+                .read()
+                .setup
+                .as_ref()
+                .and_then(|setup| setup.source(&params.source))
+                .is_some_and(|source| matches!(source.kind, SourceKind::Window(_)))
+        {
+            self.forget_unused_windows();
+        }
+        // A recording that started during the dialog keeps its sources; they
+        // reopen on the saved choice when it ends, which needs the desktop to
+        // keep it. Refuse before switching any.
+        let state = self.state.read();
+        let (engine, showing) = match (&state.engine, &state.setup) {
+            (Some(engine), Some(setup)) => (Some(engine), target.showing(setup)),
+            _ => (None, Vec::new()),
+        };
+        let kept: Vec<String> = showing
+            .iter()
+            .filter(|id| !picked.remembered && engine.is_some_and(|e| e.recording_uses(id)))
+            .cloned()
+            .collect();
+        if !kept.is_empty() {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: format!(
+                    "{} started recording while the dialog was open and the desktop didn't keep \
+                     the choice; choose again once the recording stops",
+                    kept.iter()
+                        .map(|id| format!("{id:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+        let after_recording = showing
+            .into_iter()
+            .filter(|id| engine.is_some_and(|e| !e.reopen(id)))
+            .collect();
+        Ok(ScreenPicked {
+            source: params.source,
+            width: picked.width,
+            height: picked.height,
+            remembered: picked.remembered,
+            after_recording,
+        })
     }
 
     fn refresh_browser(&self, source: String) -> Result<Refreshed, RpcError> {
@@ -5980,6 +6076,117 @@ fn content_size(_kind: &SourceKind) -> Option<(u32, u32)> {
     None
 }
 
+/// What `screen_pick` chooses for: a source's screen target, owned.
+#[derive(Debug, PartialEq)]
+enum PickTarget {
+    /// A display source's `display`, shared by the display sources giving it.
+    Display(String),
+    /// One window source.
+    Window {
+        source: String,
+        app: String,
+        title: Option<String>,
+    },
+}
+
+impl PickTarget {
+    fn target<'a>(&'a self, id: &'a str) -> ScreenTarget<'a> {
+        match self {
+            PickTarget::Display(display) => ScreenTarget::Display {
+                display,
+                source: id,
+            },
+            PickTarget::Window { source, app, title } => ScreenTarget::Window {
+                app,
+                title: title.as_deref(),
+                source,
+            },
+        }
+    }
+
+    /// The sources of `setup` that show this choice.
+    fn showing(&self, setup: &Setup) -> Vec<String> {
+        setup
+            .sources
+            .iter()
+            .filter(|s| match (self, &s.kind) {
+                (PickTarget::Display(display), SourceKind::Display(d)) => d.display == *display,
+                (PickTarget::Window { source, .. }, SourceKind::Window(_)) => s.id == *source,
+                _ => false,
+            })
+            .map(|s| s.id.clone())
+            .collect()
+    }
+}
+
+/// Whether `new` lacks a window source `old` has (removed, renamed or
+/// retyped).
+fn removes_a_window(old: Option<&Setup>, new: Option<&Setup>) -> bool {
+    let is_window =
+        |source: &isocast_protocol::Source| matches!(source.kind, SourceKind::Window(_));
+    old.into_iter()
+        .flat_map(|old| &old.sources)
+        .filter(|source| is_window(source))
+        .any(|source| {
+            !new.and_then(|new| new.source(&source.id))
+                .is_some_and(is_window)
+        })
+}
+
+/// The screen target `screen_pick` chooses for source `id`, which must be
+/// a display or window source of the live `setup`, and whether that source
+/// shows the cursor.
+fn pick_target(setup: Option<&Setup>, id: &str) -> Result<(PickTarget, bool), RpcError> {
+    let invalid = |message: String| RpcError {
+        code: RpcError::INVALID_PARAMS,
+        message,
+    };
+    let screens = |setup: &Setup| {
+        let ids: Vec<&str> = setup
+            .sources
+            .iter()
+            .filter(|s| matches!(s.kind, SourceKind::Display(_) | SourceKind::Window(_)))
+            .map(|s| s.id.as_str())
+            .collect();
+        if ids.is_empty() {
+            "none; add a display or window source first".to_string()
+        } else {
+            ids.join(", ")
+        }
+    };
+    let Some(setup) = setup else {
+        return Err(RpcError {
+            code: RpcError::WRONG_STATE,
+            message: "screen_pick: there is no live setup; add a display or window source first"
+                .into(),
+        });
+    };
+    let Some(source) = setup.source(id) else {
+        return Err(invalid(format!(
+            "source: no source {id:?}; display and window sources: {}",
+            screens(setup)
+        )));
+    };
+    match &source.kind {
+        SourceKind::Display(display) => {
+            Ok((PickTarget::Display(display.display.clone()), display.cursor))
+        }
+        SourceKind::Window(window) => Ok((
+            PickTarget::Window {
+                source: source.id.clone(),
+                app: window.app.clone(),
+                title: window.title.clone(),
+            },
+            window.cursor,
+        )),
+        other => Err(invalid(format!(
+            "source: {id:?} is a {} source; screen_pick chooses for display and window sources: {}",
+            other.label(),
+            screens(setup)
+        ))),
+    }
+}
+
 fn failed(err: anyhow::Error) -> RpcError {
     RpcError {
         code: RpcError::FAILED,
@@ -6003,6 +6210,105 @@ fn to_json(value: impl serde::Serialize) -> Result<serde_json::Value, RpcError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_a_window_on_remove_rename_or_retype() {
+        let setup = |sources: &str| {
+            Setup::from_toml(&format!(
+                r#"
+                version = 1
+                name = "t"
+                canvas = {{ width = 1280, height = 720, fps = 30 }}
+                sources = [{sources}]
+                [recording]
+                folder = "."
+                program = {{ enabled = false, encoder = {{ codec = "h264", quality = 70 }} }}
+                iso = {{ enabled = true, encoder = {{ codec = "h264", quality = 70 }} }}
+                "#
+            ))
+            .unwrap()
+        };
+        let before = setup(
+            r#"{ id = "terminal", kind = "window", app = "foot" },
+               { id = "browser", kind = "window", app = "Chromium" },
+               { id = "slides", kind = "window", app = "Chromium" },
+               { id = "screen", kind = "display", display = "main" }"#,
+        );
+        let after = setup(
+            r#"{ id = "terminal", kind = "window", app = "kitty" },
+               { id = "web", kind = "window", app = "Chromium" },
+               { id = "slides", kind = "display", display = "main" }"#,
+        );
+        assert!(removes_a_window(Some(&before), Some(&after)));
+        assert!(removes_a_window(Some(&before), None));
+        assert!(!removes_a_window(None, Some(&after)));
+        let renamed_app = setup(
+            r#"{ id = "terminal", kind = "window", app = "kitty" },
+               { id = "browser", kind = "window", app = "Firefox" },
+               { id = "slides", kind = "window", app = "Chromium" },
+               { id = "screen", kind = "display", display = "main" }"#,
+        );
+        assert!(!removes_a_window(Some(&before), Some(&renamed_app)));
+    }
+
+    #[test]
+    fn screen_pick_chooses_for_display_and_window_sources_only() {
+        let setup = Setup::from_toml(
+            r#"
+            version = 1
+            name = "t"
+            canvas = { width = 1280, height = 720, fps = 30 }
+            sources = [
+              { id = "left", kind = "display", display = "main" },
+              { id = "right", kind = "display", display = "main" },
+              { id = "other", kind = "display", display = "picked" },
+              { id = "slides", kind = "window", app = "Chromium" },
+              { id = "notes", kind = "window", app = "Chromium", title = "Notes" },
+              { id = "mic", kind = "microphone" },
+            ]
+            [recording]
+            folder = "."
+            program = { enabled = false, encoder = { codec = "h264", quality = 70 } }
+            iso = { enabled = true, encoder = { codec = "h264", quality = 70 } }
+            "#,
+        )
+        .unwrap();
+        // A display's choice is kept for its `display`: every display
+        // source giving it switches.
+        let (main, _) = pick_target(Some(&setup), "left").unwrap();
+        assert_eq!(main, PickTarget::Display("main".into()));
+        assert_eq!(main.showing(&setup), ["left", "right"]);
+        // A window source keeps its own window.
+        let (slides, _) = pick_target(Some(&setup), "slides").unwrap();
+        assert_eq!(
+            slides.target("slides"),
+            ScreenTarget::Window {
+                app: "Chromium",
+                title: None,
+                source: "slides",
+            }
+        );
+        assert_eq!(slides.showing(&setup), ["slides"]);
+        let refused = pick_target(Some(&setup), "mic").unwrap_err();
+        assert_eq!(refused.code, RpcError::INVALID_PARAMS);
+        assert_eq!(
+            refused.message,
+            "source: \"mic\" is a microphone source; screen_pick chooses for display and window \
+             sources: left, right, other, slides, notes"
+        );
+        let unknown = pick_target(Some(&setup), "nope").unwrap_err();
+        assert!(
+            unknown
+                .message
+                .starts_with("source: no source \"nope\"; display and window sources:"),
+            "{}",
+            unknown.message
+        );
+        assert_eq!(
+            pick_target(None, "left").unwrap_err().code,
+            RpcError::WRONG_STATE
+        );
+    }
     use std::time::Instant;
 
     /// A live engine whose `stop` holds its native teardown open until the
@@ -6033,6 +6339,12 @@ mod tests {
             unreachable!()
         }
         fn set_preview(&self, _scene: Option<String>) {
+            unreachable!()
+        }
+        fn reopen(&self, _id: &str) -> bool {
+            unreachable!()
+        }
+        fn recording_uses(&self, _id: &str) -> bool {
             unreachable!()
         }
         fn frame_jpeg(

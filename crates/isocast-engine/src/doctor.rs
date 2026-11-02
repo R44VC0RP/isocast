@@ -318,7 +318,7 @@ pub fn doctor_writing<P: Platform>(
             // Pictures, pages and media aren't devices to look for.
             _ => continue,
         }
-        match platform.probe(&source.kind, &setup.canvas) {
+        match platform.probe(&source.id, &source.kind, &setup.canvas) {
             Ok(Some(probe)) => {
                 let detail = match (probe.video, probe.channels) {
                     (Some(f), _) => {

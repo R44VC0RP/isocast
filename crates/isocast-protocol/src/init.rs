@@ -182,9 +182,9 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
                          tried when recording starts.",
                         "Screen capture access can't be checked without capturing, so it is \
                          tried when recording starts.",
-                        "Linux asks which screen to share (the desktop's screen-sharing dialog) \
-                         when capture starts, for the preview or a recording; pick the one to \
-                         record there.",
+                        "Linux chooses each display or window source's screen or window in the \
+                         desktop's screen-sharing dialog: `isocast screen pick SOURCE` opens it, \
+                         and the source waits until then.",
                     )
                     .into(),
                 );

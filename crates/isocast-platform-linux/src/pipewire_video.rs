@@ -1,7 +1,7 @@
 //! Portal-authorized PipeWire video, copied from mapped SHM into bounded BGRA
 //! frames. All PipeWire objects and callbacks stay on one owned thread.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use std::os::fd::OwnedFd;
 use std::rc::Rc;
@@ -46,6 +46,7 @@ pub fn start(
     remote: OwnedFd,
     node: u32,
     fps: u32,
+    node_removed: impl FnOnce() -> String + Send + 'static,
     sink: VideoSink<Frame>,
 ) -> Result<(Capture, CaptureFormat)> {
     ensure!(
@@ -73,15 +74,16 @@ pub fn start(
                 started.clone(),
                 ready.clone(),
             );
-            if let Err(error) = result {
-                let reason = format!("PipeWire video: {error:#}");
-                if started.load(Ordering::Acquire) {
-                    if !worker_cancel.load(Ordering::Acquire) {
-                        (sink.stopped)(reason);
-                    }
-                } else {
-                    let _ = ready.try_send(Err(anyhow::anyhow!(reason)));
-                }
+            let reason = match result {
+                Ok(End::Cancelled) => return,
+                _ if worker_cancel.load(Ordering::Acquire) => return,
+                Ok(End::NodeRemoved) => node_removed(),
+                Err(error) => format!("PipeWire video: {error:#}"),
+            };
+            if started.load(Ordering::Acquire) {
+                (sink.stopped)(reason);
+            } else {
+                let _ = ready.try_send(Err(anyhow::anyhow!(reason)));
             }
         })
         .context("starting PipeWire video thread")?;
@@ -99,6 +101,9 @@ pub fn start(
 
 struct State {
     format: Option<CaptureFormat>,
+    /// The stream's own size. `format` keeps the first one, rounded down to
+    /// even; a stream of another size is scaled to fit it.
+    stream: (u32, u32),
     pixels: VideoFormat,
     pool: Option<FramePool>,
     sink: Arc<VideoSink<Frame>>,
@@ -109,6 +114,11 @@ struct State {
     startup: Rc<RefCell<String>>,
 }
 
+enum End {
+    Cancelled,
+    NodeRemoved,
+}
+
 fn run(
     remote: OwnedFd,
     node: u32,
@@ -117,7 +127,7 @@ fn run(
     cancel: Arc<AtomicBool>,
     started: Arc<AtomicBool>,
     ready: mpsc::SyncSender<Result<CaptureFormat>>,
-) -> Result<()> {
+) -> Result<End> {
     pw::init();
     let mainloop = WorkerLoop::new()?;
     let context = pw::context::ContextRc::new(mainloop.main_loop(), None)?;
@@ -136,6 +146,20 @@ fn run(
                 .get_or_insert_with(|| format!("remote error on object {id} ({code}): {message}"));
         })
         .register();
+    // A vanished portal node (the portal restarted, or dropped the stream
+    // without closing the session) sends no portal `Closed`: report it here
+    // rather than rely on the session manager destroying our node.
+    let registry = core.get_registry_rc()?;
+    let node_removed = Rc::new(Cell::new(false));
+    let removed = node_removed.clone();
+    let _registry_listener = registry
+        .add_listener_local()
+        .global_remove(move |id| {
+            if id == node {
+                removed.set(true);
+            }
+        })
+        .register();
     let stream = mainloop.stream(pw::stream::StreamBox::new(
         &core,
         "Isocast screen capture",
@@ -144,10 +168,16 @@ fn run(
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Screen",
             "node.name" => "isocast-screen-capture",
+            // With DONT_RECONNECT at connect: bind to the portal's node
+            // only, never falling back, moving or relinking to another
+            // source when it goes away.
+            "node.dont-fallback" => "true",
+            "node.dont-move" => "true",
         },
     )?);
     let state = State {
         format: None,
+        stream: (0, 0),
         pixels: VideoFormat::BGRA,
         pool: None,
         sink,
@@ -201,10 +231,15 @@ fn run(
     stream.connect(
         spa::utils::Direction::Input,
         Some(node),
-        pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+        pw::stream::StreamFlags::AUTOCONNECT
+            | pw::stream::StreamFlags::MAP_BUFFERS
+            | pw::stream::StreamFlags::DONT_RECONNECT,
         &mut [Pod::from_bytes(&format).context("invalid video format pod")?],
     )?;
     while !cancel.load(Ordering::Acquire) {
+        if node_removed.get() {
+            return Ok(End::NodeRemoved);
+        }
         ensure!(
             started.load(Ordering::Acquire) || Instant::now() < deadline,
             "no valid screen frame: {}",
@@ -215,9 +250,9 @@ fn run(
         }
         mainloop.iterate(LOOP_WAIT)?;
     }
-    // Locals drop in order: listener, stream (disconnected and its queued
-    // callbacks flushed on this thread), core listener, core, context, loop.
-    Ok(())
+    // Locals drop in reverse order; the stream disconnects and flushes its
+    // queued callbacks on this thread.
+    Ok(End::Cancelled)
 }
 
 fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32) -> Result<()> {
@@ -251,20 +286,20 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
     );
     // Desktop streams may report 0/1 (variable rate). The engine records at
     // the requested rate; actual delivery timestamps remain independent.
-    let format = CaptureFormat {
-        width: size.width,
-        height: size.height,
-        fps,
-    };
-    if let Some(previous) = state.format {
-        ensure!(
-            previous == format,
-            "screen size changed; restart capture to renegotiate"
-        );
-    } else {
+    // The portal shares windows at any size, but H.264's 4:2:0 needs even
+    // ones: drop the last column or row of an odd size. A stream that
+    // changes size later (a resized window, a screen's new mode) keeps the
+    // first size, and `process` scales its frames to fit.
+    if state.format.is_none() {
+        let format = CaptureFormat {
+            width: even(size.width),
+            height: even(size.height),
+            fps,
+        };
         state.pool = Some(FramePool::new(format.width, format.height)?);
         state.format = Some(format);
     }
+    state.stream = (size.width, size.height);
     state.pixels = raw.format();
     *state.startup.borrow_mut() = format!(
         "negotiated {}x{} {:?}; no mapped buffer received",
@@ -309,6 +344,44 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         Pod::from_bytes(&header).context("invalid metadata pod")?,
     ])?;
     Ok(())
+}
+
+/// `size` rounded down to an even number, at least 2, as H.264's 4:2:0
+/// needs.
+pub(crate) fn even(size: u32) -> u32 {
+    (size & !1).max(2)
+}
+
+/// The bytes in one pixel of a negotiated packed format.
+fn pixel_bytes(format: VideoFormat) -> Option<usize> {
+    match format {
+        VideoFormat::RGB | VideoFormat::BGR => Some(3),
+        VideoFormat::BGRA | VideoFormat::BGRx | VideoFormat::RGBA | VideoFormat::RGBx => Some(4),
+        _ => None,
+    }
+}
+
+/// A chunk's row stride. A chunk that gives none (0) is read as tightly
+/// packed rows of the stream's `size` only when its byte size is exactly
+/// that; otherwise the stride stays 0 and `Layout::new` drops the chunk.
+fn chunk_stride(stride: i32, bytes: u32, (width, height): (u32, u32), format: VideoFormat) -> i32 {
+    if stride != 0 {
+        return stride;
+    }
+    let row = pixel_bytes(format).and_then(|pixel| (width as usize).checked_mul(pixel));
+    match row {
+        Some(row) if row.checked_mul(height as usize) == Some(bytes as usize) => {
+            i32::try_from(row).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+/// Whether a stream of `stream` size copies straight into `format`: the
+/// same size, or one more column or row that is dropped.
+fn fits((width, height): (u32, u32), format: CaptureFormat) -> bool {
+    (format.width..=format.width + 1).contains(&width)
+        && (format.height..=format.height + 1).contains(&height)
 }
 
 fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
@@ -375,13 +448,19 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
         // SPA_CHUNK_FLAG_CORRUPTED | SPA_CHUNK_FLAG_EMPTY
         return Ok(());
     }
+    let direct = fits(state.stream, format);
+    let (width, height) = if direct {
+        (format.width, format.height)
+    } else {
+        state.stream
+    };
     let Some(layout) = Layout::new(
         data.maxsize,
         chunk.offset,
         chunk.size,
-        chunk.stride,
-        format.width,
-        format.height,
+        chunk_stride(chunk.stride, chunk.size, state.stream, state.pixels),
+        width,
+        height,
         state.pixels,
     ) else {
         return Ok(());
@@ -395,7 +474,19 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
         .pool
         .as_mut()
         .context("missing negotiated frame pool")?
-        .draw(&mut |target, _| copy_bgra(source, target, &layout, pixels))?;
+        .draw(&mut |target, _| {
+            if direct {
+                copy_bgra(source, target, &layout, pixels);
+            } else {
+                scale_bgra(
+                    source,
+                    target,
+                    &layout,
+                    pixels,
+                    (format.width, format.height),
+                );
+            }
+        })?;
     // Requeue before calling the sink: downstream retains only our own copy.
     drop(buffer);
     if let Some(frame) = frame {
@@ -445,11 +536,7 @@ impl Layout {
         {
             return None;
         }
-        let pixel_bytes = match format {
-            VideoFormat::RGB | VideoFormat::BGR => 3,
-            VideoFormat::BGRA | VideoFormat::BGRx | VideoFormat::RGBA | VideoFormat::RGBx => 4,
-            _ => return None,
-        };
+        let pixel_bytes = pixel_bytes(format)?;
         let row = (width as usize).checked_mul(pixel_bytes)?;
         let output_row = (width as usize).checked_mul(4)?;
         let step = stride.unsigned_abs() as usize;
@@ -477,41 +564,100 @@ impl Layout {
     }
 }
 
+/// Turns one pixel of `format` into BGRA.
+fn to_bgra(format: VideoFormat) -> impl Fn(&[u8]) -> [u8; 4] {
+    let swap = matches!(
+        format,
+        VideoFormat::RGBA | VideoFormat::RGBx | VideoFormat::RGB
+    );
+    let opaque = matches!(
+        format,
+        VideoFormat::BGRx | VideoFormat::RGBx | VideoFormat::RGB | VideoFormat::BGR
+    );
+    move |src| {
+        [
+            src[if swap { 2 } else { 0 }],
+            src[1],
+            src[if swap { 0 } else { 2 }],
+            if opaque { 255 } else { src[3] },
+        ]
+    }
+}
+
+/// The start of source row `y` (counted from the top) in `layout`.
+fn row_start(layout: &Layout, y: usize) -> usize {
+    let y = if layout.bottom_up {
+        layout.height - 1 - y
+    } else {
+        y
+    };
+    layout.offset + y * layout.stride
+}
+
 fn copy_bgra(source: &[u8], target: &mut [u8], layout: &Layout, format: VideoFormat) {
+    let convert = to_bgra(format);
     for (y, output) in target
         .chunks_exact_mut(layout.output_row)
         .take(layout.height)
         .enumerate()
     {
-        let y = if layout.bottom_up {
-            layout.height - 1 - y
-        } else {
-            y
-        };
-        let start = layout.offset + y * layout.stride;
+        let start = row_start(layout, y);
         let input = &source[start..start + layout.row];
         if format == VideoFormat::BGRA {
             output.copy_from_slice(input);
         } else {
-            let swap = matches!(
-                format,
-                VideoFormat::RGBA | VideoFormat::RGBx | VideoFormat::RGB
-            );
-            let opaque = matches!(
-                format,
-                VideoFormat::BGRx | VideoFormat::RGBx | VideoFormat::RGB | VideoFormat::BGR
-            );
             for (src, dst) in input
                 .chunks_exact(layout.pixel_bytes)
                 .zip(output.as_chunks_mut::<4>().0)
             {
-                dst.copy_from_slice(&[
-                    src[if swap { 2 } else { 0 }],
-                    src[1],
-                    src[if swap { 0 } else { 2 }],
-                    if opaque { 255 } else { src[3] },
-                ]);
+                *dst = convert(src);
             }
+        }
+    }
+}
+
+/// Copy a frame of another size into `target`, a `size` BGRA frame: scaled
+/// to fit, keeping its shape, centred on black (nearest pixel).
+fn scale_bgra(
+    source: &[u8],
+    target: &mut [u8],
+    layout: &Layout,
+    format: VideoFormat,
+    size: (u32, u32),
+) {
+    let convert = to_bgra(format);
+    let (in_width, in_height) = (layout.row / layout.pixel_bytes, layout.height);
+    let (out_width, out_height) = (size.0 as usize, size.1 as usize);
+    let (width, height) = if in_width * out_height >= in_height * out_width {
+        (
+            out_width,
+            (in_height * out_width / in_width).clamp(1, out_height),
+        )
+    } else {
+        (
+            (in_width * out_height / in_height).clamp(1, out_width),
+            out_height,
+        )
+    };
+    let (left, top) = ((out_width - width) / 2, (out_height - height) / 2);
+    // Byte offset in an input row of each output column.
+    let columns: Vec<usize> = (0..width)
+        .map(|x| x * in_width / width * layout.pixel_bytes)
+        .collect();
+    for (y, output) in target
+        .chunks_exact_mut(out_width * 4)
+        .take(out_height)
+        .enumerate()
+    {
+        let output = output.as_chunks_mut::<4>().0;
+        output.fill([0, 0, 0, 255]);
+        if !(top..top + height).contains(&y) {
+            continue;
+        }
+        let start = row_start(layout, (y - top) * in_height / height);
+        let input = &source[start..start + layout.row];
+        for (dst, &at) in output[left..left + width].iter_mut().zip(&columns) {
+            *dst = convert(&input[at..at + layout.pixel_bytes]);
         }
     }
 }
@@ -671,6 +817,74 @@ mod tests {
             copy_bgra(&source, &mut target, &layout, VideoFormat::BGRA);
             assert_eq!(target, expected);
         }
+    }
+
+    #[test]
+    fn odd_streams_copy_into_even_frames() {
+        assert_eq!(
+            (even(2118), even(1059), even(2), even(1)),
+            (2118, 1058, 2, 2)
+        );
+        let format = |width, height| CaptureFormat {
+            width,
+            height,
+            fps: 30,
+        };
+        assert!(fits((3, 3), format(2, 2)));
+        assert!(fits((2, 2), format(2, 2)));
+        assert!(!fits((1, 1), format(2, 2)));
+        assert!(!fits((4, 2), format(2, 2)));
+        // A 3x3 BGRA stream copies its top-left 2x2.
+        let source: Vec<u8> = (0..36).collect();
+        let layout = Layout::new(36, 0, 36, 12, even(3), even(3), VideoFormat::BGRA).unwrap();
+        let mut target = [0; 16];
+        copy_bgra(&source, &mut target, &layout, VideoFormat::BGRA);
+        assert_eq!(
+            target,
+            [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
+    }
+
+    #[test]
+    fn a_missing_stride_is_trusted_only_for_tightly_packed_chunks() {
+        assert_eq!(chunk_stride(-16, 0, (3, 3), VideoFormat::BGRA), -16);
+        // 3x3: rows of 12 BGRA bytes or 9 RGB bytes, and nothing else.
+        assert_eq!(chunk_stride(0, 36, (3, 3), VideoFormat::BGRA), 12);
+        assert_eq!(chunk_stride(0, 27, (3, 3), VideoFormat::RGB), 9);
+        // Padded rows, a short chunk, or no size: stays 0, and is dropped.
+        for bytes in [48, 24, 0] {
+            assert_eq!(chunk_stride(0, bytes, (3, 3), VideoFormat::BGRA), 0);
+        }
+        assert!(Layout::new(48, 0, 48, 0, 3, 3, VideoFormat::BGRA).is_none());
+    }
+
+    #[test]
+    fn resized_streams_scale_into_the_first_size_on_black() {
+        const B: [u8; 4] = [0, 0, 0, 255];
+        // A 2x1 BGRx stream (pixels 1 and 2) into a 4x4 frame: 4x2 in the
+        // middle rows, each pixel doubled, black above and below.
+        let source = [1, 1, 1, 0, 2, 2, 2, 0];
+        let layout = Layout::new(8, 0, 8, 8, 2, 1, VideoFormat::BGRx).unwrap();
+        let mut target = [0; 64];
+        scale_bgra(&source, &mut target, &layout, VideoFormat::BGRx, (4, 4));
+        let one = [1, 1, 1, 255];
+        let two = [2, 2, 2, 255];
+        let row = [one, one, two, two];
+        let rows: Vec<[[u8; 4]; 4]> = target
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|r| *r.as_chunks::<4>().0.first_chunk().unwrap())
+            .collect();
+        assert_eq!(rows, [[B; 4], row, row, [B; 4]]);
+        // A 1x2 bottom-up stream into 4x2: one column each side is black.
+        let source = [7, 7, 7, 0, 9, 9, 9, 0];
+        let layout = Layout::new(8, 0, 8, -4, 1, 2, VideoFormat::BGRx).unwrap();
+        let mut target = [0; 32];
+        scale_bgra(&source, &mut target, &layout, VideoFormat::BGRx, (4, 2));
+        let nine = [9, 9, 9, 255];
+        let seven = [7, 7, 7, 255];
+        assert_eq!(target.as_chunks::<4>().0, [B, nine, B, B, B, seven, B, B]);
     }
 
     #[test]

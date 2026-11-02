@@ -523,6 +523,19 @@ pub enum Method {
     /// End this connection's WebRTC viewer (WHEP DELETE semantics).
     /// Returns null, then closes the connection.
     WhepClose,
+    /// Choose the screen or window a `display` or `window` source records,
+    /// in the desktop's sharing dialog, where apps can't list screens and
+    /// windows themselves (Linux). Waits up to 3 minutes for the choice.
+    /// A source never shows the dialog by itself: one with nothing chosen
+    /// waits (`needs_pick` in `status`). The source then opens that screen
+    /// or window without asking again while the desktop remembers it; a
+    /// running source switches to it, even during a recording that shows it
+    /// only through the program (as any setup change would). Refused while
+    /// a recording writes the source's own ISO file, which keeps its
+    /// picture to the end.
+    /// Returns [`ScreenPicked`]. Only on this machine; refused where
+    /// `devices` lists screens and windows instead (macOS, Windows).
+    ScreenPick(ScreenPickParams),
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2892,6 +2905,11 @@ pub struct SourceStatus {
     /// Why it couldn't open, or stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Nothing is chosen for it in the desktop's sharing dialog yet (a
+    /// Linux display or window source), so it waits (`waiting_for_permission`)
+    /// without showing the dialog; `screen_pick` chooses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_pick: bool,
     /// Its picture's size and rate, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
@@ -3542,6 +3560,32 @@ pub struct OverloadedFile {
     pub dropped_frames: u64,
     /// Of the pictures due so far.
     pub percent: f64,
+}
+
+/// The source `screen_pick` chooses for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenPickParams {
+    /// The id of a `display` or `window` source in the live setup. A window
+    /// source keeps its own window; a display source's choice is kept for
+    /// its `display` value, shared by display sources that give the same.
+    pub source: String,
+}
+
+/// What was chosen in the desktop's sharing dialog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenPicked {
+    pub source: String,
+    /// The size the desktop shares, in pixels; 0 if it didn't say.
+    pub width: u32,
+    pub height: u32,
+    /// Whether the desktop remembers the choice. If not, the source shows it
+    /// until the source stops, then waits to be chosen again.
+    pub remembered: bool,
+    /// Sources showing the choice that a recording started during the dialog
+    /// keeps; they switch when it stops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after_recording: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

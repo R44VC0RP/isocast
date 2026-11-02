@@ -36,6 +36,20 @@ fn unsupported(what: &str) -> anyhow::Error {
     anyhow::anyhow!("{what}: not supported by the Linux backend")
 }
 
+/// A screen or window as `probe` reports it: the size the portal last
+/// shared it at, if it was shared before.
+fn screen_probe(device: String, target: ScreenTarget<'_>, canvas: &Canvas) -> Probe {
+    Probe {
+        device,
+        video: portal::saved_size(&target).map(|(width, height)| CaptureFormat {
+            width,
+            height,
+            fps: canvas.fps,
+        }),
+        channels: None,
+    }
+}
+
 impl Platform for LinuxPlatform {
     type Frame = Frame;
     type FramePool = FramePool;
@@ -122,7 +136,7 @@ impl Platform for LinuxPlatform {
                 .notes
                 .push(format!("PipeWire audio devices: {error:#}")),
         }
-        devices.notes.push("Screen selection happens in the desktop portal when capture opens. Sizes are unknown until selected; saved sizes describe the last grant. Restore tokens avoid repeated prompts only on portals that support persistent grants. Desktop audio uses the default output's monitor through a system_audio source.".into());
+        devices.notes.push("Screens and windows are chosen in the desktop's sharing dialog, which opens when a display or window source first starts. To choose ahead, or choose again, `isocast screen pick SOURCE` (method `screen_pick`) shows the dialog for that source. Sizes are unknown until chosen; saved sizes describe the last choice. Restore tokens avoid repeated prompts only on portals that support persistent grants. Desktop audio uses the default output's monitor through a system_audio source.".into());
         Ok(devices)
     }
     fn permissions(&self) -> Result<PermissionsReport> {
@@ -164,7 +178,7 @@ impl Platform for LinuxPlatform {
     }
     fn source_open_timeout(&self, source: &SourceKind) -> std::time::Duration {
         std::time::Duration::from_secs(match source {
-            SourceKind::Display(_) => 120,
+            SourceKind::Display(_) | SourceKind::Window(_) => 120,
             // PipeWire allows 5s enumeration then 5s for the first samples.
             SourceKind::Microphone(_)
             | SourceKind::SystemAudio(_)
@@ -172,12 +186,22 @@ impl Platform for LinuxPlatform {
             _ => 8,
         })
     }
-    fn request_permissions(&self, only: Option<PermissionKind>) -> Result<PermissionsReport> {
-        if only.is_none() || only == Some(PermissionKind::ScreenRecording) {
-            // Consent belongs to a selection, not a global permission bit.
-            // Permit a failed source's next retry to show the portal again.
-            portal::allow_prompt();
+    fn pick_screen(
+        &self,
+        target: ScreenTarget<'_>,
+        cursor: bool,
+    ) -> Result<isocast_engine::PickedScreen> {
+        portal::pick(&target, cursor)
+    }
+    fn keep_windows(&self, sources: &std::collections::BTreeSet<String>) {
+        if let Err(error) = portal::keep_windows(sources) {
+            isocast_diagnostics::diagnostic!("warn";
+                "could not forget the windows chosen for removed window sources: {error:#}");
         }
+    }
+    fn request_permissions(&self, _only: Option<PermissionKind>) -> Result<PermissionsReport> {
+        // Consent belongs to a selection, not a global permission bit:
+        // `screen_pick` asks for a source's screen or window.
         self.permissions()
     }
     fn open_permission_settings(&self, _permission: PermissionKind) -> Result<String> {
@@ -217,7 +241,7 @@ impl Platform for LinuxPlatform {
             },
         ]
     }
-    fn probe(&self, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
+    fn probe(&self, id: &str, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
         match source {
             SourceKind::Camera(source) => camera::probe_capture(
                 &source.device,
@@ -228,22 +252,23 @@ impl Platform for LinuxPlatform {
                 canvas,
             )
             .map(Some),
-            SourceKind::Display(display) => {
-                let saved = portal::displays()?
-                    .into_iter()
-                    .find(|d| d.id == display.display);
-                Ok(Some(Probe {
-                    device: display.display.clone(),
-                    video: saved
-                        .filter(|d| d.width > 0 && d.height > 0)
-                        .map(|d| CaptureFormat {
-                            width: d.width,
-                            height: d.height,
-                            fps: canvas.fps,
-                        }),
-                    channels: None,
-                }))
-            }
+            SourceKind::Display(display) => Ok(Some(screen_probe(
+                display.display.clone(),
+                ScreenTarget::Display {
+                    display: &display.display,
+                    source: id,
+                },
+                canvas,
+            ))),
+            SourceKind::Window(window) => Ok(Some(screen_probe(
+                window.app.clone(),
+                ScreenTarget::Window {
+                    app: &window.app,
+                    title: window.title.as_deref(),
+                    source: id,
+                },
+                canvas,
+            ))),
             SourceKind::Microphone(mic) => {
                 let (devices, _, _) = pipewire_audio::devices()?;
                 let device = devices.iter().find(|d| d.id == mic.device || d.name == mic.device)

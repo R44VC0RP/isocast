@@ -337,7 +337,7 @@ impl Platform for StubPlatform {
         }
     }
 
-    fn probe(&self, source: &SourceKind, _canvas: &Canvas) -> Result<Option<Probe>> {
+    fn probe(&self, _id: &str, source: &SourceKind, _canvas: &Canvas) -> Result<Option<Probe>> {
         match source {
             // Drawn by the engine itself into this platform's frame pools.
             SourceKind::TestPattern(_)

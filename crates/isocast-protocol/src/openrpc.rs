@@ -453,6 +453,7 @@ pub fn result(method: &str, g: &mut SchemaGenerator) -> Option<(String, Schema)>
         "whep_offer" => of::<api::WhepAnswer>(g),
         // Null, then the connection closes.
         "whep_close" => of::<()>(g),
+        "screen_pick" => of::<api::ScreenPicked>(g),
         _ => None,
     }
 }

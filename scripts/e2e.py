@@ -4655,9 +4655,9 @@ def scenario_linux_capture(e, cfg, evidence):
         cfg["recording"]["program"]["audio"] = ["desktop", "mic"]
         cfg["recording"]["iso"].update(enabled=True, sources=iso, audio=["desktop"], source_audio=source_audio)
         e.apply(cfg)
-        # The portal session and PipeWire streams start with the engine
-        # (up to 105 s on a slow desktop; the fixture never asks).
+        # The fixture has no saved choice. Pick its headless output before recording.
         e.rpc("engine", {"running": True}, timeout=150)
+        e.rpc("screen_pick", {"source": "screen"}, timeout=150)
         time.sleep(2)
         evidence["devices"] = e.optional("devices")
         path, manifest = take(e, seconds)

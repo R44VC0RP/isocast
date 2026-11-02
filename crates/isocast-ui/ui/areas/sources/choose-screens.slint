@@ -1,0 +1,79 @@
+// Choose screens and windows ("choose-screens"): display and window sources
+// waiting for a pick in the desktop's sharing dialog. Each row's button opens
+// it; a row leaves once its source runs.
+
+import { Theme } from "../../theme.slint";
+import { Ui } from "../../state.slint";
+import { Button, Dialog, Spinner } from "../../kit.slint";
+import { SourcesArea, UnchosenRow } from "state.slint";
+import { KindGlyph } from "properties.slint";
+
+component UnchosenLine inherits HorizontalLayout {
+    in property <UnchosenRow> entry;
+    spacing: Theme.space-3;
+    padding-top: Theme.space-2;
+    padding-bottom: Theme.space-2;
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        Text {
+            text: root.entry.name;
+            color: Theme.text;
+            font-size: Theme.fs;
+            font-weight: Theme.weight-medium;
+            overflow: elide;
+        }
+        Text {
+            text: root.entry.what == "window" ? "No window chosen yet" : "No screen chosen yet";
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            overflow: elide;
+        }
+    }
+    if root.entry.id == SourcesArea.unchosen-picking: HorizontalLayout {
+        spacing: Theme.space-2;
+        alignment: end;
+        VerticalLayout {
+            alignment: center;
+            Spinner {
+                small: true;
+            }
+        }
+        Text {
+            text: "Choose in the desktop’s dialog…";
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+        }
+    }
+    if root.entry.id != SourcesArea.unchosen-picking: VerticalLayout {
+        alignment: center;
+        Button {
+            text: root.entry.what == "window" ? "Choose a window…" : "Choose a screen…";
+            enabled: SourcesArea.unchosen-picking == "";
+            accessible-name: self.text + " (" + root.entry.name + ")";
+            clicked => { SourcesArea.choose-unchosen(root.entry.id); }
+        }
+    }
+}
+
+export component ChooseScreensDialog inherits Dialog {
+    title: "Choose screens and windows";
+    subtitle: "These sources wait until you choose what they show.";
+    icon: KindGlyph.glyph("window");
+    dialog-width: 520px;
+    ok-text: "";
+    cancel-text: "Later";
+    cancelled => { Ui.close-dialog(); }
+
+    VerticalLayout {
+        padding-left: Theme.sheet-pad;
+        padding-right: Theme.sheet-pad;
+        alignment: start;
+        for row in SourcesArea.unchosen: UnchosenLine {
+            entry: row;
+        }
+    }
+}
