@@ -1603,6 +1603,23 @@ impl App {
         self.toasts.show(self, Toast::new(kind, title, message))
     }
 
+    /// Put `text` on the clipboard and say whether it got there, as the bug
+    /// report does: `copied` and what to do with it, else "Clipboard
+    /// unavailable" and `by_hand`, how to do without it.
+    pub fn copy(
+        self: &Rc<Self>,
+        text: &str,
+        copied: &str,
+        next: impl Into<String>,
+        by_hand: impl Into<String>,
+    ) {
+        if crate::platform::try_copy_text(text) {
+            self.toast(ToastKind::Success, copied, next);
+        } else {
+            self.toast(ToastKind::Error, "Clipboard unavailable", by_hand);
+        }
+    }
+
     pub fn show_toast(self: &Rc<Self>, toast: Toast) -> i32 {
         self.toasts.show(self, toast)
     }

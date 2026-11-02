@@ -387,8 +387,12 @@ impl Area for Remote {
                 .and_then(|s| s.identity.as_ref())
                 .map(|i| i.id.clone());
             if let Some(id) = id {
-                crate::platform::copy_text(&id);
-                app.toast(ToastKind::Success, "Identity copied", id);
+                app.copy(
+                    &id,
+                    "Identity copied",
+                    id.clone(),
+                    format!("Type it by hand: {id}"),
+                );
             }
         });
         on!(on_add_engine, |app| app.remote.open_pairing(&app, None));

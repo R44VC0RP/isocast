@@ -26,6 +26,7 @@ use isocast_protocol::api::{Method, RequestPermissionsParams};
 use isocast_protocol::devices::{
     Permission, PermissionAction, PermissionDetail, PermissionKind, Permissions, PermissionsReport,
 };
+use isocast_protocol::hello::EngineOs;
 use slint::ComponentHandle;
 
 use super::{Area, Changed};
@@ -370,6 +371,13 @@ impl PermissionsStep {
             "ask" => self.ask(app, kind),
             "open" => self.open_settings(app, kind),
             "relaunch" => self.relaunch(app, kind),
+            // Linux: the command that gives this user the cameras.
+            "copy" => app.copy(
+                VIDEO_GROUP,
+                "Command copied",
+                "Paste it into a terminal, then log out and back in.",
+                format!("Run {VIDEO_GROUP} in a terminal, then log out and back in."),
+            ),
             // Refused without a prompt: only a newer app can ask.
             "update" => app.menu("check_updates"),
             _ => {}
@@ -560,13 +568,27 @@ impl PermissionsStep {
             }
             .into(),
         );
+        // Linux grants nothing up front: the portal asks for the screen
+        // when capture opens, and recording tries the cameras.
+        let linux = crate::engine::os() == EngineOs::Linux;
         area.set_ready(
-            report
-                .details
-                .iter()
-                .all(|d| !needed[index(d.permission)] || settled(d.state)),
+            linux
+                || report
+                    .details
+                    .iter()
+                    .all(|d| !needed[index(d.permission)] || settled(d.state)),
         );
         let busy = self.busy.get();
+        if linux {
+            area.set_items(model(LINUX_ROWS.into_iter().map(|kind| {
+                remote(row_linux(
+                    kind,
+                    report.permissions.get(kind),
+                    needed[index(kind)],
+                ))
+            })));
+            return;
+        }
         // Windows can only block the camera and microphone: the rows are
         // those two.
         let shown = |d: &&PermissionDetail| {
@@ -590,11 +612,16 @@ impl PermissionsStep {
 /// a window on another computer's engine its action is "Grant on …": the
 /// grant happens there, never through a prompt on this computer.
 fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem {
-    let mut item = if crate::engine::windows() {
+    remote(if crate::engine::windows() {
         row_windows(d, needed, busy)
     } else {
         row_mac(d, needed, busy)
-    };
+    })
+}
+
+/// `item`, with "Grant on …" for its action in a window on another
+/// computer's engine.
+fn remote(mut item: PermissionItem) -> PermissionItem {
     if !crate::engine::is_local() && !item.action.is_empty() {
         item.action = "remote".into();
         item.action_label =
@@ -797,6 +824,78 @@ fn row_windows(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> Permis
     }
 }
 
+/// Linux's rows: the screen, the cameras and the microphones (system
+/// audio is PipeWire's too, and needs nothing either).
+const LINUX_ROWS: [PermissionKind; 3] = [
+    PermissionKind::ScreenRecording,
+    PermissionKind::Camera,
+    PermissionKind::Microphone,
+];
+
+/// What gives a user the cameras (`/dev/video*`) besides logging in at the
+/// computer's own screen: the `video` group.
+const VIDEO_GROUP: &str = "sudo usermod -aG video $USER";
+
+/// One permission's row on Linux, where nothing is granted ahead: the
+/// desktop portal asks which screen to share when capture opens, cameras
+/// are the user's access to `/dev/video*` (the engine checks it), and
+/// PipeWire's microphones need no permission.
+fn row_linux(kind: PermissionKind, state: Permission, needed: bool) -> PermissionItem {
+    let (icon, title, purpose) = match kind {
+        PermissionKind::ScreenRecording => (
+            "display",
+            "Screen Recording",
+            "Screens and windows on this computer.",
+        ),
+        PermissionKind::Camera => ("camera", "Camera", "Cameras and capture cards."),
+        _ => ("mic", "Microphone", "Microphones and audio interfaces."),
+    };
+    let (status, label, detail, action, action_label) = match (kind, state) {
+        (PermissionKind::Microphone, _) => {
+            ("allowed", "No permission needed", String::new(), "", "")
+        }
+        (_, Permission::Granted) => ("allowed", "Allowed", String::new(), "", ""),
+        (PermissionKind::ScreenRecording, _) => (
+            "not-asked",
+            "Asked when recording starts",
+            String::new(),
+            "",
+            "",
+        ),
+        (_, Permission::Denied | Permission::Restricted) => (
+            "denied",
+            "No access",
+            format!(
+                "Your user can’t open any camera (/dev/video*). Log in at this computer’s own \
+                 screen, or run {VIDEO_GROUP} in a terminal and log in again."
+            ),
+            "copy",
+            "Copy Command",
+        ),
+        // No /dev/video* at all: nothing to allow yet.
+        _ => ("not-asked", "No camera found", String::new(), "", ""),
+    };
+    PermissionItem {
+        id: PermissionKind::NAMES[index(kind)].into(),
+        icon: icon.into(),
+        title: title.into(),
+        purpose: if needed {
+            purpose.into()
+        } else {
+            format!("{purpose} This setup doesn’t use it.").into()
+        },
+        status: status.into(),
+        status_label: label.into(),
+        detail: detail.into(),
+        action: action.into(),
+        action_label: action_label.into(),
+        alt_action: "".into(),
+        alt_label: "".into(),
+        busy: false,
+        needed,
+    }
+}
+
 /// The helper's one line.
 fn helper_line(app: &str, drag: bool) -> String {
     if drag {
@@ -908,5 +1007,41 @@ fn sample_report(states: [Permission; 4], unasked: bool, restart: bool) -> Permi
         },
         app: "Isocast".into(),
         details,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_rows_offer_an_action_only_for_a_camera_without_access() {
+        use Permission::{Denied, Granted, Unknown};
+        let row = |kind, state| row_linux(kind, state, true);
+
+        let screen = row(PermissionKind::ScreenRecording, Unknown);
+        assert_eq!(screen.status_label, "Asked when recording starts");
+        assert_eq!(screen.action, "");
+
+        let mic = row(PermissionKind::Microphone, Unknown);
+        assert_eq!(
+            (mic.status.as_str(), mic.status_label.as_str()),
+            ("allowed", "No permission needed")
+        );
+        assert_eq!(mic.action, "");
+
+        assert_eq!(row(PermissionKind::Camera, Granted).status_label, "Allowed");
+        let none = row(PermissionKind::Camera, Unknown);
+        assert_eq!(
+            (none.status_label.as_str(), none.action.as_str()),
+            ("No camera found", "")
+        );
+
+        let denied = row(PermissionKind::Camera, Denied);
+        assert_eq!(
+            (denied.status.as_str(), denied.action.as_str()),
+            ("denied", "copy")
+        );
+        assert!(denied.detail.contains(VIDEO_GROUP));
     }
 }

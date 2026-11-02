@@ -243,11 +243,11 @@ impl Developer {
                 }
             }
             let text = isocast_diagnostics::redact::Redactor::default().text(&text);
-            crate::platform::copy_text(&text);
-            app.toast(
-                ToastKind::Success,
+            app.copy(
+                &text,
                 "Copied diagnostics",
                 "A redacted summary is on the clipboard.",
+                "Help › Report a Bug… collects diagnostics in a zip instead.",
             );
         });
     }
