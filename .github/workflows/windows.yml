@@ -1369,7 +1369,7 @@ jobs:
       # binaries used for recovery/contract checks above.
       - name: Build recording qualification services
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli -p isocast-platform-windows --bins --example monitor-loopback
+        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli -p isocast-platform-windows --features isocast-daemon/vcam-diagnostics --bins --example monitor-loopback --example vcam-reader
 
       - name: Install recording recovery decoder
         if: env.MODE == 'full'
@@ -1387,6 +1387,11 @@ jobs:
         if: env.MODE == 'full'
         timeout-minutes: 9
         run: python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
+
+      - name: Two camera pipe readers during live and held recording
+        if: env.MODE == 'full'
+        timeout-minutes: 4
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --only win_vcam_publisher --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-vcam" --report windows-vcam.json
 
       - name: Monitoring startup preserves recording audio (no-device skip on hosted Windows)
         if: env.MODE == 'full'

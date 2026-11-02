@@ -130,7 +130,12 @@ impl Daemon {
     }
 
     pub(super) fn virtual_camera_start(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
-        if let Some(reason) = unavailable() {
+        // Windows has a publisher, not a registered camera. Keep readiness
+        // (including the UI) unchanged. Only local diagnostic builds may
+        // start the publisher to exercise it with the pipe reader.
+        let publisher_probe = cfg!(all(windows, feature = "vcam-diagnostics"))
+            && crate::callers::current().is_local();
+        if !publisher_probe && let Some(reason) = unavailable() {
             return Err(refused(reason));
         }
         // Extension activation can retry here outside the dispatcher.

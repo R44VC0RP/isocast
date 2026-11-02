@@ -387,6 +387,17 @@ impl Platform for WindowsPlatform {
     /// still fails on Windows until native preview sharing lands.
     type SharedSurface = isocast_surfaces::Surface;
 
+    const CAMERA_IS_MONITOR: bool = true;
+
+    fn virtual_camera_sink(
+        &self,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<Box<dyn isocast_engine::record::CameraSink<Frame>>> {
+        crate::virtual_camera::open(&self.graphics()?, width, height, fps)
+    }
+
     fn now(&self) -> Time {
         now()
     }

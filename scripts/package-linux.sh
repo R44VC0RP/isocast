@@ -1,7 +1,7 @@
 #!/bin/sh
 # Package a Linux build: dist/isocast-linux-<arch>.tar.gz holding isocast,
 # isocastd, isocast-browser (its browser sources' helper), isocast-ui (from
-# BIN_DIR, default target/release), the desktop entry, icon, install.sh and
+# BIN_DIR, default target/release), the desktop entry, icons, install.sh and
 # README.txt (packaging/linux). No OpenH264: install.sh downloads Cisco's
 # binary on the user's computer.
 #
@@ -37,7 +37,8 @@ for exe in isocast isocastd isocast-browser isocast-ui; do
     exit 1
   fi
 done
-cp packaging/linux/dev.isocast.Isocast.desktop packaging/linux/dev.isocast.Isocast.png \
+cp -R packaging/linux/icons "$out/"
+cp packaging/linux/dev.isocast.Isocast.desktop \
   packaging/linux/install.sh packaging/linux/README.txt packaging/linux/CISCO_H264_LICENSE.txt "$out/"
 cp LICENSE-MIT LICENSE-APACHE "$out/" 2>/dev/null || true
 test -f THIRD_PARTY_NOTICES && cp THIRD_PARTY_NOTICES "$out/"

@@ -59,10 +59,16 @@ impl Listener {
         Incoming(self)
     }
 
-    fn accept(&self) -> io::Result<Stream> {
+    /// Bound an idle accept so a short-lived publisher can stop without a
+    /// dummy client or a detached listener holding the pipe namespace.
+    pub fn accept_timeout(&self, timeout: Duration) -> io::Result<Stream> {
+        self.accept(Some(timeout))
+    }
+
+    fn accept(&self, timeout: Option<Duration>) -> io::Result<Stream> {
         let mut waiting = lock(&self.waiting);
         let result = (|| {
-            waiting.accept()?;
+            waiting.accept(timeout)?;
             let peer = self.user.verify_peer(&waiting)?;
             let next = self.user.create_pipe(&self.name, false)?;
             let pipe = std::mem::replace(&mut *waiting, next);
@@ -84,7 +90,7 @@ impl Iterator for Incoming<'_> {
     type Item = io::Result<Stream>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(self.0.accept())
+        Some(self.0.accept(None))
     }
 }
 
@@ -436,12 +442,12 @@ impl Pipe {
         })
     }
 
-    fn accept(&self) -> io::Result<()> {
+    fn accept(&self, timeout: Option<Duration>) -> io::Result<()> {
         let mut operation = Operation::new(self)?;
         // SAFETY: this instance is exclusively owned by the acceptor. No payload
         // is read or written until the peer's kernel identity has been checked.
         match unsafe { operation.submit(|overlapped| ConnectNamedPipe(self.raw(), overlapped)) } {
-            Ok(()) => operation.wait(None).map(|_| ()),
+            Ok(()) => operation.wait(timeout).map(|_| ()),
             // A client can connect between CreateNamedPipe and ConnectNamedPipe.
             Err(ERROR_PIPE_CONNECTED) => Ok(()),
             Err(code) => Err(win_error(code)),
