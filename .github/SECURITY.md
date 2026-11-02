@@ -6,7 +6,7 @@ Please report security problems privately, not in a public issue or
 discussion. Private vulnerability reporting is turned on for this
 repository:
 
-1. Open [Report a vulnerability](https://github.com/R44VC0RP/isocast/security/advisories/new)
+1. Open [Report a vulnerability](https://github.com/anomalyco/isocast/security/advisories/new)
    (the **Security** tab → **Report a vulnerability**).
 2. Describe the problem, the version (`isocast --version`) and how to
    reproduce it.

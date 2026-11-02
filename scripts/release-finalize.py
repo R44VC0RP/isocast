@@ -30,7 +30,7 @@ TEAM = os.environ.get("APPLE_TEAM_ID", "9G68SMNHEU")
 REQUIREMENT = f'=anchor apple generic and certificate leaf[subject.OU] = "{TEAM}"'
 PROFILE = "isocast-notary"
 KEYCHAIN = os.environ.get("ISOCAST_SIGN_KEYCHAIN", str(Path.home() / "Library/Keychains/login.keychain-db"))
-REPO = "R44VC0RP/isocast"
+REPO = "anomalyco/isocast"
 ROOT = Path(__file__).resolve().parent.parent
 RELEASES = "docs/releases"  # X.Y.Z.md: each version's notes, committed before tagging (#106)
 CHANGELOG = "**Full Changelog**"
@@ -465,7 +465,7 @@ def write_appcast(work, dmg, notes, prefix, out):
     os.link(dmg, work / dmg.name)
     (work / dmg.name).with_suffix(".md").write_text(notes + "\n", encoding="utf-8")
     sparkle_run(sparkle_tool("generate_appcast"), "--download-url-prefix", prefix,
-                "--embed-release-notes", "--link", f"https://github.com/{REPO}", work)
+                "--embed-release-notes", "--link", prefix.split("/releases/download/")[0], work)
     (work / "appcast.xml").replace(out)
     command("rm", "-rf", work)
 
@@ -782,6 +782,11 @@ def refresh_appcast(output, version, dry_run=False):
     metadata = {"version": version, "build_version": info["CFBundleVersion"],
                 "sparkle": {"public_key": info["SUPublicEDKey"]}}
     print("Published appcast:", flush=True)
+    # Refresh changes only the notes. A pre-transfer feed keeps its exact
+    # signed item link and enclosure; never take an arbitrary URL from the feed.
+    legacy_prefix = f"https://github.com/R44VC0RP/isocast/releases/download/{tag}/"
+    if appcast_item(original / "appcast.xml").get("enclosure.url") == legacy_prefix + dmg_name:
+        prefix = legacy_prefix
     verify_appcast(original / "appcast.xml", metadata, dmg, prefix)
     out = output / "appcast.xml"
     refresh_feed(output, dmg, notes, prefix, metadata, original / "appcast.xml", out)

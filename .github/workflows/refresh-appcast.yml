@@ -25,7 +25,7 @@ jobs:
   # Without secrets or approval: the version, its notes file on main, and a
   # published (not draft) release with exactly the DMG, checksum and appcast.
   preflight:
-    if: github.repository == 'R44VC0RP/isocast' && github.ref == 'refs/heads/main'
+    if: github.repository == 'anomalyco/isocast' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

@@ -50,7 +50,7 @@ Settings → Saved replies, or copy them from here.
 ## Question or idea, not a bug
 
 > Thanks for asking! Questions and ideas are best in
-> [Discussions](https://github.com/R44VC0RP/isocast/discussions), where
+> [Discussions](https://github.com/anomalyco/isocast/discussions), where
 > others can find the answer too. I've moved this there.
 
 ## Accepted
@@ -70,5 +70,5 @@ Settings → Saved replies, or copy them from here.
 
 > Thanks for reporting this. Security problems should be reported
 > privately, so I've hidden the details here. Please send them through
-> [Report a vulnerability](https://github.com/R44VC0RP/isocast/security/advisories/new)
+> [Report a vulnerability](https://github.com/anomalyco/isocast/security/advisories/new)
 > (see SECURITY.md), and we'll follow up there.

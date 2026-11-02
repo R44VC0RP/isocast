@@ -14,7 +14,7 @@ in Rust, MIT or Apache 2.0.
 
 ![Isocast recording: the Screen scene shows a terminal with a picture-in-picture photo and a title, above the recording timer, frame rate, dropped frames and CPU; below are the scenes, the sources with their ISO badges, the audio mixer and the Controls dock with Stop, Pause, Marker, Replay Buffer, Virtual Camera and Studio Mode](docs/images/app.png)
 
-[Download for Mac or Linux](https://github.com/R44VC0RP/isocast/releases) ·
+[Download for Mac or Linux](https://github.com/anomalyco/isocast/releases) ·
 [Getting started](docs/getting-started.md) ·
 [Isocast vs OBS](#isocast-vs-obs) · [FAQ](#faq)
 
@@ -246,7 +246,7 @@ back once the load passes.
 ### Mac
 
 1. Get the latest **Isocast.dmg** from
-   [Releases](https://github.com/R44VC0RP/isocast/releases).
+   [Releases](https://github.com/anomalyco/isocast/releases).
 2. Open it and drag Isocast to Applications.
 3. Isocast updates itself: it checks daily and asks before installing, or
    use **Isocast › Check for Updates…**.
@@ -256,7 +256,7 @@ later. Intel Macs aren't supported.
 
 ### Linux
 
-From [Releases](https://github.com/R44VC0RP/isocast/releases), download
+From [Releases](https://github.com/anomalyco/isocast/releases), download
 `SHA256SUMS` and **one** `.deb` into a new, empty folder. Match your
 distro and the architecture printed by `dpkg --print-architecture`
 (`amd64` or `arm64`), then run the commands below in that folder. The

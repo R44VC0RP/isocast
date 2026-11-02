@@ -189,10 +189,10 @@ Release-note generation explicitly reads UTF8 on Windows PowerShell5.1.
 
 Merge the release branch into the private working repository's main and use
 `scripts/publish-snapshot.sh` to send a clean snapshot to
-`R44VC0RP/isocast`, as usual. **Never push this checkout's history.** The tag
+`anomalyco/isocast`, as usual. **Never push this checkout's history.** The tag
 you release must include this workflow and its release scripts.
 
-In GitHub: **R44VC0RP/isocast → Settings → Environments → New environment**:
+In GitHub: **anomalyco/isocast → Settings → Environments → New environment**:
 
 - Name it **release**.
 - Under required reviewers, select **Ryan's GitHub user** and save.
@@ -251,13 +251,13 @@ secrets="$HOME/.config/isocast-release-secrets"
   chmod 600 "$secrets/developer-id.p12" "$secrets/AuthKey.p8" &&
   base64 < "$secrets/developer-id.p12" | tr -d '\n' > "$secrets/p12.base64" &&
   base64 < "$secrets/AuthKey.p8" | tr -d '\n' > "$secrets/p8.base64" )
-gh secret set DEVELOPER_ID_P12_BASE64 --repo R44VC0RP/isocast --env release < "$secrets/p12.base64"
-gh secret set DEVELOPER_ID_P12_PASSWORD --repo R44VC0RP/isocast --env release
-gh secret set APPLE_API_KEY_P8_BASE64 --repo R44VC0RP/isocast --env release < "$secrets/p8.base64"
-gh secret set APPLE_API_KEY_ID --repo R44VC0RP/isocast --env release
-gh secret set APPLE_API_ISSUER_ID --repo R44VC0RP/isocast --env release
-gh secret set APPLE_TEAM_ID --repo R44VC0RP/isocast --env release --body 9G68SMNHEU
-gh secret list --repo R44VC0RP/isocast --env release
+gh secret set DEVELOPER_ID_P12_BASE64 --repo anomalyco/isocast --env release < "$secrets/p12.base64"
+gh secret set DEVELOPER_ID_P12_PASSWORD --repo anomalyco/isocast --env release
+gh secret set APPLE_API_KEY_P8_BASE64 --repo anomalyco/isocast --env release < "$secrets/p8.base64"
+gh secret set APPLE_API_KEY_ID --repo anomalyco/isocast --env release
+gh secret set APPLE_API_ISSUER_ID --repo anomalyco/isocast --env release
+gh secret set APPLE_TEAM_ID --repo anomalyco/isocast --env release --body 9G68SMNHEU
+gh secret list --repo anomalyco/isocast --env release
 rm "$secrets/p12.base64" "$secrets/p8.base64"
 ```
 
@@ -313,8 +313,8 @@ secrets="$HOME/.config/isocast-release-secrets"
   mv "$HOME/Downloads/Isocast_Virtual_Camera_Developer_ID.provisionprofile" "$secrets/isocast-camera.provisionprofile" &&
   chmod 600 "$secrets"/isocast-*.provisionprofile )
 python3 scripts/vcam-package.py release-profiles "$secrets/isocast-engine.provisionprofile" "$secrets/isocast-camera.provisionprofile" --identity "Developer ID Application: Ryan Vogel (9G68SMNHEU)"
-base64 < "$secrets/isocast-engine.provisionprofile" | tr -d '\n' | gh secret set ENGINE_PROVISIONING_PROFILE_B64 --repo R44VC0RP/isocast --env release
-base64 < "$secrets/isocast-camera.provisionprofile" | tr -d '\n' | gh secret set CAMERA_PROVISIONING_PROFILE_B64 --repo R44VC0RP/isocast --env release
+base64 < "$secrets/isocast-engine.provisionprofile" | tr -d '\n' | gh secret set ENGINE_PROVISIONING_PROFILE_B64 --repo anomalyco/isocast --env release
+base64 < "$secrets/isocast-camera.provisionprofile" | tr -d '\n' | gh secret set CAMERA_PROVISIONING_PROFILE_B64 --repo anomalyco/isocast --env release
 ```
 
 (Use the downloaded files' actual names in the two `mv` lines.) The check
@@ -358,7 +358,7 @@ cd "$HOME/dev/isocast" &&
   scripts/sparkle/sparkle.sh public-key &&
   rm -f "$HOME/.config/isocast-release-secrets/sparkle-ed.key" &&
   ( umask 077 && "$dist/bin/generate_keys" -x "$HOME/.config/isocast-release-secrets/sparkle-ed.key" ) &&
-  gh secret set SPARKLE_ED_PRIVATE_KEY --repo R44VC0RP/isocast --env release < "$HOME/.config/isocast-release-secrets/sparkle-ed.key" &&
+  gh secret set SPARKLE_ED_PRIVATE_KEY --repo anomalyco/isocast --env release < "$HOME/.config/isocast-release-secrets/sparkle-ed.key" &&
   rm "$HOME/.config/isocast-release-secrets/sparkle-ed.key" &&
   git commit scripts/sparkle/public-ed-key.txt -m 'Sparkle: the release update key (public half)'
 ```
@@ -406,20 +406,20 @@ cd "$HOME/dev/isocast-public" &&
   git tag -a v0.0.2 -m 'Isocast 0.0.2 alpha' &&
   git push origin v0.0.2 &&
   sleep 20 &&
-  gh run list --repo R44VC0RP/isocast --workflow release.yml -L 1
+  gh run list --repo anomalyco/isocast --workflow release.yml -L 1
 ```
 
 The tag push starts the run; the last line shows it with its id.
 Preflight passes, then the release job waits for your approval under
 **Actions → Release → Review deployments** (`gh run view <id> --repo
-R44VC0RP/isocast --web` opens that page). Approve it; `gh run watch <id>
---repo R44VC0RP/isocast --exit-status` follows it. 30–60 minutes later
+anomalyco/isocast --web` opens that page). Approve it; `gh run watch <id>
+--repo anomalyco/isocast --exit-status` follows it. 30–60 minutes later
 (cold Rust build, two notarizations, three recording takes), the job
 summary links the draft. Check it like a user would:
 
 ```sh
-gh release view v0.0.2 --repo R44VC0RP/isocast --json isDraft,assets --jq '{isDraft, assets: [.assets[]|{name,size}]}'
-gh release download v0.0.2 --repo R44VC0RP/isocast --dir "$HOME/Downloads/isocast-0.0.2"
+gh release view v0.0.2 --repo anomalyco/isocast --json isDraft,assets --jq '{isDraft, assets: [.assets[]|{name,size}]}'
+gh release download v0.0.2 --repo anomalyco/isocast --dir "$HOME/Downloads/isocast-0.0.2"
 cd "$HOME/Downloads/isocast-0.0.2" && shasum -a 256 -c Isocast-0.0.2-arm64.dmg.sha256
 spctl --assess --type open --context context:primary-signature -v Isocast-0.0.2-arm64.dmg
 open Isocast-0.0.2-arm64.dmg
@@ -433,7 +433,7 @@ installed apps read `releases/latest/download/appcast.xml`, and GitHub's
 `latest` resolves; it has no appcast, so 0.0.1 finds no update until 0.0.2
 is published, and 0.0.1 has no updater anyway). Every release meant to reach
 testers must be published the same way. If you prefer not to cut 0.0.2 yet, a manual run for 0.0.1
-(`gh workflow run release.yml --repo R44VC0RP/isocast --ref main -f version=0.0.1`)
+(`gh workflow run release.yml --repo anomalyco/isocast --ref main -f version=0.0.1`)
 only demonstrates the clean "already published" exit; it does not exercise
 the secrets.
 
@@ -539,7 +539,7 @@ an Apple ID app-specific password. Rotate it once the hosted run works:
 Manual retry of an **existing tag** (also requires environment approval):
 
 ```sh
-gh workflow run release.yml --repo R44VC0RP/isocast --ref main -f version=0.0.2
+gh workflow run release.yml --repo anomalyco/isocast --ref main -f version=0.0.2
 ```
 
 Both `0.0.2` and `v0.0.2` are accepted. This builds the tag's code, not
@@ -561,7 +561,7 @@ published release with one that embeds `docs/releases/X.Y.Z.md` from main:
 2. Run it and approve the **release** environment when it waits:
 
    ```sh
-   gh workflow run refresh-appcast.yml --repo R44VC0RP/isocast --ref main -f version=0.0.6
+   gh workflow run refresh-appcast.yml --repo anomalyco/isocast --ref main -f version=0.0.6
    ```
 
 Preflight (no secrets) refuses drafts, unpublished or missing versions,

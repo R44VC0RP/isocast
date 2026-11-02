@@ -12,7 +12,7 @@ const root = document.documentElement;
 // latest release's page.
 const version = document.querySelector(".meta[data-version]")?.dataset.version;
 if (version && /^\d+\.\d+\.\d+$/.test(version)) {
-  const dl = `https://github.com/R44VC0RP/isocast/releases/download/v${version}/`;
+  const dl = `https://github.com/anomalyco/isocast/releases/download/v${version}/`;
   for (const a of document.querySelectorAll("a[data-download]")) a.href = `${dl}Isocast-${version}-arm64.dmg`;
   for (const a of document.querySelectorAll("a[data-deb]")) a.href = `${dl}isocast-${version}-${a.dataset.deb}.deb`;
   for (const a of document.querySelectorAll("a[data-sums]")) a.href = `${dl}SHA256SUMS`;

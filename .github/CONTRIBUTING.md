@@ -32,7 +32,7 @@ written with one. Please do.
   `accepted` label. Bigger pull requests without an accepted issue are
   closed, so nobody's work goes to waste on something that won't land.
 - **Questions and ideas:** use
-  [Discussions](https://github.com/R44VC0RP/isocast/discussions).
+  [Discussions](https://github.com/anomalyco/isocast/discussions).
 - **Security problems:** report them privately, see
   [SECURITY.md](SECURITY.md).
 

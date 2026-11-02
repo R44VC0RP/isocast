@@ -35,7 +35,10 @@ if (-not $AllowUnsignedTest) {
     if ($version -ne $info.version) { throw 'Production Windows build version must match the workspace release version' }
     if ($info.test_only -or -not $metadata.signed -or -not $ExpectedCertificateThumbprint) { throw 'Production appcasts require a production-key build and an expected Authenticode certificate' }
     $key = (Get-Content "$repo\scripts\sparkle\public-ed-key.txt" | Where-Object { $_ -and -not $_.StartsWith('#') }).Trim()
-    if ($key -ne $info.public_key -or $info.feed_url -ne 'https://github.com/R44VC0RP/isocast/releases/latest/download/appcast-windows.xml') { throw 'Production app update root/feed mismatch' }
+    # Pre-transfer WinSparkle builds use the GitHub transfer redirect.
+    $feeds = @('https://github.com/anomalyco/isocast/releases/latest/download/appcast-windows.xml',
+               'https://github.com/R44VC0RP/isocast/releases/latest/download/appcast-windows.xml')
+    if ($key -ne $info.public_key -or $info.feed_url -notin $feeds) { throw 'Production app update root/feed mismatch' }
     $auth = Get-AuthenticodeSignature -LiteralPath $installer
     if ($auth.Status -ne 'Valid' -or $auth.SignerCertificate.Thumbprint -ne $ExpectedCertificateThumbprint -or
         $metadata.certificate_thumbprint -ne $ExpectedCertificateThumbprint -or -not $auth.TimeStamperCertificate) { throw 'Installer Authenticode identity/timestamp mismatch' }
