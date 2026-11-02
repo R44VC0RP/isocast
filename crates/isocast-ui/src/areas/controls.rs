@@ -223,7 +223,17 @@ impl Area for Controls {
                 set_vcam(&app, &field, &value);
             }
         });
-        area.on_copy_text(|text| crate::platform::copy_text(&text));
+        let weak = Rc::downgrade(app);
+        area.on_copy_text(move |text| {
+            if let Some(app) = weak.upgrade() {
+                app.copy(
+                    &text,
+                    "Command copied",
+                    "Paste it into Terminal, in the Isocast folder.",
+                    format!("Type {text} in Terminal, in the Isocast folder."),
+                );
+            }
+        });
         area.on_open_vcam_settings(|| {
             crate::platform::open_url(
                 "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",

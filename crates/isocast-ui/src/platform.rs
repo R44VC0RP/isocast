@@ -477,6 +477,7 @@ fn shell_open(url: &str) -> std::io::Result<()> {
 }
 
 /// Put `text` on the general pasteboard (a command to paste in Terminal).
+/// False without one (no desktop session, as over SSH).
 #[cfg(target_os = "macos")]
 pub fn try_copy_text(text: &str) -> bool {
     use objc2::rc::Retained;
@@ -486,7 +487,10 @@ pub fn try_copy_text(text: &str) -> bool {
     // SAFETY: NSPasteboard's shared object on the main thread; the type is
     // the constant string NSPasteboardTypeString stands for.
     unsafe {
-        let board: Retained<AnyObject> = msg_send![class!(NSPasteboard), generalPasteboard];
+        let board: Option<Retained<AnyObject>> = msg_send![class!(NSPasteboard), generalPasteboard];
+        let Some(board) = board else {
+            return false;
+        };
         let _: isize = msg_send![&*board, clearContents];
         let string = ns_string(text);
         let kind = ns_string("public.utf8-plain-text");
@@ -506,10 +510,6 @@ pub fn try_copy_text(text: &str) -> bool {
             .as_mut()
             .is_some_and(|clipboard| clipboard.set_text(text).is_ok())
     })
-}
-
-pub fn copy_text(text: &str) {
-    try_copy_text(text);
 }
 
 /// Open `folder` (`~` allowed) in the Finder, as OBS's Show Recordings
@@ -592,6 +592,18 @@ pub(crate) unsafe fn rust_string(string: &objc2::runtime::AnyObject) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Copy buttons' one path, read back from the system clipboard. Run by
+    /// hand in a desktop session (`-- --ignored clipboard`); CI has none.
+    #[test]
+    #[ignore = "needs a desktop session's clipboard"]
+    fn clipboard_holds_copied_text() {
+        let text = format!("isocast clipboard check {}", std::process::id());
+        assert!(super::try_copy_text(&text));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(arboard::Clipboard::new().unwrap().get_text().unwrap(), text);
+        println!("copied: {text}");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn save_options_separate_basename_from_existing_directory() {

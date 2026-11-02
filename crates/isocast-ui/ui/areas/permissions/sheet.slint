@@ -73,7 +73,7 @@ component Action inherits HorizontalLayout {
         alignment: center;
         Button {
             text: root.item.action-label;
-            icon: root.item.action == "open" ? Icons.settings : root.item.action == "relaunch" ? Icons.refresh : root.item.action == "update" ? Icons.download : "";
+            icon: root.item.action == "open" ? Icons.settings : root.item.action == "relaunch" ? Icons.refresh : root.item.action == "update" ? Icons.download : root.item.action == "copy" ? Icons.copy : "";
             accessible-name: root.item.action-label + " (" + root.item.title + ")";
             clicked => { PermissionsArea.act(root.item.id, root.item.action); }
         }
@@ -133,12 +133,14 @@ component Rows inherits VerticalLayout {
                         wrap: word-wrap;
                     }
                 }
+                // A row with no action lends its lane to a longer status
+                // (Linux's "Asked when recording starts").
                 Status {
-                    width: 136px;
+                    width: item.action == "" && !item.busy ? 136px + 176px : 136px;
                     item: item;
                 }
                 Action {
-                    width: 176px;
+                    width: item.action == "" && !item.busy ? 0px : 176px;
                     item: item;
                 }
             }
