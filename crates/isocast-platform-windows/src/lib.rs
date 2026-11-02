@@ -8,6 +8,7 @@ mod aac;
 mod audio;
 mod audio_apps;
 mod broker;
+mod browser;
 mod camera;
 mod capture;
 mod clock;
