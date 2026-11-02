@@ -522,9 +522,11 @@ an Apple ID app-specific password. Rotate it once the hosted run works:
    changes"), publish the snapshot, and only then publish the release.
 6. **After publishing, bump the website's version and redeploy.** The site
    names the version in one place: `data-version` on the meta line in
-   `website/public/index.html`. Both Download buttons are built from it
-   (`releases/download/vX.Y.Z/Isocast-X.Y.Z-arm64.dmg`), so check that URL
-   downloads and commit `website: X.Y.Z`. Then, on main, deploy from
+   `website/public/index.html`. The Download buttons and the Linux
+   section's links are built from it
+   (`releases/download/vX.Y.Z/Isocast-X.Y.Z-arm64.dmg`, the four
+   `isocast-X.Y.Z-<distro>-<arch>.deb` and `SHA256SUMS`), so check those
+   URLs download and commit `website: X.Y.Z`. Then, on main, deploy from
    `website/` with the `cf` CLI's `work` profile
    ([docs/website.md](website.md)):
    ```sh

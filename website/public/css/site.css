@@ -180,6 +180,13 @@ h1 {
 .meta { margin: 0; font-size: 12px; line-height: 16px; font-weight: 450; letter-spacing: 0.01em; color: var(--ink-4); }
 /* The version is written once, in the meta line's data-version (index.html). */
 .meta[data-version]::before { content: "Version " attr(data-version) " · "; }
+.meta a { white-space: nowrap; }
+.meta a, .install p a { color: var(--ink-2); text-decoration: underline; text-decoration-color: rgb(255 255 255 / 0.25); text-underline-offset: 0.2em; border-radius: 3px; }
+@media (hover: hover) and (pointer: fine) { .meta a:hover, .install p a:hover { color: var(--ink); text-decoration-color: currentColor; } }
+/* The visitor's OS (js/main.js sets data-os on <html>); Mac without scripts. */
+.for-linux { display: none; }
+[data-os="linux"] .for-linux { display: inline; }
+[data-os="linux"] .for-mac { display: none; }
 
 /* The tactile download key: its thickness is a stacked edge under the face. */
 .btn-download {
@@ -456,6 +463,23 @@ code {
 .cpu-bar.is-obs { --lo: 0.58; --hi: 0.71; background: rgb(74 71 68 / 0.45); }
 .cpu-bar.is-obs::before { background: linear-gradient(180deg, #4a4744, #393735); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08); }
 
+/* Install on Linux: the facts' column, with the commands in panels. */
+.install { width: min(800px, 100% - 40px); margin: var(--section) auto 0; scroll-margin-top: var(--s-6); }
+.install h2 { margin: 0 0 var(--s-4); font-size: 24px; line-height: 30px; font-weight: 600; font-stretch: 112.5%; letter-spacing: -0.02em; color: var(--ink); }
+.install h3 { margin: var(--s-7) 0 0; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--ink); }
+.install p { margin: var(--s-4) 0 0; font-size: 16px; line-height: 26px; color: var(--ink-3); }
+.install h3 + p { margin-top: var(--s-2); }
+.pkgs { display: flex; flex-direction: column; gap: var(--s-3); margin-top: var(--s-5); padding: var(--s-5); }
+.pkg-row { display: flex; align-items: center; gap: var(--s-2); }
+.pkg-name { width: 136px; flex: none; font-size: 14px; line-height: 18px; font-weight: 500; color: var(--ink); }
+.pkgs .chip { cursor: pointer; font-family: var(--mono); font-size: 13px; color: var(--ink-2); }
+.install pre {
+  margin: var(--s-3) 0 0; padding: var(--s-4) var(--s-5); overflow-x: auto; border-radius: 12px;
+  background: #0f0f0e; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.07);
+  font-size: 13px; line-height: 22px;
+}
+.install pre code { padding: 0; margin: 0; background: none; box-shadow: none; font-size: inherit; line-height: inherit; white-space: pre; color: var(--ink-2); }
+
 .foot {
   display: flex; align-items: center; justify-content: space-between; gap: var(--s-4);
   margin-top: var(--section);
@@ -545,6 +569,11 @@ code {
 
   .facts { flex-direction: column; align-items: stretch; gap: var(--s-6); width: auto; padding: 0 max(20px, env(safe-area-inset-right)) 0 max(20px, env(safe-area-inset-left)); }
   .points li { font-size: 15.5px; line-height: 24px; }
+  .install { width: auto; padding: 0 max(20px, env(safe-area-inset-right)) 0 max(20px, env(safe-area-inset-left)); }
+  .install p { font-size: 15.5px; line-height: 24px; }
+  .install pre { margin-inline: calc(-1 * var(--s-2)); padding: var(--s-3) var(--s-4); }
+  .pkgs { padding: var(--s-4); }
+  .pkg-name { width: auto; flex: 1; }
   .cpu { width: auto; }
   .foot { flex-direction: column; align-items: flex-start; gap: 0; padding-bottom: calc(112px + env(safe-area-inset-bottom)); }
   .foot-brand, .foot-link { min-height: 44px; }

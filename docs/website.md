@@ -46,7 +46,8 @@ Everything in `website/public/`:
   `js/take.js`;
 - `fonts/isocast-sans.woff2` with `fonts/LICENSE-mona-sans.txt` (the font is a
   renamed subset of Mona Sans, see `fonts/README.md`);
-- `img/` (icons, `favicon.svg`, `og.jpg`);
+- `img/` (icons, `favicon.svg`, `og.jpg`, the link preview: a 1200×630
+  shot of the hero, with its alt text in `index.html`);
 - `media/take-<hash>/` (the hero's loops, posters and mic peaks).
 
 `_headers` sets a Content-Security-Policy that allows only the site's own
@@ -68,11 +69,16 @@ deployed site (`curl -sI https://isocast.com/nope`).
 
 The page names the version once: `data-version` on the meta line in
 `public/index.html`. CSS writes "Version X.Y.Z" from it and `js/main.js`
-points both Download links at
-`releases/download/vX.Y.Z/Isocast-X.Y.Z-arm64.dmg` (without scripts they open
-the latest release's page). After a release is published, bump that
-attribute, check the DMG link, and deploy once it's on main (docs/releasing.md,
-step 6). Check the page's claims against the release notes at the same time.
+points the Mac links at `releases/download/vX.Y.Z/Isocast-X.Y.Z-arm64.dmg`
+and the "Install on Linux" section's links at
+`isocast-X.Y.Z-{ubuntu24.04,debian12}-{amd64,arm64}.deb` and `SHA256SUMS`
+in the same release (the names `scripts/release-finalize.py` attaches;
+without scripts they all open the latest release's page). On desktop Linux
+(not Android or ChromeOS) the main button reads "Download for Linux" and
+leads to that section. After a release is published, bump that attribute,
+check the DMG, `.deb` and `SHA256SUMS` links, and deploy once it's on main
+(docs/releasing.md, step 6). Check the page's claims against the release
+notes at the same time.
 
 ## The hero's take
 

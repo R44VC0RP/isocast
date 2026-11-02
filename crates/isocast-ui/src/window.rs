@@ -56,6 +56,26 @@ pub(crate) fn with_app(f: impl FnOnce(&Rc<App>)) {
 #[cfg(target_os = "linux")]
 const APP_ID: &str = "dev.isocast.Isocast";
 
+/// Linux: the window's icon on X11 (`_NET_WM_ICON`, for taskbars and
+/// Alt-Tab when the desktop file isn't installed), the packaged 128 px
+/// PNG. Wayland has no window icon: compositors find it by the app id.
+#[cfg(target_os = "linux")]
+fn window_icon() -> Option<slint::winit_030::winit::window::Icon> {
+    const PNG: &[u8] = include_bytes!(
+        "../../../packaging/linux/icons/hicolor/128x128/apps/dev.isocast.Isocast.png"
+    );
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(PNG));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut pixels = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut pixels).ok()?;
+    if frame.color_type != png::ColorType::Rgba {
+        return None;
+    }
+    pixels.truncate(frame.buffer_size());
+    slint::winit_030::winit::window::Icon::from_rgba(pixels, frame.width, frame.height).ok()
+}
+
 /// Linux: the app's colour scheme is dark, whatever the desktop's. Slint's
 /// winit backend hands each window the scheme it holds for the app (the
 /// desktop's, from the settings portal, or none) as the theme of the title
@@ -188,9 +208,11 @@ pub fn run(options: &Options) -> Result<()> {
     }
     // Linux: the app id the desktop file names (dev.isocast.Isocast), so
     // the compositor and the dock match the window to its icon and entry;
-    // the dark theme for any decorations the compositor draws.
+    // the dark theme for any decorations the compositor draws; the icon
+    // itself on X11.
     #[cfg(target_os = "linux")]
     {
+        let icon = window_icon();
         selector = selector.with_winit_window_attributes_hook(move |attributes| {
             use slint::winit_030::winit::platform::wayland::WindowAttributesExtWayland;
             use slint::winit_030::winit::platform::x11::WindowAttributesExtX11;
@@ -198,6 +220,7 @@ pub fn run(options: &Options) -> Result<()> {
             let attributes = WindowAttributesExtX11::with_name(attributes, APP_ID, "isocast");
             let attributes =
                 attributes.with_theme(Some(slint::winit_030::winit::window::Theme::Dark));
+            let attributes = attributes.with_window_icon(icon.clone());
             match background {
                 true => attributes.with_active(false),
                 false => attributes,
