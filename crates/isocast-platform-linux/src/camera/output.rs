@@ -1,6 +1,7 @@
 //! Single-planar YUYV producer. No kernel-module management: the user supplies
 //! the loopback device. No reader-owned buffers or waits for a consumer.
 use super::*;
+use crate::frames::Readback;
 use isocast_engine::record::CameraSink;
 use std::io::Write;
 use std::sync::{Mutex, Weak};
@@ -175,7 +176,8 @@ pub(crate) fn start(width: u32, height: u32, fps: u32) -> Result<Box<dyn CameraS
         // S_FMT may return the page-aligned allocation rather than the
         // bytes in the image. A write is one frame, not one allocation.
         next: vec![0; stride * height as usize],
-        last: Vec::new(),
+        last: Vec::with_capacity(stride * height as usize),
+        readback: Readback::default(),
     }))
 }
 
@@ -186,24 +188,30 @@ struct Producer {
     stride: usize,
     next: Vec<u8>,
     last: Vec<u8>,
+    readback: Readback,
 }
 
 // BT.601 studio range, pairs of packed BGRA -> Y0 Cb Y1 Cr. Average both
 // pixels' chroma before rounding. Ignore alpha: the program is composited.
-fn pack_pair(p: &[u8], out: &mut [u8]) {
-    let y = |p: &[u8]| {
-        ((66 * i32::from(p[2]) + 129 * i32::from(p[1]) + 25 * i32::from(p[0]) + 128) / 256 + 16)
-            as u8
-    };
-    let b = i32::from(p[0]) + i32::from(p[4]);
-    let g = i32::from(p[1]) + i32::from(p[5]);
-    let r = i32::from(p[2]) + i32::from(p[6]);
-    out.copy_from_slice(&[
-        y(p),
-        (128 + ((112 * b - 74 * g - 38 * r + 256) >> 9)) as u8,
-        y(&p[4..]),
-        (128 + ((112 * r - 94 * g - 18 * b + 256) >> 9)) as u8,
-    ]);
+fn pack_row(src: &[u8], dst: &mut [u8]) {
+    for (pair, out) in src
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0)
+    {
+        let [b0, g0, r0, _, b1, g1, r1, _] = pair.map(u16::from);
+        let (b, g, r) = (b0 + b1, g0 + g1, r0 + r1);
+        let y = |b, g, r| ((66u16 * r + 129u16 * g + 25u16 * b + 128u16) >> 8) as u8 + 16;
+        // All chroma coefficients are even. Halving them and folding the
+        // 128 offset into the numerator keeps every intermediate in u16.
+        *out = [
+            y(b0, g0, r0),
+            ((32896 + 56 * b - 37 * g - 19 * r) >> 8) as u8,
+            y(b1, g1, r1),
+            ((32896 + 56 * r - 47 * g - 9 * b) >> 8) as u8,
+        ];
+    }
 }
 
 fn submit(file: &mut File, bytes: &[u8]) -> Result<bool> {
@@ -237,20 +245,19 @@ impl CameraSink<Frame> for Producer {
     }
 
     fn send(&mut self, frame: &Frame, _: Time) -> Result<bool> {
-        let pixels = frame.read_bgra()?;
-        for (src, dst) in pixels
-            .chunks_exact(self.width * 4)
-            .zip(self.next.chunks_exact_mut(self.stride))
-        {
-            for (pair, out) in src
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .zip(dst.as_chunks_mut::<4>().0)
+        ensure!(
+            frame.width() as usize == self.width
+                && frame.height() as usize == self.next.len() / self.stride,
+            "virtual_camera: frame dimensions do not match the negotiated format"
+        );
+        frame.with_bgra(&mut self.readback, |pixels, stride| {
+            for (src, dst) in pixels
+                .chunks_exact(stride)
+                .zip(self.next.chunks_exact_mut(self.stride))
             {
-                pack_pair(pair, out);
+                pack_row(&src[..self.width * 4], dst);
             }
-        }
+        })?;
         let sent = submit(&mut self.file, &self.next)?;
         if sent {
             std::mem::swap(&mut self.next, &mut self.last);
@@ -287,10 +294,41 @@ mod tests {
     #[test]
     fn yuyv_keeps_luma_order_and_averages_chroma() {
         let mut out = [0; 4];
-        pack_pair(&[0, 0, 0, 255, 255, 255, 255, 255], &mut out);
+        pack_row(&[0, 0, 0, 255, 255, 255, 255, 255], &mut out);
         assert_eq!(out, [16, 128, 235, 128]);
-        pack_pair(&[0, 0, 255, 255, 255, 0, 0, 255], &mut out);
+        pack_row(&[0, 0, 255, 255, 255, 0, 0, 255], &mut out);
         assert_eq!(out, [82, 165, 41, 175]);
+    }
+
+    #[test]
+    fn gradient_and_colour_bars_match_the_original_matrix_exactly() {
+        let mut src = Vec::new();
+        for n in 0..=255u8 {
+            src.extend([n, n.wrapping_mul(131), 255 - n, n]);
+        }
+        for n in 0..8u8 {
+            let channel = |bit: u8| if n & (1 << bit) != 0 { 255 } else { 0 };
+            // Odd bar width also exercises pairs straddling two colours.
+            for _ in 0..17 {
+                src.extend([channel(0), channel(1), channel(2), 255]);
+            }
+        }
+        let mut dst = vec![0xa5; src.len() / 2 + 8];
+        pack_row(&src, &mut dst);
+        let mut expected = Vec::new();
+        for pair in src.as_chunks::<8>().0 {
+            let [b0, g0, r0, _, b1, g1, r1, _] = pair.map(i32::from);
+            let (b, g, r) = (b0 + b1, g0 + g1, r0 + r1);
+            let y = |b, g, r| ((66 * r + 129 * g + 25 * b + 128) / 256 + 16) as u8;
+            expected.extend([
+                y(b0, g0, r0),
+                (128 + ((112 * b - 74 * g - 38 * r + 256) >> 9)) as u8,
+                y(b1, g1, r1),
+                (128 + ((112 * r - 94 * g - 18 * b + 256) >> 9)) as u8,
+            ]);
+        }
+        expected.extend([0xa5; 8]);
+        assert_eq!(dst, expected);
     }
 
     #[test]
@@ -309,6 +347,7 @@ mod tests {
             stride: 4,
             next: vec![0; 4],
             last: Vec::new(),
+            readback: Readback::default(),
         };
         let mut pool = FramePool::new(2, 1).unwrap();
         let black = pool.draw(&mut |p, _| p.fill(0)).unwrap().unwrap();
