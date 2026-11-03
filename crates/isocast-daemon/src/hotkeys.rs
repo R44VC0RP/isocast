@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use isocast_engine::hotkeys::GlobalHotkeys;
 use isocast_engine::hotkeys::{Edge, Key};
 use isocast_protocol::Setup;
@@ -47,6 +47,8 @@ pub(crate) struct HotkeyRuntime {
     registered: Mutex<Registered>,
     sender: OnceLock<mpsc::SyncSender<Input>>,
     overflow: Arc<AtomicBool>,
+    #[cfg(windows)]
+    native: isocast_platform_windows::hotkeys::WindowsHotkeys,
 }
 
 enum Input {
@@ -359,6 +361,7 @@ impl Daemon {
                 Chord::parse(&b.keys).ok().map(|chord| Key {
                     binding: id.clone(),
                     chord,
+                    hold: b.hold(),
                 })
             })
             .collect();
@@ -383,7 +386,7 @@ impl Daemon {
                 overflow.store(true, Ordering::Release);
             }
         });
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let registrations = if crate::PARENT_OWNED.load(Ordering::SeqCst) {
             // Foreground record previously opened no global shortcuts. A
             // private engine must not steal the app's chords or fire actions
@@ -396,9 +399,13 @@ impl Daemon {
                 })
                 .collect()
         } else {
-            isocast_platform_macos::hotkeys::MacHotkeys.replace(keys, generation, on_key)
+            #[cfg(target_os = "macos")]
+            let native = &isocast_platform_macos::hotkeys::MacHotkeys;
+            #[cfg(windows)]
+            let native = &self.hotkeys.native;
+            native.replace(keys, generation, on_key)
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         let registrations: Vec<Registration> = {
             let _ = on_key;
             keys.into_iter().map(|key| Registration { binding: key.binding, global: false,

@@ -260,6 +260,10 @@ pub fn run(options: &Options) -> Result<()> {
         );
         let weak = app.as_weak();
         app.window().on_winit_window_event(move |window, event| {
+            #[cfg(windows)]
+            if crate::keys::capture_event(event) {
+                return EventResult::PreventDefault;
+            }
             if background && matches!(event, winit::event::WindowEvent::Resized(_)) {
                 window.with_winit_window(background::keep_in_corner);
             }

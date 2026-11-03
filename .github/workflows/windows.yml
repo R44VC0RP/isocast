@@ -909,6 +909,10 @@ jobs:
         if: env.MODE == 'full'
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib playback::tests
 
+      - name: Check hotkey mapping and native registration status
+        if: env.MODE == 'full'
+        run: cargo test --locked -j 1 -p isocast-platform-windows --lib hotkeys::tests
+
       - name: Install FFmpeg for the media fixtures
         if: env.MODE == 'full'
         timeout-minutes: 10

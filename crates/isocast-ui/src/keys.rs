@@ -223,7 +223,7 @@ pub fn release_all() {
 }
 
 /// "ctrl+alt+shift+cmd+key", the daemon's canonical order.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub fn chord_text(modifiers: u32, name: &str) -> String {
     let mut parts = Vec::new();
     for (bit, part) in [(1, "ctrl"), (2, "alt"), (4, "shift"), (8, "cmd")] {
@@ -599,10 +599,10 @@ unsafe fn ns_string(text: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject
 #[cfg(not(target_os = "macos"))]
 pub fn start() {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn release_all() {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn capture(capture: Option<Capture>) {
     // No physical-key hook yet. Cancel rather than leaving Settings waiting
     // for a key that this platform's stub cannot deliver.
@@ -611,3 +611,8 @@ pub fn capture(capture: Option<Capture>) {
         capture(None);
     }
 }
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{capture, capture_event, release_all};

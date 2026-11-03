@@ -278,4 +278,19 @@ daemon. Ordinary global keys continue working, and media bindings remain
 available through the focused-client API. The passive tap does not suppress
 macOS's media/volume behavior. Accessibility isn't requested as a workaround.
 
-Global capture on other platforms currently reports focused-only status.
+## Windows
+
+The daemon registers each chord on its own Windows message thread using
+`RegisterHotKey`. `cmd` means the Windows logo key. Printable keys use their
+physical US positions, translated to the foreground keyboard layout at
+registration time. Windows reserves some chords; `hotkeys list --json` names
+the failed binding and chord. Keypad Enter has no separate virtual key for
+global registration (a Return shortcut also matches keypad Enter).
+
+`WM_HOTKEY` has no key-up event. Ordinary actions use one pulse per press
+(`MOD_NOREPEAT`). Only while a push action is held, the thread checks that
+key and its required modifiers with `GetAsyncKeyState` every 10 ms. Releasing
+either ends the hold. No system-wide keyboard hook is installed; with no
+holds the thread sleeps until a registered press or shutdown. Rebinding joins
+the old thread and releases its registrations before installing the new ones.
+Settings records an unclaimed chord from the focused window; Escape cancels.
