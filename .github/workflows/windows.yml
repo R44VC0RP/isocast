@@ -872,6 +872,12 @@ jobs:
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-vcam-dshow -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts -p isocast-browser -p isocast-browser-protocol -p isocast-browser-host
 
+      - name: Build 32-bit DirectShow camera for x86 consumers
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo build --locked --target i686-pc-windows-msvc -p isocast-vcam-dshow
+
       # Synchronous MF AAC transactions: serial, after the native build so
       # the test binary is cached. Package-only features can still rebuild
       # dependencies, so allow compilation time as well as test execution.

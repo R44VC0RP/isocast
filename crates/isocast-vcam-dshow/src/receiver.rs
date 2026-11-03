@@ -1,17 +1,20 @@
 use isocast_ipc::Stream;
 use isocast_vcam_wire::{HEADER_BYTES, Header, Mode, destination};
 use std::{
+    ffi::c_void,
     io::{self, Read},
     net::Shutdown,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 
 fn session(pid: u32) -> io::Result<u32> {
     let mut id = 0;
+    // SAFETY: id is a writable DWORD for the duration of the call.
     if unsafe { ProcessIdToSessionId(pid, &mut id) } == 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -23,7 +26,8 @@ fn endpoint() -> io::Result<(PathBuf, u32)> {
     Ok((destination(&isocast_protocol::api::socket_path(), id), id))
 }
 fn connect((path, id): &(PathBuf, u32)) -> io::Result<Stream> {
-    let pipe = Stream::connect(path)?;
+    // One authenticated attempt; the caller controls its retry deadline.
+    let pipe = Stream::Local(isocast_ipc::LocalStream::try_connect(path)?);
     if session(isocast_ipc::peer_pid(&pipe)?)? != *id {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
@@ -43,19 +47,51 @@ struct Format {
     fps: u32,
 }
 
-#[unsafe(no_mangle)]
 extern "C" fn camera_probe() -> Format {
-    let mode = (|| -> io::Result<Mode> {
-        let mut pipe = connect(&endpoint()?)?;
-        pipe.set_read_timeout(Some(Duration::from_millis(200)))?;
-        Ok(header(&mut pipe, None)?.mode)
-    })()
-    .unwrap_or_else(|_| Mode::new(1280, 720, 30).unwrap());
-    Format {
-        width: mode.width(),
-        height: mode.height(),
-        fps: mode.fps(),
-    }
+    catch_unwind(|| -> io::Result<Format> {
+        let until = Instant::now() + Duration::from_millis(100);
+        let ep = endpoint()?;
+        let mut pipe = loop {
+            if Instant::now() >= until {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            match connect(&ep) {
+                Ok(pipe) => break pipe,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    let left = until.saturating_duration_since(Instant::now());
+                    thread::sleep(left.min(Duration::from_millis(5)));
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        let mut bytes = [0; HEADER_BYTES];
+        let mut rest = bytes.as_mut_slice();
+        while !rest.is_empty() {
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            pipe.set_read_timeout(Some(remaining))?;
+            let n = pipe.read(rest)?;
+            if n == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            rest = &mut rest[n..];
+        }
+        let mode = Header::decode(&bytes, None)?.mode;
+        Ok(Format {
+            width: mode.width(),
+            height: mode.height(),
+            fps: mode.fps(),
+        })
+    })
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or(Format {
+        width: 1280,
+        height: 720,
+        fps: 30,
+    })
 }
 
 struct Picture {
@@ -112,6 +148,7 @@ struct Receiver {
 
 impl Receiver {
     fn open(mode: Mode, yuy2: bool) -> io::Result<Self> {
+        let output = render(mode, yuy2, None);
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
         let feed = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -132,7 +169,6 @@ impl Receiver {
                         .unwrap();
                 }
             })?;
-        let output = render(mode, yuy2, None);
         Ok(Self {
             shared,
             worker: Some(worker),
@@ -247,36 +283,114 @@ fn render(mode: Mode, yuy2: bool, picture: Option<&Picture>) -> Vec<u8> {
 
 // The SDK filter owns this box for one Run interval. Only its delivery thread
 // calls fill; Stop joins that thread before returning ownership to close.
-#[unsafe(no_mangle)]
-extern "C" fn camera_open(format: Format, yuy2: bool) -> *mut Receiver {
-    Mode::new(format.width, format.height, format.fps)
-        .and_then(|m| Receiver::open(m, yuy2))
-        .map_or(std::ptr::null_mut(), |r| Box::into_raw(Box::new(r)))
+extern "C" fn camera_open(format: Format, yuy2: bool) -> *mut c_void {
+    catch_unwind(|| {
+        Mode::new(format.width, format.height, format.fps)
+            .and_then(|m| Receiver::open(m, yuy2))
+            .map_or(std::ptr::null_mut(), |r| Box::into_raw(Box::new(r)).cast())
+    })
+    .unwrap_or(std::ptr::null_mut())
 }
-#[unsafe(no_mangle)]
-unsafe extern "C" fn camera_fill(receiver: *mut Receiver, data: *mut u8, len: usize) -> bool {
-    let r = unsafe { &mut *receiver };
-    let pixels = r.mode.width() as usize * r.mode.height() as usize;
-    let required = if r.yuy2 {
-        pixels * 2
-    } else {
-        r.mode.nv12_len()
-    };
-    if data.is_null() || len < required {
-        return false;
-    }
-    r.fill(unsafe { std::slice::from_raw_parts_mut(data, required) })
+unsafe extern "C" fn camera_fill(receiver: *mut c_void, data: *mut u8, len: usize) -> bool {
+    // On panic the delivery thread aborts the graph; it never reuses this sample.
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: a non-null receiver is the open box used exclusively by this delivery thread.
+        let Some(r) = (unsafe { receiver.cast::<Receiver>().as_mut() }) else {
+            return false;
+        };
+        let pixels = r.mode.width() as usize * r.mode.height() as usize;
+        let required = if r.yuy2 {
+            pixels * 2
+        } else {
+            r.mode.nv12_len()
+        };
+        if data.is_null() || len < required {
+            return false;
+        }
+        // SAFETY: the allocator sample grants exclusive access to at least `required` bytes until fill returns.
+        r.fill(unsafe { std::slice::from_raw_parts_mut(data, required) })
+    }))
+    .unwrap_or(false)
 }
+unsafe extern "C" fn camera_close(receiver: *mut c_void) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !receiver.is_null() {
+            // SAFETY: the filter joined the delivery thread (or never started it) and returns the open box once.
+            drop(unsafe { Box::from_raw(receiver.cast::<Receiver>()) });
+        }
+    }));
+}
+
+// Hand the native factory private callbacks, not DLL exports callable by apps.
+// Layout and calling conventions match CameraApi in native/camera.h.
+#[repr(C)]
+struct CameraApi {
+    probe: extern "C" fn() -> Format,
+    open: extern "C" fn(Format, bool) -> *mut c_void,
+    fill: unsafe extern "C" fn(*mut c_void, *mut u8, usize) -> bool,
+    close: unsafe extern "C" fn(*mut c_void),
+}
+static API: CameraApi = CameraApi {
+    probe: camera_probe,
+    open: camera_open,
+    fill: camera_fill,
+    close: camera_close,
+};
+
+unsafe extern "C" {
+    fn camera_factory(
+        api: &CameraApi,
+        cls: *const c_void,
+        iid: *const c_void,
+        out: *mut *mut c_void,
+    ) -> i32;
+}
+
 #[unsafe(no_mangle)]
-unsafe extern "C" fn camera_close(receiver: *mut Receiver) {
-    if !receiver.is_null() {
-        drop(unsafe { Box::from_raw(receiver) });
-    }
+unsafe extern "system" fn DllGetClassObject(
+    cls: *const c_void,
+    iid: *const c_void,
+    out: *mut *mut c_void,
+) -> i32 {
+    // SAFETY: COM supplies the CLSID, IID and output slot per DllGetClassObject's ABI; API lives for the DLL's lifetime.
+    unsafe { camera_factory(&API, cls, iid, out) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn off_slate_at_nonstandard_dimensions() {
+        // NV12 forbids odd planes, but the centering arithmetic can still
+        // have odd remainders in both axes (and scale to zero at tiny sizes).
+        assert!(Mode::new(35, 19, 30).is_err());
+        let mode = Mode::new(34, 18, 30).unwrap();
+        let out = render(mode, false, None);
+        let mut expected = vec![16; 34 * 18];
+        for (y, row) in [
+            "###.###.###",
+            "#.#.#...#..",
+            "#.#.##..##.",
+            "#.#.#...#..",
+            "###.#...#..",
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (x, c) in row.bytes().enumerate() {
+                if c == b'#' {
+                    expected[(6 + y) * 34 + 11 + x] = 170;
+                }
+            }
+        }
+        expected.resize(mode.nv12_len(), 128);
+        assert_eq!(out, expected);
+        assert_eq!(
+            render(Mode::new(2, 2, 30).unwrap(), true, None),
+            [16, 128, 16, 128, 16, 128, 16, 128]
+        );
+    }
 
     #[test]
     fn yuy2_keeps_luma_and_reuses_chroma_on_both_lines() {

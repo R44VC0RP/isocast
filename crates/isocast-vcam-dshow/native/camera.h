@@ -34,8 +34,10 @@ struct Format {
     uint32_t width, height, fps;
 };
 struct Receiver;
-extern "C" Format camera_probe();
-extern "C" Receiver *camera_open(Format, bool yuy2);
-extern "C" bool camera_fill(Receiver *, BYTE *, size_t);
-extern "C" void camera_close(Receiver *);
-HRESULT create_camera(REFIID, void **);
+struct CameraApi {
+    Format (*probe)();
+    Receiver *(*open)(Format, bool yuy2);
+    bool (*fill)(Receiver *, BYTE *, size_t);
+    void (*close)(Receiver *);
+};
+HRESULT create_camera(const CameraApi &, REFIID, void **);

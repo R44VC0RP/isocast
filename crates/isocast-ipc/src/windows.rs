@@ -120,9 +120,18 @@ struct Timeouts {
 
 impl Stream {
     pub fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::connect_with_wait(path.as_ref(), Duration::from_secs(1))
+    }
+
+    /// Make one authenticated open attempt, without waiting for a busy instance.
+    pub fn try_connect(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::connect_with_wait(path.as_ref(), Duration::ZERO)
+    }
+
+    fn connect_with_wait(path: &Path, wait: Duration) -> io::Result<Self> {
         let user = User::current()?;
-        let name = name::pipe_name(path.as_ref(), user.sid_bytes())?;
-        let pipe = Pipe::connect(&name)?;
+        let name = name::pipe_name(path, user.sid_bytes())?;
+        let pipe = Pipe::connect(&name, wait)?;
         let peer = user.verify_peer(&pipe)?;
         Ok(Self::new(pipe, peer))
     }
@@ -399,10 +408,10 @@ impl Pipe {
         self.handle.as_raw_handle()
     }
 
-    fn connect(name: &[u16]) -> io::Result<Self> {
+    fn connect(name: &[u16], wait: Duration) -> io::Result<Self> {
         // SAFETY: NUL-terminated name. No inheritable handle, and identification
         // SQOS prevents even a malicious server from impersonating this client.
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + wait;
         let handle = loop {
             let result = unsafe {
                 owned(CreateFileW(

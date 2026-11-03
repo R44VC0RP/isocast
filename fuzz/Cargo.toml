@@ -14,6 +14,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 isocast-protocol = { path = "../crates/isocast-protocol" }
+isocast-vcam-wire = { path = "../crates/isocast-vcam-wire" }
 
 [[bin]]
 name = "h264"
@@ -25,6 +26,13 @@ bench = false
 [[bin]]
 name = "mp4_edits"
 path = "fuzz_targets/mp4_edits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vcam_header"
+path = "fuzz_targets/vcam_header.rs"
 test = false
 doc = false
 bench = false

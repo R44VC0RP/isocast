@@ -2,7 +2,9 @@
 #include <strsafe.h>
 
 class Factory final : public IClassFactory, public Counted {
+    const CameraApi &api;
   public:
+    explicit Factory(const CameraApi &api) : api(api) {}
     REFCOUNT()
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override {
         if (!out)
@@ -18,7 +20,7 @@ class Factory final : public IClassFactory, public Counted {
         if (!out)
             return E_POINTER;
         *out = nullptr;
-        return outer ? CLASS_E_NOAGGREGATION : create_camera(id, out);
+        return outer ? CLASS_E_NOAGGREGATION : create_camera(api, id, out);
     }
     HRESULT STDMETHODCALLTYPE LockServer(BOOL lock) override {
         if (lock)
@@ -28,13 +30,13 @@ class Factory final : public IClassFactory, public Counted {
         return S_OK;
     }
 };
-STDAPI DllGetClassObject(REFCLSID cls, REFIID id, void **out) {
+extern "C" HRESULT camera_factory(const CameraApi &api, REFCLSID cls, REFIID id, void **out) {
     if (!out)
         return E_POINTER;
     *out = nullptr;
     if (cls != camera_id)
         return CLASS_E_CLASSNOTAVAILABLE;
-    auto f = new (std::nothrow) Factory;
+    auto f = new (std::nothrow) Factory(api);
     if (!f)
         return E_OUTOFMEMORY;
     HRESULT hr = f->QueryInterface(id, out);

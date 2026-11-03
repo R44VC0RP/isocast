@@ -219,10 +219,24 @@ class Filter final : public IBaseFilter, public IAMFilterMiscFlags, public Count
     std::recursive_mutex lock; // pin negotiation may synchronously query this pin
     std::mutex transition;
     FILTER_STATE state = State_Stopped;
-    Type type{camera_probe(), false};
+    const CameraApi &api;
+    Type type{};
+    // Called under lock, and only when a caller actually needs a format.
+    Type mediaType() {
+        if (!type.mode.fps)
+            type.mode = api.probe();
+        return type;
+    }
+    Type preferredType() {
+        auto t = mediaType();
+        if (!fixed)
+            t.yuy2 = false;
+        return t;
+    }
     bool fixed = false;
     wchar_t name[MAX_FILTER_NAME] = L"Isocast Camera";
     IFilterGraph *graph = nullptr; // graph owns the filter; no reference cycle
+    IMediaEventSink *events = nullptr; // same lifetime as graph
     ComPtr<IPin> peer;
     ComPtr<IMemInputPin> input;
     ComPtr<IMemAllocator> allocator;
@@ -233,14 +247,15 @@ class Filter final : public IBaseFilter, public IAMFilterMiscFlags, public Count
 
     // While the worker exists its pin, allocator, clock and type are immutable.
     // No filter mutex is held during GetBuffer, Receive, flush, or join.
-    void deliver() {
+    HRESULT deliver() {
         const auto wallStart = GetTickCount64();
         uint64_t index = 0;
         while (WaitForSingleObject(stopEvent, 0) == WAIT_TIMEOUT) {
             REFERENCE_TIME now{};
+            HRESULT hr;
             if (runClock) {
-                if (FAILED(runClock->GetTime(&now)))
-                    break;
+                if (FAILED(hr = runClock->GetTime(&now)))
+                    return hr;
                 now -= origin;
             } else
                 now = REFERENCE_TIME(GetTickCount64() - wallStart) * 10000;
@@ -262,25 +277,40 @@ class Filter final : public IBaseFilter, public IAMFilterMiscFlags, public Count
             }
             auto end = at(index + 1);
             ComPtr<IMediaSample> sample;
-            if (FAILED(allocator->GetBuffer(&sample, nullptr, nullptr, 0)))
-                break;
+            if (FAILED(hr = allocator->GetBuffer(&sample, nullptr, nullptr, 0))) {
+                // The graph can stop downstream before it stops us. Don't spin
+                // on its decommitted allocator or report its state as our error.
+                if (hr == VFW_E_NOT_COMMITTED || hr == VFW_E_WRONG_STATE)
+                    WaitForSingleObject(stopEvent, INFINITE);
+                return S_OK;
+            }
             BYTE *data{};
-            if (FAILED(sample->GetPointer(&data)) || sample->GetSize() < type.length() ||
-                !camera_fill(receiver, data, type.length()))
-                break;
-            sample->SetActualDataLength(type.length());
-            sample->SetTime(&start, &end);
-            sample->SetSyncPoint(TRUE);
-            sample->SetPreroll(FALSE);
-            sample->SetDiscontinuity(discontinuity);
+            if (FAILED(hr = sample->GetPointer(&data)))
+                return hr;
+            if (sample->GetSize() < type.length())
+                return VFW_E_BUFFER_OVERFLOW;
+            if (!api.fill(receiver, data, type.length()))
+                return E_FAIL;
+            if (FAILED(hr = sample->SetActualDataLength(type.length())) ||
+                FAILED(hr = sample->SetTime(&start, &end)) || FAILED(hr = sample->SetSyncPoint(TRUE)) ||
+                FAILED(hr = sample->SetPreroll(FALSE)) || FAILED(hr = sample->SetDiscontinuity(discontinuity)))
+                return hr;
             if (input->Receive(sample.Get()) != S_OK)
-                break;
+                return S_OK; // downstream stopped or declined further samples
             ++index;
         }
+        return S_OK;
     }
     static DWORD WINAPI entry(LPVOID data) {
         HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        static_cast<Filter *>(data)->deliver();
+        auto &f = *static_cast<Filter *>(data);
+        HRESULT hr = f.deliver();
+        if (FAILED(hr)) {
+            std::lock_guard guard(f.lock);
+            // Stop/Pause intentionally flush Receive and decommit GetBuffer.
+            if (f.events && WaitForSingleObject(f.stopEvent, 0) == WAIT_TIMEOUT)
+                f.events->Notify(EC_ERRORABORT, hr, 0);
+        }
         if (SUCCEEDED(init))
             CoUninitialize();
         return 0;
@@ -300,7 +330,7 @@ class Filter final : public IBaseFilter, public IAMFilterMiscFlags, public Count
         peer->EndFlush();
         CloseHandle(thread);
         CloseHandle(stopEvent);
-        camera_close(receiver);
+        api.close(receiver);
         std::lock_guard guard(lock);
         receiver = nullptr;
         thread = nullptr;
@@ -310,6 +340,7 @@ class Filter final : public IBaseFilter, public IAMFilterMiscFlags, public Count
     }
 
   public:
+    explicit Filter(const CameraApi &api) : api(api) {}
     REFCOUNT()
     ~Filter() override { halt(State_Stopped); }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override {
@@ -352,13 +383,13 @@ class Filter final : public IBaseFilter, public IAMFilterMiscFlags, public Count
             if (FAILED(hr))
                 return hr;
             stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            receiver = camera_open(type.mode, type.yuy2);
+            receiver = api.open(type.mode, type.yuy2);
             runClock = clock;
             origin = start;
             if (stopEvent && receiver)
                 thread = CreateThread(nullptr, 0, entry, this, 0, nullptr);
             if (!thread) {
-                camera_close(receiver);
+                api.close(receiver);
                 receiver = nullptr;
                 if (stopEvent)
                     CloseHandle(stopEvent);
@@ -418,6 +449,11 @@ class Filter final : public IBaseFilter, public IAMFilterMiscFlags, public Count
     }
     HRESULT STDMETHODCALLTYPE JoinFilterGraph(IFilterGraph *g, LPCWSTR n) override {
         std::lock_guard guard(lock);
+        // As with graph, retain a borrowed interface only until graph detach.
+        ComPtr<IMediaEventSink> sink;
+        if (g)
+            g->QueryInterface(IID_PPV_ARGS(&sink));
+        events = sink.Get();
         graph = g;
         StringCchCopyNW(name, MAX_FILTER_NAME, n ? n : camera_name, MAX_FILTER_NAME - 1);
         return S_OK;
@@ -467,7 +503,7 @@ HRESULT Pin::Connect(IPin *peer, const AM_MEDIA_TYPE *proposed) {
     HRESULT hr = peer->QueryInterface(IID_PPV_ARGS(&input));
     if (FAILED(hr))
         return hr;
-    Type t = owner.type;
+    Type t = owner.preferredType();
     for (int i = 0; i < (owner.fixed ? 1 : 2); ++i, t.yuy2 = !t.yuy2) {
         if (!t.matches(proposed, true))
             continue;
@@ -533,7 +569,7 @@ HRESULT Pin::ConnectionMediaType(AM_MEDIA_TYPE *m) {
 }
 HRESULT Pin::QueryAccept(const AM_MEDIA_TYPE *m) {
     std::lock_guard guard(owner.lock);
-    auto t = owner.type;
+    auto t = owner.preferredType();
     if (t.matches(m))
         return S_OK;
     t.yuy2 = !t.yuy2;
@@ -543,7 +579,7 @@ HRESULT Pin::EnumMediaTypes(IEnumMediaTypes **out) {
     if (!out)
         return E_POINTER;
     std::lock_guard guard(owner.lock);
-    *out = new (std::nothrow) Enum<IEnumMediaTypes, AM_MEDIA_TYPE>(this, owner.type, owner.fixed ? 1 : 2);
+    *out = new (std::nothrow) Enum<IEnumMediaTypes, AM_MEDIA_TYPE>(this, owner.preferredType(), owner.fixed ? 1 : 2);
     return *out ? S_OK : E_OUTOFMEMORY;
 }
 HRESULT Pin::SetFormat(AM_MEDIA_TYPE *m) {
@@ -557,7 +593,7 @@ HRESULT Pin::SetFormat(AM_MEDIA_TYPE *m) {
         owner.type.yuy2 = false;
         return S_OK;
     }
-    Type t = owner.type;
+    Type t = owner.mediaType();
     t.yuy2 = (m->subtype == MEDIASUBTYPE_YUY2);
     if (!t.matches(m))
         return VFW_E_INVALIDMEDIATYPE;
@@ -567,7 +603,7 @@ HRESULT Pin::SetFormat(AM_MEDIA_TYPE *m) {
 }
 HRESULT Pin::GetFormat(AM_MEDIA_TYPE **out) {
     std::lock_guard guard(owner.lock);
-    return owner.type.allocate(out);
+    return (owner.peer ? owner.type : owner.preferredType()).allocate(out);
 }
 HRESULT Pin::GetStreamCaps(int index, AM_MEDIA_TYPE **out, BYTE *caps) {
     if (!out || !caps)
@@ -576,7 +612,7 @@ HRESULT Pin::GetStreamCaps(int index, AM_MEDIA_TYPE **out, BYTE *caps) {
     if (index < 0 || index >= 2)
         return S_FALSE;
     std::lock_guard guard(owner.lock);
-    Type t = owner.type;
+    Type t = owner.mediaType();
     t.yuy2 = (index == 1);
     VIDEO_STREAM_CONFIG_CAPS c{};
     c.guid = FORMAT_VideoInfo;
@@ -589,8 +625,8 @@ HRESULT Pin::GetStreamCaps(int index, AM_MEDIA_TYPE **out, BYTE *caps) {
 }
 } // namespace
 
-HRESULT create_camera(REFIID id, void **out) {
-    auto f = new (std::nothrow) Filter;
+HRESULT create_camera(const CameraApi &api, REFIID id, void **out) {
+    auto f = new (std::nothrow) Filter(api);
     if (!f)
         return E_OUTOFMEMORY;
     HRESULT hr = f->QueryInterface(id, out);
