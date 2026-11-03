@@ -20,6 +20,7 @@ mod frames;
 mod gpu;
 mod h264;
 mod hevc;
+pub mod hotkeys;
 mod media;
 mod mf;
 mod native;

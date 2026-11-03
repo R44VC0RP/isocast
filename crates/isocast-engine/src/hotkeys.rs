@@ -8,6 +8,8 @@ use std::sync::Arc;
 pub struct Key {
     pub binding: String,
     pub chord: Chord,
+    /// The action needs a physical release, not just a press pulse.
+    pub hold: bool,
 }
 
 #[derive(Debug)]
