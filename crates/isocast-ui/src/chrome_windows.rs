@@ -41,8 +41,8 @@ use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWi
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DrawMenuBar, EnumThreadWindows, GWL_STYLE, GetClientRect, GetMenuBarInfo, GetMenuItemInfoW,
     GetWindowLongPtrW, GetWindowRect, HMENU, IsWindowVisible, MENUBARINFO, MENUITEMINFOW,
-    MIIM_STRING, OBJID_MENU, WM_NCACTIVATE, WM_NCDESTROY, WM_NCPAINT, WM_SETTINGCHANGE,
-    WM_THEMECHANGED, WS_CAPTION, WS_OVERLAPPEDWINDOW,
+    MIIM_STRING, OBJID_MENU, SPI_SETCLIENTAREAANIMATION, WM_NCACTIVATE, WM_NCDESTROY, WM_NCPAINT,
+    WM_SETTINGCHANGE, WM_THEMECHANGED, WS_CAPTION, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::{AppWindow, Theme};
@@ -138,6 +138,16 @@ pub fn style_windows_soon() {
         }
         // SAFETY: the callback only touches the window it is given.
         unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(each), 0) };
+        // Catch changes between the startup read and installing the subclass.
+        refresh_motion();
+    });
+}
+
+fn refresh_motion() {
+    crate::window::with_app(|app| {
+        if let Some(window) = app.window() {
+            crate::platform::apply_windows_motion(&window, false);
+        }
     });
 }
 
@@ -253,6 +263,11 @@ unsafe extern "system" fn subclass(
             result
         }
         WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            if message == WM_SETTINGCHANGE && wparam == SPI_SETCLIENTAREAANIMATION as usize {
+                // A synchronous broadcast can re-enter the UI. Update Slint
+                // on its next event-loop turn, not inside the window proc.
+                let _ = slint::invoke_from_event_loop(refresh_motion);
+            }
             let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
             apply_dwm(hwnd, colors);
             result
