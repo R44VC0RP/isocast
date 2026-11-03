@@ -288,6 +288,47 @@ typical file size. Constant-quality rates depend strongly on motion, noise,
 fine detail, codec, depth and the Mac's encoder. Measure a representative
 take before budgeting a long recording.
 
+## Windows desktop audio exclusions
+
+With monitoring off and `exclude = []`, `kind = "system_audio"` records the
+**default render endpoint** using `endpoint-loopback`. Its real endpoint
+timestamps drive rate correction against the video clock. An app playing
+only to another device isn't captured.
+
+Starting with monitoring on or an exclusion configured selects
+`process-loopback-exclude`. This excludes the engine tree, including monitor
+playback. Enabling monitoring while an endpoint-loopback source is running is
+refused: stop the engine after recording, then enable monitoring before
+reopening desktop audio. A take keeps the capture it started with; switching
+monitoring off doesn't replace a source pinned by that take.
+
+**Long takes ([#251](https://github.com/anomalyco/isocast/issues/251)):**
+The exclude stream mixes audio from **all render endpoints**. Its packet
+timestamps follow the virtual client's nominal 48 kHz sample count, not a
+measured hardware clock. PCM on the measured single-output system followed
+the physical playback oscillator, drifting about 26 ms per ten minutes
+against video and repeating 200 ms after roughly 16 minutes. Audio playing
+on a second device is included on the same virtual timeline, not on its own
+clocked track. Windows provides no per-device timing in this mix; Isocast
+doesn't correct the devices' relative drift or guarantee their alignment.
+For a clock-corrected desktop recording, use the default endpoint path.
+
+In exclude mode, `exclude = []` excludes only the engine tree. One additional running app can
+be named (use its executable path or a name from `isocast devices`) **only
+when its tree and the engine fit inside one of those two trees**. For
+example, if a playback app launches the engine, excluding that app leaves
+out both. `isocast doctor` reports the planned tree. This selects the
+running tree, including future children, not future independent instances;
+if the selected root exits, reopen the source. An unrelated app, an absent
+app or multiple entries are refused. To record selected independent apps,
+use `application_audio` sources for the ones you want to hear instead.
+
+[WASAPI process loopback](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/)
+accepts one target PID per stream. Excluding a common parent would drop
+unrequested siblings. Subtracting separately captured app streams isn't an
+exact filter: they aren't guaranteed sample alignment or identical gains.
+Isocast never falls back to capturing the unfiltered mix.
+
 ## Audio interface inputs
 
 A microphone source records its device's inputs 1 and 2 as left and

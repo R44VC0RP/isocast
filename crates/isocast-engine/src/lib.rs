@@ -59,6 +59,14 @@ pub struct DoctorWarning {
     pub fix: String,
 }
 
+/// A platform where desktop capture selects a different stream for monitoring.
+#[derive(Clone, Copy)]
+pub struct SystemAudioMode {
+    pub name: &'static str,
+    pub captures_monitor: bool,
+    pub warning: Option<&'static str>,
+}
+
 /// The video encoders found by [`Platform::video_encoders`], by name, in
 /// the order a recording tries them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -258,6 +266,20 @@ pub trait Platform: Clone + Send + Sync + 'static {
         source: &SourceKind,
         canvas: &Canvas,
     ) -> anyhow::Result<Option<Probe>>;
+
+    fn probe_with_monitoring(
+        &self,
+        id: &str,
+        source: &SourceKind,
+        canvas: &Canvas,
+        _monitoring: bool,
+    ) -> anyhow::Result<Option<Probe>> {
+        self.probe(id, source, canvas)
+    }
+
+    fn system_audio_mode(&self, _exclude: &[String], _monitoring: bool) -> Option<SystemAudioMode> {
+        None
+    }
 
     /// Free space and kind of the volume holding `path`.
     fn volume(&self, path: &Path) -> anyhow::Result<Volume>;

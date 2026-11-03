@@ -32,6 +32,7 @@ use crate::native::{Apartment, Event};
 
 mod application;
 mod rate;
+pub(crate) use application::probe_system_audio;
 pub use application::{capture_application_audio, probe_application_audio};
 
 const MAX_FRAMES: u32 = 48_000;
@@ -308,18 +309,39 @@ pub fn capture_loopback(
     capture(device, None, eRender, sink, thread_start)
 }
 
+pub(crate) fn desktop_mode(
+    exclude: &[String],
+    monitoring: bool,
+) -> isocast_engine::SystemAudioMode {
+    if exclude.is_empty() && !monitoring {
+        isocast_engine::SystemAudioMode {
+            name: "endpoint-loopback",
+            captures_monitor: true,
+            warning: None,
+        }
+    } else {
+        isocast_engine::SystemAudioMode {
+            name: "process-loopback-exclude",
+            captures_monitor: false,
+            warning: Some(
+                "#251: filtered Windows desktop audio can drift against video on long takes and repeat audio without reporting a dropout; for long takes use endpoint loopback (no exclusions and monitoring off)",
+            ),
+        }
+    }
+}
+
 pub fn capture_system_audio(
     exclude: &[String],
     sink: AudioSink,
     exclude_own: bool,
     thread_start: fn(),
 ) -> Result<(AudioCapture, u32)> {
-    if !exclude.is_empty() || exclude_own {
-        bail!(
-            "system_audio.exclude/exclude_own: process exclusion is not supported by this Windows endpoint-loopback backend; use exclude=[] and exclude_own=false"
-        );
+    let mode = desktop_mode(exclude, exclude_own);
+    if mode.captures_monitor {
+        capture_loopback("default", sink, thread_start)
+    } else {
+        application::capture_desktop(exclude, sink, thread_start)
     }
-    capture_loopback("default", sink, thread_start)
 }
 
 fn capture(
@@ -354,6 +376,9 @@ fn capture(
                         let capture = Session::new(&endpoint, channels.as_deref(), &state)?;
                         state.check_device()?;
                         unsafe { capture.client.Start() }.context("WASAPI Start")?;
+                        if flow == eRender {
+                            isocast_diagnostics::diagnostic!("info"; "Windows system audio opened: mode=endpoint-loopback");
+                        }
                         if started
                             .send(Ok((endpoint.device.clone(), capture.pick.len() as u32)))
                             .is_err()

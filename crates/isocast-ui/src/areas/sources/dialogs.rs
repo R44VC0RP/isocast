@@ -2406,6 +2406,8 @@ mod tests {
                 state,
                 error: None,
                 needs_pick,
+                capture_mode: None,
+                warning: None,
                 width: None,
                 height: None,
                 fps: None,

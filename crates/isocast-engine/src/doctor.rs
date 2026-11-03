@@ -308,7 +308,12 @@ pub fn doctor_writing<P: Platform>(
             // Pictures, pages and media aren't devices to look for.
             _ => continue,
         }
-        match platform.probe(&source.id, &source.kind, &setup.canvas) {
+        match platform.probe_with_monitoring(
+            &source.id,
+            &source.kind,
+            &setup.canvas,
+            setup.monitors(),
+        ) {
             Ok(Some(probe)) => {
                 let detail = match (probe.video, probe.channels) {
                     (Some(f), _) => {
@@ -321,7 +326,20 @@ pub fn doctor_writing<P: Platform>(
                     }
                     (None, None) => probe.device,
                 };
-                checks.push(check(&name, CheckStatus::Ok, detail, None));
+                if let SourceKind::SystemAudio(s) = &source.kind
+                    && let Some(warning) = platform
+                        .system_audio_mode(&s.exclude, setup.monitors())
+                        .and_then(|m| m.warning)
+                {
+                    checks.push(check(
+                        &name,
+                        CheckStatus::Warning,
+                        format!("{detail}; {warning}"),
+                        None,
+                    ));
+                } else {
+                    checks.push(check(&name, CheckStatus::Ok, detail, None));
+                }
             }
             Ok(None) => {}
             Err(err) if required => checks.push(check(

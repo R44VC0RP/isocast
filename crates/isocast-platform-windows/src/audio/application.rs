@@ -18,7 +18,8 @@ use windows::Win32::Media::Audio::{
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
     ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
     IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
-    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    PROCESS_LOOPBACK_MODE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
 };
 use windows::Win32::System::Com::BLOB;
 use windows::Win32::System::Com::StructuredStorage::{
@@ -38,6 +39,10 @@ use windows::core::{Owned, Ref};
 use super::*;
 use crate::audio_apps;
 
+mod exclusion;
+pub(in crate::audio) use exclusion::capture_desktop;
+pub(crate) use exclusion::probe_system_audio;
+
 const MIN_BUILD: u32 = 19041;
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 // Audio handles can close before the owning process object becomes signaled.
@@ -47,7 +52,7 @@ const EXIT_GRACE_MS: u32 = 250;
 fn require_build(major: u32, build: u32) -> Result<()> {
     if major < 10 || (major == 10 && build < MIN_BUILD) {
         bail!(
-            "application_audio.app: process loopback requires Windows 10 version 2004 (build {MIN_BUILD}) or later; this system is {major}, build {build}"
+            "process loopback requires Windows 10 version 2004 (build {MIN_BUILD}) or later; this system is {major}, build {build}"
         );
     }
     Ok(())
@@ -67,7 +72,7 @@ fn supported() -> Result<()> {
 }
 
 pub fn probe_application_audio(selector: &str) -> Result<String> {
-    supported()?;
+    supported().map_err(|e| anyhow!("application_audio.app: {e:#}"))?;
     let apps = audio_apps::audio_apps()?;
     let identity = audio_apps::resolve(selector, &apps)?;
     ensure!(
@@ -99,14 +104,14 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for Completion_Impl {
     }
 }
 
-fn activate(pid: u32, state: &Arc<State>) -> Result<Session> {
+fn activate(pid: u32, mode: PROCESS_LOOPBACK_MODE, state: &Arc<State>) -> Result<Session> {
     let activation = Arc::new(Activation {
         params: AUDIOCLIENT_ACTIVATION_PARAMS {
             ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
             Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
                 ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
                     TargetProcessId: pid,
-                    ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                    ProcessLoopbackMode: mode,
                 },
             },
         },
@@ -136,8 +141,16 @@ fn activate(pid: u32, state: &Arc<State>) -> Result<Session> {
     }
     .into();
     let operation = unsafe {
-        ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(&*variant), &completion)
-    }.context("application_audio.app: activate Windows process loopback (requires Windows 10 build 19041 or later)")?;
+        ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &IAudioClient::IID,
+            Some(&*variant),
+            &completion,
+        )
+    }
+    .context(
+        "activate Windows process loopback (requires Windows with process-loopback support)",
+    )?;
     let wait = unsafe {
         WaitForMultipleObjects(
             &[state.stop.handle(), activation.complete.handle()],
@@ -146,11 +159,11 @@ fn activate(pid: u32, state: &Arc<State>) -> Result<Session> {
         )
     };
     if wait == WAIT_OBJECT_0 {
-        bail!("application audio activation cancelled");
+        bail!("process-loopback activation cancelled");
     }
     if wait.0 != WAIT_OBJECT_0.0 + 1 {
         bail!(
-            "application_audio.app: process-loopback activation did not complete within 5 seconds (wait={})",
+            "process-loopback activation did not complete within 5 seconds (wait={})",
             wait.0
         );
     }
@@ -160,7 +173,7 @@ fn activate(pid: u32, state: &Arc<State>) -> Result<Session> {
         .context("process-loopback activation result")?;
     status
         .ok()
-        .context("application_audio.app: Windows refused process-loopback activation")?;
+        .context("Windows refused process-loopback activation")?;
     let client: IAudioClient = unknown
         .context("process-loopback returned no audio client")?
         .cast()?;
@@ -190,7 +203,7 @@ fn activate(pid: u32, state: &Arc<State>) -> Result<Session> {
     Ok(session)
 }
 
-fn image_name(process: HANDLE) -> Option<String> {
+fn image_name(process: HANDLE) -> windows::core::Result<String> {
     let mut path = vec![0u16; 32768];
     let mut length = path.len() as u32;
     unsafe {
@@ -200,9 +213,8 @@ fn image_name(process: HANDLE) -> Option<String> {
             PWSTR(path.as_mut_ptr()),
             &mut length,
         )
-    }
-    .ok()?;
-    Some(String::from_utf16_lossy(&path[..length as usize]))
+    }?;
+    Ok(String::from_utf16_lossy(&path[..length as usize]))
 }
 
 /// Pin the actual process object, not merely its reusable PID. Recheck its
@@ -222,9 +234,7 @@ fn open_process(pid: u32, identity: &str) -> windows::core::Result<Option<Owned<
     }
     // A process can exit after the snapshot/open and before this query.
     // An unreadable identity is never a license to capture its PID.
-    let Some(actual) = image_name(*process) else {
-        return Ok(None);
-    };
+    let actual = image_name(*process)?;
     Ok((actual.eq_ignore_ascii_case(identity)
         && unsafe { WaitForSingleObject(*process, 0) } == WAIT_TIMEOUT)
         .then_some(process))
@@ -292,6 +302,16 @@ fn lineage_roots(
 /// browser's audio-session PID often belongs to a renderer, not its root.
 /// Also returns a same-named process that refused to open (access denied).
 fn process_roots(identity: &str) -> Result<(Vec<u32>, Option<u32>)> {
+    let (roots, denied) = matching_roots(identity, None)?;
+    Ok((roots.into_iter().map(|(pid, _)| pid).collect(), denied))
+}
+
+type Root = (u32, Option<Owned<HANDLE>>);
+
+/// Add the recorder to the match set only when a named instance exists.
+/// Retain the verified process handles through ancestry checking and, for a
+/// named exclusion root, activation. A recycled PID cannot change the filter.
+fn matching_roots(identity: &str, recorder: Option<u32>) -> Result<(Vec<Root>, Option<u32>)> {
     // Read before the snapshot: a process created later cannot be the one the
     // snapshot listed under its PID.
     let taken = filetime(unsafe { GetSystemTimeAsFileTime() });
@@ -318,10 +338,15 @@ fn process_roots(identity: &str) -> Result<(Vec<u32>, Option<u32>)> {
         let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
         if name.eq_ignore_ascii_case(binary) {
             match open_process(entry.th32ProcessID, identity) {
-                Ok(Some(_)) => matches.push(entry.th32ProcessID),
+                Ok(Some(handle)) => matches.push((entry.th32ProcessID, Some(handle))),
                 Ok(None) => {}
                 Err(error) if error.code() == E_ACCESSDENIED => {
                     denied.get_or_insert(entry.th32ProcessID);
+                }
+                // Unlike inclusion, skipping an unverified candidate can
+                // record it. Even an exit race is safer to retry than guess.
+                Err(error) if recorder.is_some() => {
+                    return Err(error).context("could not verify a candidate executable");
                 }
                 // Typically the process exited after the snapshot.
                 Err(_) => {}
@@ -334,11 +359,19 @@ fn process_roots(identity: &str) -> Result<(Vec<u32>, Option<u32>)> {
     {
         return Err(error).context("application_audio.app: enumerate process tree");
     }
+    if let Some(pid) = recorder
+        && !matches.is_empty()
+        && !matches.iter().any(|(id, _)| *id == pid)
+    {
+        matches.push((pid, None));
+    }
+    let ids: Vec<_> = matches.iter().map(|(id, _)| *id).collect();
     let mut times = HashMap::new();
-    let roots = lineage_roots(&entries, &matches, taken, |pid| {
+    let roots = lineage_roots(&entries, &ids, taken, |pid| {
         *times.entry(pid).or_insert_with(|| creation_time(pid))
     });
-    Ok((roots, denied))
+    matches.retain(|(pid, _)| roots.contains(pid));
+    Ok((matches, denied))
 }
 
 fn silence_until(sink: &AudioSink, end: &AtomicI64, until: Time) {
@@ -459,7 +492,13 @@ fn application_worker(
                 // The root was verified moments ago; any failure here is the
                 // same exit/replacement race the next scan resolves.
                 if let Ok(Some(process)) = open_process(pid, &identity) {
-                    let capture = match activate(pid, state) {
+                    let capture = match activate(
+                        pid,
+                        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                        state,
+                    )
+                    .context("application_audio.app")
+                    {
                         Ok(capture) => capture,
                         Err(_)
                             if unsafe { WaitForSingleObject(*process, EXIT_GRACE_MS) }
@@ -541,7 +580,6 @@ pub fn capture_application_audio(
     thread_start: fn(),
 ) -> Result<(AudioCapture, u32)> {
     let identity = probe_application_audio(selector)?;
-    let state = State::new()?;
     let device = AudioDevice {
         id: identity.clone(),
         name: selector.into(),
@@ -550,28 +588,39 @@ pub fn capture_application_audio(
         channels: 2,
         sample_rate: SAMPLE_RATE,
     };
+    process_capture(device, sink, move |state, sink, started, running| {
+        application_worker(identity, state, sink, started, running, thread_start)
+    })
+}
+
+fn process_capture(
+    device: AudioDevice,
+    sink: AudioSink,
+    run: impl FnOnce(
+        &Arc<State>,
+        &Arc<AudioSink>,
+        &mpsc::SyncSender<std::result::Result<(), String>>,
+        &mut bool,
+    ) -> Result<()>
+    + Send
+    + 'static,
+) -> Result<(AudioCapture, u32)> {
+    let state = State::new()?;
     let (started, ready) = mpsc::sync_channel(1);
     let sink = Arc::new(sink);
     let worker = {
         let state = state.clone();
         thread::Builder::new()
-            .name("Windows application audio".into())
+            .name("Windows process loopback".into())
             .spawn(move || {
                 let mut running = false;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    application_worker(
-                        identity,
-                        &state,
-                        &sink,
-                        &started,
-                        &mut running,
-                        thread_start,
-                    )
+                    run(&state, &sink, &started, &mut running)
                 }));
                 let error = match result {
                     Ok(Ok(())) => return,
-                    Ok(Err(error)) => format!("Windows application audio: {error:#}"),
-                    Err(_) => "Windows application audio worker panicked".into(),
+                    Ok(Err(error)) => format!("Windows process loopback: {error:#}"),
+                    Err(_) => "Windows process-loopback worker panicked".into(),
                 };
                 if !running {
                     let _ = started.send(Err(error));
@@ -597,7 +646,7 @@ pub fn capture_application_audio(
             let _ = worker.join();
             match result {
                 Ok(Err(error)) => bail!("{error}"),
-                _ => bail!("application audio worker exited before startup"),
+                _ => bail!("process-loopback worker exited before startup"),
             }
         }
     }

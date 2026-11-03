@@ -2902,6 +2902,12 @@ pub struct ScenesInfo {
 pub struct SourceStatus {
     pub source: String,
     pub state: SourceRun,
+    /// Desktop audio capture backend selected when this source opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_mode: Option<String>,
+    /// A known limitation of the running capture (not a source failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     /// Why it couldn't open, or stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

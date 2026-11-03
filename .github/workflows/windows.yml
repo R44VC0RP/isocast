@@ -1070,7 +1070,7 @@ jobs:
 
       - name: List application audio (real capture needs explicit tone fixtures)
         timeout-minutes: 5
-        run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_app_audio --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-app-audio" --keep-failures --report windows-app-audio.json
+        run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_app_audio --only win_audio_exclude --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-app-audio" --keep-failures --report windows-app-audio.json
 
       - name: Keep application audio listing and fixture skip evidence
         if: always()
