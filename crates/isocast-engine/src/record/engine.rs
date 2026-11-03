@@ -1297,7 +1297,11 @@ impl<P: Platform> Engine<P> {
     pub fn stop(&self) {
         let inner = &self.inner;
         inner.stopping.store(true, Ordering::SeqCst);
-        inner.wake.notify_all();
+        {
+            // Under the lock, so the thread can't miss the wake-up.
+            let _wanted = inner.wanted.read();
+            inner.wake.notify_all();
+        }
         frame_stream::stop(&inner.frame_streams);
         for thread in self.threads.lock().drain(..) {
             let _ = thread.join();
@@ -6285,15 +6289,8 @@ iso = {iso}
         }
     }
 
-    /// `stop` ends every monitor stream before it returns (its worker owns a
-    /// native encoder that must be gone before the process exits), and a
-    /// monitor asked for afterwards is refused rather than started on a
-    /// stopped engine.
-    #[test]
-    fn stop_ends_monitor_streams_and_refuses_new_ones() {
-        use isocast_protocol::api::{H264Profile, frames};
-
-        let setup = Setup::from_toml(
+    fn empty_engine_setup() -> Setup {
+        Setup::from_toml(
             r##"
 version = 1
 name = "t"
@@ -6310,8 +6307,46 @@ folder = "/nonexistent/isocast-engine-test"
 encoder = { codec = "hevc", quality = 70 }
 "##,
         )
-        .unwrap();
-        let engine = Engine::start(&inert::Inert, &setup, None, None).unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn immediate_stop_wakes_reconciler_waiters() {
+        let setup = empty_engine_setup();
+        let timeout = Duration::from_secs(5);
+        for attempt in 1..=8 {
+            let engine = Engine::start(&inert::Inert, &setup, None, None).unwrap();
+            let inner = engine.inner.clone();
+            // Model a reconciler preempted after checking `stopping`, before parking.
+            let mut wanted = inner.wanted.lock();
+            assert!(!inner.stopping.load(Ordering::SeqCst));
+            let (done, stopped) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                engine.stop();
+                done.send(()).unwrap();
+            });
+            let deadline = std::time::Instant::now() + timeout;
+            while !inner.stopping.load(Ordering::SeqCst) {
+                assert!(std::time::Instant::now() < deadline, "stop never started");
+                thread::yield_now();
+            }
+            let wake = wanted.wait_for(&inner.wake, timeout);
+            drop(wanted);
+            assert!(!wake.timed_out(), "missed stop wakeup on attempt {attempt}");
+            stopped.recv_timeout(timeout).expect("stop did not return");
+            worker.join().unwrap();
+        }
+    }
+
+    /// `stop` ends every monitor stream before it returns (its worker owns a
+    /// native encoder that must be gone before the process exits), and a
+    /// monitor asked for afterwards is refused rather than started on a
+    /// stopped engine.
+    #[test]
+    fn stop_ends_monitor_streams_and_refuses_new_ones() {
+        use isocast_protocol::api::{H264Profile, frames};
+
+        let engine = Engine::start(&inert::Inert, &empty_engine_setup(), None, None).unwrap();
         let feed = engine
             .frames(PROGRAM, None, 30, H264Profile::High)
             .expect("a running engine streams its program");

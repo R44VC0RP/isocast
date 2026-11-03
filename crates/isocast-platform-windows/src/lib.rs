@@ -31,6 +31,7 @@ mod permissions;
 mod platform;
 mod playback;
 mod system;
+mod virtual_camera;
 mod writer;
 
 pub use aac::{AacFinish, AacPacket, AacStats, MfAacEncoder};

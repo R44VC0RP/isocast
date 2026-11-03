@@ -21,6 +21,11 @@ use isocast_protocol::virtual_camera::{VirtualCameraState, VirtualCameraStatus};
 /// consumers finish; Drop disconnects the producer, restoring the card.
 pub trait CameraSink<F>: Send {
     fn send(&mut self, frame: &F, pts: Time) -> Result<bool>;
+    /// Can fit an already-composited canvas to the negotiated output size
+    /// itself, without a second compositor draw. Raw sources still need one.
+    fn fits_canvas(&self) -> bool {
+        false
+    }
     /// Re-send only an already delivered, converted frame. No input/GPU work.
     fn repeat_last(&mut self) -> Result<bool> {
         Ok(false)
@@ -394,10 +399,10 @@ fn run<P: Platform>(
         };
         after = pts;
         if P::CAMERA_IS_MONITOR
-            && platform.frame_size(&frame) == output.size
+            && (platform.frame_size(&frame) == output.size || output.sink.fits_canvas())
             && initial.settings.target != isocast_protocol::virtual_camera::Target::Source
         {
-            // This canvas is already composited at the negotiated size.
+            // Already the right size, or fitted by the native sink.
             send(platform, status, output, frame, pts, &mut latencies, fps)?;
             continue;
         }

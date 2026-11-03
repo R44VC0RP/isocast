@@ -146,6 +146,7 @@ if sys.platform == "win32":
     SCENARIOS += (
         "win_media",
         "win_metadata",
+        "win_vcam_publisher",
     )
 elif sys.platform.startswith("linux"):
     SCENARIOS += (
@@ -4035,6 +4036,30 @@ def oracle_rules_selftest(work):
         "strict: monitor take lost 1 frame at its start": (monitor_take(1, None), "fail"),
         "strict: monitor take lost nothing": (monitor_take(0, None), "pass"),
     })
+    # Encode real camera pictures so these cases exercise the same decoder
+    # and cadence rule as the V4L2 ISO. Start near a fixture loop boundary.
+    fps, period, slots = 30, ORACLE_SECONDS * 30, 30
+    for name, frames, error in (
+        ("phase beat", [i - (i % 3 == 1) for i in range(slots)], None),
+        ("10-frame freeze", [5 if 5 <= i < 15 else i for i in range(slots)], "three identical"),
+        ("5-code jump", [i if i < 10 else i + 4 for i in range(slots)], "jump of 5"),
+        ("short take", range(slots - 3), "code span"),
+        ("drifting repeats", [i - (i >= 5) - (i >= 10) for i in range(slots)], "phase drift"),
+    ):
+        path = work / f"camera-{name}.mov"
+        raw = bytes(ORACLE_LEVELS[c] for i in frames for c in oracle_cells(ORACLE_TAGS["b"], (i - 2) % period))
+        ffmpeg("-f", "rawvideo", "-pixel_format", "gray", "-video_size", "16x9", "-framerate", fps,
+               "-i", "pipe:0", "-vf", "scale=160:90:flags=neighbor", "-c:v", "libx264", "-y", path, data=raw)
+        rows = oracle_decode(path, oracle_regions([("b", (0, 0, 1, 1))]), fps)
+        ids = [row[2]["b"] for row in rows]
+        require(all(x[:2] == ("id", ORACLE_TAGS["b"]) for x in ids), f"{path.name}: unreadable fixture")
+        try:
+            camera_code_span(path, [x[2] for x in ids], period, slots)
+            outcome = "pass"
+        except Failure as exc:
+            require(error and error in str(exc), f"{path.name}: unexpected failure: {exc}")
+            outcome = "fail"
+        cases[f"camera: {name}"] = (outcome, "fail" if error else "pass")
     for is_hosted in (False, True):
         for label, head, dropped, audio, expected in (
             ("one interior drop", 0, 1, 0, "pass" if is_hosted else "fail"),
@@ -4610,6 +4635,25 @@ def scenario_win_app_audio(e, cfg, evidence):
             log.close()
 
 
+def camera_code_span(file, codes, period, slots):
+    """Two unsynchronized 30 Hz clocks can sample either side of a source tick."""
+    require(codes and all(0 <= n < period for n in codes), f"{file.name}: missing or out-of-range camera code")
+    span = low = high = 0
+    for i in range(1, len(codes)):
+        step = (codes[i] - codes[i - 1]) % period
+        require(step <= 2, f"{file.name}: camera code jump of {step} at picture {i}: {codes[i - 1:i + 1]}")
+        require(i < 2 or not (codes[i] == codes[i - 1] == codes[i - 2]),
+                f"{file.name}: three identical camera codes ending at picture {i}: {codes[i]}")
+        span += step
+        # A repeat and a skipped code may alternate with ordinary steps
+        # between them. They must not accumulate into persistent loss/gain.
+        low, high = min(low, span - i), max(high, span - i)
+        require(high - low <= 1, f"{file.name}: camera phase drift {low}..{high} at picture {i}")
+    require(abs(span - (slots - 1)) <= 1,
+            f"{file.name}: camera code span {span} ({codes[0]} to {codes[-1]}), expected {slots - 1} ±1")
+    return span
+
+
 def scenario_linux_capture(e, cfg, evidence):
     """The real Linux capture paths on scripts/linux-capture-fixture.sh's
     headless desktop: the screen through the ScreenCast portal and PipeWire
@@ -4724,9 +4768,11 @@ def scenario_linux_capture(e, cfg, evidence):
             require(not wrong, f"{file.name}: {len(wrong)} of {len(rows)} pictures don't show the {name} clip's "
                                f"frame code (first: {wrong[:1]})")
             require(back == 0, f"{file.name}: the {name} clip's frames went backwards {back} times")
-            # 90%: real runs show 447-450 of 450, and a stream that stalls after a few seconds must fail.
-            require(len(set(good)) >= seconds * fps * 9 // 10,
-                    f"{file.name}: only {len(set(good))} different {name} frames in {seconds} s (frozen or stalled)")
+            if name == "b":  # The V4L2 camera ISO, not the mpv screen or program.
+                result["span"] = camera_code_span(file, good, count, seconds * fps)
+            else:
+                require(len(set(good)) >= seconds * fps * 9 // 10,
+                        f"{file.name}: only {len(set(good))} different {name} frames in {seconds} s (frozen or stalled)")
             return result
 
         screen_iso, _ = manifest_file(path, manifest, "screen")
@@ -5091,6 +5137,126 @@ def scenario_linux_recovery(e, cfg, evidence):
     """SIGKILL with committed program/ISO fragments, then restart and verify
     finalized indexes, real decoded counts and persisted recovery metadata."""
     fragment_recovery(e, cfg, evidence)
+
+
+def scenario_win_vcam_publisher(e, cfg, evidence):
+    """Two independent pipe consumers during a live take, then during a
+    governor-held take. Decode the program separately: the publisher must
+    never be its own reference. The changing right half proves recovery."""
+    reader = e.binary.parent / "examples" / "vcam-reader.exe"
+    if not reader.is_file():
+        raise Skip("needs the Windows qualification build with the vcam-reader example")
+    w, h, fps = 320, 180, 30
+    seconds = 8 if os.environ.get("GITHUB_ACTIONS") else 60
+    cfg = setup(e.root, "h264", width=w, height=h, fps=fps)
+    def box(key, x, y, width, height, color):
+        return {"id": key, "rect": dict(x=x, y=y, width=width, height=height), "style": {"background": color}}
+    cfg["scenes"] = [{"id": name, "name": name, "items": [box("base", 0, 0, w, h, "#2080d0"),
+                      box("mark", 8, 12, 80, 60, "#e03070"), box("cut", w//2, 0, w//2, h, color)]}
+                     for name, color in [("main", "#20e040"), ("other", "#f09122")]]
+    e.apply(cfg)
+    def cut(scene):
+        e.rpc("switch_scene", {"scene": scene, "transition": {"kind": "cut"}})
+    cut("main")
+    path, m = take(e, 2)
+    movie, _ = manifest_file(path, m, "program")
+    # Windows doesn't implement frame_jpeg. Grab a decoded program frame,
+    # preserving its limited-range 709 samples (planar 420 -> NV12).
+    ref = e.root / "program-frame.nv12"
+    picture = ffmpeg("-i", movie, "-frames:v", "1", "-pix_fmt", "nv12", "-f", "rawvideo", "-").stdout
+    require(len(picture) == w*h*3//2 and max(picture[:w*h])-min(picture[:w*h]) > 30, "invalid program reference")
+    ref.write_bytes(picture)
+    try:
+        estimate = e.rpc("estimate_capacity", {"setup": cfg})
+        software = any(r["resource"] == "software_renderer" for r in estimate["resources"])
+    except RpcError as exc:
+        # Windows has a capacity estimate for WARP but no hardware table.
+        if "only supported on macOS" not in str(exc):
+            raise
+        software = False
+    if not software:
+        evidence["skipped_phases"] = ["hold and cold hold: recording on a hardware GPU does not force monitors to 0 fps"]
+    for live in ([True, False] if software else [True]):
+        phase = "live" if live else "hold"
+        cfg["governor"] = {"enabled": True, "pins": ["preview.fps"] if live else []}
+        e.apply(cfg)
+        cut("main")
+        require(e.rpc("virtual_camera_status").get("unavailable_reason"), "Windows control wasn't disabled")
+        status = e.rpc("virtual_camera_start")
+        require(status["transport"] == "windows-pipe-nv12", f"wrong publisher: {status}")
+        clients, logs = [], []
+        try:
+            for delay in [0, 125]:
+                log = e.root / f"{phase}-{delay}.csv"
+                with log.open("wb") as out:
+                    clients.append(subprocess.Popen([reader, status["destination"], str(seconds+8), str(delay), ref],
+                                                   env=e.env, stdout=out, stderr=subprocess.PIPE))
+                logs.append(log)
+            until(lambda: all(log.stat().st_size > 150 for log in logs), 5, "both readers checked their first pictures")
+            started = e.rpc("start", {"seconds": seconds})
+            time.sleep(2)
+            during = e.rpc("virtual_camera_status")
+            require(during.get("governor_fps") == (None if live else 0), f"unexpected governor rate: {during}")
+            cut("other")  # live: immediate cut. Held: must reach readers only after the take.
+            if not live:
+                # Bracket a measured interval with two *confirmed* zero-fps
+                # counters. A live tick waiting for the new canvas may repeat
+                # the old PTS immediately after resume, but is not a hold tick.
+                time.sleep(seconds-4)
+                end_hold = e.rpc("virtual_camera_status")
+                require(end_hold.get("governor_fps") == 0, "hold ended before the observation window")
+            path = Path(started["manifest"])
+            m = until(lambda: finished(path), seconds+15, "program recording")
+            evidence[phase] = {"files": check_take(path, m, seconds), "camera_during_recording": during}
+            require(all(f["audio_dropouts"] == 0 and f["frames"] == seconds*fps for f in m["files"]), "recording loss")
+            for delay, proc, log in zip([0, 125], clients, logs):
+                _, err = proc.communicate(timeout=15)
+                require(proc.returncode == 0, f"{phase} reader {delay}: {err.decode(errors='replace')}")
+                rows = [tuple(map(int, line.split(","))) for line in log.read_text().splitlines()]
+                gaps = rows[-1][0]-rows[0][0]+1-len(rows)
+                require(delay == 0 or gaps >= fps, f"slow consumer didn't skip frames: {gaps}")
+                require(any(r[4] for r in rows), f"reader {delay} missed the change of picture")
+                result = {"frames": len(rows), "skipped": gaps}
+                if not live:
+                    frozen = [r for r in rows if during["frames_sent"] < r[0] <= end_hold["frames_sent"]]
+                    require(len(frozen) >= (seconds-5)*2 and all(r[3] and not r[4] for r in frozen)
+                            and len({r[2] for r in frozen}) == 1,
+                            "held pixels/PTS changed or were not delivered")
+                    hz = (len(frozen)-1)*1e9/(frozen[-1][1]-frozen[0][1])
+                    require(1.9 < hz < 2.06, f"hold cadence {hz} Hz")  # allow scheduler jitter at endpoints
+                    resumed = [r for r in rows if r[0] > frozen[-1][0]]
+                    require(any(not r[3] and r[4] for r in resumed), "reader didn't recover the new scene on the same pipe")
+                    result.update(held_samples=len(frozen), held_hz=hz)
+                evidence[phase][f"reader_{delay}ms"] = result
+            evidence[phase]["camera_after"] = e.rpc("virtual_camera_status")
+        finally:
+            for proc in clients:
+                if proc.poll() is None:
+                    proc.kill(); proc.wait(timeout=5)
+            e.rpc("virtual_camera_stop")
+
+    # A cold Start during a hold sends no placeholder. After the take, a
+    # differently shaped camera output must actually fit the live canvas.
+    cfg["virtual_camera"] = {"width": 720, "height": 1280}
+    e.apply(cfg)
+    cut("main")
+    rec = e.rpc("start", {"seconds": 4}) if software else None
+    status = e.rpc("virtual_camera_start")
+    try:
+        if rec is not None:
+            until(lambda: e.rpc("virtual_camera_status").get("governor_fps") == 0, 2, "cold hold")
+            time.sleep(1)
+            cold = e.rpc("virtual_camera_status")
+            require(cold["frames_sent"] == cold["frames_dropped"] == cold["frames_repeated"] == 0, "invented a first picture")
+            m = until(lambda: finished(rec["manifest"]), 10, "finish cold-start take")
+            evidence["cold_take"] = check_take(Path(rec["manifest"]), m, 4)
+        ref.write_bytes(ffmpeg("-i", movie, "-vf", "scale=720:406,pad=720:1280:0:436", "-frames:v", "1",
+                               "-pix_fmt", "nv12", "-f", "rawvideo", "-").stdout)
+        scaled = command([reader, status["destination"], "1", "0", ref], timeout=10)
+        evidence["scaled"] = scaled.stderr.decode().strip()
+        require(len(scaled.stdout.splitlines()) >= 2, "scaled publisher didn't recover")
+    finally:
+        e.rpc("virtual_camera_stop")
 
 
 def scenario_win_monitor(e, cfg, evidence):
@@ -6137,6 +6303,8 @@ def run_case(args, root, name):
     if losses:
         dropped, slots = (sum(row[k] for row in losses) for k in ("dropped", "slots"))
         detail = f"; video drops {dropped}/{slots} ({dropped / slots:.1%})" if slots else "; no frame slots"
+    for phase in result.get("evidence", {}).get("skipped_phases", []):
+        print(f"SKIP {name}: {phase}", file=sys.stderr if args.json else sys.stdout, flush=True)
     print(f"{result['status']:4} {name}: {result['reason']}{detail}",
           file=sys.stderr if args.json else sys.stdout, flush=True)
     if not keep:

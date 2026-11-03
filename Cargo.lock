@@ -4359,13 +4359,16 @@ version = "0.0.10"
 dependencies = [
  "anyhow",
  "cc",
+ "image",
  "isocast-browser-host",
  "isocast-diagnostics",
  "isocast-engine",
+ "isocast-ipc",
  "isocast-mux",
  "isocast-platform-credentials",
  "isocast-protocol",
  "isocast-surfaces",
+ "isocast-vcam-wire",
  "parking_lot",
  "wgpu",
  "windows",
@@ -4472,6 +4475,21 @@ dependencies = [
  "slint",
  "slint-build",
 ]
+
+[[package]]
+name = "isocast-vcam-dshow"
+version = "0.0.10"
+dependencies = [
+ "cc",
+ "isocast-ipc",
+ "isocast-protocol",
+ "isocast-vcam-wire",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "isocast-vcam-wire"
+version = "0.0.10"
 
 [[package]]
 name = "isocast-vp8"

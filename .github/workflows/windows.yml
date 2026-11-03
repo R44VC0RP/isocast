@@ -870,7 +870,7 @@ jobs:
 
       - name: Build native services and test binaries (do not run)
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts -p isocast-browser -p isocast-browser-protocol -p isocast-browser-host
+        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-vcam-dshow -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts -p isocast-browser -p isocast-browser-protocol -p isocast-browser-host
 
       # Synchronous MF AAC transactions: serial, after the native build so
       # the test binary is cached. Package-only features can still rebuild
@@ -902,7 +902,8 @@ jobs:
         if: env.MODE == 'full'
         run: |
           cargo test --locked -j 1 -p isocast-platform-windows --lib audio -- --test-threads=1 --nocapture
-          cargo clippy --locked -j 1 -p isocast-platform-windows --all-targets -- -D warnings
+          cargo test --locked -p isocast-vcam-wire -p isocast-vcam-dshow
+          cargo clippy --locked -j 1 -p isocast-platform-windows -p isocast-vcam-wire -p isocast-vcam-dshow --all-targets -- -D warnings
 
       - name: Check monitoring channel mapping and conversion
         if: env.MODE == 'full'
@@ -1380,7 +1381,7 @@ jobs:
       # binaries used for recovery/contract checks above.
       - name: Build recording qualification services
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli -p isocast-platform-windows -p isocast-browser --bins --example monitor-loopback
+        run: cargo build --release --locked -j 2 -p isocast-daemon -p isocast-cli -p isocast-platform-windows -p isocast-browser --features isocast-daemon/vcam-diagnostics --bins --example monitor-loopback --example vcam-reader
 
       - name: Install recording recovery decoder
         if: env.MODE == 'full'
@@ -1429,6 +1430,11 @@ jobs:
             ${{ runner.temp }}/windows-browser
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Two camera pipe readers during live and held recording
+        if: env.MODE == 'full'
+        timeout-minutes: 4
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --only win_vcam_publisher --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-vcam" --report windows-vcam.json
 
       - name: Monitoring startup preserves recording audio (no-device skip on hosted Windows)
         if: env.MODE == 'full'

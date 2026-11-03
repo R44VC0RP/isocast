@@ -1,0 +1,19 @@
+[package]
+name = "isocast-vcam-dshow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Windows DirectShow capture source for the Isocast camera publisher."
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+cc = "1.8.0"
+
+[target.'cfg(windows)'.dependencies]
+isocast-ipc = { path = "../isocast-ipc" }
+isocast-protocol = { path = "../isocast-protocol" }
+isocast-vcam-wire = { path = "../isocast-vcam-wire" }
+windows-sys = { version = "0.61", features = ["Win32_System_RemoteDesktop"] }
