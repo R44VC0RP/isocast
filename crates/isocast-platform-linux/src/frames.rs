@@ -20,6 +20,17 @@ struct Storage {
     gpu: Mutex<Option<(Gpu, wgpu::Texture)>>,
 }
 
+/// Owned by one synchronous reader. A failed mapping is never reused.
+#[derive(Default)]
+pub(crate) struct Readback(Option<Staging>);
+
+struct Staging {
+    device: wgpu::Device,
+    buffer: wgpu::Buffer,
+    send: mpsc::SyncSender<Result<(), wgpu::BufferAsyncError>>,
+    receive: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+}
+
 impl Frame {
     pub fn width(&self) -> u32 {
         self.0.width
@@ -75,8 +86,26 @@ impl Frame {
     /// Packed BGRA. A CPU source needs no GPU round trip. Render targets
     /// are handed here only after the engine's compositor fence completes.
     pub fn read_bgra(&self) -> Result<Vec<u8>> {
+        let row = self.width() as usize * 4;
+        self.with_bgra(&mut Readback::default(), |bytes, stride| {
+            if stride == row {
+                return bytes.to_vec();
+            }
+            let mut packed = Vec::with_capacity(row * self.height() as usize);
+            for line in bytes.chunks_exact(stride) {
+                packed.extend_from_slice(&line[..row]);
+            }
+            packed
+        })
+    }
+
+    pub(crate) fn with_bgra<T>(
+        &self,
+        readback: &mut Readback,
+        consume: impl FnOnce(&[u8], usize) -> T,
+    ) -> Result<T> {
         if !self.0.rendered {
-            return Ok(self.0.pixels.clone());
+            return Ok(consume(&self.0.pixels, self.width() as usize * 4));
         }
         let (gpu, texture) = self
             .0
@@ -88,17 +117,31 @@ impl Frame {
         let row = self.width() * 4;
         let padded =
             row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Linux software encoder readback"),
-            size: u64::from(padded) * u64::from(self.height()),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let size = u64::from(padded) * u64::from(self.height());
+        let staging = readback
+            .0
+            .take()
+            .filter(|s| s.device == gpu.device && s.buffer.size() == size)
+            .unwrap_or_else(|| {
+                let (send, receive) = mpsc::sync_channel(1);
+                Staging {
+                    device: gpu.device.clone(),
+                    buffer: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Linux BGRA readback"),
+                        size,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    }),
+                    send,
+                    receive,
+                }
+            });
+        let buffer = &staging.buffer;
         let mut commands = gpu.device.create_command_encoder(&Default::default());
         commands.copy_texture_to_buffer(
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
+                buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded),
@@ -108,7 +151,7 @@ impl Frame {
             texture.size(),
         );
         let submission = gpu.queue.submit([commands.finish()]);
-        let (send, receive) = mpsc::sync_channel(1);
+        let send = staging.send.clone();
         buffer
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |result| {
@@ -120,20 +163,19 @@ impl Frame {
                 timeout: Some(Duration::from_secs(2)),
             })
             .context("Linux frame readback GPU wait")?;
-        receive
+        staging
+            .receive
             .recv_timeout(Duration::from_secs(2))
             .context("Linux frame readback callback timed out")??;
         let mapped = buffer
             .slice(..)
             .get_mapped_range()
             .context("mapping Linux frame readback")?;
-        let mut pixels = Vec::with_capacity(self.width() as usize * self.height() as usize * 4);
-        for line in mapped.chunks_exact(padded as usize) {
-            pixels.extend_from_slice(&line[..row as usize]);
-        }
+        let result = consume(&mapped, padded as usize);
         drop(mapped);
         buffer.unmap();
-        Ok(pixels)
+        readback.0 = Some(staging);
+        Ok(result)
     }
 }
 
