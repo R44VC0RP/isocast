@@ -471,6 +471,24 @@ impl Platform for WindowsPlatform {
     }
 
     fn probe(&self, id: &str, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
+        self.probe_with_monitoring(id, source, canvas, false)
+    }
+
+    fn system_audio_mode(
+        &self,
+        exclude: &[String],
+        monitoring: bool,
+    ) -> Option<isocast_engine::SystemAudioMode> {
+        Some(crate::audio::desktop_mode(exclude, monitoring))
+    }
+
+    fn probe_with_monitoring(
+        &self,
+        id: &str,
+        source: &SourceKind,
+        canvas: &Canvas,
+        monitoring: bool,
+    ) -> Result<Option<Probe>> {
         match source {
             SourceKind::Display(display) => crate::devices::screen_probe(
                 ScreenTarget::Display {
@@ -508,19 +526,18 @@ impl Platform for WindowsPlatform {
                     channels: Some(channels),
                 }))
             }
-            SourceKind::SystemAudio(settings) => {
-                if !settings.exclude.is_empty() {
-                    bail!(
-                        "system_audio.exclude: process exclusion is not supported by this Windows endpoint-loopback backend; use exclude=[]"
-                    );
-                }
-                let (device, channels) = crate::probe_loopback()?;
-                Ok(Some(Probe {
-                    device: device.name,
-                    video: None,
-                    channels: Some(channels),
-                }))
-            }
+            SourceKind::SystemAudio(settings) => Ok(Some(Probe {
+                device: if crate::audio::desktop_mode(&settings.exclude, monitoring)
+                    .captures_monitor
+                {
+                    let (endpoint, _) = crate::probe_loopback()?;
+                    format!("{} (endpoint-loopback; no apps excluded)", endpoint.name)
+                } else {
+                    crate::audio::probe_system_audio(&settings.exclude)?
+                },
+                video: None,
+                channels: Some(2),
+            })),
             SourceKind::TestPattern(_)
             | SourceKind::Tone(_)
             | SourceKind::Color(_)
@@ -983,15 +1000,16 @@ mod tests {
         );
 
         let source = SourceKind::SystemAudio(SystemAudioSource { exclude: vec![] });
-        let actual = platform.probe("desktop", &source, &canvas);
-        match crate::probe_loopback() {
-            Ok((device, channels)) => {
-                let probe = actual.unwrap().unwrap();
-                assert_eq!(probe.device, device.name);
-                assert!(probe.video.is_none());
-                assert_eq!(probe.channels, Some(channels));
-            }
-            Err(error) => assert_eq!(actual.unwrap_err().to_string(), error.to_string()),
-        }
+        let probe = platform
+            .probe_with_monitoring("desktop", &source, &canvas, true)
+            .unwrap()
+            .unwrap();
+        assert!(
+            probe
+                .device
+                .contains("except the Isocast engine process tree")
+        );
+        assert!(probe.video.is_none());
+        assert_eq!(probe.channels, Some(2));
     }
 }

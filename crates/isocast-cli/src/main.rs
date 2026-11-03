@@ -4027,6 +4027,12 @@ fn print_engine(engine: &EngineInfo) {
             (SourceRun::Failed, Some(error)) => println!("  {}  failed: {error}", source.source),
             (state, _) => println!("  {}  {state:?} {what}", source.source),
         }
+        if let Some(mode) = &source.capture_mode {
+            println!("    capture: {mode}");
+        }
+        if let Some(warning) = &source.warning {
+            println!("    warning: {warning}");
+        }
     }
     for filter in &engine.audio_filters {
         let state = serde_json::to_value(filter.state)

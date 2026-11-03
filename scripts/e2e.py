@@ -139,6 +139,7 @@ SCENARIOS = (
     "win_machine_profile",
     "win_preview_recording",
     "win_app_audio",
+    "win_audio_exclude",
     "win_monitor",
     "win_browser",
 )
@@ -571,11 +572,11 @@ class Engine:
         self.child = None
         self.start()
 
-    def start(self, crash_parent=False):
+    def start(self, crash_parent=False, launcher=()):
         # Its own folder as the working directory: anything it (or a tool it
         # starts) writes to a relative path stays in the scenario's folder.
-        self.crash_parent = crash_parent
-        argv = [str(self.binary)]
+        self.crash_parent = crash_parent or bool(launcher)
+        argv = [*launcher, str(self.binary)]
         if crash_parent:
             # A real parent/child tree for the Windows crash test, without
             # requiring a capture device or manufacturing a dummy child.
@@ -591,7 +592,7 @@ class Engine:
             except (OSError, RpcError):
                 return None
         status = until(ready, description="isolated daemon")
-        if crash_parent:
+        if self.crash_parent:
             self.child = WindowsChild(status["daemon"]["pid"])
 
     def rpc(self, method, params=None, timeout=30):
@@ -4607,6 +4608,119 @@ def tone_amplitudes(path, stream, freqs=(440, 880), start=2, seconds=2):
         im = sum(x * math.sin(w * i) for i, x in enumerate(samples))
         out[f] = 2 * math.hypot(re_, im) / len(samples)
     return out
+
+
+def scenario_win_audio_exclude(e, cfg, evidence):
+    """Two real players. One launches the private engine (so its tree *can*
+    exclude both); the other is independent. Compare three simultaneous
+    WASAPI captures, including the actual audio rendered by the monitor."""
+    if not WINDOWS:
+        raise Skip("Windows process loopback")
+    devices = e.rpc("devices")
+    if not any(d.get("default") for d in devices["audio_outputs"]):
+        raise Skip("no default render endpoint for the two tone players and monitor")
+    require(not any(a["playing"] for a in devices["audio_apps"]),
+            "unrelated audio is active; refusing to record it")
+    # A distinct executable identity for the named launcher, without an
+    # installed fixture or build. Use only scratch files and child processes.
+    e.stop()
+    python = Path(sys.base_prefix) / "python.exe"
+    launcher = e.root / "excluded-tone.exe"
+    kept = e.root / "retained-tone.exe"
+    shutil.copyfile(python, launcher)
+    shutil.copyfile(python, kept)
+    e.env.update(PYTHONHOME=sys.base_prefix, PATH=str(python.parent) + os.pathsep + e.env["PATH"],
+                 ISOCAST_MONITOR_SILENT="0")
+    sounds = []
+    for hz in (440, 880):
+        wav = e.root / f"{hz}.wav"
+        # The retained carrier also marks whole seconds: measure its decoded
+        # cadence against the player's PCM, not against packet arrival times.
+        gate = "*lt(mod(t\\,1)\\,0.8)" if hz == 880 else ""
+        ffmpeg("-f", "lavfi", "-i", f"aevalsrc=0.10*sin(2*PI*{hz}*t){gate}:s={RATE}", "-t", 30, wav)
+        sounds.append(str(wav))
+    play = ("import winsound,sys,subprocess,time; "
+            "winsound.PlaySound(sys.argv[1],winsound.SND_FILENAME|winsound.SND_LOOP|winsound.SND_ASYNC); ")
+    e.start(launcher=[str(launcher), "-c", play + "sys.exit(subprocess.call(sys.argv[2:]))", sounds[0]])
+    other = subprocess.Popen([str(kept), "-c", play + "time.sleep(60)", sounds[1]], env=e.env)
+    try:
+        # No monitoring or exclusions: verify the stream the recorder opened,
+        # not just the plan. The same live take must refuse an unsafe toggle.
+        default = setup(e.root, "h264", width=320, height=180, fps=30)
+        default["sources"].append({"id": "desktop", "kind": "system_audio"})
+        default["recording"]["program"]["audio"] = ["desktop"]
+        e.apply(default)
+        path = Path(e.rpc("start", {"seconds": 4})["manifest"])
+        def modes():
+            return {s["source"]: s for s in e.rpc("status")["engine"]["sources"]}
+        desktop = modes()["desktop"]
+        require(desktop.get("capture_mode") == "endpoint-loopback" and not desktop.get("warning"),
+                f"wrong default capture: {desktop}")
+        require(any('mode=endpoint-loopback' in log.read_text(encoding="utf-8") for log in
+                    e.sock.with_suffix(".logs").glob("*.jsonl")), "native endpoint loopback did not start")
+        default["sources"][-2]["audio"] = {"monitor": "monitor_and_output"}
+        try:
+            e.apply(default)
+            raise Failure("live endpoint accepted monitor feedback")
+        except RpcError as err:
+            require("endpoint-loopback" in str(err) and "monitor" in str(err), f"unexpected refusal: {err}")
+        until(lambda: finished(path), 20, "endpoint take finished")
+        until(lambda: e.rpc("status")["state"] == "idle", 10, "idle after endpoint take")
+        e.rpc("engine", {"running": False})
+        evidence["default_capture_mode"] = desktop["capture_mode"]
+        cfg = setup(e.root, "h264", iso=True, width=320, height=180, fps=30)
+        cfg["sources"][-1].update(frequency=660, audio={"monitor": "monitor_and_output"})
+        cfg["sources"] += [{"id": "selfonly", "kind": "system_audio"},
+                           {"id": "filtered", "kind": "system_audio", "exclude": [str(launcher)]},
+                           {"id": "rendered", "kind": "application_audio", "app": str(e.binary)}]
+        cfg["recording"]["program"]["audio"] = ["filtered"]
+        cfg["recording"]["iso"].update(audio=[], source_audio={"bars": ["selfonly"], "bars2": ["rendered"]})
+        def preflight():
+            return next(c for c in e.rpc("doctor", {"setup": cfg})["checks"] if c["name"] == "source: filtered")
+        # Don't apply an impossible filter to the live engine.
+        cfg["sources"][-2]["exclude"] = [str(kept)]
+        refused = preflight()
+        require(refused["status"] == "problem" and "system_audio.exclude[0]" in refused["detail"]
+                and "application_audio" in refused["detail"], f"independent tree wasn't refused: {refused}")
+        cfg["sources"][-2]["exclude"] = [launcher.name]
+        planned = preflight()
+        require(planned["status"] == "warning" and "#251" in planned["detail"] and launcher.name in planned["detail"]
+                and "Isocast" in planned["detail"], f"missing named tree in preflight: {planned}")
+        evidence["preflight"] = {"unrelated": refused["status"], "launcher": planned["status"]}
+        e.apply(cfg)
+        e.rpc("engine", {"running": True})
+        path = Path(e.rpc("start", {"seconds": 10})["manifest"])
+        actual = modes()
+        for source in ("filtered", "selfonly"):
+            require(actual[source].get("capture_mode") == "process-loopback-exclude" and
+                    "#251" in actual[source].get("warning", ""), f"missing live warning: {actual[source]}")
+        def playing():
+            m = (e.rpc("status").get("live") or {}).get("monitor") or {}
+            return m["frames"] if m.get("frames", 0) > RATE else None
+        evidence["monitor_frames"] = until(playing, 10, "audio rendered to default output")
+        manifest = until(lambda: finished(path), 30, "desktop exclusion recording")
+        spectra = evidence["amplitudes"] = {}
+        for source in ("program", "bars", "bars2"):
+            file, _ = manifest_file(path, manifest, source)
+            spectra[source] = tone_amplitudes(file, 0, freqs=(440, 660, 880), start=2, seconds=1)
+        filtered, desktop, monitor = (spectra[s] for s in ("program", "bars", "bars2"))
+        require(min(desktop[440], desktop[880], filtered[880], monitor[660]) > .001,
+                f"both real players and actual monitor playback must be audible in controls: {spectra}")
+        require(filtered[440] < .01 * desktop[440] and
+                max(filtered[660], desktop[660]) < .01 * monitor[660],
+                f"excluded tones must be at least 40 dB below their controls: {spectra}")
+        require(other.poll() is None and e.process.poll() is None, "tone fixture exited early")
+        file, _ = manifest_file(path, manifest, "program")
+        samples = pcm(file)
+        peak = max(map(abs, samples))
+        onsets = [t for t in beep_onsets((s / peak for s in samples)) if .2 < t < 9.8]
+        require(len(onsets) >= 8, f"too few retained tone markers: {onsets}")
+        span = onsets[-1] - onsets[0]
+        evidence["retained_cadence"] = {"intervals": len(onsets) - 1, "seconds": span,
+                                        "error_ms": round(1000 * (span - len(onsets) + 1), 3)}
+    finally:
+        other.terminate()
+        other.wait(timeout=5)
 
 
 def scenario_win_app_audio(e, cfg, evidence):

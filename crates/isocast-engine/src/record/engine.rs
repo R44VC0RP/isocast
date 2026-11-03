@@ -845,6 +845,7 @@ struct State<P: Platform> {
 struct Live<P: Platform> {
     /// What it was opened as, to tell when the setup changes it.
     definition: serde_json::Value,
+    desktop_mode: Option<crate::SystemAudioMode>,
     run: SourceRun,
     error: Option<String>,
     /// Waiting for `screen_pick`: nothing is chosen for it in the desktop's
@@ -1259,7 +1260,7 @@ impl<P: Platform> Engine<P> {
         let setup = Arc::new(setup.clone());
         {
             let mut state = inner.state.lock();
-            if let Some(issue) = setup_refusal(inner, &state.setup, &setup) {
+            if let Some(issue) = setup_refusal(inner, &state, &setup) {
                 return Err(format!("{}: {}", issue.path, issue.message));
             }
             // Stinger videos it adds load in the background; a switch to
@@ -1289,7 +1290,7 @@ impl<P: Platform> Engine<P> {
     /// a vertical canvas whose frame rate inherits a change to the main one.
     pub fn setup_refusal(&self, setup: &Setup) -> Option<isocast_protocol::Issue> {
         let state = self.inner.state.read();
-        setup_refusal(&self.inner, &state.setup, setup)
+        setup_refusal(&self.inner, &state, setup)
     }
 
     /// Stop everything: the recording, if one runs, should be stopped
@@ -2108,6 +2109,8 @@ fn statuses<P: Platform>(state: &State<P>) -> Vec<SourceStatus> {
         .map(|(id, live)| SourceStatus {
             source: id.clone(),
             state: live.run,
+            capture_mode: live.desktop_mode.map(|m| m.name.into()),
+            warning: live.desktop_mode.and_then(|m| m.warning.map(String::from)),
             error: live.error.clone(),
             needs_pick: live.needs_pick,
             width: live.video.as_ref().map(|v| v.width),
@@ -2183,9 +2186,31 @@ fn canvas_refusal<P: Platform>(inner: &Inner<P>, current: &Canvas, new: &Canvas)
 
 fn setup_refusal<P: Platform>(
     inner: &Inner<P>,
-    current: &Setup,
+    state: &State<P>,
     new: &Setup,
 ) -> Option<isocast_protocol::Issue> {
+    let current = &state.setup;
+    // An open endpoint would record playback before an asynchronous reopen;
+    // a pinned take cannot reopen at all. Check the actual live source,
+    // even if an edit has already removed its definition from the setup.
+    if !current.monitors()
+        && let Some(index) = new
+            .sources
+            .iter()
+            .position(|s| s.audio.monitor != Monitoring::Off)
+        && let Some((id, mode)) = state.sources.iter().find_map(|(id, s)| {
+            s.desktop_mode
+                .filter(|m| m.captures_monitor)
+                .map(|m| (id, m.name))
+        })
+    {
+        return Some(isocast_protocol::Issue {
+            path: format!("sources[{index}].audio.monitor"),
+            message: format!(
+                "desktop source {id:?} is running in {mode} mode and would record monitor playback. Leave monitoring off, or stop the engine after recording and enable monitoring before reopening desktop audio"
+            ),
+        });
+    }
     // Outputs are made once per canvas id for the engine's life: a setup
     // whose new canvases don't fit is refused here, not skipped later
     // (#84 review M6).
@@ -2266,12 +2291,26 @@ fn stinger_files(setup: &Setup) -> Vec<String> {
     files
 }
 
+fn desktop_mode(
+    platform: &impl Platform,
+    setup: &Setup,
+    id: &str,
+) -> Option<crate::SystemAudioMode> {
+    match &setup.source(id)?.kind {
+        SourceKind::SystemAudio(s) => platform.system_audio_mode(&s.exclude, setup.monitors()),
+        _ => None,
+    }
+}
+
 /// What source `id` is opened as: a change means opening it again.
-fn definition_of(setup: &Setup, id: &str) -> serde_json::Value {
+fn definition_of(platform: &impl Platform, setup: &Setup, id: &str) -> serde_json::Value {
     setup
         .source(id)
         .and_then(|source| {
             let mut definition = serde_json::to_value(&source.kind).ok()?;
+            if let Some(mode) = desktop_mode(platform, setup, id) {
+                definition["capture_mode"] = mode.name.into();
+            }
             // A picture's rate follows the canvas (a test pattern has its
             // own): a new canvas rate opens it again, so its ISO file
             // records at that rate.
@@ -2333,7 +2372,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
             if inner.opening.lock().contains(id) {
                 continue;
             }
-            let definition = definition_of(&setup, id);
+            let definition = definition_of(&inner.platform, &setup, id);
             match state.sources.get(id) {
                 Some(live) if state.pins.contains(id) => {
                     if live.definition != definition {
@@ -2408,7 +2447,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
             let mut state = inner.state.lock();
             let current = state.setup.clone();
             let wanted = !inner.stopping.load(Ordering::SeqCst)
-                && definition_of(&current, &id) == definition
+                && definition_of(&inner.platform, &current, &id) == definition
                 && (needed_sources(&current).contains(&id)
                     || inner.camera_source.lock().as_ref() == Some(&id));
             let mut replaced = None;
@@ -2571,6 +2610,7 @@ impl<P: Platform> Live<P> {
         Self {
             definition,
             run: SourceRun::Running,
+            desktop_mode: desktop_mode(&inner.platform, setup, id),
             error: None,
             needs_pick: false,
             video,
@@ -2583,6 +2623,7 @@ impl<P: Platform> Live<P> {
         Self {
             definition,
             run: SourceRun::Failed,
+            desktop_mode: None,
             error: Some(error),
             needs_pick: false,
             video: None,
@@ -2615,6 +2656,7 @@ impl<P: Platform> Live<P> {
     fn closed(opened: source::Opened<P>) -> Self {
         Self {
             definition: serde_json::Value::Null,
+            desktop_mode: None,
             run: SourceRun::Failed,
             error: None,
             needs_pick: false,
@@ -2628,6 +2670,8 @@ impl<P: Platform> Live<P> {
         EngineEvent::Source(SourceStatus {
             source: id.to_string(),
             state: self.run,
+            capture_mode: self.desktop_mode.map(|m| m.name.into()),
+            warning: self.desktop_mode.and_then(|m| m.warning.map(String::from)),
             error: self.error.clone(),
             needs_pick: self.needs_pick,
             width: self.video.as_ref().map(|v| v.width),
@@ -4326,7 +4370,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         // A source the setup just changed (another device, say) is still
         // the old one until it reopens: wait for it, or the recording would
         // keep the old one to the end.
-        let reopening = |id: &str, live: &Live<P>| live.definition != definition_of(setup, id);
+        let reopening =
+            |id: &str, live: &Live<P>| live.definition != definition_of(&inner.platform, setup, id);
         // One waiting for `screen_pick` waits for a person: fail at once.
         let pending = required.iter().any(|id| {
             state.sources.get(*id).is_none_or(|live| {
@@ -5977,7 +6022,9 @@ iso = {iso}
         let ids = ["screen", "other", "cam", "beep"];
         let changed = |a: &Setup, b: &Setup| -> Vec<&'static str> {
             ids.into_iter()
-                .filter(|id| definition_of(a, id) != definition_of(b, id))
+                .filter(|id| {
+                    definition_of(&inert::Inert, a, id) != definition_of(&inert::Inert, b, id)
+                })
                 .collect()
         };
         let default = setup("", &iso(""));

@@ -18498,6 +18498,13 @@
       "SourceStatus": {
         "description": "One of the live engine's sources.",
         "properties": {
+          "capture_mode": {
+            "description": "Desktop audio capture backend selected when this source opened.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "channels": {
             "description": "Its audio channels, if it has sound.",
             "format": "uint32",
@@ -18547,6 +18554,13 @@
           },
           "state": {
             "$ref": "#/components/schemas/SourceRun"
+          },
+          "warning": {
+            "description": "A known limitation of the running capture (not a source failure).",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "width": {
             "description": "Its picture's size and rate, if it has one.",
