@@ -326,12 +326,37 @@ impl NvencBudgetProfile {
                 "encoder.budget: no qualified NVENC engine-count/profile for adapter {key}; calibration required"
             );
         }
-        Ok(Self {
+        Ok(Self::rtx_5070(key))
+    }
+
+    fn rtx_5070(key: String) -> Self {
+        Self {
             key,
             h264: [977.0, 718.0, 323.0],
             hevc: [1134.0, 529.0, 506.0],
             calibrated: false,
-        })
+        }
+    }
+
+    /// Capacity in completed 1080p-equivalent frames/s at P1/P3/P5.
+    fn rates(&self, codec: Codec, depth: u8) -> Result<[f64; 3]> {
+        match (codec, depth) {
+            (Codec::H264, 8) => Ok(self.h264),
+            (Codec::Hevc, 8) => Ok(self.hevc),
+            (Codec::Hevc, 10) if self.calibrated => {
+                bail!("8-bit calibration does not cover HEVC Main10; use reference figures")
+            }
+            (Codec::Hevc, 10) => {
+                // RTX 5070 / 617.42, BGRA8, LL/CQP20/AQ8: across 1080p30/60 and
+                // 2160p30, Main10 sustained >=82.7% of Main's throughput at P1
+                // and >=100% at P3/P5. Round down; never credit a speedup.
+                let [p1, p3, p5] = self.hevc;
+                Ok([0.8 * p1, p3, p5])
+            }
+            _ => bail!(
+                "unsupported {codec:?}/{depth}; valid codec/bit_depth options are h264/8, hevc/8 and hevc/10"
+            ),
+        }
     }
 
     /// Cache key includes PCI subsystem/revision and the actual UMD version.
@@ -385,7 +410,7 @@ impl NvencBudgetProfile {
     /// except the same recording's earlier-take session of an output in this
     /// batch, which a split's cut hands over. `active` is the snapshot from
     /// `NvencAdmission::settled` under this same `admission`. Fails closed
-    /// when an open session cannot be priced (MF hardware, 10-bit, a preset
+    /// when an open session cannot be priced (MF hardware, a preset
     /// outside P1/P3/P5).
     pub fn plan_accounted(
         &self,
@@ -461,19 +486,9 @@ impl NvencBudgetProfile {
                 "encoder.budget.active: session {name} is a Media Foundation hardware encoder without an NVENC preset; it cannot be priced"
             ),
         };
-        if session.bit_depth != 8 {
-            bail!(
-                "encoder.budget.active: {}-bit session {name} is not priced by this 8-bit profile",
-                session.bit_depth
-            );
-        }
-        let rates = match session.codec {
-            Codec::H264 => self.h264,
-            Codec::Hevc => self.hevc,
-            _ => {
-                bail!("encoder.budget.active: session {name} has a codec this profile cannot price")
-            }
-        };
+        let rates = self
+            .rates(session.codec, session.bit_depth)
+            .with_context(|| format!("encoder.budget.active: session {name}"))?;
         let pixels = u64::from(session.width)
             .checked_mul(u64::from(session.height))
             .and_then(|area| area.checked_mul(u64::from(session.fps)))
@@ -516,20 +531,9 @@ impl NvencBudgetProfile {
                     output.id
                 );
             }
-            if spec.encoder.effective_bit_depth() != 8 {
-                bail!(
-                    "encoder.budget.outputs.{}.bit_depth: 10-bit throughput is not qualified by this 8-bit profile",
-                    output.id
-                );
-            }
-            let rates = match spec.encoder.codec {
-                Codec::H264 => self.h264,
-                Codec::Hevc => self.hevc,
-                _ => bail!(
-                    "encoder.budget.outputs.{}.codec: valid NVENC profile codecs are h264 and hevc",
-                    output.id
-                ),
-            };
+            let rates = self
+                .rates(spec.encoder.codec, spec.encoder.effective_bit_depth())
+                .with_context(|| format!("encoder.budget.outputs.{}.codec/bit_depth", output.id))?;
             let pixels = u64::from(spec.width)
                 .checked_mul(u64::from(spec.height))
                 .and_then(|area| area.checked_mul(u64::from(spec.fps)))
@@ -608,6 +612,87 @@ fn budget_identity(device: &GraphicsDevice) -> Result<(String, u32, u32)> {
         desc.VendorId,
         desc.DeviceId,
     ))
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn output(i: usize, depth: u8) -> NvencBudgetOutput {
+        NvencBudgetOutput {
+            id: format!("out{i}"),
+            iso: i != 0,
+            video: VideoTrackSpec {
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                encoder: isocast_protocol::Encoder {
+                    codec: Codec::Hevc,
+                    bit_depth: depth,
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn main10_charges_new_and_running_sessions_at_their_presets() {
+        let profile = NvencBudgetProfile::rtx_5070("5070".into());
+        let mut active = NvencAccounted {
+            recording: 1,
+            take: 1,
+            output: "iso/camera".into(),
+            codec: Codec::Hevc,
+            bit_depth: 10,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            preset: Some(1),
+            native: true,
+            qp: Some(20),
+            input: PixelFormat::Bgra8,
+            planned: true,
+        };
+        for (preset, rate) in [(1, 0.8 * 1134.0), (3, 529.0), (5, 506.0)] {
+            active.preset = Some(preset);
+            let fixed = profile.charge(&active).unwrap();
+            assert_eq!(fixed, 120.0 / rate);
+            let plan = profile
+                .select(&[output(0, 10)], false, fixed, 1, 0)
+                .unwrap();
+            assert_eq!(plan.estimated_load, fixed + 120.0 / 506.0);
+        }
+        // One P5 program + four P1 ISOs fit. A fifth ISO would cost
+        // ~90%, even at P1. The same six outputs still fit at 8-bit.
+        let outputs: Vec<_> = (0..6).map(|i| output(i, 10)).collect();
+        assert!(profile.select(&outputs[..5], false, 0.0, 0, 0).is_ok());
+        let error = profile.select(&outputs, false, 0.0, 0, 0).unwrap_err();
+        assert!(error.to_string().contains("exceed 85%"));
+        let eight: Vec<_> = (0..6).map(|i| output(i, 8)).collect();
+        assert!(profile.select(&eight, false, 0.0, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn h264_ten_bit_is_refused_and_main10_is_never_priced_as_calibrated() {
+        let profile = NvencBudgetProfile::rtx_5070("5070".into());
+        let mut bad = output(0, 10);
+        bad.video.encoder.codec = Codec::H264;
+        let error = profile.select(&[bad], false, 0.0, 0, 0).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("out0.codec/bit_depth"));
+        assert!(message.contains("h264/8, hevc/8 and hevc/10"));
+        let calibrated = profile.calibrated("5070", [500.0; 3], [700.0; 3]).unwrap();
+        assert!(
+            calibrated
+                .select(&[output(0, 8)], false, 0.0, 0, 0)
+                .unwrap()
+                .calibrated
+        );
+        let error = calibrated
+            .select(&[output(0, 10)], false, 0.0, 0, 0)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("8-bit calibration does not cover HEVC Main10"));
+    }
 }
 
 #[repr(C)]

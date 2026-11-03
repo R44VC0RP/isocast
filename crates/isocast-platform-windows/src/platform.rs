@@ -153,8 +153,10 @@ fn calibration_mismatch(
     qp: Option<u32>,
     input: PixelFormat,
     fps: u32,
+    depth: u8,
 ) -> Option<String> {
     match qp {
+        _ if depth != 8 => Some(format!("{depth}-bit output, measured with 8-bit")),
         None => Some("bitrate or MF rate control, not the measured constant QP".into()),
         Some(qp) if qp != policy.qp => Some(format!("QP {qp}, measured at QP {}", policy.qp)),
         Some(_) if input != PixelFormat::Bgra8 => {
@@ -193,21 +195,6 @@ fn budget_figures(
             return Ok(Figures::Unplanned(format!("{error:#}")));
         }
     };
-    for file in files {
-        let video = &file.spec.video;
-        if video.encoder.effective_bit_depth() != 8
-            || !matches!(
-                video.encoder.codec,
-                isocast_protocol::Codec::H264 | isocast_protocol::Codec::Hevc
-            )
-        {
-            bail!(
-                "encoder.budget: take {} {} is not 8-bit H.264/HEVC, which this adapter's NVENC profile cannot price; refused before opening any file",
-                file.take,
-                file.output
-            );
-        }
-    }
     // One non-blocking snapshot for the whole batch: scope, cache
     // applicability and the plan all see the same sessions.
     let active = admission.settled()?;
@@ -255,7 +242,13 @@ fn budget_figures(
     for (file, &format) in files.iter().zip(formats) {
         let video = &file.spec.video;
         let qp = Some(RecordingQuality::new(video.encoder.quality)?.nvenc_qp);
-        if let Some(mismatch) = calibration_mismatch(&calibration.policy, qp, format, video.fps) {
+        if let Some(mismatch) = calibration_mismatch(
+            &calibration.policy,
+            qp,
+            format,
+            video.fps,
+            video.encoder.effective_bit_depth(),
+        ) {
             return not_applicable(format!(
                 "take {} {} uses {mismatch}",
                 file.take, file.output
@@ -268,9 +261,13 @@ fn budget_figures(
         if session.handed_over(recording, take, &handover) {
             continue;
         }
-        if let Some(mismatch) =
-            calibration_mismatch(&calibration.policy, session.qp, session.input, session.fps)
-        {
+        if let Some(mismatch) = calibration_mismatch(
+            &calibration.policy,
+            session.qp,
+            session.input,
+            session.fps,
+            session.bit_depth,
+        ) {
             return not_applicable(format!(
                 "open session {}/{} uses {mismatch}",
                 session.take, session.output
