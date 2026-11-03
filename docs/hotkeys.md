@@ -307,19 +307,30 @@ host Registry and binds the profile's bindings through the GlobalShortcuts
 portal, with each chord as the preferred trigger. (An engine owned by
 foreground `isocast record` binds none, as on macOS.) The desktop picks the
 keys: GNOME and KDE ask the person, and Hyprland takes them from its config
-(`bind = MODS, KEY, global, dev.isocast.Isocast:<binding>`). A binding the
-desktop has no keys for yet is registered with a warning saying how to
-assign them. The portal needs the app's desktop entry: installed builds
-have it; for a development build run `scripts/linux-dev-install.sh`.
+(`bind = MODS, KEY, global, dev.isocast.Isocast:<binding>`). When the
+desktop doesn't say which keys it uses (Hyprland never does), the binding is
+global and its registration carries a note on how to assign keys; the note
+isn't published as a warning. The portal needs the app's desktop entry:
+installed builds have it; for a development build run
+`scripts/linux-dev-install.sh`. A portal older than xdg-desktop-portal 1.19
+has no app Registry: the daemon binds without registering, and if the portal
+then refuses, the warning says the portal is too old.
 
 Binding runs in the background, because the desktop may show a dialog.
 `hotkeys set`, a profile switch and the daemon's start return at once with
 every binding focused-only and the warning "waiting for the desktop's
 GlobalShortcuts portal; focused input works meanwhile". When the portal
 answers, `hotkeys get` shows the result and its warnings are published. A
-later change cancels a registration still in flight. A missing portal, or
-one that doesn't answer within 5 s (30 s while the desktop's shortcut
-dialog is open), leaves every binding focused-only, with the reason in its
-warning.
+later change cancels a registration still in flight and closes its session
+before it opens the next one. The portal specification says closing the
+session ends its dialog, but GNOME 50 leaves the old dialog open (its answer
+is dropped), so an edit made while a dialog is open stacks a second dialog
+on top. The desktop's dialog has no time limit. A missing portal, or one
+that doesn't connect, register and open a session within 5 s, leaves every
+binding focused-only, with the reason in its warning. A dialog that ends
+without binding leaves every binding focused-only and says so: "you declined
+the desktop's shortcut dialog; …" for a cancelled request, and "the
+desktop's shortcut dialog ended without binding them (GNOME's Cancel ends it
+this way); …" when the desktop reports it ended some other way.
 
 Global capture on other platforms currently reports focused-only status.

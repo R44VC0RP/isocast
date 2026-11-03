@@ -464,7 +464,10 @@ impl Daemon {
         mut warnings: Vec<String>,
         announced: usize,
     ) {
-        warnings.extend(registrations.iter().filter_map(|r| {
+        // A global binding's warning is a note kept on its registration
+        // (Linux: the desktop doesn't say which keys it uses); it isn't
+        // published on every start and edit.
+        warnings.extend(registrations.iter().filter(|r| !r.global).filter_map(|r| {
             r.warning
                 .as_ref()
                 .map(|w| format!("hotkeys.{}.keys: {w}", r.binding))
@@ -1083,6 +1086,26 @@ mod tests {
             registered.warnings,
             vec!["configuration issue", "hotkeys.b.keys: not bound"]
         );
+    }
+
+    #[test]
+    fn a_global_bindings_note_stays_on_its_registration() {
+        let daemon = crate::Daemon::default();
+        daemon.hotkeys.registered.lock().generation = 4;
+        let noted = Registration {
+            binding: "studio".into(),
+            global: true,
+            warning: Some("the desktop doesn't say which keys it uses".into()),
+        };
+        daemon.settle_hotkeys(
+            4,
+            vec![noted.clone(), registration("b", Some("not bound"))],
+            Vec::new(),
+            0,
+        );
+        let registered = daemon.hotkeys.registered.lock();
+        assert_eq!(registered.registrations[0], noted);
+        assert_eq!(registered.warnings, vec!["hotkeys.b.keys: not bound"]);
     }
 
     fn token(source: InputSource, owner: u64) -> PressToken {

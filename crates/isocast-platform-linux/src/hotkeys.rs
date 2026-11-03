@@ -5,23 +5,69 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ashpd::desktop::Session;
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
+use ashpd::desktop::{ResponseError, Session};
 use futures_util::StreamExt;
 use isocast_engine::hotkeys::{Edge, Key, OnKey};
 use isocast_protocol::hotkeys::{Chord, Phase, Registration};
+use tokio::sync::oneshot;
 
 /// The portal refuses an app id without a desktop entry
 /// (packaging/linux/dev.isocast.Isocast.desktop).
 const APP_ID: &str = "dev.isocast.Isocast";
-/// Connecting, registering and opening the session.
+/// Connecting, registering and opening the session. Binding has no limit:
+/// it waits on the person in the desktop's dialog, and a later `replace`
+/// cancels it.
 const ANSWER: Duration = Duration::from_secs(5);
-/// Binding, which may wait on the desktop's dialog.
-const ASSIGN: Duration = Duration::from_secs(30);
 const CLOSE: Duration = Duration::from_secs(2);
+const REGISTRY: &str = "org.freedesktop.host.portal.Registry";
 
 pub const WAITING: &str =
     "waiting for the desktop's GlobalShortcuts portal; focused input works meanwhile";
+const DECLINED: &str = "you declined the desktop's shortcut dialog; set the hotkeys again to \
+                            be asked again, or use focused input";
+const ENDED: &str = "the desktop's shortcut dialog ended without binding them (GNOME's Cancel \
+                         ends it this way); set the hotkeys again to be asked again, or use \
+                         focused input";
+
+/// The desktop's shortcut dialog ended without binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dialog {
+    /// Response 1: cancelled.
+    Declined,
+    /// Response 2: "ended in some other way". xdg-desktop-portal-gnome 50
+    /// answers the person's Cancel with it.
+    Ended,
+}
+
+impl Dialog {
+    fn warning(self) -> &'static str {
+        match self {
+            Dialog::Declined => DECLINED,
+            Dialog::Ended => ENDED,
+        }
+    }
+}
+
+impl std::fmt::Display for Dialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.warning())
+    }
+}
+
+impl std::error::Error for Dialog {}
+
+/// A later `replace` cancelled the registration.
+#[derive(Debug)]
+struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("replaced by a later registration")
+    }
+}
+
+impl std::error::Error for Cancelled {}
 
 pub type OnRegistered = Box<dyn FnOnce(Vec<Registration>) + Send>;
 
@@ -32,12 +78,31 @@ struct Running {
     listener: tokio::task::JoinHandle<()>,
 }
 
+/// A registration in flight. Dropping `cancel` asks it to stop and close
+/// the session it opened.
+struct Task {
+    handle: tokio::task::JoinHandle<()>,
+    cancel: oneshot::Sender<()>,
+}
+
+impl Task {
+    /// Waits until the portal has closed its session, so that session can't
+    /// end after the next one opens.
+    async fn stop(self) {
+        drop(self.cancel);
+        let mut handle = self.handle;
+        if tokio::time::timeout(CLOSE * 2, &mut handle).await.is_err() {
+            handle.abort();
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     /// A registration keeps its session only if no later `replace` came.
     turn: u64,
     running: Option<Running>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<Task>,
 }
 
 #[derive(Default)]
@@ -104,10 +169,11 @@ fn registrations(keys: Vec<Key>, assigned: &[(String, String)]) -> Vec<Registrat
                     "the desktop's GlobalShortcuts portal did not bind it; use focused input"
                         .to_string(),
                 ),
+                // xdph always answers with an empty description, even when
+                // hyprland.conf binds the shortcut.
                 Some((_, trigger)) if trigger.is_empty() => Some(format!(
-                    "registered with the desktop, which has no keys for it yet; assign them \
-                     in its shortcut settings (Hyprland: bind = MODS, KEY, global, \
-                     {APP_ID}:{})",
+                    "the desktop doesn't say which keys it uses; if none, assign them in its \
+                     shortcut settings (Hyprland: bind = MODS, KEY, global, {APP_ID}:{})",
                     key.binding
                 )),
                 Some(_) => None,
@@ -211,12 +277,14 @@ impl LinuxHotkeys {
         let mut state = lock(&self.state);
         state.turn += 1;
         let turn = state.turn;
-        if let Some(task) = state.task.take() {
-            task.abort();
-        }
+        let before = state.task.take();
         let previous = state.running.take();
         let shared = self.state.clone();
-        state.task = Some(runtime.spawn(async move {
+        let (cancel, mut cancelled) = oneshot::channel();
+        let handle = runtime.spawn(async move {
+            if let Some(before) = before {
+                before.stop().await;
+            }
             if let Some(previous) = previous {
                 previous.close().await;
             }
@@ -230,7 +298,7 @@ impl LinuxHotkeys {
                         .preferred_trigger(trigger(&key.chord).as_str())
                 })
                 .collect();
-            let result = match register(shortcuts, generation, on_key).await {
+            let result = match register(shortcuts, generation, on_key, &mut cancelled).await {
                 Ok((running, assigned)) => {
                     let replaced = {
                         let mut state = lock(&shared);
@@ -247,10 +315,46 @@ impl LinuxHotkeys {
                     }
                     registrations(keys, &assigned)
                 }
-                Err(error) => unavailable(&keys, &error),
+                Err(error) if error.is::<Cancelled>() => return,
+                Err(error) => match error.downcast_ref::<Dialog>() {
+                    Some(dialog) => focused(&keys, dialog.warning()),
+                    None => unavailable(&keys, &error),
+                },
             };
             done(result);
-        }));
+        });
+        state.task = Some(Task { handle, cancel });
+    }
+}
+
+/// Portals before xdg-desktop-portal 1.19 have no host app Registry.
+fn registry_missing(error: &ashpd::Error) -> bool {
+    const MISSING: [&str; 2] = [
+        "org.freedesktop.DBus.Error.UnknownMethod",
+        "org.freedesktop.DBus.Error.UnknownInterface",
+    ];
+    match error {
+        ashpd::Error::PortalNotFound(interface) => interface.as_str() == REGISTRY,
+        ashpd::Error::Zbus(zbus::Error::MethodError(name, _, _)) => {
+            MISSING.contains(&name.as_str())
+        }
+        ashpd::Error::Zbus(zbus::Error::FDO(error)) => matches!(
+            **error,
+            zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::UnknownInterface(_)
+        ),
+        _ => false,
+    }
+}
+
+/// Explains a later failure on a portal that couldn't register the app id.
+fn unregistered(error: anyhow::Error, registered: bool) -> anyhow::Error {
+    if registered {
+        error
+    } else {
+        error.context(format!(
+            "this xdg-desktop-portal has no {REGISTRY} (added in 1.19), so it couldn't \
+             register app id {APP_ID}"
+        ))
     }
 }
 
@@ -258,56 +362,79 @@ async fn register(
     shortcuts: Vec<NewShortcut>,
     generation: u64,
     on_key: OnKey,
+    cancelled: &mut oneshot::Receiver<()>,
 ) -> Result<(Running, Vec<(String, String)>)> {
-    let (portal, session, mut edges) = tokio::time::timeout(ANSWER, async {
+    let open = tokio::time::timeout(ANSWER, async {
         // A dedicated connection: Register must come before its first portal
         // call, and ASHPD's process-global one would outlive this session.
         let connection = zbus::Connection::session().await?;
-        ashpd::register_host_app_with_connection(
+        let registered = match ashpd::register_host_app_with_connection(
             connection.clone(),
             ashpd::AppID::try_from(APP_ID)?,
         )
         .await
-        .with_context(|| {
-            format!(
-                "register app id {APP_ID}: install its desktop entry with \
-                 packaging/linux/install.sh, or scripts/linux-dev-install.sh for a \
-                 development build"
-            )
-        })?;
-        let portal = GlobalShortcuts::with_connection(connection).await?;
-        let session = portal.create_session(Default::default()).await?;
-        let pressed = portal.receive_activated().await?.map(|event| {
-            (
-                event.session_handle().to_string(),
-                event.shortcut_id().to_string(),
-                Phase::Press,
-            )
-        });
-        let released = portal.receive_deactivated().await?.map(|event| {
-            (
-                event.session_handle().to_string(),
-                event.shortcut_id().to_string(),
-                Phase::Release,
-            )
-        });
-        anyhow::Ok((
-            portal,
-            session,
-            futures_util::stream::select(pressed, released),
-        ))
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("it did not answer within {} s", ANSWER.as_secs()))??;
-    let bound = tokio::time::timeout(
-        ASSIGN,
-        portal.bind_shortcuts(&session, &shortcuts, None, Default::default()),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("binding got no answer within {} s", ASSIGN.as_secs()));
-    let bound = match bound.and_then(|request| Ok(request?.response()?)) {
+        {
+            Ok(()) => true,
+            // The portal then takes the app id from the process, if it can.
+            Err(error) if registry_missing(&error) => false,
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "register app id {APP_ID}: install its desktop entry with \
+                     packaging/linux/install.sh, or scripts/linux-dev-install.sh for a \
+                     development build"
+                )));
+            }
+        };
+        let opened = async {
+            let portal = GlobalShortcuts::with_connection(connection).await?;
+            let session = portal.create_session(Default::default()).await?;
+            let pressed = portal.receive_activated().await?.map(|event| {
+                (
+                    event.session_handle().to_string(),
+                    event.shortcut_id().to_string(),
+                    Phase::Press,
+                )
+            });
+            let released = portal.receive_deactivated().await?.map(|event| {
+                (
+                    event.session_handle().to_string(),
+                    event.shortcut_id().to_string(),
+                    Phase::Release,
+                )
+            });
+            anyhow::Ok((
+                portal,
+                session,
+                futures_util::stream::select(pressed, released),
+            ))
+        }
+        .await
+        .map_err(|error| unregistered(error, registered))?;
+        anyhow::Ok((opened, registered))
+    });
+    // Cancelled before a session handle came back: dropping the connection
+    // ends any session the portal opened.
+    let opened = tokio::select! {
+        opened = open => opened,
+        _ = &mut *cancelled => return Err(Cancelled.into()),
+    };
+    let ((portal, session, mut edges), registered) = opened
+        .map_err(|_| anyhow::anyhow!("it did not answer within {} s", ANSWER.as_secs()))??;
+    let bound = tokio::select! {
+        bound = portal.bind_shortcuts(&session, &shortcuts, None, Default::default()) => {
+            bound.and_then(|request| request.response()).map_err(|error| match error {
+                ashpd::Error::Response(ResponseError::Cancelled) => Dialog::Declined.into(),
+                ashpd::Error::Response(ResponseError::Other) => Dialog::Ended.into(),
+                error => unregistered(error.into(), registered),
+            })
+        }
+        _ = &mut *cancelled => Err(Cancelled.into()),
+    };
+    let bound = match bound {
         Ok(bound) => bound,
         Err(error) => {
+            // The specification says this ends the desktop's dialog;
+            // xdg-desktop-portal-gnome 50 leaves it open, and drops its answer.
             let _ = tokio::time::timeout(CLOSE, session.close()).await;
             return Err(error);
         }
@@ -387,7 +514,7 @@ mod tests {
         assert_eq!(
             got[1].warning.as_deref(),
             Some(
-                "registered with the desktop, which has no keys for it yet; assign them in its \
+                "the desktop doesn't say which keys it uses; if none, assign them in its \
                  shortcut settings (Hyprland: bind = MODS, KEY, global, \
                  dev.isocast.Isocast:no_keys)"
             )
@@ -420,5 +547,49 @@ mod tests {
                 .iter()
                 .all(|r| !r.global && r.warning.as_deref() == Some(WAITING))
         );
+    }
+
+    #[test]
+    fn a_portal_without_the_registry_is_told_apart_from_other_failures() {
+        let missing = ashpd::Error::PortalNotFound(REGISTRY.try_into().unwrap());
+        assert!(registry_missing(&missing));
+        let other_portal = ashpd::Error::PortalNotFound(
+            "org.freedesktop.portal.GlobalShortcuts".try_into().unwrap(),
+        );
+        assert!(!registry_missing(&other_portal));
+        let unknown = ashpd::Error::from(zbus::fdo::Error::UnknownMethod("Register".into()));
+        assert!(registry_missing(&unknown));
+        let refused = ashpd::Error::from(zbus::fdo::Error::AccessDenied("no entry".into()));
+        assert!(!registry_missing(&refused));
+    }
+
+    #[test]
+    fn a_failure_after_skipping_the_registry_says_the_portal_is_old() {
+        let error = || anyhow::anyhow!("CreateSession refused");
+        assert_eq!(
+            format!("{:#}", unregistered(error(), true)),
+            "CreateSession refused"
+        );
+        assert_eq!(
+            format!("{:#}", unregistered(error(), false)),
+            "this xdg-desktop-portal has no org.freedesktop.host.portal.Registry (added in \
+             1.19), so it couldn't register app id dev.isocast.Isocast: CreateSession refused"
+        );
+    }
+
+    #[test]
+    fn a_dialog_that_ends_without_binding_has_its_own_message() {
+        assert_eq!(
+            Dialog::Declined.warning(),
+            "you declined the desktop's shortcut dialog; set the hotkeys again to be asked \
+             again, or use focused input"
+        );
+        assert_eq!(
+            Dialog::Ended.warning(),
+            "the desktop's shortcut dialog ended without binding them (GNOME's Cancel ends it \
+             this way); set the hotkeys again to be asked again, or use focused input"
+        );
+        let error = anyhow::Error::from(Dialog::Ended);
+        assert_eq!(error.downcast_ref::<Dialog>(), Some(&Dialog::Ended));
     }
 }
