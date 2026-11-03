@@ -1,6 +1,5 @@
-//! H.264 decoded in software with Cisco's OpenH264 binary (Linux), the one
-//! the installer downloads and the Linux engine encodes with, loaded by
-//! `isocast-openh264`. Each
+//! H.264 decoded in software with the same runtime OpenH264 lookup as the
+//! Linux engine, through `isocast-openh264`. Each
 //! access unit (AVCC) goes in as Annex B, with the parameter sets in front
 //! of a keyframe whenever they changed; the decoded picture comes out as
 //! RGBA for the monitors, converted as Rec.709 limited range (what the
@@ -19,7 +18,6 @@ use super::{AccessUnit, Decoded, Decoder, ParameterSets, Picture, nal_units};
 /// decoder allocates.
 const MAX_SIDE: u32 = 4096;
 
-#[derive(Default)]
 pub struct OpenH264 {
     codec: Option<Codec>,
     /// The parameter sets the decoder was last given.
@@ -56,6 +54,20 @@ impl Decoder for OpenH264 {
 }
 
 impl OpenH264 {
+    pub(super) fn new() -> Result<Self> {
+        Ok(Self {
+            codec: Some(Self::load_codec()?),
+            sets: None,
+            annex_b: Vec::new(),
+        })
+    }
+
+    fn load_codec() -> Result<Codec> {
+        let api = isocast_openh264::api().map_err(|error| super::NoDecoder(error.to_string()))?;
+        Codec::with_api_config(api, DecoderConfig::new())
+            .context("OpenH264 could not start a decoder")
+    }
+
     /// `unit`'s picture as RGBA, if it completes one.
     fn picture(&mut self, sets: &ParameterSets, unit: &AccessUnit) -> Result<Option<Picture>> {
         let fresh = self.sets.as_ref() != Some(sets);
@@ -73,12 +85,8 @@ impl OpenH264 {
             }
         }
         if self.codec.is_none() {
-            let api =
-                isocast_openh264::api().map_err(|error| super::NoDecoder(error.to_string()))?;
-            self.codec = Some(
-                Codec::with_api_config(api, DecoderConfig::new())
-                    .context("OpenH264 could not start a decoder")?,
-            );
+            // A decode error discarded the old codec. Reopen at the next keyframe.
+            self.codec = Some(Self::load_codec()?);
         }
         self.annex_b.clear();
         if fresh {
@@ -290,7 +298,7 @@ mod tests {
 
     /// One encoded keyframe as the decoder's intake.
     fn encode(frame: &YUVBuffer) -> (ParameterSets, AccessUnit) {
-        let api = isocast_openh264::api().expect("Cisco's OpenH264 (set ISOCAST_OPENH264)");
+        let api = isocast_openh264::api().expect("a compatible OpenH264 library");
         let mut encoder = Encoder::with_api_config(api, EncoderConfig::new()).unwrap();
         let annex_b = encoder.encode(frame).unwrap().to_vec();
         let (sets, unit) = super::super::from_annex_b(&annex_b, 0);
@@ -346,7 +354,7 @@ mod tests {
 
     #[test]
     fn decodes_solid_frames_and_follows_a_new_sps() {
-        let mut decoder = OpenH264::default();
+        let mut decoder = OpenH264::new().unwrap();
         let red = [63, 102, 240];
         let (sets, unit) = encode(&solid(64, 48, red));
         assert_eq!(sps_size(&sets.sps[0]), Some((64, 48)));
@@ -400,10 +408,10 @@ mod tests {
         );
         assert_eq!(sps_size(&sps), Some((8192, 16)));
         sets.sps = vec![sps];
-        let error = OpenH264::default().picture(&sets, &unit).unwrap_err();
+        let error = OpenH264::new().unwrap().picture(&sets, &unit).unwrap_err();
         assert!(error.to_string().contains("8192x16"), "{error:#}");
         // An SPS cut short is refused too.
         sets.sps = vec![vec![0x67, 66]];
-        assert!(OpenH264::default().picture(&sets, &unit).is_err());
+        assert!(OpenH264::new().unwrap().picture(&sets, &unit).is_err());
     }
 }

@@ -4243,6 +4243,7 @@ dependencies = [
 name = "isocast-openh264"
 version = "0.0.10"
 dependencies = [
+ "libc",
  "openh264",
  "sha2",
 ]

@@ -496,6 +496,10 @@ jobs:
         if: env.MODE == 'full'
         run: packaging/linux/install.sh --openh264
 
+      - name: Verify OpenH264 lookup and ELF sonames
+        if: env.MODE == 'full'
+        run: cargo test --release --locked -p isocast-openh264 -- --include-ignored
+
       - name: Build app, engine, CLI and browser helper
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser

@@ -2651,6 +2651,9 @@ impl Settings {
         if let Some(window) = app.window() {
             window.global::<Ui>().set_onboarding(true);
         }
+        if crate::engine::os() == isocast_protocol::hello::EngineOs::Linux {
+            app.wizard.linux_first_run(app, false);
+        }
         // Ask for the devices now, so they're there by the second step.
         app.load_devices(true);
         // The Permissions step draws the permissions step's rows (area H),

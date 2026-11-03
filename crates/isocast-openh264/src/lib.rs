@@ -1,19 +1,18 @@
-//! Cisco's OpenH264, loaded at run time on Linux.
+//! OpenH264, loaded at run time on Linux for encoding and preview decoding.
 //!
 //! Cisco's patent licence for H.264 covers only the OpenH264 binary Cisco
-//! builds and serves, downloaded by each user. So Isocast compiles none:
-//! its Linux installer (`install.sh --openh264`) downloads Cisco's binary
-//! into [`install_dir`], and the engine (encoding) and the app (preview
-//! decoding) load it from there through [`api`], after checking it is
-//! exactly the build pinned here (the version whose ABI the `openh264`
-//! crate was generated for). `$ISOCAST_OPENH264` points elsewhere, for
-//! development and CI.
+//! builds and serves, downloaded by each user. Isocast compiles and ships
+//! none. `install.sh --openh264` downloads only Cisco's pinned binary.
 //!
-//! When it is missing or not that build, [`api`] says so, naming the path
-//! and the one command that fixes it; nothing else stops working.
+//! [`api`] uses an explicit absolute `$ISOCAST_OPENH264` path first. Otherwise
+//! it checks Cisco's per-user binary in [`install_dir`] against its pinned
+//! SHA-256. If absent, the dynamic loader looks up `libopenh264.so.8`.
+//! The override and system paths trust the user or distro to supply native
+//! code: they check soname 8, version 2.6 or later in major 2, and encoder
+//! creation. These checks establish compatibility, not provenance.
 #![cfg(target_os = "linux")]
 
-use std::ffi::OsString;
+mod loaded_elf;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -29,6 +28,7 @@ pub use openh264::OpenH264API;
 pub const VERSION: &str = "2.6.0";
 /// Overrides where the library is looked for (a path to the `.so`).
 pub const ENV: &str = "ISOCAST_OPENH264";
+const SONAME: &str = "libopenh264.so.8";
 
 /// One of Cisco's builds: its file, where Cisco serves it (bzip2), and the
 /// SHA-256 of the download and of the library inside.
@@ -92,18 +92,20 @@ fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Where the library is looked for: `override_path` (`$ISOCAST_OPENH264`)
-/// when set and not empty, which must be absolute (it is hashed and loaded
-/// by that path, whatever the working directory); else `build.file` in
-/// [`install_dir`] under `home`. The `bool` says whether it was overridden.
+#[derive(Debug, PartialEq)]
+enum Source {
+    Override(PathBuf),
+    Cisco(PathBuf, &'static Build),
+    System,
+}
+
 fn locate(
-    override_path: Option<OsString>,
+    override_path: Option<PathBuf>,
     home: Option<PathBuf>,
-    build: &Build,
+    build: Option<&'static Build>,
     fix: &str,
-) -> Result<(PathBuf, bool), Unavailable> {
-    if let Some(path) = override_path.filter(|path| !path.is_empty()) {
-        let path = PathBuf::from(path);
+) -> Result<Source, Unavailable> {
+    if let Some(path) = override_path.filter(|path| !path.as_os_str().is_empty()) {
         if !path.is_absolute() {
             return Err(Unavailable {
                 reason: format!(
@@ -113,17 +115,18 @@ fn locate(
                 fix: format!("set ${ENV} to an absolute path, or unset it to use {fix}"),
             });
         }
-        return Ok((path, true));
+        return Ok(Source::Override(path));
     }
-    let Some(home) = home else {
-        return Err(Unavailable {
-            reason: format!(
-                "HOME isn't set, so Cisco's OpenH264 {VERSION} in ~/.local/lib/isocast can't be found"
-            ),
-            fix: format!("set HOME, or set ${ENV} to the library's absolute path"),
-        });
-    };
-    Ok((install_dir(&home).join(build.file), false))
+    if let (Some(home), Some(build)) = (home, build) {
+        let path = install_dir(&home).join(build.file);
+        // Missing is a fallback; an installed but damaged Cisco copy is an
+        // error, never an unchecked load of that file.
+        if !matches!(std::fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Ok(Source::Cisco(path, build));
+        }
+    }
+    Ok(Source::System)
 }
 
 /// The command that (re)installs the library: the Debian package's
@@ -173,9 +176,9 @@ fn verify(path: &Path, bytes: &[u8], build: &Build) -> Result<(), String> {
 /// `path` opened, read and checked through the one open file, which is
 /// returned: loading it through that file (`/proc/self/fd/N`) loads the
 /// very bytes checked, whatever replaces the path meanwhile.
-fn open_verified(path: &Path, from: &str, build: &Build, fix: &str) -> Result<File, Unavailable> {
+fn open_verified(path: &Path, build: &Build, fix: &str) -> Result<File, Unavailable> {
     let unavailable = |reason: String| Unavailable {
-        reason: format!("{reason}{from}"),
+        reason,
         fix: fix.to_string(),
     };
     let mut file = match File::open(path) {
@@ -200,42 +203,21 @@ fn open_verified(path: &Path, from: &str, build: &Build, fix: &str) -> Result<Fi
             path.display()
         )));
     }
-    verify(path, &bytes, build).map_err(unavailable)?;
+    verify(path, &bytes, build).map_err(|reason| {
+        let remove = match fix.strip_suffix(" --openh264") {
+            Some(installer) => format!("{installer} --remove-openh264"),
+            None => format!("{fix} --remove"),
+        };
+        Unavailable {
+            reason,
+            fix: format!("{fix} to replace it, or {remove} to use the system library"),
+        }
+    })?;
     Ok(file)
 }
 
-/// This machine's build and the library's path, opened and checked.
-fn open() -> Result<(PathBuf, File), Unavailable> {
-    let fix = fix_command();
-    let Some(build) = build() else {
-        return Err(Unavailable {
-            reason: format!(
-                "H.264 needs Cisco's OpenH264 {VERSION}, which Cisco doesn't build for {}",
-                std::env::consts::ARCH
-            ),
-            fix: "none on this computer: H.264 needs an x86_64 or arm64 (aarch64) one".into(),
-        });
-    };
-    let (path, overridden) = locate(std::env::var_os(ENV), home(), build, &fix)?;
-    let from = if overridden {
-        format!(" (from ${ENV})")
-    } else {
-        String::new()
-    };
-    let file = open_verified(&path, &from, build, &fix)?;
-    Ok((path, file))
-}
-
-/// Where the library is, once it is there and is the pinned build.
-pub fn check() -> Result<PathBuf, Unavailable> {
-    open().map(|(path, _)| path)
-}
-
-/// Cisco's OpenH264, loaded: for `Encoder::with_api_config` and
-/// `Decoder::with_api_config`. Checked again at each call, so installing
-/// the library while Isocast runs is picked up by the next encoder.
-pub fn api() -> Result<OpenH264API, Unavailable> {
-    let (path, file) = open()?;
+fn cisco(path: &Path, build: &Build, fix: &str) -> Result<OpenH264API, Unavailable> {
+    let file = open_verified(path, build, fix)?;
     // The file just hashed, by its descriptor, held open until loaded.
     let held = format!("/proc/self/fd/{}", file.as_raw_fd());
     // SAFETY: the bytes behind `held` are exactly Cisco's pinned OpenH264
@@ -253,13 +235,146 @@ pub fn api() -> Result<OpenH264API, Unavailable> {
                 .to_string()
                 .replace(&held, &path.display().to_string())
         ),
-        fix: fix_command(),
+        fix: fix.to_owned(),
     })
+}
+
+fn compatible(major: u32, minor: u32, revision: u32) -> Result<String, String> {
+    let version = format!("{major}.{minor}.{revision}");
+    if major != 2 || minor < 6 {
+        return Err(format!(
+            "OpenH264 {version} is incompatible; need version 2.6 or later in major 2"
+        ));
+    }
+    Ok(version)
+}
+
+fn supplied(path: &Path, provider: &str) -> Result<(OpenH264API, String), String> {
+    // SAFETY: the loader selects trusted native code from the distro's search
+    // path or the user's explicit override. This constructor only resolves
+    // symbols. Check the mapped ABI before calling any codec functions.
+    let api = unsafe { OpenH264API::from_blob_path_unchecked(path) }.map_err(|e| {
+        // dlopen supplies text, not an errno. Only summarize a missing soname
+        // itself (glibc/musl); a missing dependency or another loader error is
+        // a rejection whose explanation belongs in the wizard too.
+        let loader = e.to_string();
+        let absent = path == Path::new(SONAME)
+            && (loader
+                == format!("{SONAME}: cannot open shared object file: No such file or directory")
+                || loader
+                    == format!("Error loading shared library {SONAME}: No such file or directory"));
+        let summary = if absent { "No OpenH264 found.\n" } else { "" };
+        format!("{summary}could not load {}: {loader}", path.display())
+    })?;
+    let OpenH264API::Libloading(symbols) = &api;
+    let version = symbols
+        .WelsGetCodecVersion
+        .as_ref()
+        .map_err(ToString::to_string)?;
+    let (loaded, soname) = loaded_elf::identify(*version as usize)
+        .ok_or("cannot identify the loaded OpenH264 library")?;
+    if soname.as_deref() != Some(SONAME) {
+        return Err(format!(
+            "{} has soname {}; need {SONAME}",
+            loaded.display(),
+            soname.as_deref().unwrap_or("(none)")
+        ));
+    }
+    // SAFETY: the ABI-8 version function returns four unsigned integers.
+    let v = unsafe { version() };
+    let version = compatible(v.uMajor, v.uMinor, v.uRevision)?;
+    // bindgen stores missing symbols as Results and panics if invoked. Check
+    // the entry points the encoder and decoder need before exposing the API.
+    let create = symbols
+        .WelsCreateSVCEncoder
+        .as_ref()
+        .map_err(ToString::to_string)?;
+    let destroy = symbols
+        .WelsDestroySVCEncoder
+        .as_ref()
+        .map_err(ToString::to_string)?;
+    symbols
+        .WelsCreateDecoder
+        .as_ref()
+        .map_err(ToString::to_string)?;
+    symbols
+        .WelsDestroyDecoder
+        .as_ref()
+        .map_err(ToString::to_string)?;
+    let mut encoder = std::ptr::null_mut();
+    // SAFETY: the verified ABI matches these bindings; no vtable is used
+    // until a real encoder exists (noopenh264 cannot create one).
+    let rc = unsafe { create(&raw mut encoder) };
+    if rc != 0 || encoder.is_null() {
+        return Err(format!(
+            "OpenH264 {version} cannot create an encoder (code {rc}); it may be a stub such as noopenh264"
+        ));
+    }
+    // SAFETY: successful creation transfers ownership to the matching destroy.
+    unsafe { destroy(encoder) };
+    Ok((
+        api,
+        format!("{provider} OpenH264 {version} ({})", loaded.display()),
+    ))
+}
+
+fn load() -> Result<(OpenH264API, String), Unavailable> {
+    let fix = if build().is_some() {
+        fix_command()
+    } else {
+        format!("install your distro's OpenH264 2.x (2.6 or later, {SONAME})")
+    };
+    match locate(std::env::var_os(ENV).map(Into::into), home(), build(), &fix)? {
+        Source::Cisco(path, build) => Ok((
+            cisco(&path, build, &fix)?,
+            format!("Cisco's OpenH264 {VERSION} ({})", path.display()),
+        )),
+        Source::Override(path) => {
+            supplied(&path, "$ISOCAST_OPENH264:").map_err(|why| Unavailable {
+                reason: format!("${ENV} ({}): {why}", path.display()),
+                fix: format!("correct or unset ${ENV} to use the installed library"),
+            })
+        }
+        Source::System => supplied(Path::new(SONAME), "your system's").map_err(|why| Unavailable {
+            reason: format!("{why} (system {SONAME}; no per-user Cisco download)"),
+            fix,
+        }),
+    }
+}
+
+/// Human-readable provider, version and path of the usable codec.
+pub fn check() -> Result<String, Unavailable> {
+    load().map(|(_, status)| status)
+}
+
+/// The same checked library for encoding or preview decoding. Look again on
+/// each call so an installation while Isocast is running takes effect.
+pub fn api() -> Result<OpenH264API, Unavailable> {
+    load().map(|(api, _)| api)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the per-user Cisco download; run by both Linux app CI architectures"]
+    fn supplied_accepts_ciscos_abi_8_library() {
+        let path = install_dir(&home().unwrap()).join(build().unwrap().file);
+        let (api, status) = supplied(&path, "test").unwrap();
+        assert_eq!(status, format!("test OpenH264 2.6.0 ({})", path.display()));
+        let OpenH264API::Libloading(symbols) = api;
+        let version = symbols.WelsGetCodecVersion.as_ref().unwrap();
+        let (_, soname) = loaded_elf::identify(*version as usize).unwrap();
+        assert_eq!(soname.as_deref(), Some("libopenh264.so.8"));
+    }
+
+    #[cfg(target_env = "gnu")]
+    #[test]
+    fn identifies_the_libc_containing_getpid() {
+        let (_, soname) = loaded_elf::identify(libc::getpid as *const () as usize).unwrap();
+        assert_eq!(soname.as_deref(), Some("libc.so.6"));
+    }
 
     #[test]
     fn builds_are_cisco_2_6_0_for_both_architectures() {
@@ -310,37 +425,44 @@ mod tests {
     }
 
     #[test]
-    fn looks_in_the_install_folder_unless_overridden() {
-        let home = Some(PathBuf::from("/home/me"));
+    fn prefers_an_explicit_override_then_cisco_then_the_system() {
+        let dir = scratch("lookup");
+        let home = Some(dir.clone());
         let build = &BUILDS[1];
         let at = |env: Option<&str>, home: Option<PathBuf>| {
-            locate(env.map(OsString::from), home, build, "FIX")
+            locate(env.map(PathBuf::from), home, Some(build), "FIX")
         };
-        assert_eq!(
-            at(None, home.clone()).unwrap(),
-            (
-                PathBuf::from("/home/me/.local/lib/isocast/libopenh264-2.6.0-linux-arm64.8.so"),
-                false
-            )
-        );
+        assert_eq!(at(None, home.clone()).unwrap(), Source::System);
+        let path = install_dir(&dir).join(build.file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "present but not Cisco's library").unwrap();
+        assert_eq!(at(None, home.clone()).unwrap(), Source::Cisco(path, build));
         assert_eq!(
             at(Some(""), home.clone()).unwrap(),
             at(None, home.clone()).unwrap()
         );
         assert_eq!(
             at(Some("/ci/libopenh264.so"), home.clone()).unwrap(),
-            (PathBuf::from("/ci/libopenh264.so"), true)
+            Source::Override("/ci/libopenh264.so".into())
         );
-        // Relative: hashed here but loaded elsewhere, so refused.
         let relative = at(Some("lib/libopenh264.so"), home.clone()).unwrap_err();
         assert!(relative.reason.contains("relative path"), "{relative}");
-        // No HOME: no install folder, said so.
-        let homeless = at(None, None).unwrap_err();
-        assert!(homeless.reason.contains("HOME isn't set"), "{homeless}");
-        assert_eq!(
-            at(Some("/ci/l.so"), None).unwrap().0,
-            PathBuf::from("/ci/l.so")
-        );
+        assert_eq!(at(None, None).unwrap(), Source::System);
+        assert_eq!(locate(None, home, None, "FIX").unwrap(), Source::System);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interprets_the_version_returned_by_the_codec() {
+        assert_eq!(compatible(2, 6, 0).unwrap(), "2.6.0");
+        assert_eq!(compatible(2, 7, 12).unwrap(), "2.7.12");
+        for (major, minor) in [(1, 7), (2, 4), (2, 5), (3, 0)] {
+            assert!(
+                compatible(major, minor, 1)
+                    .unwrap_err()
+                    .contains(&format!("{major}.{minor}.1"))
+            );
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -376,7 +498,7 @@ mod tests {
     fn missing_unreadable_and_wrong_files_name_the_path_and_fix() {
         let build = &BUILDS[0];
         let dir = scratch("files");
-        let reason = |path: &Path| open_verified(path, "", build, "FIX").unwrap_err();
+        let reason = |path: &Path| open_verified(path, build, "FIX").unwrap_err();
         let missing = reason(&dir.join("absent.so"));
         assert!(
             missing.reason.contains("isn't installed at") && missing.reason.contains("absent.so"),
@@ -391,13 +513,14 @@ mod tests {
         );
         let wrong = dir.join("wrong.so");
         std::fs::write(&wrong, b"not a library").unwrap();
-        let wrong = open_verified(&wrong, " (from $ISOCAST_OPENH264)", build, "FIX").unwrap_err();
+        let wrong = open_verified(&wrong, build, "/usr/bin/isocast-openh264-install").unwrap_err();
         assert!(
-            wrong.reason.contains("is not Cisco's OpenH264 2.6.0"),
-            "{wrong}"
+            wrong
+                .fix
+                .contains("/usr/bin/isocast-openh264-install --remove")
         );
         assert!(
-            wrong.reason.ends_with("(from $ISOCAST_OPENH264)"),
+            wrong.reason.contains("is not Cisco's OpenH264 2.6.0"),
             "{wrong}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -443,7 +566,7 @@ mod tests {
             }
             Err(error) => {
                 assert!(
-                    error.fix.ends_with("--openh264") || error.fix.contains("x86_64"),
+                    error.fix.contains("openh264") || error.fix.contains(ENV),
                     "{error}"
                 );
                 if std::env::var_os("ISOCAST_OPENH264_REQUIRED").is_some() {

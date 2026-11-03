@@ -71,8 +71,7 @@ libc = "0.2"
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 
 # Linux: the engine's live video decoded in software (src/video/openh264.rs)
-# by Cisco's OpenH264 binary, which the installer downloads and the Linux
-# engine encodes with too (isocast-openh264 loads it; none is compiled in).
+# by the same run-time OpenH264 library the Linux engine encodes with.
 [target.'cfg(target_os = "linux")'.dependencies]
 isocast-openh264 = { path = "../isocast-openh264" }
 # Another computer's engine's sound (src/video/sound.rs): a PipeWire playback

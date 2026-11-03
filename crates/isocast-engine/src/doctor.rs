@@ -145,16 +145,6 @@ pub fn doctor_writing<P: Platform>(
         ));
     }
 
-    // Codecs this machine should have but can't use (Linux's OpenH264).
-    for missing in platform.missing_codecs() {
-        checks.push(check(
-            &format!("codec: {}", missing.name),
-            CheckStatus::Problem,
-            missing.reason,
-            Some(&missing.fix),
-        ));
-    }
-
     // Browser sources that would run degraded (Linux: no WebKit sandbox).
     if (setup.is_none() || uses(|kind| matches!(kind, SourceKind::Browser(_))))
         && let Some(warning) = platform.browser_warning()

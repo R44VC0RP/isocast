@@ -1,12 +1,16 @@
 Isocast for Debian and Ubuntu
 =============================
 
-H.264 (OpenH264, from Cisco)
-----------------------------
+H.264 (OpenH264)
+----------------
 Isocast's software H.264 encoder and live preview decoder use OpenH264, which this
-package does not contain: Cisco's patent licence covers only Cisco's own
-binary, downloaded by each user. On first launch choose Download to enable
-it or Not now to skip. For CLI-only use or to retry, run as yourself (not root):
+package does not contain. Isocast checks an explicit absolute $ISOCAST_OPENH264
+path first, then Cisco's verified per-user download, then the system loader's
+libopenh264.so.8. Distro packages may depend on a working OpenH264 2.x >= 2.6
+with that soname. Cisco's patent licence covers only its own downloaded binary;
+system builds are provided by the distro. If no working codec is found, choose
+Download at first launch or Not now to skip. For CLI-only use or to retry Cisco's
+download, run as yourself (not root):
 
     isocast-openh264-install
 
@@ -16,10 +20,10 @@ in ~/.local/lib/isocast. It is Cisco's binary, under Cisco's licence
 (CISCO_H264_LICENSE.txt in this folder). OpenH264 Video Codec provided by
 Cisco Systems, Inc.
 
-You control it: `isocast-openh264-install --remove` turns it off (removes
-only Cisco's library) and `isocast-openh264-install` turns it on again.
-Without it, Isocast still starts; a supported NVIDIA encoder can still
-encode H.264. `isocast doctor` checks the codec and names the repair command.
+`isocast-openh264-install --remove` removes only Cisco's library; a compatible
+system library can still be used. Without either, Isocast still starts and a
+supported NVIDIA encoder can still encode H.264. `isocast doctor` names the
+codec in use or explains why it is unavailable.
 
 Removing the package
 --------------------
