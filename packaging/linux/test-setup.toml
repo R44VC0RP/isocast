@@ -33,6 +33,17 @@ id = "tone"
 name = "Tone"
 kind = "tone"
 
+# A white square its filter tints magenta: CI's Filters snapshot checks the
+# dialog shows it filtered.
+[[sources]]
+id = "tint"
+name = "Tint"
+kind = "color"
+color = "#ffffff"
+width = 64
+height = 64
+filters = [{ kind = "color_correction", color_multiply = "#ff00ff" }]
+
 [[scenes]]
 id = "main"
 name = "Main"
@@ -44,6 +55,10 @@ rect = { x = 0, y = 0, width = 1280, height = 720 }
 [[scenes.items]]
 source = "camera"
 rect = { x = 880, y = 440, width = 360, height = 240 }
+
+[[scenes.items]]
+source = "tint"
+rect = { x = 0, y = 0, width = 64, height = 64 }
 
 [[scenes]]
 id = "camera-only"

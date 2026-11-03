@@ -151,6 +151,9 @@ export global SourcesArea {
     in property <image> preview;
     in property <bool> preview-shown;
     in property <string> preview-note;
+    // Said over the picture's foot while it lacks the source's effects
+    // ("" for nothing).
+    in property <string> preview-caption;
     // Its width over its height.
     in property <float> preview-aspect: 16 / 9;
     // The viewer line over it: the source's format as the engine opened it

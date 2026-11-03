@@ -984,13 +984,38 @@ impl Dialogs {
         self.preview.stop();
         let area = window.global::<SourcesArea>();
         area.set_preview_note(note.into());
+        area.set_preview_caption("".into());
         area.set_preview_shown(false);
+    }
+
+    /// Say why the preview has no picture (automatic quality paused it,
+    /// it lost the engine, the engine can't show it here, the source sends
+    /// none), or that it lacks the source's effects.
+    fn show_preview_status(&self, app: &Rc<App>, window: &AppWindow) {
+        let (Some(status), Some(id)) = (self.preview.status(), self.preview.source()) else {
+            return;
+        };
+        let s = app.session.borrow();
+        let paused = s
+            .status
+            .as_ref()
+            .and_then(|x| x.governor.as_ref())
+            .and_then(|g| g.previews_paused_why());
+        let silent = s
+            .running
+            .get(&id)
+            .is_some_and(|r| r.state == SourceRun::Running && r.received_fps == Some(0.0));
+        let note = super::preview::note(status, paused, silent, crate::engine::words().machine);
+        drop(s);
+        let area = window.global::<SourcesArea>();
+        area.set_preview_note(note.unwrap_or_default().into());
+        area.set_preview_caption(super::preview::caption(status).unwrap_or_default().into());
     }
 
     fn start_preview(&self, app: &Rc<App>, window: &AppWindow, id: &str) {
         let area = window.global::<SourcesArea>();
-        area.set_preview_note("".into());
         if self.preview.source().as_deref() == Some(id) {
+            self.show_preview_status(app, window);
             return;
         }
         area.set_preview_shown(false);
@@ -1006,14 +1031,24 @@ impl Dialogs {
             .unwrap_or(16.0 / 9.0);
         area.set_preview_aspect(aspect as f32);
         let weak = window.as_weak();
-        self.preview.start(id, move |image, aspect| {
-            if let Some(window) = weak.upgrade() {
-                let area = window.global::<SourcesArea>();
-                area.set_preview(image);
-                area.set_preview_aspect(aspect);
-                area.set_preview_shown(true);
-            }
-        });
+        let (later, app_weak) = (window.as_weak(), Rc::downgrade(app));
+        self.preview.start(
+            id,
+            move |image, aspect| {
+                if let Some(window) = weak.upgrade() {
+                    let area = window.global::<SourcesArea>();
+                    area.set_preview(image);
+                    area.set_preview_aspect(aspect);
+                    area.set_preview_shown(true);
+                }
+            },
+            move |_| {
+                if let (Some(window), Some(app)) = (later.upgrade(), app_weak.upgrade()) {
+                    app.sources.dialogs.show_preview_status(&app, &window);
+                }
+            },
+        );
+        self.show_preview_status(app, window);
     }
 
     pub fn props_accept(&self, app: &Rc<App>) {

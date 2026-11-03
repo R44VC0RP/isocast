@@ -325,6 +325,9 @@ pub struct Feed {
     /// Another computer's engine: the monitor shows decoded pictures'
     /// surfaces in place (native layers), so they needn't come as pixels.
     surfaces: Arc<std::sync::atomic::AtomicBool>,
+    /// Linux: shared memory couldn't be had, so the pictures are the
+    /// engine's video, which has no source filters.
+    fell_back: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Feed {
@@ -361,6 +364,7 @@ impl Feed {
             sound: Arc::default(),
             retry: Arc::default(),
             surfaces: Arc::default(),
+            fell_back: Arc::default(),
         };
         let thread_feed = feed.clone();
         thread::Builder::new()
@@ -395,6 +399,12 @@ impl Feed {
     /// Offer WebRTC again now if the feed fell back to `frames`.
     pub fn retry_webrtc(&self) {
         self.retry.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the pictures are the engine's video because shared memory
+    /// couldn't be had (Linux): a source's are then without its filters.
+    pub fn fell_back(&self) -> bool {
+        self.fell_back.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// End the receiving thread (and its stream) for good.
@@ -512,6 +522,8 @@ impl Feed {
                     }
                     SharedFailure::MissedOffer | SharedFailure::Unavailable => {
                         isocast_diagnostics::diagnostic!("info"; "preview: no shared frames ({error:#}); using the engine's video stream");
+                        self.fell_back
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         return self.receive_video(deliver);
                     }
                     SharedFailure::Other => deliver(Incoming::Lost(format!("{error:#}"))),

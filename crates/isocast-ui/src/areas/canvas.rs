@@ -2297,16 +2297,19 @@ fn layout(setup: &Setup, scene: &str) -> HashMap<String, BoxShape> {
 fn previews_paused(s: &crate::session::Session) -> Option<String> {
     let governor = s.status.as_ref()?.governor.as_ref()?;
     let why = governor.previews_paused_why()?;
-    Some(if why.starts_with("to protect ") {
-        format!(
-            "Automatic quality paused previews {why} on this {}’s software graphics.",
-            crate::engine::words().machine
-        )
+    Some(previews_paused_words(why, crate::engine::words().machine))
+}
+
+/// [`previews_paused`]'s words for `why` (`previews_paused_why`) on this
+/// kind of computer (`machine`); a source's preview says the same.
+pub(crate) fn previews_paused_words(why: &str, machine: &str) -> String {
+    if why.starts_with("to protect ") {
+        format!("Automatic quality paused previews {why} on this {machine}’s software graphics.")
     } else {
         "Automatic quality paused previews until the program keeps up; they come back on their \
          own."
             .to_string()
-    })
+    }
 }
 
 #[cfg(test)]
