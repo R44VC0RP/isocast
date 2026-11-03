@@ -12,7 +12,6 @@ fn main() {
         // regsvr32/COM look these up by undecorated name. PRIVATE excludes
         // them from the import library (they must never be statically called).
         for (name, stack) in [
-            ("DllGetClassObject", 12),
             ("DllCanUnloadNow", 0),
             ("DllRegisterServer", 0),
             ("DllUnregisterServer", 0),

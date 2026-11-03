@@ -21,11 +21,10 @@ pub struct Mode {
 
 impl Mode {
     pub fn new(width: u32, height: u32, fps: u32) -> io::Result<Self> {
-        if width < 2
-            || height < 2
+        if !(2..=3840).contains(&width)
+            || !(2..=2160).contains(&height)
             || !width.is_multiple_of(2)
             || !height.is_multiple_of(2)
-            || u64::from(width) * u64::from(height) > 3840 * 2160
             || !(1..=240).contains(&fps)
         {
             return Err(invalid(
@@ -136,5 +135,59 @@ mod tests {
         b[20] = 2;
         assert!(Header::decode(&b, None).is_err());
         assert!(Mode::new(u32::MAX - 1, u32::MAX - 1, 30).is_err());
+    }
+
+    #[test]
+    fn dimensions_are_bounded_independently() {
+        assert!(Mode::new(3840, 2160, 240).is_ok());
+        assert!(Mode::new(3842, 2, 30).is_err());
+        assert!(Mode::new(2, 2162, 30).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_reordered_samples_and_mode_changes_within_a_connection() {
+        let prev = Header {
+            mode: Mode::new(1280, 720, 30).unwrap(),
+            repeated: false,
+            sequence: 8,
+            source_ns: 30,
+            delivery_ns: 40,
+        };
+        let next = Header {
+            sequence: 9,
+            source_ns: 31,
+            delivery_ns: 41,
+            ..prev
+        };
+        assert_eq!(Header::decode(&next.encode(), Some(prev)).unwrap(), next);
+        for bad in [
+            Header {
+                sequence: 7,
+                ..next
+            },
+            Header {
+                delivery_ns: 40,
+                ..next
+            },
+            Header {
+                source_ns: 29,
+                ..next
+            },
+            Header {
+                repeated: true,
+                ..next
+            },
+            Header {
+                mode: Mode::new(640, 480, 30).unwrap(),
+                ..next
+            },
+            Header {
+                mode: Mode::new(1280, 720, 60).unwrap(),
+                ..next
+            },
+        ] {
+            assert!(Header::decode(&bad.encode(), Some(prev)).is_err());
+            assert_eq!(Header::decode(&bad.encode(), None).unwrap(), bad);
+        }
     }
 }
