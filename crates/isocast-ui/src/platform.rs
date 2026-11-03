@@ -10,6 +10,9 @@ use slint::ComponentHandle;
 use crate::{AppWindow, Theme};
 
 pub fn apply_system_settings(window: &AppWindow) {
+    #[cfg(windows)]
+    apply_windows_motion(window, true);
+    #[cfg(not(windows))]
     window.global::<Theme>().set_reduce_motion(reduce_motion());
     #[cfg(target_os = "linux")]
     watch_reduce_motion(window.as_weak());
@@ -55,9 +58,42 @@ fn reduce_motion() -> bool {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn reduce_motion() -> bool {
     false
+}
+
+#[cfg(any(windows, test))]
+fn reduce_from_client_area_animation(enabled: i32) -> bool {
+    enabled == 0 // Win32 BOOL: any nonzero value enables animations.
+}
+
+#[cfg(windows)]
+pub fn apply_windows_motion(window: &AppWindow, startup: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    };
+
+    let mut enabled = 0i32;
+    // SAFETY: GETCLIENTAREAANIMATION writes one BOOL into this live i32.
+    let result = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&raw mut enabled).cast()),
+            Default::default(),
+        )
+    };
+    if let Err(error) = result {
+        isocast_diagnostics::diagnostic!("warn"; "could not read Windows animation setting: {error}");
+        return; // Keep the current preference (animations on by default).
+    }
+    let reduce = reduce_from_client_area_animation(enabled);
+    let theme = window.global::<Theme>();
+    if startup || theme.get_reduce_motion() != reduce {
+        theme.set_reduce_motion(reduce);
+        isocast_diagnostics::diagnostic!("info"; "reduce motion from Windows settings: {}", theme.get_reduce_motion());
+    }
 }
 
 /// What to ask for in the open panel.
@@ -771,6 +807,14 @@ pub(crate) unsafe fn rust_string(string: &objc2::runtime::AnyObject) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_animation_bool_maps_to_reduce_motion() {
+        use super::reduce_from_client_area_animation;
+        assert!(reduce_from_client_area_animation(0));
+        assert!(!reduce_from_client_area_animation(1));
+        assert!(!reduce_from_client_area_animation(-1));
+    }
+
     /// Copy buttons' one path, read back from the system clipboard. Run by
     /// hand in a desktop session (`-- --ignored clipboard`); CI has none.
     #[test]
