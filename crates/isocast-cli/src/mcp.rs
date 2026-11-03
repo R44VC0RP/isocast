@@ -1962,7 +1962,7 @@ impl Isocast {
                        hasn't been decided yet (or only `permission`). Its prompts appear on the \
                        user's screen; waits up to a minute for answers and returns the \
                        permissions with next steps.", "Check/request Windows capture access supported by the backend (or only permission). Desktop camera and microphone access is controlled in Windows Settings, not individual app permission switches. Returns the permissions and next steps; unsupported operations are reported.",
-"Check/request screen, camera and microphone access supported by the backend (or only permission). On Linux the desktop's screen-sharing portal asks for a screen when one is first captured."),
+"Check/request screen, camera and microphone access supported by the backend (or only permission). On Linux a display or window source waits until its screen or window is picked with `screen_pick`."),
         annotations(
             read_only_hint = false,
             destructive_hint = false,

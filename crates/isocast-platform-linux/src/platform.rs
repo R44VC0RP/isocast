@@ -136,7 +136,7 @@ impl Platform for LinuxPlatform {
                 .notes
                 .push(format!("PipeWire audio devices: {error:#}")),
         }
-        devices.notes.push("Screens and windows are chosen in the desktop's sharing dialog, which opens when a display or window source first starts. To choose ahead, or choose again, `isocast screen pick SOURCE` (method `screen_pick`) shows the dialog for that source. Sizes are unknown until chosen; saved sizes describe the last choice. Restore tokens avoid repeated prompts only on portals that support persistent grants. Desktop audio uses the default output's monitor through a system_audio source.".into());
+        devices.notes.push("Screens and windows are chosen in the desktop's sharing dialog: a display or window source with nothing chosen waits until `isocast screen pick SOURCE` (method `screen_pick`) shows the dialog for it, which also chooses again. Sizes are unknown until chosen; saved sizes describe the last choice. Restore tokens avoid repeated prompts only on portals that support persistent grants. Desktop audio uses the default output's monitor through a system_audio source.".into());
         Ok(devices)
     }
     fn permissions(&self) -> Result<PermissionsReport> {

@@ -333,7 +333,7 @@ component PermissionsStep inherits VerticalLayout {
     alignment: start;
     StepTitle {
         title: PlatformText.engine-linux ? "Let Isocast open the camera" : PlatformText.engine-windows ? "Turn on camera and microphone access" : "Let Isocast see and hear";
-        lead: PlatformText.engine-linux ? "Your user can’t open the camera. Copy the command below and run it in a terminal, or skip this and fix it later. Linux asks which screen to share when recording starts, and the microphone needs no permission."
+        lead: PlatformText.engine-linux ? "Your user can’t open the camera. Copy the command below and run it in a terminal, or skip this and fix it later. You pick which screen to share once setup finishes, and the microphone needs no permission."
             : PlatformText.engine-windows ? "A Windows privacy setting is keeping desktop apps like Isocast from using them. Open its page in Settings, turn access on, and this updates by itself. You can skip this and turn it on later."
             : PermissionsArea.unknown-access
             ? "Access is checked when capture starts. See each item for guidance; allow access in System Settings › Privacy & Security."
@@ -357,7 +357,7 @@ component DevicesStep inherits VerticalLayout {
     alignment: start;
     StepTitle {
         title: "Choose your devices";
-        lead: PlatformText.engine-linux ? (SettingsArea.ob-linux-hint != "" ? SettingsArea.ob-linux-hint : "Choose your screen in the desktop’s screen-sharing dialog when capture starts.")
+        lead: PlatformText.engine-linux ? (SettingsArea.ob-linux-hint != "" ? SettingsArea.ob-linux-hint : "You pick which screen to share in the desktop’s sharing dialog once setup finishes.")
             + (SettingsArea.ob-pipewire-unavailable ? "\nAudio unavailable: install pipewire and wireplumber and run them in your desktop session." : "")
             + (SettingsArea.ob-codec-hint != "" ? "\n" + SettingsArea.ob-codec-hint : "")
             : "What to capture. You can add more sources, and change these, once you’re in.";
