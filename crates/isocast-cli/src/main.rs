@@ -1251,7 +1251,7 @@ enum SetupCommand {
     #[cfg_attr(
         target_os = "linux",
         command(
-            about = "Make a starting setup from this computer's display, camera, microphone and desktop audio, with program and ISO recording. Print TOML, write --output, or make it live with --apply. Runs in isocastd; the desktop asks which screen to share when capture starts."
+            about = "Make a starting setup from this computer's display, camera, microphone and desktop audio, with program and ISO recording. Print TOML, write --output, or make it live with --apply. Runs in isocastd; pick its screen afterwards with `isocast screen pick SOURCE`."
         )
     )]
     Init {

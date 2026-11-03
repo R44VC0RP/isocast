@@ -836,8 +836,8 @@ const LINUX_ROWS: [PermissionKind; 3] = [
 /// computer's own screen: the `video` group.
 const VIDEO_GROUP: &str = "sudo usermod -aG video $USER";
 
-/// One permission's row on Linux, where nothing is granted ahead: the
-/// desktop portal asks which screen to share when capture opens, cameras
+/// One permission's row on Linux, where nothing is granted ahead: a
+/// source's screen or window is chosen in the desktop portal, cameras
 /// are the user's access to `/dev/video*` (the engine checks it), and
 /// PipeWire's microphones need no permission.
 fn row_linux(kind: PermissionKind, state: Permission, needed: bool) -> PermissionItem {
@@ -857,7 +857,7 @@ fn row_linux(kind: PermissionKind, state: Permission, needed: bool) -> Permissio
         (_, Permission::Granted) => ("allowed", "Allowed", String::new(), "", ""),
         (PermissionKind::ScreenRecording, _) => (
             "not-asked",
-            "Asked when recording starts",
+            "Chosen when you add a screen or window",
             String::new(),
             "",
             "",
@@ -1019,7 +1019,10 @@ mod tests {
         let row = |kind, state| row_linux(kind, state, true);
 
         let screen = row(PermissionKind::ScreenRecording, Unknown);
-        assert_eq!(screen.status_label, "Asked when recording starts");
+        assert_eq!(
+            screen.status_label,
+            "Chosen when you add a screen or window"
+        );
         assert_eq!(screen.action, "");
 
         let mic = row(PermissionKind::Microphone, Unknown);
