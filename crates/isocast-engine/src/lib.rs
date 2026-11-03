@@ -51,15 +51,6 @@ use isocast_protocol::{Canvas, Container, Encoder, SourceKind};
 
 pub use time::{BrowserAudioStamper, Time};
 
-/// A codec this machine can't use now ([`Platform::missing_codecs`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MissingCodec {
-    /// Like "OpenH264".
-    pub name: String,
-    pub reason: String,
-    pub fix: String,
-}
-
 /// Something that works, but less well than it should, with how to fix it
 /// ([`Platform::browser_warning`]); `doctor` reports it as a warning.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -238,13 +229,6 @@ pub trait Platform: Clone + Send + Sync + 'static {
 
     /// The chip, memory, OS and hardware encoders.
     fn machine(&self) -> Machine;
-
-    /// Codecs this machine should have but can't use now (Linux: Cisco's
-    /// OpenH264, which the installer downloads), each with why and the
-    /// command that fixes it. `doctor` reports each as a problem.
-    fn missing_codecs(&self) -> Vec<MissingCodec> {
-        Vec::new()
-    }
 
     /// Why browser sources here run less safely or not at all (Linux:
     /// pages without WebKit's sandbox, or WebKitGTK missing), if they do.

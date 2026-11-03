@@ -121,7 +121,7 @@ impl Area for Wizard {
         if first {
             self.discover(app, true);
             if crate::engine::os() == isocast_protocol::hello::EngineOs::Linux {
-                self.linux_first_run(app);
+                self.linux_first_run(app, true);
             }
         }
     }
@@ -260,11 +260,7 @@ fn download_codec(app: &Rc<App>) {
             crate::window::with_app(|app| {
                 let notice = match result {
                     Ok(o) if o.status.success() => {
-                        if let Some(window) = app.window() {
-                            window
-                                .global::<crate::SettingsArea>()
-                                .set_ob_codec_hint("".into());
-                        }
+                        app.wizard.linux_first_run(app, false);
                         Toast::new(
                             ToastKind::Success,
                             "OpenH264 installed",
@@ -297,13 +293,13 @@ fn download_codec(app: &Rc<App>) {
 impl Wizard {
     /// Use the engine's doctor report, including for a remote Linux engine.
     /// Remediation shown by another machine is text, never a command to execute.
-    fn linux_first_run(&self, app: &Rc<App>) {
+    pub(super) fn linux_first_run(&self, app: &Rc<App>, offer_download: bool) {
         use isocast_protocol::api::{CheckStatus, Doctor, DoctorParams};
         let params = DoctorParams {
             setup: None,
             folder: None,
         };
-        app.call_as::<Doctor>(Method::Doctor(Box::new(params)), |app, result| {
+        app.call_as::<Doctor>(Method::Doctor(Box::new(params)), move |app, result| {
             let Some(window) = app.window() else { return };
             let area = window.global::<crate::SettingsArea>();
             let Ok(doctor) = result else {
@@ -315,6 +311,9 @@ impl Wizard {
             };
             for check in doctor.checks {
                 if check.status == CheckStatus::Ok {
+                    if check.name == "codec: OpenH264" {
+                        area.set_ob_codec_hint(format!("Using {}.", check.detail).into());
+                    }
                     continue;
                 }
                 match (check.name.as_str(), check.fix) {
@@ -327,14 +326,19 @@ impl Wizard {
                         } else {
                             "on the engine’s computer as its desktop user"
                         };
-                        area.set_ob_codec_hint(
-                            format!(
-                                "For software H.264 and live previews, run {fix} {where_to_run}."
-                            )
-                            .into(),
-                        );
+                        // Doctor keeps the loader diagnostic on the next line
+                        // for an absent codec. Rejections keep their reason.
+                        let hint = if let Some((summary, _)) = check.detail.split_once('\n') {
+                            format!("{summary} For software H.264 and live previews, run {fix} {where_to_run}.")
+                        } else {
+                            format!("{}. For software H.264 and live previews: {fix} ({where_to_run}).", check.detail)
+                        };
+                        area.set_ob_codec_hint(hint.into());
+                        #[cfg(not(target_os = "linux"))]
+                        let _ = offer_download;
                         #[cfg(target_os = "linux")]
-                        if crate::engine::is_local()
+                        if offer_download
+                            && crate::engine::is_local()
                             && fix == "/usr/bin/isocast-openh264-install"
                             && std::env::var_os(isocast_openh264::ENV).is_none()
                         {

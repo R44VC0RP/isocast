@@ -79,19 +79,6 @@ impl Platform for LinuxPlatform {
     fn machine(&self) -> Machine {
         system::machine()
     }
-    fn missing_codecs(&self) -> Vec<isocast_engine::MissingCodec> {
-        match isocast_openh264::check() {
-            Ok(_) => Vec::new(),
-            Err(error) => vec![isocast_engine::MissingCodec {
-                name: "OpenH264".into(),
-                reason: format!(
-                    "{}: software H.264 encoding and live H.264 previews are unavailable",
-                    error.reason
-                ),
-                fix: error.fix,
-            }],
-        }
-    }
     fn browser_warning(&self) -> Option<isocast_engine::DoctorWarning> {
         browser::doctor_warning()
     }
@@ -216,6 +203,23 @@ impl Platform for LinuxPlatform {
     fn doctor_checks(&self) -> Vec<isocast_protocol::api::Check> {
         let [server, capture] = pipewire_audio::scheduling_checks();
         use isocast_protocol::api::{Check, CheckStatus};
+        let codec = match isocast_openh264::check() {
+            Ok(detail) => Check {
+                name: "codec: OpenH264".into(),
+                status: CheckStatus::Ok,
+                detail,
+                fix: None,
+            },
+            Err(error) => Check {
+                name: "codec: OpenH264".into(),
+                status: CheckStatus::Problem,
+                detail: format!(
+                    "{}: software H.264 encoding and live H.264 previews are unavailable",
+                    error.reason
+                ),
+                fix: Some(error.fix),
+            },
+        };
         let (status, detail, fix) = match camera::output::device() {
             Ok(node) => (
                 CheckStatus::Ok,
@@ -229,6 +233,7 @@ impl Platform for LinuxPlatform {
             ),
         };
         vec![
+            codec,
             crate::media::decoders_check(),
             portal::doctor_check(),
             server,

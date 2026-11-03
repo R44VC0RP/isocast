@@ -1,7 +1,7 @@
-//! The system's own settings and panels, put on the window: on macOS,
-//! Reduce motion (menus, dialogs and toasts then appear without
-//! animating), the open and save panels (choosing files and folders, and
-//! where to write one, which Slint has no widget for) and showing a folder
+//! The system's own settings and panels, put on the window: Reduce
+//! motion (macOS, and Linux through the desktop's settings portal; menus,
+//! dialogs and toasts then appear without animating), the open and save
+//! panels (choosing files and folders, and where to write one, which Slint has no widget for) and showing a folder
 //! in the Finder. These are the web app's native commands `open_file`,
 //! `save_file` and `reveal`.
 
@@ -11,6 +11,8 @@ use crate::{AppWindow, Theme};
 
 pub fn apply_system_settings(window: &AppWindow) {
     window.global::<Theme>().set_reduce_motion(reduce_motion());
+    #[cfg(target_os = "linux")]
+    watch_reduce_motion(window.as_weak());
     dark_appearance();
 }
 
@@ -153,6 +155,197 @@ pub fn choose(_options: Choose) -> Option<Vec<String>> {
     None
 }
 
+/// Drive all desktop requests off the window thread on one runtime.
+#[cfg(target_os = "linux")]
+fn portal_runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("portal")
+                .enable_all()
+                .build()
+                .inspect_err(|error| {
+                    isocast_diagnostics::diagnostic!("warn"; "no runtime for the desktop portal: {error}");
+                })
+                .ok()
+        })
+        .as_ref()
+}
+
+/// A desktop setting's value, as the settings portal sends it.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, PartialEq)]
+enum SettingValue {
+    Bool(bool),
+    Unsigned(u32),
+    Number(f64),
+    Text(String),
+    Other,
+}
+
+/// Each desktop's own way of saying "reduce motion", as the settings
+/// portal exposes it: none known means animations stay on.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct MotionSettings {
+    /// `org.freedesktop.appearance` `reduced-motion` (1 reduce, 0 no preference).
+    appearance: Option<bool>,
+    /// GNOME's `org.gnome.desktop.interface` `enable-animations`, inverted.
+    gnome: Option<bool>,
+    /// KDE's animation speed `AnimationDurationFactor`, 0 meaning none.
+    kde: Option<bool>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl MotionSettings {
+    #[cfg(target_os = "linux")]
+    const NAMESPACES: [&'static str; 3] = [
+        "org.freedesktop.appearance",
+        "org.gnome.desktop.interface",
+        "org.kde.kdeglobals.KDE",
+    ];
+
+    /// Take one setting in; false if it isn't one of the motion keys.
+    fn set(&mut self, namespace: &str, key: &str, value: &SettingValue) -> bool {
+        let (slot, reduce) = match (namespace, key) {
+            ("org.freedesktop.appearance", "reduced-motion") => (
+                &mut self.appearance,
+                match value {
+                    SettingValue::Unsigned(1) => Some(true),
+                    SettingValue::Unsigned(0) => Some(false),
+                    _ => None,
+                },
+            ),
+            ("org.gnome.desktop.interface", "enable-animations") => (
+                &mut self.gnome,
+                match value {
+                    SettingValue::Bool(on) => Some(!on),
+                    _ => None,
+                },
+            ),
+            ("org.kde.kdeglobals.KDE", "AnimationDurationFactor") => (
+                &mut self.kde,
+                match value {
+                    SettingValue::Number(factor) => Some(*factor <= 0.0),
+                    // KDE's portal sends kdeglobals entries as text.
+                    SettingValue::Text(text) => {
+                        text.trim().parse::<f64>().ok().map(|factor| factor <= 0.0)
+                    }
+                    _ => None,
+                },
+            ),
+            _ => return false,
+        };
+        *slot = reduce;
+        true
+    }
+
+    /// Reduce motion if any desktop setting asks to; none if none is known.
+    fn reduce(&self) -> Option<bool> {
+        let known = [self.appearance, self.gnome, self.kde];
+        known
+            .iter()
+            .any(Option::is_some)
+            .then(|| known.contains(&Some(true)))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn setting_value(value: &ashpd::zbus::zvariant::Value) -> SettingValue {
+    use ashpd::zbus::zvariant::Value;
+    match value {
+        Value::Value(inner) => setting_value(inner),
+        Value::Bool(b) => SettingValue::Bool(*b),
+        Value::U32(n) => SettingValue::Unsigned(*n),
+        Value::F64(n) => SettingValue::Number(*n),
+        Value::Str(text) => SettingValue::Text(text.to_string()),
+        _ => SettingValue::Other,
+    }
+}
+
+/// Follow the desktop's reduce-motion setting through the settings
+/// portal, live, into the window's Theme. Without the portal or its keys
+/// the window keeps animating.
+#[cfg(target_os = "linux")]
+fn watch_reduce_motion(window: slint::Weak<AppWindow>) {
+    use ashpd::zbus::zvariant::OwnedValue;
+    use ashpd::zbus::{Connection, MessageStream, export::futures_core::Stream};
+    use std::collections::HashMap;
+
+    let Some(runtime) = portal_runtime() else {
+        return;
+    };
+    let publish = move |reduce: bool| {
+        let window = window.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(window) = window.upgrade() {
+                let theme = window.global::<Theme>();
+                theme.set_reduce_motion(reduce);
+                isocast_diagnostics::diagnostic!("info"; "reduce motion from the desktop's settings: {}", theme.get_reduce_motion());
+            }
+        });
+    };
+    runtime.spawn(async move {
+        let watch = async {
+            let bus = Connection::session().await?;
+            // Listen before reading, so a change in between isn't missed.
+            let mut changes = MessageStream::for_match_rule(
+                "type='signal',interface='org.freedesktop.portal.Settings',member='SettingChanged',path='/org/freedesktop/portal/desktop'",
+                &bus,
+                Some(16),
+            )
+            .await?;
+            let reply = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                bus.call_method(
+                    Some("org.freedesktop.portal.Desktop"),
+                    "/org/freedesktop/portal/desktop",
+                    Some("org.freedesktop.portal.Settings"),
+                    "ReadAll",
+                    &(MotionSettings::NAMESPACES.as_slice(),),
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("the settings portal did not answer"))??;
+            let all: HashMap<String, HashMap<String, OwnedValue>> = reply.body().deserialize()?;
+            let mut motion = MotionSettings::default();
+            for (namespace, keys) in &all {
+                for (key, value) in keys {
+                    motion.set(namespace, key, &setting_value(value));
+                }
+            }
+            let mut shown = motion.reduce();
+            match shown {
+                Some(reduce) => publish(reduce),
+                None => isocast_diagnostics::diagnostic!("info"; "the settings portal has no reduce-motion setting"),
+            }
+            while let Some(message) =
+                std::future::poll_fn(|cx| std::pin::Pin::new(&mut changes).poll_next(cx)).await
+            {
+                let Ok((namespace, key, value)) =
+                    message?.body().deserialize::<(String, String, OwnedValue)>()
+                else {
+                    continue;
+                };
+                if motion.set(&namespace, &key, &setting_value(&value)) {
+                    let reduce = motion.reduce();
+                    if reduce != shown {
+                        shown = reduce;
+                        publish(reduce.unwrap_or(false));
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        if let Err(error) = watch.await {
+            isocast_diagnostics::diagnostic!("info"; "desktop reduce-motion setting unavailable: {error}");
+        }
+    });
+}
+
 #[cfg(target_os = "linux")]
 pub enum PortalDialog {
     Open { folders: bool, multiple: bool },
@@ -183,21 +376,7 @@ pub fn ask_portal(
     use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
     use ashpd::zbus::Connection;
 
-    // Drive all desktop requests off the window thread on one runtime.
-    static RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
-        std::sync::OnceLock::new();
-    let runtime = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("portal")
-            .enable_all()
-            .build()
-            .inspect_err(|error| {
-                isocast_diagnostics::diagnostic!("warn"; "file panel: no runtime for the portal: {error}");
-            })
-            .ok()
-    });
-    let Some(runtime) = runtime else {
+    let Some(runtime) = portal_runtime() else {
         return done(None);
     };
     let filters = (!types.is_empty()).then(|| {
@@ -622,6 +801,47 @@ mod tests {
             super::save_location(&file.join("missing").join(name)),
             (Some(name), None)
         );
+    }
+
+    #[test]
+    fn portal_motion_settings_read() {
+        use super::{MotionSettings, SettingValue};
+        let mut motion = MotionSettings::default();
+        assert_eq!(motion.reduce(), None);
+        assert!(!motion.set(
+            "org.gnome.desktop.interface",
+            "color-scheme",
+            &SettingValue::Text("prefer-dark".into())
+        ));
+        assert_eq!(motion.reduce(), None);
+        // GNOME: animations off means reduce.
+        let gnome = ("org.gnome.desktop.interface", "enable-animations");
+        assert!(motion.set(gnome.0, gnome.1, &SettingValue::Bool(true)));
+        assert_eq!(motion.reduce(), Some(false));
+        motion.set(gnome.0, gnome.1, &SettingValue::Bool(false));
+        assert_eq!(motion.reduce(), Some(true));
+        // The freedesktop key's "no preference" doesn't undo GNOME's.
+        let appearance = ("org.freedesktop.appearance", "reduced-motion");
+        motion.set(appearance.0, appearance.1, &SettingValue::Unsigned(0));
+        assert_eq!(motion.reduce(), Some(true));
+        motion.set(gnome.0, gnome.1, &SettingValue::Bool(true));
+        assert_eq!(motion.reduce(), Some(false));
+        motion.set(appearance.0, appearance.1, &SettingValue::Unsigned(1));
+        assert_eq!(motion.reduce(), Some(true));
+        // An unexpected type forgets that key.
+        motion.set(appearance.0, appearance.1, &SettingValue::Other);
+        assert_eq!(motion.reduce(), Some(false));
+        // KDE: an animation speed of 0, as text or a number.
+        let kde = ("org.kde.kdeglobals.KDE", "AnimationDurationFactor");
+        let mut motion = MotionSettings::default();
+        motion.set(kde.0, kde.1, &SettingValue::Text("0".into()));
+        assert_eq!(motion.reduce(), Some(true));
+        motion.set(kde.0, kde.1, &SettingValue::Text("0.5".into()));
+        assert_eq!(motion.reduce(), Some(false));
+        motion.set(kde.0, kde.1, &SettingValue::Number(0.0));
+        assert_eq!(motion.reduce(), Some(true));
+        motion.set(kde.0, kde.1, &SettingValue::Text("fast".into()));
+        assert_eq!(motion.reduce(), None);
     }
 
     #[test]

@@ -496,6 +496,10 @@ jobs:
         if: env.MODE == 'full'
         run: packaging/linux/install.sh --openh264
 
+      - name: Verify OpenH264 lookup and ELF sonames
+        if: env.MODE == 'full'
+        run: cargo test --release --locked -p isocast-openh264 -- --include-ignored
+
       - name: Build app, engine, CLI and browser helper
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser
@@ -1405,6 +1409,11 @@ jobs:
         if: env.MODE == 'full'
         timeout-minutes: 9
         run: python scripts/e2e.py --hosted --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
+
+      - name: Check per-output GPU scaling, dimensions and decoded colors
+        if: env.MODE == 'full'
+        timeout-minutes: 4
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --only win_output_scale --windows-profile 180p30 --codec h264 --work "$RUNNER_TEMP/windows-scale" --report windows-scale.json
 
       # A page through isocast-browser.exe (WebView2 on this runner's
       # console session, software rendering): frame codes advance in the ISO

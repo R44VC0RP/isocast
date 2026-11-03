@@ -76,10 +76,7 @@ fi
 step "isocast-openh264-install"
 isocast-openh264-install
 doctor=$(isocast doctor 2>&1 || true)
-if printf '%s\n' "$doctor" | grep 'codec: OpenH264'; then
-  echo "doctor still reports OpenH264 after installing it" >&2
-  exit 1
-fi
+printf '%s\n' "$doctor" | grep -F "Cisco's OpenH264 2.6.0 (" || { echo "doctor didn't select the installed Cisco binary" >&2; exit 1; }
 
 step "apply the test setup"
 isocast apply --revision 0 "$setup"

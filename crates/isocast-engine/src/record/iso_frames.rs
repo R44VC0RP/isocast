@@ -11,10 +11,10 @@
 //! conversion deadlocked every file of the recording (S.2 stress,
 //! 2026-10-13). Converted here, the encoders get what the program's do.
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use anyhow::Result;
-use isocast_protocol::{Filter, ScaleFilter};
+use isocast_protocol::{Filter, Fit, ScaleFilter};
 
 use super::SourceFilters;
 use crate::filter::Filters;
@@ -36,6 +36,7 @@ pub(super) struct IsoFrames<P: Platform> {
     pool: P::FramePool,
     size: (u32, u32),
     scale_filter: ScaleFilter,
+    fit: Fit,
     /// Monitor-only BGRA imports can borrow cached texture wrappers. Recording
     /// stages retain their existing per-import resource leases.
     cache_imports: bool,
@@ -117,6 +118,7 @@ impl<P: Platform> IsoFrames<P> {
             pool,
             size,
             scale_filter,
+            fit: Fit::Stretch,
             cache_imports: false,
             source_filters,
             drawing: None,
@@ -182,6 +184,7 @@ impl<P: Platform> IsoFrames<P> {
                 };
                 let mut layer = Layer::full(&filtered, size.0, size.1);
                 layer.scale_filter = self.scale_filter;
+                layer.fit = self.fit;
                 let (picture, bound) = drawing.picture.as_ref().expect("made with a conversion");
                 drawing.renderer.render(gpu, picture, &[layer], size);
                 bound.clone()
@@ -253,6 +256,7 @@ impl<P: Platform> IsoFrames<P> {
         };
         let mut layer = Layer::full(&filtered, size.0, size.1);
         layer.scale_filter = self.scale_filter;
+        layer.fit = self.fit;
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         drawing.renderer.encode(
             gpu,
@@ -271,5 +275,59 @@ impl<P: Platform> IsoFrames<P> {
 
     pub(super) fn drain(&mut self) -> Result<()> {
         self.in_flight.drain()
+    }
+}
+
+/// For native encoders that require exact-size input. The canvas producer
+/// only enqueues its original picture; each file or stream worker scales
+/// independently, using the monitor draw's bounded pool and GPU leases.
+pub struct ProgramScaler<P: Platform> {
+    platform: P,
+    size: (u32, u32),
+    stage: Option<Box<IsoFrames<P>>>,
+}
+
+impl<P: Platform> ProgramScaler<P> {
+    pub fn new(platform: P, size: (u32, u32)) -> Self {
+        Self {
+            platform,
+            size,
+            stage: None,
+        }
+    }
+
+    /// Call only on the output worker. No allocation or GPU work for a
+    /// matching canvas. `None` is backpressure, never an unfinished frame.
+    pub fn prepare<'a>(
+        &mut self,
+        frame: &'a P::Frame,
+        pts: Time,
+    ) -> Result<Option<Cow<'a, P::Frame>>> {
+        if self.platform.frame_size(frame) == self.size {
+            return Ok(Some(Cow::Borrowed(frame)));
+        }
+        if self.stage.is_none() {
+            let mut stage = IsoFrames::new(
+                &self.platform,
+                Gpu::for_platform(&self.platform)?,
+                "program",
+                self.size,
+                None,
+                pts,
+                ScaleFilter::Area,
+            )?
+            .with_cached_imports();
+            stage.fit = Fit::Contain;
+            self.stage = Some(Box::new(stage));
+        }
+        let Some(pending) = self
+            .stage
+            .as_mut()
+            .expect("initialized above")
+            .draw(frame, pts)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Cow::Owned(pending.into_completed()?)))
     }
 }

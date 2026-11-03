@@ -286,11 +286,20 @@ The Debian 12 package has no browser sources; use Ubuntu 24.04 if you
 need them. The tarballs are Ubuntu 24.04 builds with a per-user
 `install.sh`; don't install one over a `.deb`.
 
-**First launch:** open Isocast from your app menu and choose **Download**
-to get Cisco's OpenH264 for H.264 encoding and live previews. It
-downloads and checks the codec as your user, never as root. You can skip
-it and run `isocast-openh264-install` later (`--remove` removes it).
-OpenH264 Video Codec provided by Cisco Systems, Inc. When you add a
+**First launch:** Isocast uses your distro’s OpenH264 for software H.264
+encoding and live previews if you haven’t installed Cisco’s binary. The wizard
+and `isocast doctor` show which library is in use. If neither is available,
+choose **Download** to get Cisco’s verified 2.6.0 binary as your user, or
+run `isocast-openh264-install` later (`--remove` removes only that copy).
+Cisco’s patent licence covers its own downloaded binary, not distro builds.
+OpenH264 Video Codec provided by Cisco Systems, Inc.
+
+**Packagers:** you can depend on a working OpenH264 2.x ≥ 2.6 with soname
+`libopenh264.so.8`. Lookup is at run time: an explicit absolute
+`$ISOCAST_OPENH264` path, then the verified Cisco download in
+`~/.local/lib/isocast`, then the soname through the system loader.
+
+When you add a
 screen or window, your desktop asks which one to share (a source waiting
 for a choice shows in **Choose screens and windows**, or run `isocast
 screen pick`); if no picker opens,
