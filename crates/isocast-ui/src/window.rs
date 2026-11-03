@@ -270,6 +270,8 @@ pub fn run(options: &Options) -> Result<()> {
                 let ui = app.global::<Ui>();
                 ui.set_window_maximized(window.is_maximized());
                 ui.set_window_fullscreen(window.is_fullscreen());
+                #[cfg(target_os = "linux")]
+                window.with_winit_window(|w| crate::areas::menubar::window_configured(&app, w));
             }
             #[cfg(windows)]
             if let winit::event::WindowEvent::Resized(size) = event {

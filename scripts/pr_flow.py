@@ -65,7 +65,7 @@ import tempfile
 import time
 import uuid
 
-REPO = "R44VC0RP/isocast"
+REPO = "anomalyco/isocast"
 REMOTE = f"https://github.com/{REPO}.git"
 WORKFLOWS = ("CI", "Engine E2E", "Windows")
 MACOS_WORKFLOWS = ("CI", "Engine E2E")

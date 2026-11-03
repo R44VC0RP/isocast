@@ -333,8 +333,20 @@ impl Feed {
     /// thread.
     pub fn start(
         target: Option<&str>,
+        size: (u32, u32),
+        fps: u32,
+        deliver: impl Fn(Incoming) + Send + 'static,
+    ) -> Self {
+        Self::start_with_filters(target, size, fps, false, deliver)
+    }
+
+    /// A source dialog asks the shared-frame renderer to apply the live
+    /// source filters. A canvas already includes them when it is drawn.
+    pub fn start_with_filters(
+        target: Option<&str>,
         (width, height): (u32, u32),
         fps: u32,
+        filtered: bool,
         deliver: impl Fn(Incoming) + Send + 'static,
     ) -> Self {
         let feed = Self {
@@ -353,7 +365,7 @@ impl Feed {
         let thread_feed = feed.clone();
         thread::Builder::new()
             .name("shared frames".into())
-            .spawn(move || thread_feed.receive(deliver))
+            .spawn(move || thread_feed.receive(filtered, deliver))
             .expect("spawn a thread");
         feed
     }
@@ -419,7 +431,7 @@ impl Feed {
         }
     }
 
-    fn receive(&self, deliver: impl Fn(Incoming)) {
+    fn receive(&self, filtered: bool, deliver: impl Fn(Incoming)) {
         if !crate::engine::is_local() || !SHARED_SURFACES {
             return self.receive_video(deliver);
         }
@@ -442,7 +454,7 @@ impl Feed {
                     max_height: shared_size(want.width, want.height).1,
                     fps: Some(want.fps),
                     slots: None,
-                    filtered: false,
+                    filtered,
                 })
             });
             let result: anyhow::Result<()> = stream.and_then(|mut frames| {

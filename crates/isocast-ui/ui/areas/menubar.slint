@@ -1,0 +1,178 @@
+// The menu bar the app draws itself (Linux, which has no native one; area
+// K, src/areas/menubar.rs): ui/app.slint's MenuBar's titles, opening its
+// menus in the app's own style (MenuHost, as every context menu). macOS and
+// Windows show Slint's MenuBar natively instead.
+//
+// Two layouts:
+// - under the window's title bar (the default): 28px of `surface-chrome`
+//   over a black line, the titles 4px in;
+// - `merged`, where the window has no title bar of its own (the app draws
+//   its decorations): 36px with the titles on the left, the window's title
+//   in the middle and its Minimize, Maximize and Close buttons on the
+//   right; dragging the empty bar moves the window, and a double click
+//   maximizes.
+//   WindowEdges then resizes it.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Ui } from "../state.slint";
+import { IconButton, MenuBarTitles, Menus } from "../kit.slint";
+
+export global MenuBarArea {
+    // The bar shows (Linux).
+    in property <bool> shown;
+    // The title and the window's buttons are in the bar.
+    in property <bool> merged;
+    // Start moving the window with the pointer (the bar was pressed).
+    callback move-window();
+    // Start resizing the window from an edge: "n", "ne", "e", "se", "s",
+    // "sw", "w" or "nw".
+    callback resize-window(edge: string);
+}
+
+export component AppMenuBar inherits Rectangle {
+    in property <string> title;
+
+    height: MenuBarArea.merged ? 36px : 28px;
+    background: Theme.surface-chrome;
+
+    // Where the titles are, for MenuHost's copy over an open menu.
+    property <length> titles-x: titles.absolute-position.x;
+    property <length> titles-y: titles.absolute-position.y;
+    property <length> titles-height: titles.height;
+    function place() {
+        Menus.bar-x = root.titles-x;
+        Menus.bar-y = root.titles-y;
+        Menus.bar-height = root.titles-height;
+    }
+    init => { root.place(); }
+    changed titles-x => { root.place(); }
+    changed titles-y => { root.place(); }
+    changed titles-height => { root.place(); }
+
+    // The empty bar moves the window (merged) once the pointer has moved
+    // 4px with the button down: a click or a double click doesn't start a
+    // move.
+    if MenuBarArea.merged: TouchArea {
+        property <bool> armed;
+        double-clicked => { Ui.menu("zoom"); }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                self.armed = true;
+            } else if event.kind == PointerEventKind.up {
+                self.armed = false;
+            }
+        }
+        moved => {
+            if self.armed && self.pressed
+                && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                self.armed = false;
+                MenuBarArea.move-window();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-1;
+        padding-right: MenuBarArea.merged ? Theme.space-2 : 0px;
+        padding-bottom: 1px;
+        spacing: Theme.space-1;
+
+        titles := MenuBarTitles {
+            horizontal-stretch: 0;
+            titles: Menus.bar-titles;
+            pressed(index, x, width) => { Menus.open-bar(index, x, width); }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        if MenuBarArea.merged: HorizontalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            spacing: Theme.space-2;
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    small: true;
+                    icon: Icons.minus;
+                    label: "Minimize";
+                    show-tooltip: false;
+                    clicked => { Ui.menu("minimize"); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    small: true;
+                    icon: Icons.square;
+                    icon-size: Theme.icon-sm;
+                    label: Ui.window-maximized ? "Restore" : "Maximize";
+                    show-tooltip: false;
+                    clicked => { Ui.menu("zoom"); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    small: true;
+                    icon: Icons.x;
+                    label: "Close";
+                    show-tooltip: false;
+                    clicked => { Ui.quit(); }
+                }
+            }
+        }
+    }
+
+    // The window's title, in the middle of the bar where there is room.
+    if MenuBarArea.merged: Text {
+        property <length> left: titles.x + titles.width + Theme.space-6;
+        property <length> right: root.width - 3 * Theme.icon-button-sm - 2 * Theme.space-2 - Theme.space-2 - Theme.space-6;
+        property <length> room: max(0px, self.right - self.left);
+        width: min(self.preferred-width, self.room);
+        x: max(self.left, min((root.width - self.width) / 2, self.right - self.width));
+        height: root.height - 1px;
+        text: root.title;
+        color: Theme.text-2;
+        font-size: Theme.fs;
+        font-weight: Theme.weight-medium;
+        letter-spacing: Theme.tracking;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    // A black line under the bar, as over the status bar.
+    Rectangle {
+        y: root.height - 1px;
+        height: 1px;
+        background: Theme.frame-line;
+    }
+}
+
+// One edge of WindowEdges.
+component Edge inherits TouchArea {
+    in property <string> name;
+    pointer-event(event) => {
+        if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+            MenuBarArea.resize-window(self.name);
+        }
+    }
+}
+
+// Resizing a window that draws its own decorations: 6px along each edge,
+// the corners 12px, with the resize cursors.
+export component WindowEdges inherits Rectangle {
+    property <length> edge: 6px;
+    property <length> corner: 12px;
+
+    Edge { name: "n"; x: root.corner; y: 0; width: root.width - 2 * root.corner; height: root.edge; mouse-cursor: n-resize; }
+    Edge { name: "s"; x: root.corner; y: root.height - root.edge; width: root.width - 2 * root.corner; height: root.edge; mouse-cursor: s-resize; }
+    Edge { name: "w"; x: 0; y: root.corner; width: root.edge; height: root.height - 2 * root.corner; mouse-cursor: w-resize; }
+    Edge { name: "e"; x: root.width - root.edge; y: root.corner; width: root.edge; height: root.height - 2 * root.corner; mouse-cursor: e-resize; }
+    Edge { name: "nw"; x: 0; y: 0; width: root.corner; height: root.corner; mouse-cursor: nw-resize; }
+    Edge { name: "ne"; x: root.width - root.corner; y: 0; width: root.corner; height: root.corner; mouse-cursor: ne-resize; }
+    Edge { name: "sw"; x: 0; y: root.height - root.corner; width: root.corner; height: root.corner; mouse-cursor: sw-resize; }
+    Edge { name: "se"; x: root.width - root.corner; y: root.height - root.corner; width: root.corner; height: root.corner; mouse-cursor: se-resize; }
+}

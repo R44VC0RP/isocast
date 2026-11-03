@@ -1409,11 +1409,11 @@ A whole display (OBS's macOS Screen Capture, display mode).
 
 ## WindowSource
 
-One window (OBS's macOS Screen Capture, window mode), matched by its app and optionally its title; the largest match wins. It keeps its size if the window is resized, scaling the window to fit.
+One window (OBS's macOS Screen Capture, window mode), matched by its app and optionally its title; the largest match wins. It keeps its size if the window is resized, scaling the window to fit. On Linux the desktop's sharing dialog chooses the window instead, with `isocast screen pick` (method `screen_pick`); until then the source waits (`needs_pick` in `status`). It reopens the window by its id; `app` and `title` only name it there. On Hyprland, xdg-desktop-portal-hyprland 1.4.1 does not report a closed window. Its source keeps the last picture until the take stops.
 
 | Field | Type | Description |
 |---|---|---|
-| `app` (required) | string | The app's name or bundle id, or part of the name. |
+| `app` (required) | string | The app's name or bundle id, or part of the name. On Linux, a name for the window chosen in the desktop's sharing dialog. |
 | `cursor` | boolean | Show the mouse pointer. Default `true`. |
 | `title` | string (optional) | Part of the window's title. |
 

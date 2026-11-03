@@ -1,0 +1,14 @@
+[package]
+name = "isocast-browser-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "isocastd's side of a browser source: starts and watches an isocast-browser helper process (portable; the platform confines the process)."
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+isocast-browser-protocol = { path = "../isocast-browser-protocol" }
+isocast-diagnostics = { path = "../isocast-diagnostics" }
+isocast-engine = { path = "../isocast-engine" }

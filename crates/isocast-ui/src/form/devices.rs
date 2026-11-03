@@ -297,7 +297,9 @@ pub fn display_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
         main.map(|m| format!("{}, {}×{}", m.name, m.width, m.height))
             .unwrap_or_default(),
     )];
-    options.extend(displays.iter().map(|d| {
+    // A display whose id is "main" (Linux's desktop-portal screen) is the
+    // row above already.
+    options.extend(displays.iter().filter(|d| d.id != "main").map(|d| {
         let v = if matched.is_some_and(|m| m.id == d.id) {
             value.to_string()
         } else {
@@ -305,7 +307,43 @@ pub fn display_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
         };
         choice(v, &d.name, format!("{}×{}", d.width, d.height))
     }));
+    if can_pick() {
+        options.push(pick_option("screen"));
+    }
     keep(options, value, "not connected")
+}
+
+/// Whether the engine (Linux) has screens and windows chosen in the
+/// desktop's sharing dialog (`screen_pick`) because it can't list them.
+/// Follows the engine's OS, not this app's.
+pub fn picked_in_dialog() -> bool {
+    crate::engine::os() == isocast_protocol::hello::EngineOs::Linux
+}
+
+/// Whether this app can open that dialog: `screen_pick` shows it on the
+/// engine's own screen, so only for an engine on this machine.
+pub fn can_pick() -> bool {
+    picked_in_dialog() && crate::engine::is_local()
+}
+
+/// The choice that opens the desktop's sharing dialog for the source.
+pub const PICK: &str = "\u{200b}pick in the dialog";
+
+/// The choice that opens the desktop's sharing dialog for a `what`
+/// ("screen" or "window").
+fn pick_option(what: &str) -> Choice {
+    choice(PICK, format!("Choose a {what}…"), "in the desktop’s dialog")
+}
+
+/// A window source's choices where the desktop's dialog chooses the window
+/// (`picked_in_dialog`): the one it has, named by `app` (a label there),
+/// and the dialog where this app can open it (`can_pick`).
+pub fn picked_window_options(app: &str) -> Vec<Choice> {
+    let mut options = vec![choice(app, "Chosen in the desktop’s dialog", app)];
+    if can_pick() {
+        options.push(pick_option("window"));
+    }
+    options
 }
 
 /// An app with windows that can be captured.

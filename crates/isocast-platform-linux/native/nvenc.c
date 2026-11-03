@@ -40,6 +40,8 @@ struct Cuda {
     CUresult (*ctx_pop)(CUcontext *);
     CUresult (*mem_alloc)(CUdeviceptr *, size_t);
     CUresult (*mem_free)(CUdeviceptr);
+    CUresult (*mem_alloc_host)(void **, size_t);
+    CUresult (*mem_free_host)(void *);
     CUresult (*memcpy_htod)(CUdeviceptr, const void *, size_t);
 };
 
@@ -70,9 +72,8 @@ struct IcNvenc {
     NV_ENC_REGISTERED_PTR registered;
     NV_ENC_INPUT_PTR mapped;
     NV_ENC_OUTPUT_PTR bitstream;
-    uint8_t *staging;
+    void *staging;
     size_t staging_size;
-    size_t input_size;
     uint32_t pitch;
     uint32_t frame_index;
     uint8_t headers[NV_MAX_SEQ_HDR_LEN];
@@ -165,6 +166,8 @@ static int load_libraries(struct Driver *e, char *error, size_t error_cap)
     LOAD(e->cuda_library, "cuCtxPopCurrent_v2", e->cuda.ctx_pop);
     LOAD(e->cuda_library, "cuMemAlloc_v2", e->cuda.mem_alloc);
     LOAD(e->cuda_library, "cuMemFree_v2", e->cuda.mem_free);
+    LOAD(e->cuda_library, "cuMemAllocHost_v2", e->cuda.mem_alloc_host);
+    LOAD(e->cuda_library, "cuMemFreeHost", e->cuda.mem_free_host);
     LOAD(e->cuda_library, "cuMemcpyHtoD_v2", e->cuda.memcpy_htod);
     LOAD(e->nvenc_library, "NvEncodeAPIGetMaxSupportedVersion", max_version);
     LOAD(e->nvenc_library, "NvEncodeAPICreateInstance", create_instance);
@@ -498,11 +501,12 @@ static int initialize(IcNvenc *e, uint32_t width, uint32_t height, uint32_t fps,
         return -1;
 
     e->pitch = (width + 255u) & ~255u;
-    e->input_size = (size_t)width * height * 3 / 2;
     e->staging_size = (size_t)e->pitch * height * 3 / 2;
-    e->staging = calloc(1, e->staging_size);
-    if (!e->staging)
-        return fail(error, error_cap, "NV12 staging: cannot allocate %zu bytes", e->staging_size);
+    if (cu_check(e->cuda.mem_alloc_host(&e->staging, e->staging_size),
+                 "cuMemAllocHost_v2", error, error_cap) < 0)
+        return -1;
+    /* Initialize the whole slice, including row padding uploaded each frame. */
+    memset(e->staging, 0, e->staging_size);
     if (cu_check(e->cuda.mem_alloc(&e->device_input, e->staging_size),
                  "cuMemAlloc_v2", error, error_cap) < 0)
         return -1;
@@ -563,7 +567,7 @@ IcNvenc *ic_nvenc_open(uint32_t width, uint32_t height, uint32_t fps,
         goto failed;
     /* Device 0 may differ from Vulkan's adapter. CPU-copy input makes that
      * safe, but this is not GPU affinity selection or a zero-copy path.
-     * SYNC_MEMOPS makes the pageable HtoD upload complete before NVENC use.
+     * SYNC_MEMOPS makes the HtoD upload complete before NVENC use.
      */
     if (cu_check(e->cuda.ctx_create(&e->context,
                  CU_CTX_SCHED_BLOCKING_SYNC | CU_CTX_SYNC_MEMOPS, device),
@@ -606,8 +610,14 @@ int ic_nvenc_headers(IcNvenc *e, uint8_t *out, size_t capacity,
     return leave(e, result, error, error_cap);
 }
 
-int ic_nvenc_encode(IcNvenc *e, const uint8_t *nv12, size_t length,
-                    int64_t pts, uint32_t force_idr, uint8_t *out,
+uint8_t *ic_nvenc_staging(IcNvenc *e, size_t *size, size_t *pitch)
+{
+    *size = e->staging_size;
+    *pitch = e->pitch;
+    return e->failed ? NULL : e->staging;
+}
+
+int ic_nvenc_encode(IcNvenc *e, int64_t pts, uint32_t force_idr, uint8_t *out,
                     size_t capacity, size_t *written, int64_t *output_pts,
                     uint32_t *keyframe, char *error, size_t error_cap)
 {
@@ -615,7 +625,6 @@ int ic_nvenc_encode(IcNvenc *e, const uint8_t *nv12, size_t length,
     NV_ENC_PIC_PARAMS pic = {0};
     NV_ENC_LOCK_BITSTREAM lock = {0};
     NVENCSTATUS status;
-    uint32_t row;
     int result = -1;
 
     clear_error(error, error_cap);
@@ -625,16 +634,12 @@ int ic_nvenc_encode(IcNvenc *e, const uint8_t *nv12, size_t length,
         *output_pts = 0;
     if (keyframe)
         *keyframe = 0;
-    if (!e || !nv12 || !out || !capacity || !written || !output_pts || !keyframe)
-        return fail(error, error_cap, "encode: encoder, input and output buffers/pointers required");
-    if (length != e->input_size || force_idr > 1)
-        return fail(error, error_cap, "encode: NV12 length must be %zu (got %zu), force_idr=0|1",
-                    e->input_size, length);
+    if (!e || !out || !capacity || !written || !output_pts || !keyframe)
+        return fail(error, error_cap, "encode: encoder and output buffers/pointers required");
+    if (force_idr > 1)
+        return fail(error, error_cap, "encode: force_idr=0|1");
     if (enter(e, error, error_cap) < 0)
         return -1;
-    for (row = 0; row < e->init.encodeHeight * 3 / 2; ++row)
-        memcpy(e->staging + (size_t)row * e->pitch,
-               nv12 + (size_t)row * e->init.encodeWidth, e->init.encodeWidth);
     if (cu_check(e->cuda.memcpy_htod(e->device_input, e->staging, e->staging_size),
                  "cuMemcpyHtoD_v2", error, error_cap) < 0)
         goto done;
@@ -816,11 +821,12 @@ void ic_nvenc_close(IcNvenc *e)
         CUcontext popped = NULL;
         if (e->device_input)
             e->cuda.mem_free(e->device_input);
+        if (e->staging)
+            e->cuda.mem_free_host(e->staging);
         e->cuda.ctx_pop(&popped);
     }
     /* Destroy also releases allocations if a lost context prevented free. */
     if (e->context)
         e->cuda.ctx_destroy(e->context);
-    free(e->staging);
     free(e);
 }

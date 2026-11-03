@@ -15,7 +15,7 @@ use anyhow::{Context, Result, ensure};
 use isocast_engine::{EncodedVideo, LiveVideoSpec, ParameterSets, Time, VideoEncoder};
 use isocast_protocol::api::H264Profile;
 
-use crate::encoder::{I420, avcc};
+use crate::encoder::avcc;
 use crate::frames::Frame;
 
 const MAX_PACKET: usize = 16 * 1024 * 1024;
@@ -46,10 +46,9 @@ unsafe extern "C" {
         error: *mut c_char,
         error_cap: usize,
     ) -> i32;
+    fn ic_nvenc_staging(encoder: *mut c_void, size: *mut usize, pitch: *mut usize) -> *mut u8;
     fn ic_nvenc_encode(
         encoder: *mut c_void,
-        nv12: *const u8,
-        length: usize,
         pts: i64,
         force_idr: u32,
         out: *mut u8,
@@ -73,10 +72,24 @@ unsafe extern "C" {
 struct Native(NonNull<c_void>);
 
 // SAFETY: the bridge detaches its CUDA context between calls and pushes it on
-// each caller thread. Rust methods require exclusive access; native memory is
-// never borrowed after a call returns. Moving this owner does not run calls
-// concurrently. NonNull keeps it !Sync.
+// each caller thread. Borrowing staging requires exclusive access to the owner,
+// so it cannot move or submit work while borrowed. NonNull keeps it !Sync.
 unsafe impl Send for Native {}
+
+impl Native {
+    fn staging(&mut self) -> Result<(&mut [u8], usize)> {
+        let (mut size, mut pitch) = (0, 0);
+        // SAFETY: live exclusive session and writable scalar outputs.
+        let ptr = unsafe { ic_nvenc_staging(self.0.as_ptr(), &mut size, &mut pitch) };
+        ensure!(
+            !ptr.is_null(),
+            "NVENC: staging unavailable after encoder failure"
+        );
+        // SAFETY: the bridge owns one initialized `size`-byte host allocation
+        // until close. No driver use overlaps this borrow: upload is synchronous.
+        Ok((unsafe { std::slice::from_raw_parts_mut(ptr, size) }, pitch))
+    }
+}
 
 impl Drop for Native {
     fn drop(&mut self) {
@@ -96,8 +109,6 @@ fn error_message(error: &[c_char; ERROR_CAPACITY]) -> String {
 pub struct Encoder {
     native: Native,
     spec: LiveVideoSpec,
-    pixels: I420,
-    nv12: Vec<u8>,
     bitstream: Vec<u8>,
     parameters: ParameterSets,
     ready: Option<EncodedVideo>,
@@ -203,8 +214,6 @@ impl Encoder {
         Ok(Self {
             native,
             spec: *spec,
-            pixels: I420::new(spec.width as usize, spec.height as usize),
-            nv12: Vec::new(),
             bitstream: vec![0; MAX_PACKET],
             parameters,
             ready: None,
@@ -237,19 +246,25 @@ impl VideoEncoder for Encoder {
             self.dropped += 1;
             return Ok(());
         }
-        self.pixels.read_bgra(&frame.read_bgra()?)?;
-        self.pixels.write_nv12(&mut self.nv12);
+        let (staging, pitch) = self.native.staging()?;
+        let width = self.spec.width as usize;
+        bgra_to_nv12(
+            &frame.read_bgra()?,
+            width * 4,
+            staging,
+            pitch,
+            width,
+            self.spec.height as usize,
+        )?;
         let mut length = 0;
         let mut output_pts = 0;
         let mut idr = 0;
         let mut error = [0; ERROR_CAPACITY];
-        // SAFETY: the live session is exclusive; both byte slices and all
+        // SAFETY: the staging borrow has ended; the output buffer and all
         // scalar outputs remain alive for this synchronous call.
         let result = unsafe {
             ic_nvenc_encode(
                 self.native.0.as_ptr(),
-                self.nv12.as_ptr(),
-                self.nv12.len(),
                 pts.as_nanos(),
                 u32::from(keyframe || self.last.is_none()),
                 self.bitstream.as_mut_ptr(),
@@ -378,6 +393,157 @@ pub(crate) fn availability() -> &'static Result<(), String> {
     }
 }
 
+/// Limited-range Rec.709, rounding chroma only after summing its 2x2 footprint.
+fn bgra_to_nv12(
+    src: &[u8],
+    stride: usize,
+    dst: &mut [u8],
+    pitch: usize,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    // Dimensions were bounded and checked even at open. Validate the row
+    // layouts once, then use fixed-size pixel pairs without per-pixel checks.
+    ensure!(
+        stride >= width * 4 && src.len() == stride * height,
+        "video.frame: invalid BGRA stride or length"
+    );
+    ensure!(
+        pitch >= width && dst.len() == pitch * (height + height / 2),
+        "NVENC: invalid staging pitch or length"
+    );
+    let (y, uv) = dst.split_at_mut(pitch * height);
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = std::is_x86_feature_detected!("avx2");
+    for ((rows, ys), uv) in src
+        .chunks_exact(2 * stride)
+        .zip(y.chunks_exact_mut(2 * pitch))
+        .zip(uv.chunks_exact_mut(pitch))
+    {
+        let (a, b) = rows.split_at(stride);
+        let (ya, yb) = ys.split_at_mut(pitch);
+        #[cfg(target_arch = "x86_64")]
+        let start = if use_avx2 {
+            // SAFETY: AVX2 was detected and the slices cover this row's active pixels.
+            unsafe {
+                row_avx2(
+                    &a[..width * 4],
+                    &b[..width * 4],
+                    &mut ya[..width],
+                    &mut yb[..width],
+                    &mut uv[..width],
+                )
+            };
+            width / 8 * 8
+        } else {
+            0
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let start = 0;
+        for ((((a, b), ya), yb), uv) in a[start * 4..width * 4]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(b[start * 4..width * 4].as_chunks::<8>().0)
+            .zip(ya[start..width].as_chunks_mut::<2>().0)
+            .zip(yb[start..width].as_chunks_mut::<2>().0)
+            .zip(uv[start..width].as_chunks_mut::<2>().0)
+        {
+            let luma = |p: &[u8; 8], i: usize| {
+                let (b, g, r) = (u16::from(p[i]), u16::from(p[i + 1]), u16::from(p[i + 2]));
+                (16 + ((47 * r + 157 * g + 16 * b + 128) >> 8)) as u8
+            };
+            *ya = [luma(a, 0), luma(a, 4)];
+            *yb = [luma(b, 0), luma(b, 4)];
+            let sum = |i: usize| {
+                i32::from(a[i]) + i32::from(a[i + 4]) + i32::from(b[i]) + i32::from(b[i + 4])
+            };
+            let (b, g, r) = (sum(0), sum(1), sum(2));
+            *uv = [
+                (128 + ((113 * b - 87 * g - 26 * r + 512) >> 10)) as u8,
+                (128 + ((112 * r - 102 * g - 10 * b + 512) >> 10)) as u8,
+            ];
+        }
+    }
+    Ok(())
+}
+
+/// Eight pixels from each row. All loads/stores are unaligned; the caller
+/// handles leftover pairs so there is no padding requirement on either side.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn row_avx2(a: &[u8], b: &[u8], ya: &mut [u8], yb: &mut [u8], uv: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let byte_pairs = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        0, 4, 1, 5, 2, 6, 3, 7, 8, 12, 9, 13, 10, 14, 11, 15,
+    ));
+    let y_weights = _mm256_set1_epi32(i32::from_le_bytes([16, 157, 47, 0]));
+    let u_weights = _mm256_setr_epi16(
+        113, -87, -26, 0, 113, -87, -26, 0, 113, -87, -26, 0, 113, -87, -26, 0,
+    );
+    let v_weights = _mm256_setr_epi16(
+        -10, -102, 112, 0, -10, -102, 112, 0, -10, -102, 112, 0, -10, -102, 112, 0,
+    );
+    for ((((a, b), ya), yb), uv) in a
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<32>().0)
+        .zip(ya.as_chunks_mut::<8>().0)
+        .zip(yb.as_chunks_mut::<8>().0)
+        .zip(uv.as_chunks_mut::<8>().0)
+    {
+        // SAFETY: each array contains exactly 32 readable bytes; no alignment required.
+        let (a, b) = unsafe {
+            (
+                _mm256_loadu_si256(a.as_ptr().cast()),
+                _mm256_loadu_si256(b.as_ptr().cast()),
+            )
+        };
+        // maddubs takes unsigned weights and signed (pixel - 128) values.
+        // Each partial sum and the complete centered dot fit i16. Restore
+        // the center, limited-range offset and rounding before the unsigned shift.
+        let y = |p| _mm256_maddubs_epi16(y_weights, _mm256_xor_si256(p, _mm256_set1_epi8(-128)));
+        let luma = _mm256_hadd_epi16(y(a), y(b));
+        let luma = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+            luma,
+            _mm256_set1_epi16(128 * 220 + 16 * 256 + 128),
+        ));
+        // Each 128-bit lane contains four top followed by four bottom pixels.
+        let bytes = _mm_packus_epi16(
+            _mm256_castsi256_si128(luma),
+            _mm256_extracti128_si256::<1>(luma),
+        );
+        let rows = _mm_shuffle_epi32::<0xd8>(bytes);
+        *ya = _mm_cvtsi128_si64(rows).to_le_bytes();
+        *yb = _mm_extract_epi64::<1>(rows).to_le_bytes();
+
+        // BGRA sums for each 2x2 footprint (0..1020). Widen to i32
+        // before applying the chroma coefficients; no intermediate average.
+        let pairs =
+            |p| _mm256_maddubs_epi16(_mm256_shuffle_epi8(p, byte_pairs), _mm256_set1_epi8(1));
+        let sums = _mm256_add_epi16(pairs(a), pairs(b));
+        let chroma = _mm256_hadd_epi32(
+            _mm256_madd_epi16(sums, u_weights),
+            _mm256_madd_epi16(sums, v_weights),
+        );
+        let chroma = _mm256_srli_epi32::<10>(_mm256_add_epi32(
+            chroma,
+            _mm256_set1_epi32(128 * 1024 + 512),
+        ));
+        // Two U then two V per lane; pack and interleave both lanes as NV12.
+        let words = _mm_packs_epi32(
+            _mm256_castsi256_si128(chroma),
+            _mm256_extracti128_si256::<1>(chroma),
+        );
+        let interleaved = _mm_shuffle_epi8(
+            words,
+            _mm_setr_epi8(0, 4, 2, 6, 8, 12, 10, 14, -1, -1, -1, -1, -1, -1, -1, -1),
+        );
+        *uv = _mm_cvtsi128_si64(interleaved).to_le_bytes();
+    }
+}
+
 fn parameters(nals: &[&[u8]]) -> ParameterSets {
     let mut parameters = ParameterSets::default();
     for nal in nals {
@@ -437,6 +603,7 @@ fn nals(bytes: &[u8]) -> Result<Vec<&[u8]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoder::I420;
     use isocast_engine::FramePool as _;
     use isocast_openh264::openh264;
     use openh264::formats::YUVSource;
@@ -460,7 +627,6 @@ mod tests {
 
     #[test]
     fn nv12_preserves_rec709_planes() {
-        let mut pixels = I420::new(4, 2);
         let bgra: Vec<_> = [
             [0, 0, 255, 255],
             [0, 0, 255, 255],
@@ -471,10 +637,109 @@ mod tests {
         .into_iter()
         .flatten()
         .collect();
-        pixels.read_bgra(&bgra).unwrap();
-        let mut nv12 = Vec::new();
-        pixels.write_nv12(&mut nv12);
+        let mut nv12 = [0; 12];
+        bgra_to_nv12(&bgra, 16, &mut nv12, 4, 4, 2).unwrap();
         assert_eq!(nv12, [63, 63, 32, 32, 63, 63, 32, 32, 102, 240, 241, 118]);
+    }
+
+    #[test]
+    fn pitched_nv12_matches_i420_bit_for_bit() {
+        let mut seed = 12345u32;
+        for width in [2, 14, 16, 18, 30, 32, 34, 66, 1920] {
+            let height = 18;
+            for (stride, pitch) in [(width * 4, width), (width * 4 + 3, width + 7)] {
+                for image in 0..5 {
+                    let mut src = vec![0x83; stride * height];
+                    let mut packed = Vec::new();
+                    for (y, row) in src.chunks_exact_mut(stride).enumerate() {
+                        for (x, pixel) in row[..width * 4]
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .enumerate()
+                        {
+                            for (c, byte) in pixel.iter_mut().enumerate() {
+                                seed ^= seed << 13;
+                                seed ^= seed >> 17;
+                                seed ^= seed << 5;
+                                *byte = match image {
+                                    0 => 0,
+                                    1 => 255,
+                                    2 => ((x + y * 17 + c * 31) & 255) as u8,
+                                    3 => {
+                                        if (x ^ y ^ c) & 1 == 0 {
+                                            0
+                                        } else {
+                                            255
+                                        }
+                                    }
+                                    _ => seed as u8,
+                                };
+                            }
+                        }
+                        packed.extend_from_slice(&row[..width * 4]);
+                    }
+                    let mut reference = I420::new(width, height);
+                    reference.read_bgra(&packed).unwrap();
+                    let mut expected = Vec::new();
+                    reference.write_nv12(&mut expected);
+                    let mut dst = vec![0xad; pitch * height * 3 / 2];
+                    bgra_to_nv12(&src, stride, &mut dst, pitch, width, height).unwrap();
+                    for (row, want) in dst.chunks_exact(pitch).zip(expected.chunks_exact(width)) {
+                        assert_eq!(
+                            &row[..width],
+                            want,
+                            "width={width} pitch={pitch} image={image}"
+                        );
+                        assert!(row[width..].iter().all(|&b| b == 0xad));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "microbenchmark; run with --release --ignored --nocapture"]
+    fn benchmark_bgra_to_pitched_nv12_1080p() {
+        use std::{hint::black_box, time::Instant};
+        let (width, height, pitch) = (1920, 1080, 2048);
+        let src: Vec<_> = (0..width * height * 4)
+            .map(|i| (i ^ (i >> 8)) as u8)
+            .collect();
+        let mut i420 = I420::new(width, height);
+        let mut packed = Vec::new();
+        let mut dst = vec![0; pitch * height * 3 / 2];
+        for direct in [false, true] {
+            let mut run = || {
+                if direct {
+                    bgra_to_nv12(black_box(&src), width * 4, &mut dst, pitch, width, height)
+                        .unwrap();
+                } else {
+                    i420.read_bgra(black_box(&src)).unwrap();
+                    i420.write_nv12(&mut packed);
+                    for (row, input) in dst.chunks_exact_mut(pitch).zip(packed.chunks_exact(width))
+                    {
+                        row[..width].copy_from_slice(input);
+                    }
+                }
+                black_box(&dst);
+            };
+            run();
+            let start = Instant::now();
+            const FRAMES: u32 = 200;
+            for _ in 0..FRAMES {
+                run();
+            }
+            eprintln!(
+                "{}: {:.3} ms/frame",
+                if direct {
+                    "direct"
+                } else {
+                    "I420 + interleave + pitch copy"
+                },
+                start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES)
+            );
+        }
     }
 
     #[test]

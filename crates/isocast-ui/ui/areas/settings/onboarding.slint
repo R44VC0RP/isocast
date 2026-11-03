@@ -328,11 +328,12 @@ component StepTitle inherits VerticalLayout {
 // The permissions, as the permissions step (area H) shows them: live, one
 // action each.
 component PermissionsStep inherits VerticalLayout {
+    in property <length> detail-width;
     spacing: 0;
     alignment: start;
     StepTitle {
         title: PlatformText.engine-linux ? "Let Isocast open the camera" : PlatformText.engine-windows ? "Turn on camera and microphone access" : "Let Isocast see and hear";
-        lead: PlatformText.engine-linux ? "Your user can’t open the camera devices (/dev/video*). Follow the step below; you can skip this and fix it later. The screen is chosen when capture starts, and PipeWire audio needs no permission."
+        lead: PlatformText.engine-linux ? "Your user can’t open the camera. Copy the command below and run it in a terminal, or skip this and fix it later. Linux asks which screen to share when recording starts, and the microphone needs no permission."
             : PlatformText.engine-windows ? "A Windows privacy setting is keeping desktop apps like Isocast from using them. Open its page in Settings, turn access on, and this updates by itself. You can skip this and turn it on later."
             : PermissionsArea.unknown-access
             ? "Access is checked when capture starts. See each item for guidance; allow access in System Settings › Privacy & Security."
@@ -342,7 +343,9 @@ component PermissionsStep inherits VerticalLayout {
         height: 1px;
         background: Theme.line;
     }
-    PermissionRows { }
+    PermissionRows {
+        detail-width: root.detail-width;
+    }
     Rectangle {
         height: 1px;
         background: Theme.line;
@@ -617,7 +620,9 @@ export component Onboarding inherits Rectangle {
                     padding-bottom: Theme.space-6;
                     padding-left: Theme.space-8 - 1px;
                     padding-right: Theme.space-8 - 1px;
-                    if SettingsArea.step == 0: PermissionsStep { }
+                    if SettingsArea.step == 0: PermissionsStep {
+                        detail-width: card.width - 2 * Theme.space-8 - Theme.icon-lg - Theme.space-4;
+                    }
                     if SettingsArea.step == 1: DevicesStep { }
                     if SettingsArea.step == 2: LayoutStep { }
                 }

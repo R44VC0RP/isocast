@@ -4,10 +4,12 @@
 //! shows itself through `SourcesArea`; changes go to the daemon as edits.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::time::Duration;
 
-use isocast_protocol::{CanvasId, Codec, Setup};
+use isocast_protocol::api::{EngineState, Method, ScreenPickParams, ScreenPicked, SourceRun};
+use isocast_protocol::{CanvasId, Codec, Setup, SourceKind};
 use serde_json::{Map, Value, json};
 use slint::{ComponentHandle, SharedString};
 
@@ -19,7 +21,7 @@ use crate::form::{self, Context, FormEvent, FormModel, Group, Outcome, Row, Targ
 use crate::kit::{self, model};
 use crate::model as setup_model;
 use crate::session::EditOptions;
-use crate::{AppWindow, FilterRow, PickRow, SourcesArea, ToastKind, Ui};
+use crate::{AppWindow, FilterRow, PickRow, SourcesArea, ToastKind, Ui, UnchosenRow};
 
 /// A new source waiting for what it can't exist without (a file, an
 /// app): Properties edits it as a draft and adds it on OK.
@@ -61,6 +63,12 @@ pub struct Dialogs {
     refreshing: Cell<bool>,
     /// Properties of a camera: its status every second.
     status_timer: slint::Timer,
+    /// The source whose sharing dialog is open, and whether it was answered;
+    /// an answered one clears once its source stops waiting.
+    picking: RefCell<Option<(String, bool)>>,
+    /// Sources already shown as waiting, so Choose screens and windows opens
+    /// only for a new one.
+    announced: RefCell<BTreeSet<String>>,
 }
 
 /// A source's settings: everything but its id, name, kind, audio and
@@ -478,10 +486,10 @@ fn add_source(
     name: &str,
     visible: bool,
     done: impl FnOnce(&Rc<App>, String) + 'static,
-) {
+) -> Option<String> {
     let (id, audio) = {
         let s = app.session.borrow();
-        let Some(setup) = s.setup.clone() else { return };
+        let setup = s.setup.clone()?;
         let label = if name.is_empty() {
             setup_model::kind_info(kind).label
         } else {
@@ -518,6 +526,7 @@ fn add_source(
     let scene = scene.to_string();
     let key = item.as_ref().map(item_key);
     let canvas = app.session.borrow().edit_canvas();
+    let added = id.clone();
     app.edit_then(patch, EditOptions::default(), move |app, applied| {
         if !applied {
             return;
@@ -534,6 +543,7 @@ fn add_source(
         }
         done(app, id);
     });
+    Some(added)
 }
 
 impl Dialogs {
@@ -651,6 +661,76 @@ impl Dialogs {
         }
     }
 
+    /// Choose screens and windows: the sources waiting for a pick. A newly
+    /// waiting source opens it, or a toast if another dialog is open or a
+    /// recording runs; only where this app can pick. Closes once none waits.
+    pub fn show_unchosen(&self, app: &Rc<App>, window: &AppWindow) {
+        let area = window.global::<SourcesArea>();
+        let (rows, fresh, recording) = {
+            let s = app.session.borrow();
+            let rows: Vec<UnchosenRow> = s
+                .setup
+                .iter()
+                .flat_map(|setup| &setup.sources)
+                .filter(|source| s.running.get(&source.id).is_some_and(|r| r.needs_pick))
+                .map(|source| UnchosenRow {
+                    id: source.id.as_str().into(),
+                    name: source.name.as_deref().unwrap_or(&source.id).into(),
+                    what: match source.kind {
+                        SourceKind::Window(_) => "window",
+                        _ => "screen",
+                    }
+                    .into(),
+                })
+                .collect();
+            let fresh = fresh_unchosen(
+                &mut self.announced.borrow_mut(),
+                &s.running,
+                rows.iter().map(|row| row.id.as_str()),
+            );
+            let recording = s.status.as_ref().is_some_and(|status| {
+                matches!(status.state, EngineState::Recording | EngineState::Starting)
+            });
+            (rows, fresh, recording)
+        };
+        {
+            let mut picking = self.picking.borrow_mut();
+            if matches!(&*picking, Some((id, true)) if !rows.iter().any(|row| row.id == id.as_str()))
+            {
+                *picking = None;
+            }
+            area.set_unchosen_picking(picking.as_ref().map_or("", |(id, _)| id).into());
+        }
+        let names: Vec<(SharedString, SharedString)> = rows
+            .iter()
+            .filter(|row| fresh.iter().any(|id| id == row.id.as_str()))
+            .map(|row| (row.name.clone(), row.what.clone()))
+            .collect();
+        let empty = rows.is_empty();
+        area.set_unchosen(model(rows));
+        let open = window.global::<Ui>().get_dialog();
+        if empty {
+            if open == "choose-screens" {
+                app.close_dialog();
+            }
+            return;
+        }
+        if names.is_empty() || !form::devices::can_pick() || app.mode.offscreen {
+            return;
+        }
+        if open.is_empty() && !recording {
+            app.open_dialog("choose-screens", "");
+        } else if open != "choose-screens" {
+            for (name, what) in names {
+                app.toast(
+                    ToastKind::Info,
+                    &format!("“{name}” has no {what} chosen"),
+                    format!("Pick “Choose a {what}…” in its toolbar’s list."),
+                );
+            }
+        }
+    }
+
     fn close(&self, app: &Rc<App>) {
         self.preview.stop();
         self.status_timer.stop();
@@ -765,7 +845,13 @@ impl Dialogs {
         if name.is_empty() || area.get_create_taken() {
             return;
         }
-        let settings = starting(&kind, app.session.borrow().devices.as_ref());
+        let mut settings = starting(&kind, app.session.borrow().devices.as_ref());
+        let pick = form::devices::picked_in_dialog() && kind == "window";
+        if pick {
+            // The desktop's dialog chooses the window, opened right after
+            // the source is added; `app` only names it, after the source.
+            settings.insert("app".into(), json!(name));
+        }
         if missing(&kind, &settings).is_some() {
             // Not valid yet: Properties collects what it needs, then adds it.
             let mut draft = Map::new();
@@ -784,10 +870,26 @@ impl Dialogs {
         }
         self.close(app);
         // Properties next, saying the source was added.
-        add_source(app, &scene, &kind, settings, &name, visible, |app, id| {
-            app.sources.dialogs.next_created.set(true);
-            app.open_dialog("properties", &id);
-        });
+        let added = add_source(
+            app,
+            &scene,
+            &kind,
+            settings,
+            &name,
+            visible,
+            move |app, id| {
+                app.sources.dialogs.next_created.set(true);
+                app.open_dialog("properties", &id);
+                if pick {
+                    pick_screen(app, id);
+                }
+            },
+        );
+        // So Choose screens and windows doesn't also open if the engine
+        // reports it waiting before the edit's reply.
+        if pick && let Some(id) = added {
+            self.announced.borrow_mut().insert(id);
+        }
     }
 
     // ---------- Properties ----------
@@ -844,7 +946,7 @@ impl Dialogs {
         }
         area.set_preview_format(source_format(running).into());
         let failed = running
-            .filter(|r| r.state == isocast_protocol::api::SourceRun::Failed)
+            .filter(|r| r.state == isocast_protocol::api::SourceRun::Failed || r.needs_pick)
             .map(|r| {
                 r.error
                     .clone()
@@ -1107,6 +1209,14 @@ impl Dialogs {
             },
             Outcome::Reshow => {}
             Outcome::Nothing => return,
+            Outcome::Pick => {
+                // A draft isn't in the setup yet: the dialog opens once it
+                // is added.
+                if self.pending.borrow().is_none() {
+                    pick_screen(app, self.props_source.borrow().clone());
+                }
+                return;
+            }
         }
         self.reshow(app, window, form_id);
     }
@@ -2169,4 +2279,178 @@ fn filter_skips(filter: &Value) -> Vec<&'static str> {
         }
     }
     skip
+}
+
+/// Ids in `waiting` not yet in `announced`, now added. Ids that ran or
+/// failed since are dropped from `announced`, and all are while the engine
+/// is stopped.
+fn fresh_unchosen<'a>(
+    announced: &mut BTreeSet<String>,
+    running: &std::collections::HashMap<String, isocast_protocol::api::SourceStatus>,
+    waiting: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    if running.is_empty() {
+        announced.clear();
+    }
+    announced.retain(|id| {
+        running
+            .get(id)
+            .is_none_or(|status| status.needs_pick || status.state == SourceRun::Opening)
+    });
+    waiting
+        .into_iter()
+        .filter(|id| announced.insert(id.to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Show the desktop's sharing dialog for display or window source `id`
+/// (`screen_pick`). The engine keeps the choice and switches the source to
+/// it. The call runs on a connection of its own: the dialog waits for the
+/// person, and the window's calls mustn't wait with it.
+pub fn pick_screen(app: &Rc<App>, id: String) {
+    if app.mode.offscreen || id.is_empty() || !form::devices::can_pick() {
+        return;
+    }
+    // One dialog at a time: the engine would make another wait anyway.
+    let dialogs = &app.sources.dialogs;
+    let open = dialogs
+        .picking
+        .borrow()
+        .as_ref()
+        .map(|(open, _)| open.clone());
+    if let Some(open) = open {
+        app.toast(
+            ToastKind::Info,
+            "A sharing dialog is open",
+            format!("Choose for “{open}” first, or cancel its dialog."),
+        );
+        return;
+    }
+    dialogs.announced.borrow_mut().insert(id.clone());
+    *dialogs.picking.borrow_mut() = Some((id.clone(), false));
+    app.changed(crate::session::Changed::RUNNING);
+    let spawned = std::thread::Builder::new()
+        .name("screen pick".into())
+        .spawn(move || {
+            let result = crate::daemon::connect()
+                .and_then(|mut client| {
+                    client.call::<ScreenPicked>(Method::ScreenPick(ScreenPickParams { source: id }))
+                })
+                .map_err(|error| format!("{error:#}"));
+            let _ = slint::invoke_from_event_loop(move || {
+                crate::window::with_app(|app| {
+                    {
+                        // An answered pick keeps the buttons waiting until
+                        // its source runs, unless that waits for a recording.
+                        let mut picking = app.sources.dialogs.picking.borrow_mut();
+                        match (&result, picking.as_mut()) {
+                            (Ok(picked), Some((id, answered)))
+                                if !picked.after_recording.contains(id) =>
+                            {
+                                *answered = true
+                            }
+                            _ => *picking = None,
+                        }
+                    }
+                    app.changed(crate::session::Changed::RUNNING);
+                    match result {
+                        Ok(picked) if !picked.after_recording.is_empty() => {
+                            app.toast(
+                                ToastKind::Info,
+                                "It switches when the recording stops",
+                                "A recording started while the dialog was open; the source keeps \
+                                 its picture until the recording stops.",
+                            );
+                        }
+                        Ok(picked) if !picked.remembered => {
+                            app.toast(
+                                ToastKind::Warning,
+                                "The desktop won’t remember this choice",
+                                "The source shows it until the source stops, then waits to be \
+                                 chosen again.",
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(message) => {
+                            app.toast(ToastKind::Error, "The source wasn’t changed", message);
+                        }
+                    }
+                });
+            });
+        });
+    if let Err(error) = spawned {
+        app.sources.dialogs.picking.take();
+        app.changed(crate::session::Changed::RUNNING);
+        app.toast(
+            ToastKind::Error,
+            "Couldn’t open the sharing dialog",
+            error.to_string(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    use isocast_protocol::api::{SourceRun, SourceStatus};
+
+    use super::fresh_unchosen;
+
+    fn status(source: &str, state: SourceRun, needs_pick: bool) -> (String, SourceStatus) {
+        (
+            source.into(),
+            SourceStatus {
+                source: source.into(),
+                state,
+                error: None,
+                needs_pick,
+                width: None,
+                height: None,
+                fps: None,
+                received_fps: None,
+                channels: None,
+            },
+        )
+    }
+
+    /// Each waiting source is shown once ("Later" holds while it keeps
+    /// waiting); again if it waits again after running, or after the engine
+    /// stopped.
+    #[test]
+    fn a_waiting_source_is_shown_once_until_it_runs() {
+        let mut announced = BTreeSet::new();
+        let waiting = HashMap::from([
+            status("terminal", SourceRun::WaitingForPermission, true),
+            status("browser", SourceRun::WaitingForPermission, true),
+        ]);
+        let both = ["terminal", "browser"];
+        assert_eq!(
+            fresh_unchosen(&mut announced, &waiting, both),
+            ["terminal", "browser"]
+        );
+        // Later, then more status updates: nothing new.
+        assert!(fresh_unchosen(&mut announced, &waiting, both).is_empty());
+        assert!(fresh_unchosen(&mut announced, &waiting, both).is_empty());
+        // Terminal is reopening (after a pick): still not new.
+        let reopening = HashMap::from([
+            status("terminal", SourceRun::Opening, false),
+            status("browser", SourceRun::WaitingForPermission, true),
+        ]);
+        assert!(fresh_unchosen(&mut announced, &reopening, ["browser"]).is_empty());
+        // Terminal ran, then waits again: shown again.
+        let ran = HashMap::from([
+            status("terminal", SourceRun::Running, false),
+            status("browser", SourceRun::WaitingForPermission, true),
+        ]);
+        assert!(fresh_unchosen(&mut announced, &ran, ["browser"]).is_empty());
+        assert_eq!(fresh_unchosen(&mut announced, &waiting, both), ["terminal"]);
+        // The engine stopped and started again: both are new.
+        assert!(fresh_unchosen(&mut announced, &HashMap::new(), []).is_empty());
+        assert_eq!(
+            fresh_unchosen(&mut announced, &waiting, both),
+            ["terminal", "browser"]
+        );
+    }
 }

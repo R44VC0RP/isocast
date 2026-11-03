@@ -1,6 +1,7 @@
 //! Foreground recording through the same API as `start`, but with a private
 //! daemon. Neither the running app's setup nor its active outputs are touched.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,11 +11,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use isocast_client::{DaemonError, IsolatedDaemon};
-use isocast_protocol::Setup;
 use isocast_protocol::api::{
-    EngineState, Event, EventKind, Method, Report, RpcError, StartParams, Started, Status,
-    WatchParams,
+    Applied, ApplyParams, EngineInfo, EngineState, Event, EventKind, Live, Method, Report,
+    RpcError, ScreenPickParams, ScreenPicked, StartParams, Started, Status, WatchParams,
 };
+use isocast_protocol::change::Change;
+use isocast_protocol::hello::EngineOs;
+use isocast_protocol::{Setup, SourceKind};
 
 pub(super) fn run(
     setup: Setup,
@@ -44,6 +47,74 @@ pub(super) fn run(
             Err(error.context(format!("isolated daemon shutdown: {close:#}")))
         }
     }
+}
+
+/// On Linux, ask for each screen and window the setup records, one dialog at
+/// a time: this private daemon has no saved choices. The live engine runs
+/// first, so each source opens on its choice as soon as it is made.
+fn pick_screens(
+    owner: &IsolatedDaemon,
+    control: &mut isocast_client::Client,
+    setup: &Setup,
+    stop: &AtomicBool,
+) -> Result<()> {
+    if EngineOs::current() != EngineOs::Linux {
+        return Ok(());
+    }
+    // Display sources giving the same display share one choice.
+    let mut displays = HashSet::new();
+    let screens: Vec<(&str, &str)> = setup
+        .sources
+        .iter()
+        .filter_map(|source| match &source.kind {
+            SourceKind::Display(display) if displays.insert(&display.display) => {
+                Some((source.id.as_str(), "screen"))
+            }
+            SourceKind::Window(_) => Some((source.id.as_str(), "window")),
+            _ => None,
+        })
+        .collect();
+    if screens.is_empty() {
+        return Ok(());
+    }
+    let live: Live = control.call(Method::Get(None))?;
+    let _: Applied = control.call(Method::Apply(Box::new(ApplyParams {
+        revision: live.revision,
+        change: Change::Setup(Box::new(setup.clone())),
+        live: false,
+    })))?;
+    let _: Option<EngineInfo> = control.call(Method::Engine { running: true })?;
+    for (source, what) in screens {
+        isocast_diagnostics::diagnostic!(
+            "Choose the {what} for source {source:?} in the desktop's sharing dialog"
+        );
+        // The dialog may wait minutes: pick on a thread of its own, so
+        // Ctrl-C still stops (closing this daemon closes the dialog).
+        let mut client = owner.connect()?;
+        let source = source.to_string();
+        let (picked_tx, picked_rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("record pick".into())
+            .spawn(move || {
+                let picked: Result<ScreenPicked> =
+                    client.call(Method::ScreenPick(ScreenPickParams { source }));
+                let _ = picked_tx.send(picked);
+            })?;
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                bail!("recording stopped before it started");
+            }
+            match picked_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(picked) => {
+                    picked?;
+                    break;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => bail!("the screen pick stopped"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn record(
@@ -81,6 +152,7 @@ fn record(
     if stop.load(Ordering::SeqCst) {
         bail!("recording stopped before it started");
     }
+    pick_screens(owner, &mut control, &setup, stop)?;
     let mut start = owner.connect()?;
     let (started_tx, started_rx) = mpsc::channel();
     // Start may wait on device initialization. Keep Ctrl-C responsive while

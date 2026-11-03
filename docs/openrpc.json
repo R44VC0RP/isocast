@@ -16318,6 +16318,57 @@
         ],
         "type": "object"
       },
+      "ScreenPickParams": {
+        "additionalProperties": false,
+        "description": "The source `screen_pick` chooses for.",
+        "properties": {
+          "source": {
+            "description": "The id of a `display` or `window` source in the live setup. A window\nsource keeps its own window; a display source's choice is kept for\nits `display` value, shared by display sources that give the same.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "ScreenPicked": {
+        "description": "What was chosen in the desktop's sharing dialog.",
+        "properties": {
+          "after_recording": {
+            "description": "Sources showing the choice that a recording started during the dialog\nkeeps; they switch when it stops.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "height": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "remembered": {
+            "description": "Whether the desktop remembers the choice. If not, the source shows it\nuntil the source stops, then waits to be chosen again.",
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          },
+          "width": {
+            "description": "The size the desktop shares, in pixels; 0 if it didn't say.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source",
+          "width",
+          "height",
+          "remembered"
+        ],
+        "type": "object"
+      },
       "Scroll": {
         "description": "Moves the picture continuously, wrapping around (OBS's Scroll).",
         "properties": {
@@ -18478,6 +18529,10 @@
               "integer",
               "null"
             ]
+          },
+          "needs_pick": {
+            "description": "Nothing is chosen for it in the desktop's sharing dialog yet (a\nLinux display or window source), so it waits (`waiting_for_permission`)\nwithout showing the dialog; `screen_pick` chooses it.",
+            "type": "boolean"
           },
           "received_fps": {
             "description": "Frames it actually delivered per second over the last second,\nmeasured (`fps` is the rate it was opened at); 0 for a still\npicture or a device that stopped sending. In `status` only.",
@@ -22352,10 +22407,10 @@
         "type": "object"
       },
       "WindowSource": {
-        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit.",
+        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit. On Linux the\ndesktop's sharing dialog chooses the window instead, with `isocast\nscreen pick` (method `screen_pick`); until then the source waits\n(`needs_pick` in `status`). It reopens the window by its id; `app` and\n`title` only name it there. On Hyprland, xdg-desktop-portal-hyprland\n1.4.1 does not report a closed window. Its source keeps the last\npicture until the take stops.",
         "properties": {
           "app": {
-            "description": "The app's name or bundle id, or part of the name.",
+            "description": "The app's name or bundle id, or part of the name. On Linux, a name\nfor the window chosen in the desktop's sharing dialog.",
             "type": "string"
           },
           "cursor": {
@@ -22377,10 +22432,10 @@
         "type": "object"
       },
       "WindowSourceResult": {
-        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit.",
+        "description": "One window (OBS's macOS Screen Capture, window mode), matched by its\napp and optionally its title; the largest match wins. It keeps its size\nif the window is resized, scaling the window to fit. On Linux the\ndesktop's sharing dialog chooses the window instead, with `isocast\nscreen pick` (method `screen_pick`); until then the source waits\n(`needs_pick` in `status`). It reopens the window by its id; `app` and\n`title` only name it there. On Hyprland, xdg-desktop-portal-hyprland\n1.4.1 does not report a closed window. Its source keeps the last\npicture until the take stops.",
         "properties": {
           "app": {
-            "description": "The app's name or bundle id, or part of the name.",
+            "description": "The app's name or bundle id, or part of the name. On Linux, a name\nfor the window chosen in the desktop's sharing dialog.",
             "type": "string"
           },
           "cursor": {
@@ -27026,6 +27081,32 @@
         }
       },
       "summary": "End this connection's WebRTC viewer (WHEP DELETE semantics)."
+    },
+    {
+      "description": "Choose the screen or window a `display` or `window` source records,\nin the desktop's sharing dialog, where apps can't list screens and\nwindows themselves (Linux). Waits up to 3 minutes for the choice.\nA source never shows the dialog by itself: one with nothing chosen\nwaits (`needs_pick` in `status`). The source then opens that screen\nor window without asking again while the desktop remembers it; a\nrunning source switches to it, even during a recording that shows it\nonly through the program (as any setup change would). Refused while\na recording writes the source's own ISO file, which keeps its\npicture to the end.\nReturns [`ScreenPicked`]. Only on this machine; refused where\n`devices` lists screens and windows instead (macOS, Windows).",
+      "name": "screen_pick",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "The id of a `display` or `window` source in the live setup. A window\nsource keeps its own window; a display source's choice is kept for\nits `display` value, shared by display sources that give the same.",
+          "name": "source",
+          "required": true,
+          "schema": {
+            "description": "The id of a `display` or `window` source in the live setup. A window\nsource keeps its own window; a display source's choice is kept for\nits `display` value, shared by display sources that give the same.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "ScreenPicked",
+        "schema": {
+          "$ref": "#/components/schemas/ScreenPicked"
+        }
+      },
+      "summary": "Choose the screen or window a `display` or `window` source records, in the desktop's sharing dialog, where apps can't list screens and windows themselves (Linux).",
+      "x-isocast-params": {
+        "$ref": "#/components/schemas/ScreenPickParams"
+      }
     }
   ],
   "openrpc": "1.3.2",

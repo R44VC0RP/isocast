@@ -19,7 +19,7 @@ update_test=
 extra=()
 # Sparkle (#40): the released app's update feed; its EdDSA public key is in
 # scripts/sparkle/public-ed-key.txt and the private key never touches a build.
-feed_url=https://github.com/R44VC0RP/isocast/releases/latest/download/appcast.xml
+feed_url=https://github.com/anomalyco/isocast/releases/latest/download/appcast.xml
 # Virtual camera (#67): Developer ID provisioning profiles for the engine
 # helper (System Extension capability) and its embedded camera extension.
 engine_profile="${ISOCAST_ENGINE_PROFILE:-$HOME/.config/isocast-release-secrets/isocast-engine.provisionprofile}"

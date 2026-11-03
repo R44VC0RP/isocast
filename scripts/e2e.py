@@ -58,6 +58,11 @@ Linux capture: --only linux_capture records the real capture paths (the
 ScreenCast portal over PipeWire, PipeWire desktop audio, a microphone and a
 V4L2 camera) on the headless desktop of scripts/linux-capture-fixture.sh
 (source its session.env first; without it the scenario is skipped).
+
+Windows browser source: --only win_browser records a local page through
+isocast-browser.exe (WebView2) next to the daemon, strictly (zero writer
+drops); --windows-profile picks the canvas (1080p30 for a GPU machine, 270p30
+or 180p30 for hosted WARP runners).
 """
 
 import argparse
@@ -135,6 +140,7 @@ SCENARIOS = (
     "win_preview_recording",
     "win_app_audio",
     "win_monitor",
+    "win_browser",
 )
 if sys.platform == "win32":
     SCENARIOS += (
@@ -151,8 +157,15 @@ elif sys.platform.startswith("linux"):
         "linux_shared_frames",
     )
 
-if sys.platform in ("darwin", "linux"):
+if sys.platform in ("darwin", "linux", "win32"):
     SCENARIOS += ("browser_audio_gap",)
+
+OWN_CAPACITY = {"win32": {"win_preview_recording"}}
+
+
+def scenarios_check_capacity(selected, system):
+    return bool(selected) and set(selected) <= OWN_CAPACITY.get(system, set())
+
 
 FPS = 60
 RATE = 48000
@@ -4022,6 +4035,20 @@ def oracle_rules_selftest(work):
         "strict: monitor take lost 1 frame at its start": (monitor_take(1, None), "fail"),
         "strict: monitor take lost nothing": (monitor_take(0, None), "pass"),
     })
+    for is_hosted in (False, True):
+        for label, head, dropped, audio, expected in (
+            ("one interior drop", 0, 1, 0, "pass" if is_hosted else "fail"),
+            ("slot zero dropped", 1, 1, 0, "fail"),
+            ("audio dropout", 0, 0, 1, "fail"),
+        ):
+            row = {"output": "program", "slots": 600, "frames": 600 - dropped, "head": head,
+                   "dropped": dropped, "repeated": 0, "audio_dropouts": audio}
+            try:
+                check_preview_program_loss(row, hosted_reference=is_hosted)
+                actual = "pass"
+            except Failure:
+                actual = "fail"
+            cases[f"{'hosted' if is_hosted else 'strict'} preview: {label}"] = actual, expected
     wrong = {k: v for k, v in cases.items() if v[0] != v[1]}
     require(not wrong, f"oracle rules: {wrong}")
     return {k: v[0] for k, v in cases.items()}
@@ -4655,9 +4682,9 @@ def scenario_linux_capture(e, cfg, evidence):
         cfg["recording"]["program"]["audio"] = ["desktop", "mic"]
         cfg["recording"]["iso"].update(enabled=True, sources=iso, audio=["desktop"], source_audio=source_audio)
         e.apply(cfg)
-        # The portal session and PipeWire streams start with the engine
-        # (up to 105 s on a slow desktop; the fixture never asks).
+        # The fixture has no saved choice. Pick its headless output before recording.
         e.rpc("engine", {"running": True}, timeout=150)
+        e.rpc("screen_pick", {"source": "screen"}, timeout=150)
         time.sleep(2)
         evidence["devices"] = e.optional("devices")
         path, manifest = take(e, seconds)
@@ -4761,6 +4788,18 @@ draw();
 </script></body></html>""")
 
 
+def software_graphics(e, cfg):
+    """Whether the engine composites on a software adapter, as the engine
+    itself reports it: its capacity estimate lists a `software_renderer`
+    resource there and refuses to estimate on a Windows hardware GPU. Any
+    other answer counts as hardware, so the strict rules apply."""
+    try:
+        estimate = e.rpc("estimate_capacity", {"setup": cfg})
+    except RpcError:
+        return False
+    return any(r.get("resource") == "software_renderer" for r in estimate.get("resources", []))
+
+
 def scenario_browser_audio_gap(e, cfg, evidence):
     """Exercise the real page bridge and stampers without a production fault switch."""
     if LINUX and not (e.binary.parent / "isocast-browser").is_file():
@@ -4789,6 +4828,16 @@ setInterval(() => {
     cfg["recording"]["program"]["audio"] = ["web"]
     cfg["recording"]["iso"].update(enabled=True, sources=["web"], audio=["web"])
     e.apply(cfg)
+    if WINDOWS:
+        # A cold WebView2 can take longer than recording's first-picture
+        # timeout. Start measuring audio only once the page has a picture.
+        e.rpc("engine", {"running": True}, timeout=60)
+        def has_picture():
+            try:
+                return e.rpc("snapshot", {"source": "web"})["png_base64"]
+            except RpcError:
+                return False
+        until(has_picture, 60, "the WebView2 gap fixture's first picture", interval=0.25)
     started = e.rpc("start", {})
     time.sleep(1)
     render(480)
@@ -4854,7 +4903,54 @@ function tone() {
 
 def scenario_linux_browser(e, cfg, evidence):
     """A browser source on Linux (the isocast-browser helper next to the
-    daemon: WebKitGTK 6 on a private GTK Broadway display) over a green
+    daemon: WebKitGTK 6 on a private GTK Broadway display); see
+    browser_scenario."""
+    if not LINUX:
+        raise Skip("Linux only")
+    browser_scenario(e, cfg, evidence, e.binary.parent / "isocast-browser")
+
+
+def scenario_win_browser(e, cfg, evidence):
+    """A browser source on Windows (isocast-browser.exe next to the daemon:
+    a WebView2 composition controller captured offscreen); see
+    browser_scenario."""
+    if not WINDOWS:
+        raise Skip("Windows only")
+    browser_scenario(e, cfg, evidence, e.binary.parent / "isocast-browser.exe")
+
+
+def check_browser_tone_windows(file, evidence):
+    # One complex magnitude per full 100 ms, not one over several seconds:
+    # a phase jump must not cancel good sound elsewhere in the recording.
+    raw = ffmpeg("-i", file, "-map", "0:a:0", "-ac", "1", "-ar", RATE, "-f", "f32le", "-").stdout
+    samples = array.array("f")
+    samples.frombytes(raw)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    n = RATE // 10
+    require(len(samples) >= RATE, f"{file.name}: under a second of sound")
+    levels = {}
+    for hz in (660, 440):
+        w = 2 * math.pi * hz / RATE
+        basis = [complex(math.cos(w*i), math.sin(w*i)) for i in range(n)]
+        levels[hz] = [2 * abs(sum(x*b for x, b in zip(samples[i:i+n], basis))) / n
+                      for i in range(0, len(samples) - n + 1, n)]
+    tone = levels[660]
+    median = statistics.median(tone)
+    evidence.update(window_ms=100, levels_660=[round(x, 5) for x in tone], median_660=median,
+                    max_440=max(levels[440]))
+    require(median > 0.05, f"{file.name}: missing 660 Hz tone (median level {median:.5f})")
+    threshold = median * 0.5
+    onset = next(i for i, level in enumerate(tone) if level >= threshold)
+    gaps = [i for i in range(onset, len(tone)) if tone[i] < threshold]
+    evidence.update(onset_s=onset / 10, gaps_s=[i / 10 for i in gaps])
+    require(onset / 10 <= 0.5, f"{file.name}: 660 Hz tone starts late at {onset / 10:.1f} s")
+    require(not gaps, f"{file.name}: 660 Hz below {threshold:.5f} at {evidence['gaps_s']} s")
+    require(evidence["max_440"] < median * 0.1, f"{file.name}: 440 Hz leaked into the page's tone: {evidence['max_440']:.5f}")
+
+
+def browser_scenario(e, cfg, evidence, helper):
+    """A browser source (the platform's isocast-browser helper) over a green
     color source: a local page draws the frame oracle's block code for its
     current frame and a 50% blue box moving on a transparent background,
     and plays a 660 Hz Web Audio tone, sent to the mixer (control_audio).
@@ -4863,9 +4959,6 @@ def scenario_linux_browser(e, cfg, evidence):
     the program, the page's transparent parts show the green beneath and
     the box blends with it; and no file dropped a frame (zero, also under
     --hosted)."""
-    if not LINUX:
-        raise Skip("Linux only")
-    helper = e.binary.parent / "isocast-browser"
     if not helper.is_file():
         raise Skip(f"no {helper.name} next to the daemon (cargo build --release -p isocast-browser)")
     w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
@@ -4923,13 +5016,26 @@ def scenario_linux_browser(e, cfg, evidence):
     evidence["writer_drops"] = {f["source"]: f["dropped_frames"] for f in manifest["files"]}
     lost = {k: v for k, v in evidence["writer_drops"].items() if v}
     require(not lost, f"writer drops (zero required, also under --hosted): {lost}")
-    tones = {}
-    for f in manifest["files"]:
-        tones[f["source"]] = tone_amplitudes(path.parent / f["path"], 0, freqs=(660, 440))
-        require(tones[f["source"]][660] > 0.05 and tones[f["source"]][440] < 0.1 * tones[f["source"]][660],
-                f"{f['source']}: the page's 660 Hz tone isn't its sound: {tones[f['source']]}")
-    evidence["tones"] = {k: {str(f): round(a, 4) for f, a in v.items()} for k, v in tones.items()}
+    if WINDOWS:
+        evidence["audio_dropouts"] = {f["source"]: f["audio_dropouts"] for f in manifest["files"]}
+        require(evidence["audio_dropouts"] == {"web": 0, "program": 0},
+                f"continuous browser audio reported dropouts: {evidence['audio_dropouts']}")
+        evidence["tone_windows"] = {}
+        for f in manifest["files"]:
+            track = evidence["tone_windows"][f["source"]] = {}
+            check_browser_tone_windows(path.parent / f["path"], track)
+    else:
+        tones = {}
+        for f in manifest["files"]:
+            tones[f["source"]] = tone_amplitudes(path.parent / f["path"], 0, freqs=(660, 440))
+            require(tones[f["source"]][660] > 0.05 and tones[f["source"]][440] < 0.1 * tones[f["source"]][660],
+                    f"{f['source']}: the page's 660 Hz tone isn't its sound: {tones[f['source']]}")
+        evidence["tones"] = {k: {str(f): round(a, 4) for f, a in v.items()} for k, v in tones.items()}
 
+    # Whether the engine's own graphics adapter is a software one (WARP):
+    # only there does WebView2 render the page in software (below).
+    software = WINDOWS and software_graphics(e, cfg)
+    evidence["graphics"] = "software" if software else "hardware"
     code_region = oracle_regions([("c", (0, 0, 0.5, 0.5))])
     for source in ("web", "program"):
         file, _ = manifest_file(path, manifest, source)
@@ -4941,8 +5047,19 @@ def scenario_linux_browser(e, cfg, evidence):
         good = [x[2] for x in ids]
         back = sum(1 for a, b in zip(good, good[1:]) if 0 < (a - b) % count < count // 2)
         require(back == 0, f"{file.name}: the page's frames went backwards {back} times")
-        require(len(set(good)) >= len(good) * 2 // 3,
-                f"{file.name}: only {len(set(good))} different page frames in {len(good)} pictures")
+        # Most pictures are a new page frame. A Windows runner without a GPU
+        # renders the page in software beside a software compositor and
+        # encoders on four vCPUs, and WebView2 then paints every second
+        # frame: the helper sent 289 pictures in 10 s, none dropped, but
+        # 151 of 300 were new (hosted runs 40138211826, 40142180703). That
+        # is how WebView2 behaves on such machines, not a loss in Isocast,
+        # so there (no hardware GPU) 2/5 must be new (delegator, 2026-10-24);
+        # every other check stays strict, and 2/3 everywhere else.
+        share = (2, 5) if software else (2, 3)
+        evidence["unique_share_required"] = f"{share[0]}/{share[1]}"
+        require(len(set(good)) >= len(good) * share[0] // share[1],
+                f"{file.name}: only {len(set(good))} different page frames in {len(good)} pictures "
+                f"(at least {share[0]}/{share[1]} required)")
         evidence[f"{source}_codes"] = {"pictures": len(rows), "unique": len(set(good)), "backwards": back}
 
     # Alpha in the program: the page's transparent parts show the green
@@ -5014,9 +5131,17 @@ def scenario_win_monitor(e, cfg, evidence):
         raise Skip("no output device: real WASAPI open returned the expected error; mid-take recording audio verified")
 
 
+def check_preview_program_loss(loss, hosted_reference):
+    limit = 0.01 if hosted_reference else 0
+    require(loss["head"] == 0, f"program started {loss['head']} slot(s) late")
+    check_loss(loss, limit)
+    require(loss["repeated"] == 0, f"program: unexpected repeated_frames={loss['repeated']}")
+    return limit
+
+
 def scenario_win_preview_recording(e, cfg, evidence):
     """Qualify the conservative reference, then protect it from previews.
-    Zero losses even under --hosted; paused consumers must survive and resume.
+    Only hosted reference takes allow interior drops; paused consumers must survive and resume.
     A passing lower profile is not a universal software-renderer capacity claim."""
     if not WINDOWS:
         raise Skip("Windows shared-preview recording qualification")
@@ -5059,19 +5184,22 @@ def scenario_win_preview_recording(e, cfg, evidence):
                 f"qualification take did not complete: {manifest}")
         require(len(manifest["files"]) == len(result["loss"]) == 1,
                 "qualification requires final counters for exactly one program file")
-        # Retain all counters before strict media validation can fail; never
-        # turn an overloaded headless take into a pass.
         file, facts = manifest_file(path, manifest, "program")
+        dimensions = (profile["width"], profile["height"])
+        loss = result["loss"][0]
+        limit = check_preview_program_loss(loss, dimensions == reference and evidence["capabilities"]["hosted"])
         result["files"] = [check_file(file, duration=seconds, fps=profile["fps"],
-                                     dimensions=(profile["width"], profile["height"]))]
+                                     dimensions=dimensions, dropped=loss["dropped"] - loss["head"],
+                                     repeated=loss["repeated"])]
         require(facts["frames"] == result["files"][0]["frames"], "program manifest/decoded frame mismatch")
-        check_loss(result["loss"][0], 0)
+        if dimensions == reference:
+            result["files"][0].update(sync_check(file, profile["fps"], lost=set() if limit else None))
 
     # Retain the larger-profile measurements, but do not select a host's
     # highest single 10-second pass: it can sit on the edge and lose frames
     # during the longer preview take. Gate the same conservative reference
-    # named by estimate::SOFTWARE_REFERENCE, with no fallback or loss allowance.
-    reference = (320, 180)
+    # named by estimate::SOFTWARE_REFERENCE, with no fallback.
+    reference = WINDOWS_PROFILES["180p30"][:2]
     selected = None
     reference_warning_seen = False
     for width, height in ((1280, 720), (960, 540), (640, 360), (480, 270), (426, 240), (320, 180)):
@@ -5124,11 +5252,11 @@ def scenario_win_preview_recording(e, cfg, evidence):
         except Failure as exc:
             case.update(status="FAIL", reason=str(exc))
         else:
-            case.update(status="PASS", reason="zero loss and strict media checks passed")
+            case.update(status="PASS", reason="loss and media checks passed")
             if (width, height) == reference:
                 selected = copy.deepcopy(cfg)
                 evidence["preview_profile"] = case["profile"].copy()
-    require(selected is not None, "320x180@30 reference failed strict zero-loss qualification; see headless_profiles")
+    require(selected is not None, f"320x180@30 reference failed qualification: {profiles[-1]['reason']}")
     cfg = selected
     e.apply(cfg)
     width, height = (cfg["canvas"][k] for k in ("width", "height"))
@@ -5925,7 +6053,8 @@ def worker(args):
         # profiles: their counters stay in headless_profiles, not suite loss.
         try:
             rejected_profiles = {Path(case["manifest"]) for case in evidence.get("headless_profiles", [])
-                                 if case.get("status") == "FAIL" and case.get("manifest")}
+                                 if case.get("status") == "FAIL" and case.get("manifest")
+                                 and (case["profile"]["width"], case["profile"]["height"]) != WINDOWS_PROFILES["180p30"][:2]}
             for path in (root / "recordings").rglob("*.session.json"):
                 if path.is_symlink() or not path.is_file():
                     continue  # plugin_files plants dangling links
@@ -6099,7 +6228,8 @@ def main():
     parser.add_argument("--hosted", action="store_true", help="qualify a 720p30 profile for a constrained hosted VM")
     parser.add_argument("--capabilities-from", type=Path, help="reuse this invocation's hosted qualification report")
     parser.add_argument("--list", action="store_true")
-    parser.add_argument("--only", action="append", choices=SCENARIOS)
+    parser.add_argument("--only", action="extend", type=lambda s: s.split(","), metavar="SCENARIO[,SCENARIO...]",
+                        help="run only the named scenarios (repeatable; see --list)")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--keep-failures", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -6130,6 +6260,9 @@ def main():
     parser.add_argument("--worker", choices=SCENARIOS + ("capacity",), help=argparse.SUPPRESS)
     parser.add_argument("--worker-root", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    for name in args.only or []:
+        if name not in SCENARIOS:
+            parser.error(f"unknown --only scenario {name!r}; choose from {', '.join(SCENARIOS)}")
     if args.linux_profile and not LINUX:
         parser.error("--linux-profile is only for Linux synthetic recording checks")
     if args.windows_profile and not WINDOWS:
@@ -6156,6 +6289,15 @@ def main():
         args.work.mkdir(parents=True, exist_ok=True)
         try:
             require(len(SCENARIOS) == len(set(SCENARIOS)), "duplicate name in SCENARIOS")
+            for system, selected, expected in (
+                ("win32", ["win_preview_recording"], True),
+                ("win32", ["win_preview_recording", "win_record"], False),
+                ("win32", ["win_record"], False),
+                ("darwin", ["win_preview_recording"], False),
+                ("win32", [], False),
+            ):
+                require(scenarios_check_capacity(selected, system) == expected,
+                        f"wrong hosted capacity preflight decision for {selected} on {system}")
             print(json.dumps(oracle_selftest(args.work), indent=2))
         except Failure as exc:
             print(f"FAIL selftest: {exc}")
@@ -6232,7 +6374,11 @@ def main():
                 print(f"e2e: {report['work_note']}", file=sys.stderr)
             write_json(root / "capabilities.json", report["capabilities"])
             report["work"] = str(root)
-            if args.hosted and not args.capabilities_from:
+            qualify = args.hosted and not args.capabilities_from
+            if qualify and not args.capabilities and scenarios_check_capacity(args.only or SCENARIOS, sys.platform):
+                print(f"e2e: skipping generic hosted capacity test: {', '.join(args.only or SCENARIOS)} "
+                      "runs its own capacity sweep", file=sys.stderr)
+            elif qualify:
                 result = run_case(args, root, "capacity")
                 report["scenarios"].append(result)
                 measured = result.get("evidence", {})

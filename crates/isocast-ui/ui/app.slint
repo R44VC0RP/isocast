@@ -46,12 +46,14 @@ import { WizardSheet } from "areas/wizard/sheet.slint";
 import { ProjectorsArea } from "areas/projectors/projector.slint";
 import { RemoteArea } from "areas/remote/state.slint";
 import { RemoteDialogs } from "areas/remote/dialogs.slint";
+import { AppMenuBar, MenuBarArea, WindowEdges } from "areas/menubar.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, ExtraCanvas, Menus, Toasts, EditCommands, SettingsForms }
 export { PlatformText }
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
 export { DeveloperArea }
+export { MenuBarArea }
 export { RemoteArea, RemotePeerRow, RemoteFolderRow, RemoteFileRow } from "areas/remote/state.slint";
 export { StatRow, OutputStat } from "areas/developer/state.slint";
 export { PermissionsArea, PermissionItem } from "areas/permissions/state.slint";
@@ -346,8 +348,11 @@ export component AppWindow inherits Window {
     in property <string> title-text: "Isocast";
     in property <string> version: "0.0.1";
     // Offscreen snapshots have no native menu bar (Slint would draw one in
-    // the window instead), so it is hidden there.
+    // the window instead), so it is hidden there. On Linux this is the
+    // bar the app draws (MenuBarArea.shown).
     in property <bool> native-menu: true;
+    // The app's own menu bar's height (Linux), above everything else.
+    property <length> bar-height: root.native-menu && MenuBarArea.shown ? app-bar.height : 0px;
 
     // Where the edited monitor and its picture are, in window points, and
     // the selection box: for the native layers (src/layers.rs), scripted
@@ -413,7 +418,8 @@ export component AppWindow inherits Window {
     in-out property <int> kit-dropdown;
 
     // An Edit menu command: the focused field's, else the window's.
-    function edit(command: string) {
+    // Public for the app's own menu bar (src/areas/menubar.rs).
+    public function edit(command: string) {
         EditCommands.run(command);
         edit-fallback.running = true;
     }
@@ -422,6 +428,8 @@ export component AppWindow inherits Window {
         && Ui.connection != ConnectionState.mismatch && Ui.connection != ConnectionState.identity-changed;
 
     title: root.title-text;
+    // The merged menu bar draws the title bar itself.
+    no-frame: root.native-menu && MenuBarArea.shown && MenuBarArea.merged;
     preferred-width: 1280px;
     preferred-height: 800px;
     min-width: 900px;
@@ -459,8 +467,11 @@ export component AppWindow inherits Window {
     // The menu bar, after OBS's where Isocast has the function (the ids
     // are the web app's, src/mac MENU_ACTIONS; App::menu and the areas
     // handle them).
+    // On Linux the app draws its own bar from this one (AppMenuBar below;
+    // src/areas/menubar.rs reads these menus); hidden, it still matches
+    // their shortcuts.
     MenuBar {
-        visible: root.native-menu;
+        visible: root.native-menu && !MenuBarArea.shown;
         Menu {
             title: "File";
             MenuItem { title: "Show Recordings"; activated => { Ui.menu("show_recordings"); } }
@@ -650,138 +661,159 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Keys nothing else took (web app: app.js onKey): 1–9 choose that
-    // scene, Escape deselects, Return or Space takes the preview in Studio
-    // Mode, Delete removes the selected item, arrows nudge it (⇧ ×10).
-    keys := FocusScope {
-        // A press on the canvas gives the keyboard back to the window.
-        property <int> canvas-pressed: CanvasArea.press-serial;
-        changed canvas-pressed => { self.focus(); }
-        key-pressed(event) => {
-            // Windows: F11 leaves full screen, where the menu bar (and its
-            // F11) is hidden.
-            if PlatformText.windows && event.text == Key.F11 && !root.native-menu {
-                Ui.menu("fullscreen");
-                return accept;
-            }
-            // Windows' Redo is Ctrl+Y; Ctrl+Shift+Z redoes too, as it did.
-            if PlatformText.windows && event.modifiers.control && event.modifiers.shift && !event.modifiers.alt && (event.text == "z" || event.text == "Z") && Ui.dialog == "" {
-                root.edit("redo");
-                return accept;
-            }
-            if event.modifiers.control || event.modifiers.meta || event.modifiers.alt || Ui.dialog != "" {
-                return reject;
-            }
-            if event.text >= "1" && event.text <= "9" && event.text.character-count == 1 {
-                Ui.menu("scene:" + event.text);
-                return accept;
-            }
-            if event.text == Key.Escape {
-                Ui.menu("deselect");
-                return accept;
-            }
-            if Ui.studio && (event.text == "\n" || event.text == " ") {
-                Ui.menu("take");
-                return accept;
-            }
-            if event.text == Key.Backspace || event.text == Key.Delete {
-                Ui.menu("remove");
-                return accept;
-            }
-            if Ui.selected-item != "" && (event.text == Key.LeftArrow || event.text == Key.RightArrow || event.text == Key.UpArrow || event.text == Key.DownArrow) {
-                Ui.menu("nudge:" + (event.text == Key.LeftArrow ? -1 : event.text == Key.RightArrow ? 1 : 0) * (event.modifiers.shift ? 10 : 1) + "," + (event.text == Key.UpArrow ? -1 : event.text == Key.DownArrow ? 1 : 0) * (event.modifiers.shift ? 10 : 1));
-                return accept;
-            }
-            reject
-        }
-
-        VerticalLayout {
-            spacing: 0;
-            workspace := Workspace {
-                vertical-stretch: 1;
-            }
-            // Drawn once and reused, as the docks are, and kept made (see
-            // Workspace's cache-docks).
-            StatusBar {
-                cache-rendering-hint: true;
-                visible: Ui.show-status-bar;
-                height: Ui.show-status-bar ? Theme.statusbar : 0px;
-            }
-        }
-    }
-
-    // Developer mode's stats overlay (#47), clear of the viewer line's
-    // menus and the toasts (top right), and of the picture where the stage
-    // has room: in the letterbox left of the picture (full width, else the
-    // narrow form), else under it, else at the stage's bottom left.
-    if DeveloperArea.on && DeveloperArea.overlay && root.ready: StatsOverlay {
-        property <length> margin: Theme.space-2;
-        property <length> beside: workspace.picture-left - workspace.stage-x - 2 * self.margin;
-        property <length> below: workspace.stage-y + workspace.stage-height - (workspace.picture-top + workspace.picture-height) - 2 * self.margin;
-        property <bool> under: !Ui.studio && self.beside < OverlaySize.compact && self.below >= self.height;
-        compact: !Ui.studio && self.beside >= OverlaySize.compact && self.beside < OverlaySize.full;
-        room: self.beside;
-        x: workspace.stage-x + self.margin;
-        y: self.under
-            ? workspace.picture-top + workspace.picture-height + self.margin
-            : max(workspace.stage-y + Theme.statusbar, workspace.stage-y + workspace.stage-height - self.height - self.margin);
-    }
-
-    // Until the setup is read: where the window stands with isocastd, over
-    // the workspace.
-    if !root.ready: ConnectingState {
+    // The app's own menu bar (Linux), then everything else under it, as
+    // Slint lays out the window under its MenuBar where it draws one.
+    app-bar := AppMenuBar {
+        visible: root.native-menu && MenuBarArea.shown;
         x: 0;
         y: 0;
         width: root.width;
-        height: root.height - (Ui.show-status-bar ? Theme.statusbar : 0px);
+        title: root.title-text;
     }
 
-    // A remote engine's link dropped after the window had read it (R2).
-    if root.ready && Ui.engine-remote && Ui.connection != ConnectionState.connected: RemoteLinkOverlay {
+    content := Rectangle {
         x: 0;
-        y: 0;
+        y: root.bar-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.bar-height;
+
+        // Keys nothing else took (web app: app.js onKey): 1–9 choose that
+        // scene, Escape deselects, Return or Space takes the preview in Studio
+        // Mode, Delete removes the selected item, arrows nudge it (⇧ ×10).
+        keys := FocusScope {
+            // A press on the canvas gives the keyboard back to the window.
+            property <int> canvas-pressed: CanvasArea.press-serial;
+            changed canvas-pressed => { self.focus(); }
+            key-pressed(event) => {
+                // Windows: F11 leaves full screen, where the menu bar (and its
+                // F11) is hidden.
+                if PlatformText.windows && event.text == Key.F11 && !root.native-menu {
+                    Ui.menu("fullscreen");
+                    return accept;
+                }
+                // Windows' Redo is Ctrl+Y; Ctrl+Shift+Z redoes too, as it did.
+                if PlatformText.windows && event.modifiers.control && event.modifiers.shift && !event.modifiers.alt && (event.text == "z" || event.text == "Z") && Ui.dialog == "" {
+                    root.edit("redo");
+                    return accept;
+                }
+                if event.modifiers.control || event.modifiers.meta || event.modifiers.alt || Ui.dialog != "" {
+                    return reject;
+                }
+                if event.text >= "1" && event.text <= "9" && event.text.character-count == 1 {
+                    Ui.menu("scene:" + event.text);
+                    return accept;
+                }
+                if event.text == Key.Escape {
+                    Ui.menu("deselect");
+                    return accept;
+                }
+                if Ui.studio && (event.text == "\n" || event.text == " ") {
+                    Ui.menu("take");
+                    return accept;
+                }
+                if event.text == Key.Backspace || event.text == Key.Delete {
+                    Ui.menu("remove");
+                    return accept;
+                }
+                if Ui.selected-item != "" && (event.text == Key.LeftArrow || event.text == Key.RightArrow || event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                    Ui.menu("nudge:" + (event.text == Key.LeftArrow ? -1 : event.text == Key.RightArrow ? 1 : 0) * (event.modifiers.shift ? 10 : 1) + "," + (event.text == Key.UpArrow ? -1 : event.text == Key.DownArrow ? 1 : 0) * (event.modifiers.shift ? 10 : 1));
+                    return accept;
+                }
+                reject
+            }
+
+            VerticalLayout {
+                spacing: 0;
+                workspace := Workspace {
+                    vertical-stretch: 1;
+                }
+                // Drawn once and reused, as the docks are, and kept made (see
+                // Workspace's cache-docks).
+                StatusBar {
+                    cache-rendering-hint: true;
+                    visible: Ui.show-status-bar;
+                    height: Ui.show-status-bar ? Theme.statusbar : 0px;
+                }
+            }
+        }
+
+        // Developer mode's stats overlay (#47), clear of the viewer line's
+        // menus and the toasts (top right), and of the picture where the stage
+        // has room: in the letterbox left of the picture (full width, else the
+        // narrow form), else under it, else at the stage's bottom left.
+        if DeveloperArea.on && DeveloperArea.overlay && root.ready: StatsOverlay {
+            property <length> margin: Theme.space-2;
+            property <length> beside: workspace.picture-left - workspace.stage-x - 2 * self.margin;
+            property <length> below: workspace.stage-y + workspace.stage-height - (workspace.picture-top + workspace.picture-height) - 2 * self.margin;
+            property <bool> under: !Ui.studio && self.beside < OverlaySize.compact && self.below >= self.height;
+            compact: !Ui.studio && self.beside >= OverlaySize.compact && self.beside < OverlaySize.full;
+            room: self.beside;
+            // (Window points, from here under the menu bar.)
+            x: workspace.stage-x + self.margin;
+            y: (self.under
+                ? workspace.picture-top + workspace.picture-height + self.margin
+                : max(workspace.stage-y + Theme.statusbar, workspace.stage-y + workspace.stage-height - self.height - self.margin)) - content.y;
+        }
+
+        // Until the setup is read: where the window stands with isocastd, over
+        // the workspace.
+        if !root.ready: ConnectingState {
+            x: 0;
+            y: 0;
+            width: content.width;
+            height: content.height - (Ui.show-status-bar ? Theme.statusbar : 0px);
+        }
+
+        // A remote engine's link dropped after the window had read it (R2).
+        if root.ready && Ui.engine-remote && Ui.connection != ConnectionState.connected: RemoteLinkOverlay {
+            x: 0;
+            y: 0;
+            width: content.width;
+            height: content.height;
+        }
+
+        // Over the window: Welcome (no setup yet), the dialogs, the gallery,
+        // the menu and the toasts.
+        if Ui.loaded && !Ui.has-setup && !Ui.onboarding && !PermissionsArea.shown && !WizardArea.shown: Welcome { }
+        if Ui.onboarding: Onboarding { }
+        // The setup wizard (area I): OBS's collections on the first launch,
+        // and Tools › Auto-Configuration Wizard….
+        if WizardArea.shown && !PermissionsArea.shown: WizardSheet { }
+
+        SourcesDialogs { }
+        MixerDialogs { }
+        ControlsDialogs { }
+        SettingsDialogs {
+            version: root.version;
+        }
+        LibraryDialogs { }
+        // The permissions step (area H), over Welcome, the first run and
+        // Settings, which open it.
+        if PermissionsArea.shown: PermissionsSheet { }
+        // Pairing with an engine and the engine file browser (area J), over
+        // any dialog that opened them.
+        RemoteDialogs { }
+        QuitDialog { }
+
+        if root.kit-gallery: KitGallery {
+            show-dialog: root.kit-dialog;
+            open-dropdown: root.kit-dropdown;
+        }
+
+        MenuHost { }
+
+        // Under the viewer line (its Fit and View menus stay in reach), 12px
+        // in from the window's right.
+        ToastStack {
+            area-width: content.width;
+            y: Theme.statusbar + Theme.space-3;
+            // A dialog's own stack shows them clear of its sheet.
+            visible: Ui.dialog == "" || !Toasts.shown-in-dialog;
+        }
     }
 
-    // Over the window: Welcome (no setup yet), the dialogs, the gallery,
-    // the menu and the toasts.
-    if Ui.loaded && !Ui.has-setup && !Ui.onboarding && !PermissionsArea.shown && !WizardArea.shown: Welcome { }
-    if Ui.onboarding: Onboarding { }
-    // The setup wizard (area I): OBS's collections on the first launch,
-    // and Tools › Auto-Configuration Wizard….
-    if WizardArea.shown && !PermissionsArea.shown: WizardSheet { }
-
-    SourcesDialogs { }
-    MixerDialogs { }
-    ControlsDialogs { }
-    SettingsDialogs {
-        version: root.version;
-    }
-    LibraryDialogs { }
-    // The permissions step (area H), over Welcome, the first run and
-    // Settings, which open it.
-    if PermissionsArea.shown: PermissionsSheet { }
-    // Pairing with an engine and the engine file browser (area J), over
-    // any dialog that opened them.
-    RemoteDialogs { }
-    QuitDialog { }
-
-    if root.kit-gallery: KitGallery {
-        show-dialog: root.kit-dialog;
-        open-dropdown: root.kit-dropdown;
-    }
-
-    MenuHost { }
-
-    // Under the viewer line (its Fit and View menus stay in reach), 12px
-    // in from the window's right.
-    ToastStack {
-        area-width: root.width;
-        y: Theme.statusbar + Theme.space-3;
-        // A dialog's own stack shows them clear of its sheet.
-        visible: Ui.dialog == "" || !Toasts.shown-in-dialog;
-    }
+    // Resizing, where the window draws its own decorations.
+    if root.native-menu && MenuBarArea.shown && MenuBarArea.merged && !Ui.window-maximized && !Ui.window-fullscreen: WindowEdges { }
 
     if root.test-edge == 1: Rectangle {
         x: root.scenes-right - 1.5px;

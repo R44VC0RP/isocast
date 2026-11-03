@@ -10,7 +10,7 @@ macOS on Apple silicon only, for now.
 ## Install
 
 Download the latest `Isocast.dmg` from
-[Releases](https://github.com/R44VC0RP/isocast/releases), open it and drag
+[Releases](https://github.com/anomalyco/isocast/releases), open it and drag
 Isocast to Applications. You need macOS 14 or later on Apple silicon.
 
 The first time you record, macOS asks for screen recording, camera and

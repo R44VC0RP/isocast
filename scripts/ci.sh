@@ -60,7 +60,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
-repo=R44VC0RP/isocast
+repo=anomalyco/isocast
 remote="https://github.com/$repo.git"
 dry_run=0
 worktree=0

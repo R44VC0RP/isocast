@@ -395,6 +395,9 @@ impl Area for Sources {
             .sources
             .dialogs
             .rename_accept(&app, &w));
+        wire!(area, app, on_choose_unchosen, |app, w, id| {
+            dialogs::pick_screen(&app, id.to_string())
+        });
     }
 
     fn update(&self, app: &Rc<App>, window: &AppWindow, changed: Changed) {
@@ -411,6 +414,9 @@ impl Area for Sources {
         }
         if lists {
             show_lists(app);
+        }
+        if changed.any(Changed::SETUP | Changed::RUNNING) {
+            self.dialogs.show_unchosen(app, window);
         }
         if changed.any(Changed::SELECTION | Changed::SETUP | Changed::DEVICES) {
             show_quick_setting(app, window);
@@ -1491,6 +1497,12 @@ fn show_quick_setting(app: &Rc<App>, window: &AppWindow) {
             "device",
             devices::microphone_options(devices.as_ref(), &text("device")),
         ),
+        SourceKind::Window(_) if devices::picked_in_dialog() => choice(
+            &area,
+            "Window",
+            "app",
+            devices::picked_window_options(&text("app")),
+        ),
         SourceKind::Window(_) | SourceKind::Application(_) => choice(
             &area,
             "Application",
@@ -1568,9 +1580,15 @@ fn quick_choose(app: &Rc<App>, value: &str) {
     let Some(source) = selected_source(app) else {
         return;
     };
+    if value == devices::PICK {
+        dialogs::pick_screen(app, source.id.clone());
+        return;
+    }
     let now = source_value(app, &source.id);
     let mut patch = json!({ "id": source.id });
     match source.kind.label() {
+        // The dialog chooses the window; its name stays.
+        "window" if devices::picked_in_dialog() => return,
         "display" => patch["display"] = json!(value),
         "microphone" => patch["device"] = json!(value),
         "camera" => {

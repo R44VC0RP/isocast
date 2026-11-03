@@ -49,8 +49,6 @@ export global PermissionsArea {
     in property <bool> first-launch;
     // The floating helper beside System Settings is showing.
     in property <bool> helper-shown;
-    // The width a row's detail wraps at (set by the sheet).
-    in-out property <length> detail-width: 560px;
     // A row's action: its id and the action ("ask", "open", "relaunch",
     // "update").
     callback act(string, string);

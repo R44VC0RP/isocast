@@ -498,9 +498,17 @@ impl Offscreen {
         self.advance(Duration::from_millis(16));
         self.render()?;
         // The menu's title, in the bar along the top of the window.
+        // The app's own bar (Linux) has buttons; Slint's doesn't.
+        let own = self.app.global::<crate::MenuBarArea>().get_shown();
         let found =
             i_slint_backend_testing::ElementHandle::find_by_accessible_label(&self.app, title)
-                .find(|e| e.absolute_position().y < 40.0 && e.size().height > 0.0);
+                .find(|e| {
+                    e.absolute_position().y < 40.0
+                        && e.size().height > 0.0
+                        && (!own
+                            || e.accessible_role()
+                                == Some(i_slint_backend_testing::AccessibleRole::Button))
+                });
         let Some(element) = found else {
             bail!(
                 "no menu {title:?} in the menu bar (File, Edit, View, Docks, Profile, Scene \

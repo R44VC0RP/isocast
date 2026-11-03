@@ -128,7 +128,7 @@ git(
     "config",
     "--global",
     "url." + str(root / "origin") + ".insteadOf",
-    "https://github.com/R44VC0RP/isocast.git",
+    "https://github.com/anomalyco/isocast.git",
 )
 git("init", "--bare", "-q", "-b", "main", str(root / "origin"))
 git("init", "-q", "-b", "main")

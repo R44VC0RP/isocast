@@ -14,7 +14,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
 public="${ISOCAST_PUBLIC_DIR:-$HOME/dev/isocast-public}"
-repo="${ISOCAST_PUBLIC_REPO:-R44VC0RP/isocast}"
+repo="${ISOCAST_PUBLIC_REPO:-anomalyco/isocast}"
 ref="${ISOCAST_PUBLIC_REF:-main}"
 push=0
 create=0

@@ -1,0 +1,11 @@
+[package]
+name = "isocast-browser-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The records an isocast-browser helper sends isocastd (pictures, sound, failures), on every OS."
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"

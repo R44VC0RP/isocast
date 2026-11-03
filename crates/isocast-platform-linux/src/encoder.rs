@@ -387,6 +387,7 @@ impl I420 {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn write_nv12(&self, output: &mut Vec<u8>) {
         output.resize(self.y.len() + self.u.len() * 2, 0);
         output[..self.y.len()].copy_from_slice(&self.y);

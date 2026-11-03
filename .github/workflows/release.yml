@@ -23,7 +23,7 @@ jobs:
   # version mismatch fails here, and an already published version ends the
   # run green with nothing to do instead of asking for an approval.
   preflight:
-    if: github.repository == 'R44VC0RP/isocast' && (github.event_name == 'push' || github.ref == 'refs/heads/main')
+    if: github.repository == 'anomalyco/isocast' && (github.event_name == 'push' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

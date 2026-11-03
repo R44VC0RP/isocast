@@ -129,8 +129,16 @@ fn capture<P: Platform>(platform: &P) -> Result<Value> {
         }),
         stopped: Box::new(move |why| stopped.lock().unwrap().push(why)),
     };
-    let (capture, format) =
-        platform.capture_screen(ScreenTarget::Display("main"), 30, false, false, sink)?;
+    let (capture, format) = platform.capture_screen(
+        ScreenTarget::Display {
+            display: "main",
+            source: "screen",
+        },
+        30,
+        false,
+        false,
+        sink,
+    )?;
     first
         .recv_timeout(Duration::from_secs(5))
         .context("capture delivered no frame")?;

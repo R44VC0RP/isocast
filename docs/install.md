@@ -141,7 +141,7 @@ also resume. A stale `.release-lock` after a hard kill requires checking that
 the previous process is gone before removing it.
 
 `--draft-release` uploads only verified notarized output and its checksum
-to a **draft** on `R44VC0RP/isocast`, with a short user-facing alpha summary
+to a **draft** on `anomalyco/isocast`, with a short user-facing alpha summary
 and that repo's main as its tag target. It reuses a matching draft and verifies both GitHub asset digests;
 published releases or mismatched assets are refused. No git history is
 pushed, release published, or repository setting changed. The draft URL is
