@@ -4035,6 +4035,30 @@ def oracle_rules_selftest(work):
         "strict: monitor take lost 1 frame at its start": (monitor_take(1, None), "fail"),
         "strict: monitor take lost nothing": (monitor_take(0, None), "pass"),
     })
+    # Encode real camera pictures so these cases exercise the same decoder
+    # and cadence rule as the V4L2 ISO. Start near a fixture loop boundary.
+    fps, period, slots = 30, ORACLE_SECONDS * 30, 30
+    for name, frames, error in (
+        ("phase beat", [i - (i % 3 == 1) for i in range(slots)], None),
+        ("10-frame freeze", [5 if 5 <= i < 15 else i for i in range(slots)], "three identical"),
+        ("5-code jump", [i if i < 10 else i + 4 for i in range(slots)], "jump of 5"),
+        ("short take", range(slots - 3), "code span"),
+        ("drifting repeats", [i - (i >= 5) - (i >= 10) for i in range(slots)], "phase drift"),
+    ):
+        path = work / f"camera-{name}.mov"
+        raw = bytes(ORACLE_LEVELS[c] for i in frames for c in oracle_cells(ORACLE_TAGS["b"], (i - 2) % period))
+        ffmpeg("-f", "rawvideo", "-pixel_format", "gray", "-video_size", "16x9", "-framerate", fps,
+               "-i", "pipe:0", "-vf", "scale=160:90:flags=neighbor", "-c:v", "libx264", "-y", path, data=raw)
+        rows = oracle_decode(path, oracle_regions([("b", (0, 0, 1, 1))]), fps)
+        ids = [row[2]["b"] for row in rows]
+        require(all(x[:2] == ("id", ORACLE_TAGS["b"]) for x in ids), f"{path.name}: unreadable fixture")
+        try:
+            camera_code_span(path, [x[2] for x in ids], period, slots)
+            outcome = "pass"
+        except Failure as exc:
+            require(error and error in str(exc), f"{path.name}: unexpected failure: {exc}")
+            outcome = "fail"
+        cases[f"camera: {name}"] = (outcome, "fail" if error else "pass")
     for is_hosted in (False, True):
         for label, head, dropped, audio, expected in (
             ("one interior drop", 0, 1, 0, "pass" if is_hosted else "fail"),
@@ -4610,6 +4634,25 @@ def scenario_win_app_audio(e, cfg, evidence):
             log.close()
 
 
+def camera_code_span(file, codes, period, slots):
+    """Two unsynchronized 30 Hz clocks can sample either side of a source tick."""
+    require(codes and all(0 <= n < period for n in codes), f"{file.name}: missing or out-of-range camera code")
+    span = low = high = 0
+    for i in range(1, len(codes)):
+        step = (codes[i] - codes[i - 1]) % period
+        require(step <= 2, f"{file.name}: camera code jump of {step} at picture {i}: {codes[i - 1:i + 1]}")
+        require(i < 2 or not (codes[i] == codes[i - 1] == codes[i - 2]),
+                f"{file.name}: three identical camera codes ending at picture {i}: {codes[i]}")
+        span += step
+        # A repeat and a skipped code may alternate with ordinary steps
+        # between them. They must not accumulate into persistent loss/gain.
+        low, high = min(low, span - i), max(high, span - i)
+        require(high - low <= 1, f"{file.name}: camera phase drift {low}..{high} at picture {i}")
+    require(abs(span - (slots - 1)) <= 1,
+            f"{file.name}: camera code span {span} ({codes[0]} to {codes[-1]}), expected {slots - 1} ±1")
+    return span
+
+
 def scenario_linux_capture(e, cfg, evidence):
     """The real Linux capture paths on scripts/linux-capture-fixture.sh's
     headless desktop: the screen through the ScreenCast portal and PipeWire
@@ -4724,9 +4767,11 @@ def scenario_linux_capture(e, cfg, evidence):
             require(not wrong, f"{file.name}: {len(wrong)} of {len(rows)} pictures don't show the {name} clip's "
                                f"frame code (first: {wrong[:1]})")
             require(back == 0, f"{file.name}: the {name} clip's frames went backwards {back} times")
-            # 90%: real runs show 447-450 of 450, and a stream that stalls after a few seconds must fail.
-            require(len(set(good)) >= seconds * fps * 9 // 10,
-                    f"{file.name}: only {len(set(good))} different {name} frames in {seconds} s (frozen or stalled)")
+            if name == "b":  # The V4L2 camera ISO, not the mpv screen or program.
+                result["span"] = camera_code_span(file, good, count, seconds * fps)
+            else:
+                require(len(set(good)) >= seconds * fps * 9 // 10,
+                        f"{file.name}: only {len(set(good))} different {name} frames in {seconds} s (frozen or stalled)")
             return result
 
         screen_iso, _ = manifest_file(path, manifest, "screen")
