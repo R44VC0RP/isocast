@@ -145,6 +145,7 @@ SCENARIOS = (
 if sys.platform == "win32":
     SCENARIOS += (
         "win_media",
+        "win_output_scale",
         "win_metadata",
         "win_vcam_publisher",
     )
@@ -374,7 +375,8 @@ LINUX = sys.platform.startswith("linux")
 # --windows-profile: the hosted no-GPU reference canvas (#128: 180p30; 270p30
 # held for win_media on one host but not for preview recording on all) and a
 # GPU machine's strict 1080p30.
-WINDOWS_PROFILES = {"180p30": (320, 180, 30), "270p30": (480, 270, 30), "1080p30": (1920, 1080, 30)}
+WINDOWS_PROFILES = {"180p30": (320, 180, 30), "270p30": (480, 270, 30), "1080p30": (1920, 1080, 30),
+                    "2160p30": (3840, 2160, 30)}
 
 
 def windows_pipe(path):
@@ -4336,6 +4338,96 @@ def scenario_win_record(e, cfg, evidence):
     require(len(manifest["files"]) == 5, f"files: {[f['source'] for f in manifest['files']]}, expected program, "
                                          f"bars, bars2, vertical-program and square")
     evidence["t0"] = check_pattern_take(e, path, manifest, cfg, layout, evidence, vertical=vertical)
+
+
+def scenario_win_output_scale(e, cfg, evidence):
+    """One canvas, not three canvases: letterboxed program recording, then
+    a full-size program take with two differently sized RTMP receivers."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    # Known static bars: inspect decoded pixels against their source, not
+    # one encode against another encode with the same range/matrix mistake.
+    bars = ["bfbfbf", "bfbf00", "00bfbf", "00bf00", "bf00bf", "bf0000", "0000bf", "202020"]
+    cfg["sources"] = [s for s in cfg["sources"] if s["id"] == "tone"]
+    cfg["sources"].extend({"id": "bar" + str(i), "kind": "color", "color": "#" + color,
+                           "width": 16, "height": 16} for i, color in enumerate(bars))
+    cfg["scenes"][0]["items"] = [item("bar" + str(i), (i / 8, 0, 1 / 8, 1), (w, h)) for i in range(8)]
+    cfg["recording"]["iso"].update(enabled=False, sources=[])
+
+    def check_bars(path, width, height, letterboxed=False):
+        raw = ffmpeg("-i", path, "-map", "0:v:0", "-an", "-vf",
+                     "scale=in_color_matrix=bt709:in_range=tv,format=rgb24", "-frames:v", "1",
+                     "-f", "rawvideo", "-").stdout
+        require(len(raw) == width * height * 3, f"{path.name}: unexpected decoded size")
+
+        def pixel(x, y):
+            p = (y * width + x) * 3
+            return raw[p:p + 3]
+
+        samples = [pixel((2 * i + 1) * width // 16, height // 2) for i in range(8)]
+        err = max(abs(a - b) for want, got in zip(bars, samples) for a, b in zip(bytes.fromhex(want), got))
+        require(err <= 8, f"{path.name}: incorrect Rec.709 studio-range bars: {[s.hex() for s in samples]}")
+        if letterboxed:
+            require(max(pixel(width // 16, y)[c] for y in (1, height - 2) for c in range(3)) <= 8,
+                    f"{path.name}: did not letterbox the wider canvas")
+        evidence.setdefault("bar_rgb_max_errors", {})[path.name] = err
+
+    program = cfg["recording"]["program"]
+    side = h // 4 * 2
+    program.update(width=side, height=side)
+    if program["encoder"]["codec"] == "hevc":
+        program["encoder"]["bit_depth"] = 10
+    e.apply(cfg)
+    path, manifest = take(e, 3)
+    evidence["files"] = check_take(path, manifest, 3, expected_sources=["program"], evidence=evidence)
+    scaled_file = manifest_file(path, manifest, "program")[0]
+    check_bars(scaled_file, side, side, letterboxed=True)
+    if program["encoder"].pop("bit_depth", None) == 10:
+        video = next(s for s in probe(scaled_file)["streams"] if s["codec_type"] == "video")
+        require(video["pix_fmt"] == "yuv420p10le" and video["profile"] == "Main 10", f"not Main10: {video}")
+
+    del program["width"], program["height"]
+    destinations = [("main", w // 4 * 2, h // 4 * 2), ("small", w // 6 * 2, h // 6 * 2)]
+    listeners = {}
+    try:
+        for name, width, height in destinations:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            server = f"rtmp://127.0.0.1:{port}/live"
+            settings = {"service": "custom", "server": server, "width": width, "height": height}
+            if name == "main":
+                cfg["stream"] = dict(settings, video_bitrate_kbps=4000, destinations=[])
+            else:
+                cfg["stream"]["destinations"].append(dict(settings, id=name))
+            output = e.root / f"{name}.flv"
+            with (e.root / f"{name}-listener.log").open("wb") as log:
+                listeners[name] = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "warning", "-listen", "1", "-i",
+                                                    server + "/e2e", "-c", "copy", "-y", str(output)],
+                                                   stdout=log, stderr=log)
+        e.apply(cfg)
+        e.rpc("stream_start")
+        path, manifest = take(e, 3)
+        final = e.rpc("stream_stop")["destinations"]
+        evidence["files"].extend(check_take(path, manifest, 3, expected_sources=["program"], evidence=evidence))
+        check_bars(manifest_file(path, manifest, "program")[0], w, h)
+        for name, width, height in destinations:
+            listeners[name].wait(timeout=10)
+            status = next(s for s in final if s["id"] == name)
+            output = e.root / f"{name}.flv"
+            video = next(s for s in probe(output)["streams"] if s["codec_type"] == "video")
+            count = int(video["nb_read_frames"])
+            require((video["width"], video["height"]) == (width, height), f"{name}: wrong stream size")
+            require(count == status["frames_sent"] and count >= 3 * fps - 1, f"{name}: {count} frames, {status}")
+            require(video_packets_accounted(video_times(output), fps, status["dropped_frames"]),
+                    f"{name}: received timestamps have unaccounted gaps")
+            loss = vertical_stream_loss(status, fps, evidence)
+            evidence.setdefault("drops", {})[name] = dict(loss, output=name)
+            check_bars(output, width, height)
+    finally:
+        for listener in listeners.values():
+            if listener.poll() is None:
+                listener.kill()
+            listener.wait(timeout=5)
 
 
 def scenario_linux_record(e, cfg, evidence):

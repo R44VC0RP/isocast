@@ -350,7 +350,7 @@ impl WindowsPlatform {
     fn open_single_writer(&self, spec: &WriterSpec, input: PixelFormat) -> Result<VideoWriter> {
         let video = &spec.video;
         let qp = RecordingQuality::new(video.encoder.quality)?.nvenc_qp;
-        let encoder = self.open_single(
+        let mut encoder = self.open_single(
             NvencOwner {
                 recording: 0,
                 take: 0,
@@ -367,6 +367,9 @@ impl WindowsPlatform {
             |device| WindowsVideoEncoder::recording_with_preset(device, video, input, 5),
             |device| WindowsVideoEncoder::recording(device, video, input),
         )?;
+        if input == PixelFormat::Bgra8 {
+            encoder.scale_program(self, (video.width, video.height));
+        }
         VideoWriter::from_encoder(spec, encoder)
     }
 }
@@ -776,6 +779,9 @@ impl Platform for WindowsPlatform {
                     applied_preset: applied,
                     backend: format!("{:?}", encoder.backend()),
                 };
+                if !file.iso {
+                    encoder.scale_program(self, (video.width, video.height));
+                }
                 Ok((VideoWriter::from_encoder(file.spec, encoder)?, output))
             })();
             match opened {
@@ -907,7 +913,7 @@ impl Platform for WindowsPlatform {
         // Live FLV/frame-stream callers require H.264. HEVC is confined to
         // the file writer's explicitly checked codec/configuration boundary.
         // Fixed P5 bitrate control: priced as such, never reconfigured.
-        let encoder = self.open_single(
+        let mut encoder = self.open_single(
             NvencOwner {
                 recording: 0,
                 take: 0,
@@ -929,6 +935,7 @@ impl Platform for WindowsPlatform {
             spec.bitrate_kbps,
             encoder.fallback_reasons()
         );
+        encoder.scale_program(self, (spec.width, spec.height));
         Ok(encoder)
     }
 

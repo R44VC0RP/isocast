@@ -1,9 +1,14 @@
 //! Provider order is explicit and observable: NVENC, hardware MFT, software
 //! MFT last. This does not select the Windows platform in the daemon yet.
 
-use std::time::{Duration, Instant};
+use std::{
+    borrow::Cow,
+    time::{Duration, Instant},
+};
 
+use crate::WindowsPlatform;
 use anyhow::{Context, Result, bail};
+use isocast_engine::record::ProgramScaler;
 use isocast_engine::{
     EncodedVideo, LiveVideoSpec, ParameterSets, Time, VideoEncoder, VideoTrackSpec,
 };
@@ -295,6 +300,8 @@ pub struct WindowsVideoEncoder {
     quality: Option<RecordingQuality>,
     delivered: u64,
     held: Option<EncodedVideo>,
+    scaler: Option<ProgramScaler<WindowsPlatform>>,
+    scale_drops: u64,
     force_idr: bool,
     terminal: bool,
     /// The device a live session's rate increases are priced on.
@@ -345,6 +352,8 @@ impl WindowsVideoEncoder {
                     fallback_reasons: reasons,
                     encoding,
                     quality: None,
+                    scaler: None,
+                    scale_drops: 0,
                     delivered: 0,
                     held: None,
                     force_idr: false,
@@ -377,6 +386,8 @@ impl WindowsVideoEncoder {
                         fallback_reasons: reasons,
                         encoding,
                         quality: None,
+                        scaler: None,
+                        scale_drops: 0,
                         delivered: 0,
                         held: None,
                         force_idr: false,
@@ -464,6 +475,8 @@ impl WindowsVideoEncoder {
                     fallback_reasons: reasons,
                     encoding,
                     quality: Some(quality),
+                    scaler: None,
+                    scale_drops: 0,
                     delivered: 0,
                     held: None,
                     force_idr: true,
@@ -509,6 +522,8 @@ impl WindowsVideoEncoder {
                         fallback_reasons: reasons,
                         encoding,
                         quality: Some(quality),
+                        scaler: None,
+                        scale_drops: 0,
                         delivered: 0,
                         held: None,
                         force_idr: true,
@@ -585,6 +600,26 @@ impl WindowsVideoEncoder {
         }
     }
 
+    pub(crate) fn scale_program(&mut self, platform: &WindowsPlatform, size: (u32, u32)) {
+        self.scaler = Some(ProgramScaler::new(platform.clone(), size));
+    }
+
+    pub(crate) fn prepare<'a>(
+        &mut self,
+        frame: &'a Frame,
+        pts: Time,
+    ) -> Result<Option<Cow<'a, Frame>>> {
+        // Only composed BGRA is resized. Raw NV12/RGB10 ISOs must never
+        // round-trip through BGRA8; Main10 from a canvas still takes the
+        // provider's original BGRA-to-ten-bit path after the draw.
+        match &mut self.scaler {
+            Some(scaler) if frame.is_output() && frame.pixel_format() == PixelFormat::Bgra8 => {
+                scaler.prepare(frame, pts)
+            }
+            _ => Ok(Some(Cow::Borrowed(frame))),
+        }
+    }
+
     pub fn backend(&self) -> &EncoderBackend {
         &self.backend
     }
@@ -630,6 +665,7 @@ impl WindowsVideoEncoder {
             Encoder::Mf(encoder) => encoder.stats(),
         }?;
         stats.ready_packets += usize::from(self.held.is_some());
+        stats.dropped += self.scale_drops;
         Ok(stats)
     }
 
@@ -704,6 +740,10 @@ impl VideoEncoder for WindowsVideoEncoder {
     }
     fn encode(&mut self, frame: &Frame, pts: Time, keyframe: bool) -> Result<()> {
         self.input_refused()?;
+        let Some(frame) = self.prepare(frame, pts)? else {
+            self.scale_drops += 1;
+            return Ok(());
+        };
         let before = if self.force_idr {
             Some(self.stats()?.accepted)
         } else {
@@ -711,8 +751,8 @@ impl VideoEncoder for WindowsVideoEncoder {
         };
         let keyframe = keyframe || self.force_idr;
         match &mut self.encoder {
-            Encoder::Nvenc(encoder) => encoder.encode(frame, pts, keyframe)?,
-            Encoder::Mf(encoder) => encoder.encode(frame, pts, keyframe)?,
+            Encoder::Nvenc(encoder) => encoder.encode(&frame, pts, keyframe)?,
+            Encoder::Mf(encoder) => encoder.encode(&frame, pts, keyframe)?,
         };
         if let Some(before) = before
             && self.stats()?.accepted > before
@@ -737,10 +777,11 @@ impl VideoEncoder for WindowsVideoEncoder {
         Ok(packet)
     }
     fn dropped(&self) -> u64 {
-        match &self.encoder {
-            Encoder::Nvenc(encoder) => encoder.dropped(),
-            Encoder::Mf(encoder) => encoder.dropped(),
-        }
+        self.scale_drops
+            + match &self.encoder {
+                Encoder::Nvenc(encoder) => encoder.dropped(),
+                Encoder::Mf(encoder) => encoder.dropped(),
+            }
     }
     fn set_rate(&mut self, fps: u32, bitrate_kbps: u32) -> Result<()> {
         self.input_refused()?;

@@ -408,7 +408,7 @@ impl Completion {
         Ok(false)
     }
 
-    /// Only for final draining, never the frame loop.
+    /// Only for final draining or a private output worker, never the compositor.
     pub(crate) fn wait(&self) -> Result<()> {
         self.ready()?;
         let mut state = self.0.state.lock();
@@ -485,6 +485,14 @@ impl<F: Clone + Send + 'static> PendingFrame<F> {
 
     pub(crate) fn ready(frame: F) -> Self {
         Self { frame, done: None }
+    }
+
+    pub(crate) fn into_completed(self) -> Result<F> {
+        if let Some(done) = self.done {
+            done.wait()?;
+            done.ready()?; // A device lost during the wait cannot publish pixels.
+        }
+        Ok(self.frame)
     }
 
     pub(crate) fn then(self, send: impl FnOnce(F, Duration) + Send + 'static) {

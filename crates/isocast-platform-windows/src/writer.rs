@@ -480,6 +480,11 @@ impl VideoWriter {
         self.drain_ready()?;
         self.drain_audio()?;
         let ticks = self.ticks(pts)?;
+        // Scale once on this file's worker, not on the compositor or on
+        // each retry. A repeat reuses the already sized accepted picture.
+        let Some(frame) = self.encoder.prepare(frame, pts)? else {
+            return Ok(false);
+        };
         if (frame.width(), frame.height()) != (self.spec.video.width, self.spec.video.height) {
             bail!(
                 "video.size: frame is {}x{}, file is {}x{}",
@@ -518,7 +523,7 @@ impl VideoWriter {
             .unwrap_or(now + wait);
         loop {
             if self.pending.len() < MAX_PENDING
-                && self.encoder.try_encode(frame, pts, self.accepted == 0)?
+                && self.encoder.try_encode(&frame, pts, self.accepted == 0)?
             {
                 break;
             }
@@ -549,7 +554,7 @@ impl VideoWriter {
         self.pending.push_back(Pending { pts, repeated });
         self.accepted += 1;
         self.accepted_originals += u64::from(!repeated);
-        self.last_video = Some((frame.clone(), pts));
+        self.last_video = Some((frame.into_owned(), pts));
         Ok(true)
     }
 

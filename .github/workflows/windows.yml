@@ -1400,6 +1400,11 @@ jobs:
         timeout-minutes: 9
         run: python scripts/e2e.py --hosted --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_preview_recording --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-preview" --keep --report windows-preview.json
 
+      - name: Check per-output GPU scaling, dimensions and decoded colors
+        if: env.MODE == 'full'
+        timeout-minutes: 4
+        run: python scripts/e2e.py --daemon target/release/isocastd.exe --only win_output_scale --windows-profile 180p30 --codec h264 --work "$RUNNER_TEMP/windows-scale" --report windows-scale.json
+
       # A page through isocast-browser.exe (WebView2 on this runner's
       # console session, software rendering): frame codes advance in the ISO
       # and program, alpha blends over the layer beneath, the page's tone is
