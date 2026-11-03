@@ -1,8 +1,7 @@
 //! GPU-only BGRA8/RGB10 conversion or qualified NV12 copy/expansion to
 //! limited-range Rec.709 NV12/P010 for the MF worker.
-//! Ten-bit output is SDR, not HDR. Only an explicitly selected software
-//! encoder may call `readback`; its BGRA8 path copies RGB and converts on
-//! the CPU so it does not require a hardware video processor.
+//! Ten-bit output is SDR, not HDR. The software encoder and the independent
+//! camera publisher can read back RGB without a hardware video processor.
 
 use std::mem::ManuallyDrop;
 use std::time::{Duration, Instant};
@@ -364,7 +363,81 @@ impl Converter {
 
     pub(crate) fn readback(&mut self, target: &ID3D11Texture2D) -> Result<Vec<u8>> {
         self.idle()?;
-        let mut desc = self.texture_desc(target, self.output_format, true)?;
+        let desc = self.texture_desc(target, self.output_format, true)?;
+        let staging = self.staging(desc)?;
+        let bytes = self.copy_pixels(target, None, &staging, (self.width, self.height))?;
+        if self.output_format == DXGI_FORMAT_B8G8R8A8_UNORM {
+            Ok(bgra_to_nv12(
+                &bytes,
+                self.width as usize,
+                self.height as usize,
+            ))
+        } else {
+            Ok(bytes)
+        }
+    }
+
+    /// The shared worker hands us completed, composited BGRA.
+    /// Never enqueue a wait for a late frame on the recorder's GPU context.
+    /// The staging texture belongs only to the camera thread and is reused.
+    pub(crate) fn camera_nv12(
+        &mut self,
+        frame: &Frame,
+        staging: &mut Option<((u32, u32), ID3D11Texture2D)>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.idle()?;
+        let size = (frame.width(), frame.height());
+        if !self.device.owns(frame)
+            || frame.pixel_format() != PixelFormat::Bgra8
+            || u64::from(size.0) * u64::from(size.1) > 3840 * 2160
+        {
+            bail!("virtual_camera: expected a same-device BGRA canvas of at most 3840×2160 pixels");
+        }
+        if !frame.wait_ready(Duration::ZERO)? {
+            return Ok(None);
+        }
+        let (_, staging) = match staging {
+            Some(pair) if pair.0 == size => pair,
+            slot => {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { frame.texture().GetDesc(&mut desc) };
+                slot.insert((size, self.staging(desc)?))
+            }
+        };
+        let bytes = self.copy_pixels(frame.texture(), Some(frame.clone()), staging, size)?;
+        let bytes = if size == (self.width, self.height) {
+            bytes
+        } else {
+            // All four channels are resampled independently (opaque BGRA).
+            // Center the fitted image on black just like the compositor.
+            let image = image::RgbaImage::from_raw(size.0, size.1, bytes)
+                .context("invalid camera BGRA length")?;
+            let scale = (f64::from(self.width) / f64::from(size.0))
+                .min(f64::from(self.height) / f64::from(size.1));
+            let w = ((f64::from(size.0) * scale).round() as u32).clamp(1, self.width);
+            let h = ((f64::from(size.1) * scale).round() as u32).clamp(1, self.height);
+            let fit = image::imageops::resize(&image, w, h, image::imageops::FilterType::Triangle);
+            if (w, h) == (self.width, self.height) {
+                fit.into_raw()
+            } else {
+                let mut canvas = image::RgbaImage::new(self.width, self.height);
+                image::imageops::replace(
+                    &mut canvas,
+                    &fit,
+                    i64::from((self.width - w) / 2),
+                    i64::from((self.height - h) / 2),
+                );
+                canvas.into_raw()
+            }
+        };
+        Ok(Some(bgra_to_nv12(
+            &bytes,
+            self.width as usize,
+            self.height as usize,
+        )))
+    }
+
+    fn staging(&self, mut desc: D3D11_TEXTURE2D_DESC) -> Result<ID3D11Texture2D> {
         desc.Usage = D3D11_USAGE_STAGING;
         desc.BindFlags = 0;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
@@ -378,22 +451,31 @@ impl Converter {
             },
             "create YUV readback texture",
         )?;
-        let staging = staging.context("D3D11 returned no readback texture")?;
+        staging.context("D3D11 returned no readback texture")
+    }
+
+    fn copy_pixels(
+        &mut self,
+        target: &ID3D11Texture2D,
+        frame: Option<Frame>,
+        staging: &ID3D11Texture2D,
+        (width, height): (u32, u32),
+    ) -> Result<Vec<u8>> {
         let software_rgb = self.output_format == DXGI_FORMAT_B8G8R8A8_UNORM;
-        let row_bytes = self.width as usize
+        let row_bytes = width as usize
             * match self.output_format {
                 DXGI_FORMAT_B8G8R8A8_UNORM => 4,
                 DXGI_FORMAT_P010 => 2,
                 _ => 1,
             };
         let rows = if software_rgb {
-            self.height
+            height
         } else {
-            self.height + self.height / 2
+            height + height / 2
         } as usize;
         let mut bytes = vec![0; row_bytes * rows];
-        self.retain(None, target, &staging)?;
-        unsafe { self.context.CopyResource(&staging, target) };
+        self.retain(frame, target, staging)?;
+        unsafe { self.context.CopyResource(staging, target) };
         self.finish()?;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         // A completed GPU fence does not guarantee that WDDM has finished
@@ -404,7 +486,7 @@ impl Converter {
         loop {
             let result = unsafe {
                 self.context.Map(
-                    &staging,
+                    staging,
                     0,
                     D3D11_MAP_READ,
                     D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32,
@@ -441,19 +523,11 @@ impl Converter {
                 };
             }
         }
-        unsafe { self.context.Unmap(&staging, 0) };
+        unsafe { self.context.Unmap(staging, 0) };
         if !valid {
             bail!("D3D11 YUV readback returned a null pointer or invalid row pitch");
         }
-        if software_rgb {
-            Ok(bgra_to_nv12(
-                &bytes,
-                self.width as usize,
-                self.height as usize,
-            ))
-        } else {
-            Ok(bytes)
-        }
+        Ok(bytes)
     }
 
     fn idle(&self) -> Result<()> {

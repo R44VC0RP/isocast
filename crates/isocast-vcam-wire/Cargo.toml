@@ -1,0 +1,7 @@
+[package]
+name = "isocast-vcam-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fixed-width NV12 frame protocol used by the Windows camera pipe."
