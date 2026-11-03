@@ -147,19 +147,24 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 **On Linux (new in 0.0.10):**
 
-- Screens through your desktop's screen-sharing picker, cameras
-  (including NV12-only ones), microphones, desktop audio, media files and
-  web pages (Ubuntu 24.04 only), recorded to the program and ISO files.
+- Screens and single windows, chosen in your desktop's screen-sharing
+  dialog (or with `isocast screen pick`), cameras (including NV12-only
+  ones), microphones, desktop audio, media files and web pages (Ubuntu
+  24.04 only), recorded to the program and ISO files.
+- NVENC on NVIDIA GPUs: 1080p60 recording without dropped frames on a
+  tested Tesla T4.
 - Previews through shared memory when the app and engine run on the same
   computer.
 - The virtual camera through a v4l2loopback device you set up; Isocast
   never loads the module or asks for root.
-- OBS import from `~/.config/obs-studio`, a dark title bar and Linux key
-  names.
+- OBS import from `~/.config/obs-studio`, a dark title bar, the app's own
+  menu bar and icon, Linux key names and your desktop's file chooser for
+  Open and Export.
 - `isocast doctor` checks capture, the codec, camera access and real-time
   audio scheduling.
-- Updates are manual (see [Download](#download)), and window sources
-  aren't available yet.
+- Updates are manual (see [Download](#download)). On Hyprland, a closed
+  window's ISO keeps its last picture until the take stops; window capture
+  on GNOME and KDE isn't tested yet.
 
 **Coming next** (not in a release yet; see [coming soon](docs/coming.md)):
 
@@ -167,7 +172,6 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   program, and a choice of where its sound plays.
 - **Windows:** the next release (0.0.11), once its installer is
   code-signed.
-- **Window sources on Linux.**
 - Later ideas: running real OBS plugins in a
   helper process, Elgato Stream Deck's own protocol, shader filters and
   WebAssembly sources.
@@ -286,8 +290,10 @@ need them. The tarballs are Ubuntu 24.04 builds with a per-user
 to get Cisco's OpenH264 for H.264 encoding and live previews. It
 downloads and checks the codec as your user, never as root. You can skip
 it and run `isocast-openh264-install` later (`--remove` removes it).
-OpenH264 Video Codec provided by Cisco Systems, Inc. When screen capture
-starts, your desktop asks which screen to share; if no picker opens,
+OpenH264 Video Codec provided by Cisco Systems, Inc. When you add a
+screen or window, your desktop asks which one to share (a source waiting
+for a choice shows in **Choose screens and windows**, or run `isocast
+screen pick`); if no picker opens,
 install `xdg-desktop-portal` and your desktop's backend
 (`xdg-desktop-portal-gnome` or `xdg-desktop-portal-kde`). `isocast doctor`
 reports capture and codec problems.
@@ -305,7 +311,7 @@ anything you can't redo.
 1. **Open Isocast and allow access.** On a Mac, the permissions step asks for
    screen recording, camera and microphone access; macOS may ask you to
    reopen Isocast after granting screen recording. On Linux, your desktop
-   asks which screen to share when capture starts.
+   asks which screen or window to share when you add one.
 2. **Pick a start.** *Start with this Mac* (*this computer* on Linux) builds ready-made scenes from
    your screen, camera and microphone. *Import from OBS* brings an OBS
    scene collection over.
