@@ -56,6 +56,7 @@ The API methods are `bug_report`, `report_file` and `logs`; MCP exposes
 | `plugins/` | Bounded, redacted current/previous process-plugin output |
 | `metrics.jsonl` | Extracted one-second metric records (also present in logs) |
 | `macos-crashes/` | Up to ten user/system macOS DiagnosticReports whose names identify Isocast |
+| `linux-crashes/` | Up to ten of this user's systemd-coredump records for Isocast executables, as `coredumpctl info` prints them; user, group, host, machine, boot, storage and session-unit lines are left out |
 | `manifests/` | Up to ten recent session manifests in current/recent recording folders; no media |
 | `REDACTION.json` | Redaction categories/counts, privacy policy and files omitted by bounds |
 
@@ -160,6 +161,10 @@ Background daemons' native `.ips` reports can land in
 `/Library/Logs/DiagnosticReports`, not the user's `~/Library/Logs/DiagnosticReports`;
 both locations are collected when readable. macOS can write these tens of
 seconds after the crash; generating another report later includes them.
+On Linux, native crashes of `isocastd`, `isocast`, `isocast-app`, `isocast-ui`
+and `isocast-browser` are read with `coredumpctl` (systemd 248 or newer) when it
+is installed; the backtrace needs the binary's symbols. Like macOS reports,
+they are collected only while the engine is reachable.
 
 For an isolated fault-injection run, set `ISOCAST_DEBUG_PANIC_AFTER=5` on the
 daemon. Release builds honor it **only with an explicit `ISOCAST_SOCKET`**.

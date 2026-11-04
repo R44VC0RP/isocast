@@ -587,7 +587,7 @@ fn collect_report(
     }
     contents.insert("ISSUE.md".into(), issue.clone());
     contents.insert("metrics.jsonl".into(), metrics);
-    let redaction = json!({"policy":"credential fields/text and all HTTP/RTMP capability paths removed; serial fields omitted; home abbreviated; no environment dump or media. Text-source content and data-store values are retained unless credential-like. Default device names may contain owner names; strict mode pseudonymizes known device names/IDs/models and paths/titles with a fresh per-report HMAC key, never exported. Report credentials are seeded independently from configured Keychain accounts.", "hash_paths":params.hash_paths,"pseudonyms":"HMAC-SHA256 with independent random per-report key","counts":redactor.counts,"omitted":omitted});
+    let redaction = json!({"policy":"credential fields/text and all HTTP/RTMP capability paths removed; serial fields omitted; home abbreviated; no environment dump or media. Text-source content and data-store values are retained unless credential-like. Default device names may contain owner names; strict mode pseudonymizes known device names/IDs/models and paths/titles with a fresh per-report HMAC key, never exported. Report credentials are seeded independently from configured Keychain accounts. Linux core dump records omit user, group, host, machine, boot, storage and session-unit lines and the user id in their message.", "hash_paths":params.hash_paths,"pseudonyms":"HMAC-SHA256 with independent random per-report key","counts":redactor.counts,"omitted":omitted});
     contents.insert(
         "REDACTION.json".into(),
         serde_json::to_string_pretty(&redaction).unwrap(),
@@ -702,6 +702,17 @@ const CRASH_PREFIXES: [&str; 6] = [
     "isocastd_",
 ];
 
+/// Isocast's executables on Linux. Core dumps match these names exactly, so
+/// cargo test and contract binaries named `isocast_*` stay out.
+#[cfg(target_os = "linux")]
+const LINUX_EXECUTABLES: [&str; 5] = [
+    "isocastd",
+    "isocast",
+    "isocast-app",
+    "isocast-ui",
+    "isocast-browser",
+];
+
 /// `coredumpctl info` fields that identify the person or machine (user and
 /// host names, machine and boot ids, session units), left out of reports.
 #[cfg(target_os = "linux")]
@@ -746,22 +757,24 @@ fn collect_coredumps(
     };
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = u64::from(unsafe { libc::getuid() });
-    let mut ours = entries
-        .iter()
-        .filter_map(|entry| {
-            let exe = Path::new(entry["exe"].as_str()?).file_name()?;
-            let exe = exe.to_string_lossy().to_lowercase();
-            let name = format!("{exe}-");
-            (entry["uid"].as_u64() == Some(uid)
-                && CRASH_PREFIXES.iter().any(|p| name.starts_with(p)))
-            .then_some((entry["time"].as_u64()?, entry["pid"].as_u64()?, exe))
-        })
-        .collect::<Vec<_>>();
-    ours.sort();
-    for (time, pid, exe) in ours.into_iter().rev().take(10) {
+    for (time, pid, exe, path) in coredump_entries(&entries, uid) {
         let name = format!("linux-crashes/{time}-{pid}-{exe}.txt");
         let current: usize = contents.values().map(String::len).sum();
-        let Some(info) = run(&["info", "--no-pager", &pid.to_string()]) else {
+        // A bare PID matches every record with that PID, from any boot,
+        // program or (for a privileged reader) user. `time` is the journal
+        // entry's time in microseconds; the one-second window, the UID and
+        // the path select this record, and -1 keeps a single one.
+        let since = time / 1_000_000;
+        let Some(info) = run(&[
+            "info",
+            "--no-pager",
+            "-1",
+            &format!("--since=@{since}"),
+            &format!("--until=@{}", since + 1),
+            &format!("COREDUMP_PID={pid}"),
+            &format!("COREDUMP_UID={uid}"),
+            &format!("COREDUMP_EXE={path}"),
+        ]) else {
             omitted.push(format!("{name}: coredumpctl info failed"));
             continue;
         };
@@ -773,7 +786,28 @@ fn collect_coredumps(
     }
 }
 
-/// `coredumpctl info` output without [`COREDUMP_PRIVATE`] lines, redacted.
+/// The newest ten `coredumpctl list --json=short` entries of `uid` for
+/// [`LINUX_EXECUTABLES`], newest first: (time, pid, executable name, path).
+#[cfg(target_os = "linux")]
+fn coredump_entries(entries: &[Value], uid: u64) -> Vec<(u64, u64, &str, &str)> {
+    let mut ours =
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let path = entry["exe"].as_str()?;
+                let exe = Path::new(path).file_name()?.to_str()?;
+                (entry["uid"].as_u64() == Some(uid) && LINUX_EXECUTABLES.contains(&exe))
+                    .then_some((entry["time"].as_u64()?, entry["pid"].as_u64()?, exe, path))
+            })
+            .collect::<Vec<_>>();
+    ours.sort();
+    ours.reverse();
+    ours.truncate(10);
+    ours
+}
+
+/// `coredumpctl info` output without [`COREDUMP_PRIVATE`] lines, the UID in
+/// `Message:` or the report-relative age in `Timestamp:`, redacted.
 #[cfg(target_os = "linux")]
 fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
     info.lines()
@@ -781,7 +815,27 @@ fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
             let line = line.trim_start();
             !COREDUMP_PRIVATE.iter().any(|key| line.starts_with(key))
         })
-        .map(|line| redactor.text(line))
+        .map(|line| {
+            let mut line = line.to_owned();
+            let key = line.trim_start();
+            if key.starts_with("Timestamp:")
+                && line.ends_with(" ago)")
+                && let Some(at) = line.rfind(" (")
+            {
+                line.truncate(at);
+            } else if key.starts_with("Message:")
+                && let Some(at) = line.find(" of user ")
+            {
+                let digits = line[at + 9..]
+                    .bytes()
+                    .take_while(u8::is_ascii_digit)
+                    .count();
+                if digits > 0 {
+                    line.replace_range(at..at + 9 + digits, "");
+                }
+            }
+            redactor.text(&line)
+        })
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
@@ -929,12 +983,39 @@ mod linux_tests {
     use super::*;
 
     #[test]
+    fn coredump_entries_take_only_this_users_isocast_executables() {
+        let entries = serde_json::json!([
+            {"time":1,"pid":10,"uid":1000,"exe":"/usr/bin/isocastd"},
+            {"time":2,"pid":11,"uid":1000,"exe":"/home/u/isocast/target/debug/isocast-platform-contracts"},
+            {"time":3,"pid":12,"uid":1000,"exe":"/home/u/isocast/target/debug/deps/isocast_diagnostics-0f1e2d"},
+            {"time":4,"pid":13,"uid":963,"exe":"/usr/bin/isocastd"},
+            {"time":5,"pid":14,"uid":1000,"exe":"/usr/bin/python3"},
+            {"time":6,"pid":15,"uid":1000,"exe":"/opt/isocast/isocast-ui"}
+        ]);
+        assert_eq!(
+            coredump_entries(entries.as_array().unwrap(), 1000),
+            vec![
+                (6, 15, "isocast-ui", "/opt/isocast/isocast-ui"),
+                (1, 10, "isocastd", "/usr/bin/isocastd"),
+            ]
+        );
+        let many = (0..12)
+            .map(|i| serde_json::json!({"time":i,"pid":i,"uid":1000,"exe":"/usr/bin/isocastd"}))
+            .collect::<Vec<_>>();
+        let newest = coredump_entries(&many, 1000);
+        assert_eq!(newest.len(), 10);
+        assert_eq!((newest[0].0, newest[9].0), (11, 2));
+    }
+
+    #[test]
     fn coredump_text_leaves_out_identifying_fields() {
-        let info = "           PID: 4242 (isocastd)\n           UID: 1000 (mat)\n      Hostname: tanner\n    Machine ID: 0123abcd\n       Boot ID: 4567ef01\n        Signal: 6 (ABRT)\n     Executable: /usr/bin/isocastd\n Control Group: /user.slice/user-1000.slice\n          Unit: user@1000.service\n     User Unit: app.slice\n         Slice: user-1000.slice\n       Storage: /var/lib/systemd/coredump/core.isocastd.zst (present)\n";
+        let info = "           PID: 4242 (isocastd)\n           UID: 1000 (mat)\n      Hostname: tanner\n    Machine ID: 0123abcd\n       Boot ID: 4567ef01\n        Signal: 6 (ABRT)\n     Executable: /usr/bin/isocastd\n Control Group: /user.slice/user-1000.slice\n          Unit: user@1000.service\n     User Unit: app.slice\n         Slice: user-1000.slice\n       Storage: /var/lib/systemd/coredump/core.isocastd.zst (present)\n     Timestamp: Wed 2026-10-28 20:22:16 CET (6 days ago)\n       Message: Process 4242 (isocastd) of user 1000 dumped core.\n";
         let text = coredump_text(info, &mut Redactor::default());
         assert!(text.contains("PID: 4242 (isocastd)"));
         assert!(text.contains("Signal: 6 (ABRT)"));
         assert!(text.contains("Executable: /usr/bin/isocastd"));
+        assert!(text.contains("Timestamp: Wed 2026-10-28 20:22:16 CET\n"));
+        assert!(text.contains("Message: Process 4242 (isocastd) dumped core."));
         for private in [
             "UID:",
             "Hostname:",
@@ -945,6 +1026,8 @@ mod linux_tests {
             "Unit:",
             "Slice:",
             "Storage:",
+            "of user",
+            "ago)",
         ] {
             assert!(!text.contains(private), "{private} left in {text}");
         }
