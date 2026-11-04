@@ -37,6 +37,42 @@ const MAX_BYTES: u64 = 512 * 1024 * 1024;
 static BYTES: AtomicU64 = AtomicU64::new(0);
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(feature = "wgpu")]
+static ADAPTER: Mutex<Option<(u32, i32)>> = Mutex::new(None);
+
+#[cfg(feature = "wgpu")]
+fn preferred_adapter(instance: &wgpu::Instance) -> Result<wgpu::Adapter> {
+    block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .context("no compatible DX12 adapter found")
+}
+
+/// Native D3D11 needs the adapter identity, not the renderer's compiler or
+/// device. Once pinned (in particular, during or after any warm-up retry),
+/// do not even enumerate DX12 adapters: wgpu's probe owns a device reference.
+#[cfg(feature = "wgpu")]
+pub fn capture_adapter_luid() -> Result<(u32, i32)> {
+    let _span = isocast_diagnostics::gpu_startup_span("adapter.capture");
+    let mut selected = ADAPTER.lock().unwrap();
+    if let Some(luid) = *selected {
+        return Ok(luid);
+    }
+    // First native user: use the same compatibility and power preference as
+    // the renderer. Drop the probe *before* unlocking/publishing the LUID.
+    let luid = {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::DX12;
+        let _system_fxc = super::shader_compiler::load_system_fxc()?;
+        desc.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::Fxc;
+        let instance = wgpu::Instance::new(desc);
+        dx12_adapter_luid(&preferred_adapter(&instance)?)?
+    };
+    *selected = Some(luid);
+    Ok(luid)
+}
+
 /// One adapter identity for every native device in this process. The daemon
 /// chooses among wgpu-compatible DX12 adapters, not DXGI's unfiltered first
 /// adapter. Clients supply the daemon's LUID before creating their renderer.
@@ -47,8 +83,28 @@ pub fn dx12_adapter(
     instance: &wgpu::Instance,
     requested: Option<(u32, i32)>,
 ) -> Result<wgpu::Adapter> {
-    static ADAPTER: Mutex<Option<(u32, i32)>> = Mutex::new(None);
+    let _span = isocast_diagnostics::gpu_startup_span("adapter.render");
     let mut selected = ADAPTER.lock().unwrap();
+    select_adapter(&mut selected, instance, requested)
+}
+
+/// Reserve the selection before initializing the renderer instance. Otherwise
+/// a source starting alongside the renderer can win the pin while FXC/DXGI
+/// initializes, forcing two expensive DX12 compatibility probes in series.
+#[cfg(feature = "wgpu")]
+pub fn engine_adapter() -> Result<(wgpu::Adapter, wgpu::Dx12Compiler)> {
+    let _span = isocast_diagnostics::gpu_startup_span("adapter.render");
+    let mut selected = ADAPTER.lock().unwrap();
+    let (instance, compiler) = super::shader_compiler::instance_and_compiler()?;
+    Ok((select_adapter(&mut selected, &instance, None)?, compiler))
+}
+
+#[cfg(feature = "wgpu")]
+fn select_adapter(
+    selected: &mut Option<(u32, i32)>,
+    instance: &wgpu::Instance,
+    requested: Option<(u32, i32)>,
+) -> Result<wgpu::Adapter> {
     if let (Some(current), Some(requested)) = (*selected, requested) {
         ensure!(
             current == requested,
@@ -60,11 +116,7 @@ pub fn dx12_adapter(
             .into_iter()
             .find(|adapter| dx12_adapter_luid(adapter).ok() == Some(luid))
             .with_context(|| format!("DX12 adapter {luid:?} is unavailable; restart Isocast"))?,
-        None => block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .context("no compatible DX12 adapter found")?,
+        None => preferred_adapter(instance)?,
     };
     *selected = Some(dx12_adapter_luid(&adapter)?);
     Ok(adapter)

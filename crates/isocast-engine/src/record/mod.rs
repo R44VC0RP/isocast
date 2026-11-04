@@ -39,6 +39,8 @@ mod opus_stream;
 mod pause;
 pub mod pressure;
 mod program;
+#[cfg(windows)]
+pub(crate) use program::CanvasPasses;
 pub mod recovery;
 mod scene_feeds;
 mod scenes;

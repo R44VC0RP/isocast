@@ -866,7 +866,39 @@ impl Renderer {
         }
     }
 
+    /// Share the device-local PSOs and their layouts. In particular, never
+    /// share a draw-record buffer, source texture binding cache or target view
+    /// between canvases submitting on different threads.
+    #[cfg(windows)]
+    pub(crate) fn with_fresh_draw_state(&self) -> Self {
+        Self {
+            format: self.format,
+            pipelines: self.pipelines.clone(),
+            records_layout: self.records_layout.clone(),
+            planes_layout: self.planes_layout.clone(),
+            sampler: self.sampler.clone(),
+            nearest: self.nearest.clone(),
+            blank: self.blank.clone(),
+            immediate: Mutex::default(),
+        }
+    }
+
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> Self {
+        #[cfg(windows)]
+        let _build = gpu.pipeline_build_guard();
+        #[cfg(windows)]
+        let _span =
+            isocast_diagnostics::gpu_startup_span(if format == wgpu::TextureFormat::Bgra8Unorm {
+                "pipelines.picture.bgra"
+            } else {
+                "pipelines.picture.rgba"
+            });
+        #[cfg(windows)]
+        if format == wgpu::TextureFormat::Bgra8Unorm
+            && let Some(renderer) = gpu.warmed_bgra.get()
+        {
+            return renderer.with_fresh_draw_state();
+        }
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("draw"),
@@ -979,9 +1011,30 @@ impl Renderer {
             })
         };
         let blank = planes_group(gpu, &planes_layout, &blank, &blank);
+        let row = |mode| BLENDS.map(|blend| pipeline(mode, blend));
+        #[cfg(windows)]
+        let pipelines = if gpu.parallel_warmup() {
+            // Group by shader entry point, not by blend: the seven PSOs in a
+            // row reuse the same compiler output in wgpu's device shader cache.
+            std::thread::scope(|s| {
+                let fill = s.spawn(|| row(Mode::Fill));
+                let shadow = s.spawn(|| row(Mode::Shadow));
+                [
+                    row(Mode::Picture),
+                    fill.join().unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                    shadow
+                        .join()
+                        .unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                ]
+            })
+        } else {
+            Mode::ALL.map(row)
+        };
+        #[cfg(not(windows))]
+        let pipelines = Mode::ALL.map(row);
         Self {
             format,
-            pipelines: Mode::ALL.map(|mode| BLENDS.map(|blend| pipeline(mode, blend))),
+            pipelines,
             records_layout,
             planes_layout,
             sampler,

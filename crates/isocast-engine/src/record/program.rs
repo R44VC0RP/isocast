@@ -209,9 +209,57 @@ struct Playing {
     since: Time,
 }
 
+/// Owned by one canvas, never shared between canvases. Prepare these shader
+/// families concurrently with its picture pipelines only for hardware FXC.
+/// Join on both success and loss before publishing a GPU.
+#[cfg(windows)]
+pub(crate) struct CanvasPasses {
+    filters: Filters,
+    transitions: Transitions,
+}
+
+#[cfg(windows)]
+impl CanvasPasses {
+    pub(crate) fn alongside<T>(gpu: &Gpu, picture: impl FnOnce() -> T) -> (T, Self) {
+        let format = wgpu::TextureFormat::Bgra8Unorm;
+        if !gpu.concurrent_pipeline_builds() {
+            let result = picture();
+            let filters = Filters::new(gpu, format, true);
+            let transitions = Transitions::new(gpu, format);
+            return (
+                result,
+                Self {
+                    filters,
+                    transitions,
+                },
+            );
+        }
+        std::thread::scope(|scope| {
+            let filters = scope.spawn(move || Filters::new(gpu, format, true));
+            let transitions = scope.spawn(move || Transitions::new(gpu, format));
+            let result = picture();
+            (
+                result,
+                Self {
+                    filters: filters
+                        .join()
+                        .unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                    transitions: transitions
+                        .join()
+                        .unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                },
+            )
+        })
+    }
+}
+
 impl<P: Platform> Compositor<P> {
     pub(super) fn new(platform: &P, canvas: (u32, u32)) -> Result<Self> {
-        Self::with_gpu(platform, canvas, Gpu::for_platform(platform)?)
+        #[cfg(windows)]
+        let gpu = Gpu::for_compositor(platform)?;
+        #[cfg(not(windows))]
+        let gpu = Gpu::for_platform(platform)?;
+        Self::with_gpu(platform, canvas, gpu)
     }
 
     /// A compositor drawing on `gpu`, shared with others (the scene feeds'
@@ -230,21 +278,20 @@ impl<P: Platform> Compositor<P> {
         // Overlap that startup work, but join it before returning: a recording
         // must never pay for an unprepared filter/transition on a frame tick.
         #[cfg(windows)]
-        let (renderer, mut filters, transitions) = std::thread::scope(|scope| {
-            let filters = scope.spawn(|| Filters::new(&gpu, wgpu::TextureFormat::Bgra8Unorm, true));
-            let transitions =
-                scope.spawn(|| Transitions::new(&gpu, wgpu::TextureFormat::Bgra8Unorm));
-            let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Bgra8Unorm);
-            (
-                renderer,
-                filters
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                transitions
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-            )
-        });
+        let (
+            renderer,
+            CanvasPasses {
+                mut filters,
+                transitions,
+            },
+        ) = {
+            let picture = || Renderer::new(&gpu, wgpu::TextureFormat::Bgra8Unorm);
+            let prepared = gpu.first_canvas.lock().take();
+            match prepared {
+                Some(passes) => (picture(), passes),
+                None => CanvasPasses::alongside(&gpu, picture),
+            }
+        };
         #[cfg(not(windows))]
         let (renderer, mut filters, transitions) = {
             let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Bgra8Unorm);
@@ -253,6 +300,8 @@ impl<P: Platform> Compositor<P> {
             (renderer, filters, transitions)
         };
         filters.use_masks(true);
+        #[cfg(windows)]
+        let _span = isocast_diagnostics::gpu_startup_span("canvas.outputs");
         let importer = platform.frame_importer(&gpu)?;
         let (pool, to_ycbcr) = match platform.encoder_frame_format() {
             EncoderFrameFormat::Ycbcr => (

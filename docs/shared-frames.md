@@ -249,6 +249,26 @@ Windows login session and use the exact adapter LUID; mismatches fail
 without CPU or cross-adapter fallback. Existing D3D11 capture imports stay
 upstream of the daemon's D3D12 render pass.
 
+The Windows compositor starts with system FXC and draws a test picture before
+publishing the device. A dev build without the packaged `dxcompiler.dll` and
+`dxil.dll` beside its executable can use FXC but has no DXC fallback; Isocast
+does not search the working directory or `PATH` for them.
+
+Device loss during that first draw triggers one DXC retry on the same adapter.
+This includes a transient Windows driver timeout/reset (TDR) on a real GPU. If
+the retry succeeds, that process stays on DXC until restart, even if the driver
+has recovered. It does not switch compilers during a recording. `isocast doctor`
+shows which compiler the engine selected and why.
+
+On cold program startup with hardware FXC, the first canvas prepares its filters
+and transitions alongside the picture draw and takes those pipelines on success.
+WARP/CPU adapters and the DXC fallback qualify the picture alone, then build
+the remaining pipelines serially. Other engine clients on that device also
+serialize their builds: they share the device's compiler. To time
+this path, start an isolated daemon with `ISOCAST_GPU_STARTUP_TIMINGS=1`. Its
+`gpu.startup` log entries have `start_us` and `elapsed_us` on one monotonic
+timeline; overlapping spans must not be added together.
+
 Publication follows the producer's GPU completion. Before opening a stream,
 wgpu clients call `isocast_client::shared::register_gpu(&device, &queue)`
 with the renderer's actual DX12 queue. Keep each `SharedFrame` alive until
