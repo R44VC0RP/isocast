@@ -4,7 +4,7 @@
 //
 // Settings is Paper's Settings sheet: the macOS sidebar list the sheet's
 // full height (Recording: Output, Video, Audio; Broadcast: Stream;
-// System: General, Hotkeys, Advanced), and beside it the page's header
+// System: General, Hotkeys, Advanced, Remote, Diagnostics), and beside it the page's header
 // (its glyph, its name, one line of what it is for), the page's grouped
 // rows, the summary of what the settings make, and Cancel, Apply, OK.
 
@@ -17,6 +17,7 @@ import { SettingsArea } from "state.slint";
 import { SetPage } from "parts.slint";
 import { AdvancedPage, AudioPage, GeneralPage, HotkeysPage, OutputPage, StreamPage, VideoPage } from "pages.slint";
 import { BugReportDialog } from "report.slint";
+import { DiagnosticsPage } from "diagnostics.slint";
 import { RemotePage } from "../remote/page.slint";
 
 export component SettingsDialogs inherits Rectangle {
@@ -72,7 +73,7 @@ export component SettingsDialogs inherits Rectangle {
                 }
                 pages := ScrollArea {
                     vertical-stretch: 1;
-                    if !SettingsArea.has-draft && SettingsArea.tab != "remote": SetPage {
+                    if !SettingsArea.has-draft && SettingsArea.tab != "remote" && SettingsArea.tab != "diagnostics": SetPage {
                         GroupHint {
                             text: "Set up your first scene to change its settings.";
                         }
@@ -86,6 +87,8 @@ export component SettingsDialogs inherits Rectangle {
                     if SettingsArea.has-draft && SettingsArea.tab == "advanced": AdvancedPage { }
                     // Remote settings apply at once and don't need a setup.
                     if SettingsArea.tab == "remote": RemotePage { }
+                    // Doctor's checks need no setup either.
+                    if SettingsArea.tab == "diagnostics": DiagnosticsPage { }
                 }
                 if SettingsArea.has-draft: SheetSummary {
                     // The rate is the program file's (none when only ISO

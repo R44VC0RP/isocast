@@ -44,6 +44,9 @@ export struct ItemRow {
     // Chosen with ⌘ or Shift beside the selected one (Group Selected
     // Items).
     marked: bool,
+    // A known limitation of the running source, from status or doctor
+    // (its system-audio mode, a fallback encoder): the badge's tooltip.
+    warning: string,
 }
 
 // A filter in the Filters dialog's lists.

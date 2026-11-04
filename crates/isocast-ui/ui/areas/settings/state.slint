@@ -89,6 +89,24 @@ export struct ReportFileRow {
     size: string,
 }
 
+// Diagnostics: one of doctor's checks, as a row: its title, status
+// ("ok", "warning", "problem"), what it found in one plain line, what to
+// do ("" for nothing) and the engine's own words behind Details ("" when
+// the plain line says it all).
+export struct DiagRow {
+    title: string,
+    status: string,
+    summary: string,
+    fix: string,
+    raw: string,
+}
+
+// Diagnostics: a group of checks (Capture, Encoding, Audio, Disk, Engine).
+export struct DiagGroup {
+    title: string,
+    rows: [DiagRow],
+}
+
 // First run: one choice of a device column.
 export struct DeviceChoice {
     value: string,
@@ -161,6 +179,22 @@ export global SettingsArea {
     in-out property <bool> updates-available;
     in-out property <bool> automatic-updates-available;
     in-out property <bool> auto-updates;
+
+    // ---- Diagnostics (src/areas/diagnostics.rs): doctor's checks by
+    // group, a one-line summary ("1 problem, 2 warnings · Apple M2 · …"),
+    // whether it is running, why it couldn't, and whether Copy worked.
+    in property <[DiagGroup]> diag-groups;
+    in property <string> diag-summary;
+    in property <bool> diag-busy;
+    in property <string> diag-error;
+    in property <bool> diag-copied;
+    callback diag-refresh();
+    callback diag-copy();
+    callback diag-report();
+    // The encoder recording uses ("NVIDIA NVENC (hardware)") and why it
+    // isn't the first choice, for Recording's Program group ("" unknown).
+    in property <string> encoder-name;
+    in property <string> encoder-note;
 
     // ---- Stream
     // Which canvas's streams the page shows (#96): "main" ([stream]) or

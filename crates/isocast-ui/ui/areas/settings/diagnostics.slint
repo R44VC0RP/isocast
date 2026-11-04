@@ -1,0 +1,154 @@
+// Settings → Diagnostics (src/areas/diagnostics.rs): what the engine's
+// doctor checked, grouped as Capture, Encoding, Audio, Disk and Engine.
+// Each row has its status glyph (a green check, an orange or red warning),
+// the check's name, one plain line of what it found and, for a warning or
+// problem, what to do; the engine's own words (decoder lists, D-Bus
+// errors, commands) wait behind the row's Details, folded. Above the
+// groups: a one-line summary with Refresh, Copy (the report as `isocast
+// doctor` prints it) and Report a Bug.
+
+import { Theme } from "../../theme.slint";
+import { Icon, Icons } from "../../icons.slint";
+import { Button, Callout, CalloutKind, ControlSize, GroupHint, LinkButton, RowPlace, Spinner } from "../../kit.slint";
+import { DiagRow, SettingsArea } from "state.slint";
+import { SetGroup, SetPage } from "parts.slint";
+import { Rows } from "pages.slint";
+
+// One check: a grouped row as tall as its words.
+component CheckRow inherits Rectangle {
+    in property <DiagRow> check;
+    in property <RowPlace> place: RowPlace.middle;
+    // Details unfolded (folded for each new report).
+    property <bool> expanded;
+    property <length> top-r: root.place == RowPlace.first || root.place == RowPlace.only ? Theme.r : 0px;
+    property <length> bottom-r: root.place == RowPlace.last || root.place == RowPlace.only ? Theme.r : 0px;
+    background: Theme.control;
+    border-top-left-radius: root.top-r;
+    border-top-right-radius: root.top-r;
+    border-bottom-left-radius: root.bottom-r;
+    border-bottom-right-radius: root.bottom-r;
+    accessible-role: text;
+    accessible-label: root.check.title + ": " + (root.check.status == "ok" ? "OK" : root.check.status == "warning" ? "warning" : "problem");
+    accessible-description: root.check.summary + (root.check.fix != "" ? " " + root.check.fix : "");
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        padding-top: 7px;
+        padding-bottom: 7px;
+        spacing: Theme.space-2;
+        VerticalLayout {
+            alignment: start;
+            padding-top: 1px;
+            Icon {
+                path: root.check.status == "ok" ? Icons.check : Icons.warning;
+                size: Theme.icon-sm;
+                color: root.check.status == "ok" ? Theme.onair-text : root.check.status == "warning" ? Theme.warning : Theme.danger-text;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: root.check.title;
+                color: Theme.text;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            Text {
+                text: root.check.summary;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            if root.check.fix != "": Text {
+                text: root.check.fix;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            if root.check.raw != "": HorizontalLayout {
+                alignment: start;
+                padding-top: 2px;
+                LinkButton {
+                    text: root.expanded ? "Hide Details" : "Details";
+                    clicked => { root.expanded = !root.expanded; }
+                }
+            }
+            if root.check.raw != "" && root.expanded: Text {
+                text: root.check.raw;
+                color: Theme.text-3;
+                font-family: Theme.font-mono;
+                font-weight: Theme.weight-light;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-mono;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+export component DiagnosticsPage inherits SetPage {
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        alignment: stretch;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: SettingsArea.diag-busy ? "Checking…" : SettingsArea.diag-summary;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                overflow: elide;
+            }
+        }
+        if SettingsArea.diag-busy: VerticalLayout {
+            alignment: center;
+            Spinner {
+                small: true;
+            }
+        }
+        Button {
+            text: "Refresh";
+            size: ControlSize.small;
+            enabled: !SettingsArea.diag-busy;
+            clicked => { SettingsArea.diag-refresh(); }
+        }
+        Button {
+            text: SettingsArea.diag-copied ? "Copied" : "Copy";
+            size: ControlSize.small;
+            enabled: SettingsArea.diag-groups.length > 0;
+            tooltip: "Copy every check as text, as isocast doctor prints it";
+            clicked => { SettingsArea.diag-copy(); }
+        }
+        Button {
+            text: "Report a Bug…";
+            size: ControlSize.small;
+            clicked => { SettingsArea.diag-report(); }
+        }
+    }
+    if SettingsArea.diag-error != "": Callout {
+        kind: CalloutKind.error;
+        title: "Diagnostics";
+        message: SettingsArea.diag-error;
+    }
+    if SettingsArea.diag-groups.length == 0 && !SettingsArea.diag-busy && SettingsArea.diag-error == "": GroupHint {
+        text: "Refresh to check this computer and the setup.";
+    }
+    for group in SettingsArea.diag-groups: SetGroup {
+        title: group.title;
+        for row[i] in group.rows: CheckRow {
+            check: row;
+            place: Rows.place(i, group.rows.length);
+        }
+    }
+}
