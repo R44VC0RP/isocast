@@ -282,9 +282,18 @@ sudo apt install -t bookworm-backports libpipewire-0.3-0 pipewire wireplumber
 sha256sum --ignore-missing -c SHA256SUMS && sudo apt install ./isocast-*-debian12-$(dpkg --print-architecture).deb
 ```
 
-The Debian 12 package has no browser sources; use Ubuntu 24.04 if you
-need them. The tarballs are Ubuntu 24.04 builds with a per-user
-`install.sh`; don't install one over a `.deb`.
+**Browser sources:** the Ubuntu 24.04 `.deb` includes the browser helper
+and installs its dependencies; the Debian 12 `.deb` omits it. The portable
+tarball includes the helper for systems with glibc 2.39 or newer, WebKitGTK 6
+and GTK 4's `gtk4-broadwayd`. Without that runtime only browser sources are
+unavailable; `isocast doctor` reports why.
+
+**Other glibc distributions (including Arch), or a per-user install:**
+choose `isocast-linux-<arch>.tar.gz` for `uname -m` (`x86_64` or `aarch64`).
+The portable build targets Debian 12's glibc 2.36 or newer. Install the
+runtime libraries listed in the archive's `README.txt`, then run its
+`./install.sh`; don't install it over a `.deb`. The older **0.0.10**
+tarballs were built on Ubuntu 24.04, not Debian 12.
 
 **First launch:** Isocast uses your distro’s OpenH264 for software H.264
 encoding and live previews if you haven’t installed Cisco’s binary. The wizard

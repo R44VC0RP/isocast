@@ -547,10 +547,9 @@ jobs:
           retention-days: 7
 
   linux-app:
-    # The desktop app on Linux against a local engine, and the tarball people
-    # download (scripts/package-linux.sh): x86_64 and arm64. Rendering runs on
+    # The Ubuntu desktop app against a local engine: x86_64 and arm64. Rendering runs on
     # Mesa's software Vulkan here; a snapshot proves the window draws.
-    name: Linux app + tarball (${{ matrix.arch }})
+    name: Linux app (${{ matrix.arch }})
     needs: gate
     if: needs.gate.outputs.linux_app != 'skip'
     runs-on: ${{ matrix.runner }}
@@ -677,36 +676,17 @@ jobs:
           PY
           target/release/isocast engine shutdown || true
 
-      - name: Package
+      - name: Stage Ubuntu binaries for dpkg-shlibdeps and pre-strip codec checks
         if: env.MODE == 'full'
-        run: scripts/package-linux.sh
+        run: tar -C target/release -cf ubuntu-binaries.tar isocast isocastd isocast-ui isocast-browser
 
-      - name: No OpenH264 in the tarball
-        if: env.MODE == 'full'
-        run: |
-          set -o pipefail
-          tarball=dist/isocast-linux-${{ matrix.arch }}.tar.gz
-          # Listed first, so a broken tarball fails here, not as "no match".
-          listing=$(tar -tzf "$tarball")
-          if printf '%s\n' "$listing" | grep -i openh264; then
-            echo "the tarball contains OpenH264" >&2
-            exit 1
-          fi
-          for exe in dist/isocast-linux-${{ matrix.arch }}/isocast*; do
-            text=$(strings "$exe")
-            if printf '%s\n' "$text" | grep -E 'openh264 codec version|CWelsDecoder::'; then
-              echo "$exe contains OpenH264 code" >&2
-              exit 1
-            fi
-          done
-
-      - name: Upload tarball
+      - name: Upload Ubuntu package inputs
         if: env.MODE == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: isocast-linux-${{ matrix.arch }}
-          path: dist/isocast-linux-${{ matrix.arch }}.tar.gz
-          retention-days: 30
+          name: ubuntu-binaries-${{ matrix.arch }}
+          path: ubuntu-binaries.tar
+          retention-days: 1
 
       - name: Upload snapshots
         if: (always()) && (env.MODE == 'full')
@@ -717,7 +697,7 @@ jobs:
           retention-days: 7
 
   deb-ubuntu:
-    # Ubuntu 24.04 .debs from the tarball's own binaries (linux-app):
+    # Ubuntu 24.04 .debs from the full Ubuntu binaries (linux-app):
     # Depends from dpkg-shlibdeps here, lintian with no errors.
     name: .deb Ubuntu 24.04 (${{ matrix.arch }})
     needs: [gate, linux-app]
@@ -760,13 +740,13 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: isocast-linux-${{ matrix.arch }}
+          name: ubuntu-binaries-${{ matrix.arch }}
           path: dist
 
       - name: Package
         run: |
-          tar -C dist -xzf dist/isocast-linux-${{ matrix.arch }}.tar.gz
-          scripts/package-deb.sh dist/isocast-linux-${{ matrix.arch }} ubuntu24.04
+          tar -C dist -xf dist/ubuntu-binaries.tar
+          scripts/package-deb.sh dist ubuntu24.04
           dpkg-deb --info dist/isocast_*.deb
           dpkg-deb --contents dist/isocast_*.deb
 
@@ -781,11 +761,10 @@ jobs:
           retention-days: 30
 
   deb-debian:
-    # Debian 12 .debs, built in debian:12: bookworm's glibc (2.36) is older
-    # than the tarball's build host, and its PipeWire comes from
+    # Debian 12 .debs and portable tarballs share one build. PipeWire comes from
     # bookworm-backports (capture needs 1.0.5 or newer).
     name: .deb Debian 12 (${{ matrix.arch }})
-    needs: gate
+    needs: [gate, linux-app]
     if: needs.gate.outputs.deb != 'skip'
     runs-on: ${{ matrix.runner }}
     container: debian:12
@@ -848,18 +827,21 @@ jobs:
         # Debian 12 package ships without browser sources (package-deb.sh).
         run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
 
-      - name: Runs on bookworm's glibc
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ubuntu-binaries-${{ matrix.arch }}
+          path: ubuntu
+      - name: Package tarball and check core (glibc 2.36) and WebKit helper (2.39)
         run: |
-          set -o pipefail
-          for exe in isocast isocastd isocast-ui isocast-browser; do
-            [ -e target/release/$exe ] || continue
-            symbols=$(objdump -T target/release/$exe)
-            # Weak references (Rust's std probes pidfd_*) don't bind.
-            if printf '%s\n' "$symbols" | grep -v ' w ' | grep -E 'GLIBC_2\.(3[7-9]|[4-9][0-9])'; then
-              echo "$exe needs a newer glibc than bookworm's 2.36" >&2
-              exit 1
-            fi
-          done
+          tar -C ubuntu -xf ubuntu/ubuntu-binaries.tar isocast-browser
+          scripts/package-linux.sh target/release ubuntu/isocast-browser
+
+      - name: Upload portable tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: isocast-linux-${{ matrix.arch }}
+          path: dist/isocast-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 30
 
       - name: Package
         run: |
@@ -877,6 +859,128 @@ jobs:
           name: isocast-deb-debian12-${{ matrix.arch }}
           path: dist/isocast_*.deb
           retention-days: 30
+
+  tarball-test:
+    name: Portable tarball (${{ matrix.image }}, ${{ matrix.arch }})
+    needs: deb-debian
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: 'debian:12', arch: x86_64, runner: ubuntu-24.04}
+          - {image: 'debian:12', arch: aarch64, runner: ubuntu-24.04-arm}
+          - {image: 'archlinux:latest', arch: x86_64, runner: ubuntu-24.04}
+    steps:
+      - name: Debian runtime and recording probe
+        if: matrix.image == 'debian:12'
+        run: |
+          echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/backports.list
+          apt-get update
+          apt-get install -y --no-install-recommends -t bookworm-backports libpipewire-0.3-0
+          apt-get install -y --no-install-recommends ca-certificates curl bzip2 libgstreamer-plugins-base1.0-0 mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 ffmpeg python3
+      - name: Arch runtime and recording probe
+        if: matrix.image == 'archlinux:latest'
+        run: pacman -Syu --needed --noconfirm libpipewire gst-plugins-base-libs vulkan-swrast vulkan-icd-loader ffmpeg python curl bzip2 webkitgtk-6.0 gtk4 dbus
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.linux_release_commit || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: isocast-linux-${{ matrix.arch }}
+      - name: Install tarball and decode a synthetic take
+        env:
+          ISOCAST_CALIBRATION: 'off'
+        run: |
+          tar xzf isocast-linux-$(uname -m).tar.gz
+          isocast-linux-$(uname -m)/install.sh
+          export PATH="$HOME/.local/bin:$PATH"
+          trap 'isocast engine shutdown || true' EXIT
+          isocast start packaging/linux/test-setup.toml --json > /tmp/take.json
+          sleep 5
+          isocast stop --wait --json
+          python3 - <<'PY'
+          import json, subprocess
+          files = json.load(open('/tmp/take.json'))['files']
+          assert len(files) == 3, files
+          for path in files:
+              data = subprocess.check_output(['ffprobe', '-v', 'error', '-count_frames', '-show_entries',
+                                              'stream=codec_name,nb_read_frames', '-of', 'json', path])
+              counts = {s['codec_name']: int(s['nb_read_frames']) for s in json.loads(data)['streams']}
+              print(path, counts)
+              assert counts['h264'] > 0 and counts['aac'] > 0, counts
+          PY
+
+      - name: Debian desktop and doctor with the incompatible browser helper present
+        if: matrix.image == 'debian:12'
+        env:
+          ISOCAST_CALIBRATION: 'off'
+          ISOCAST_SOCKET: /tmp/browser-check/engine.sock
+          ISOCAST_SETUP: /tmp/browser-check/setup.toml
+          XDG_RUNTIME_DIR: /tmp/browser-check
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -m 700 "$XDG_RUNTIME_DIR"
+          trap 'isocast engine shutdown || true' EXIT
+          test -x "$HOME/.local/lib/isocast/isocast-browser"
+          isocast doctor --json > /tmp/doctor.json
+          python3 - <<'PY'
+          import json
+          check, = (c for c in json.load(open('/tmp/doctor.json'))['checks'] if c['name'] == 'browser sources')
+          print(check)
+          assert check['status'] == 'warning' and ('is missing' in check['detail'] or 'GLIBC_' in check['detail']), check
+          PY
+          isocast apply --revision 0 packaging/linux/test-setup.toml
+          isocast-ui --snapshot /tmp/desktop.png --size 640x400
+          test -s /tmp/desktop.png
+
+      - name: Record the optional WebKit browser source on Arch
+        if: matrix.image == 'archlinux:latest'
+        env:
+          ISOCAST_CALIBRATION: 'off'
+          ISOCAST_SOCKET: /tmp/browser-check/engine.sock
+          ISOCAST_SETUP: /tmp/browser-check/setup.toml
+          XDG_RUNTIME_DIR: /tmp/browser-check
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -m 700 "$XDG_RUNTIME_DIR"
+          printf '%s\n' '<html style="background:#00ff00"></html>' > /tmp/green.html
+          cat > /tmp/browser.toml <<'TOML'
+          version = 1
+          name = "Browser smoke"
+          canvas = { width = 320, height = 180, fps = 30 }
+          [recording]
+          folder = "/tmp/browser-take"
+          program = { encoder = { codec = "h264" } }
+          [[sources]]
+          id = "web"
+          kind = "browser"
+          file = "/tmp/green.html"
+          width = 320
+          height = 180
+          fps = 30
+          [[scenes]]
+          id = "main"
+          items = [{ source = "web", rect = { x = 0, y = 0, width = 320, height = 180 } }]
+          TOML
+          dbus-run-session -- sh -ec '
+            trap "isocast engine shutdown || true" EXIT
+            isocast start /tmp/browser.toml --json > /tmp/browser-take.json
+            sleep 5
+            isocast stop --wait --json
+          '
+          python3 - <<'PY'
+          import json, subprocess
+          path, = json.load(open('/tmp/browser-take.json'))['files']
+          pixels = subprocess.check_output(['ffmpeg', '-v', 'error', '-i', path, '-an', '-vf', 'scale=1:1',
+                                            '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'])
+          green = sum(r < 40 and g > 200 and b < 40 for r, g, b in zip(pixels[::3], pixels[1::3], pixels[2::3]))
+          print(f'{path}: {green}/{len(pixels)//3} frames show the green HTML page')
+          assert green >= 2, 'the recorded program did not show the browser page'
+          PY
 
   deb-ubuntu-test:
     # The Ubuntu .deb on a clean runner (no build tools): apt resolves its

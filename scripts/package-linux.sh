@@ -1,13 +1,14 @@
 #!/bin/sh
 # Package a Linux build: dist/isocast-linux-<arch>.tar.gz holding isocast,
-# isocastd, isocast-browser (its browser sources' helper), isocast-ui (from
-# BIN_DIR, default target/release), the desktop entry, icons, install.sh and
+# isocastd and isocast-ui (from BIN_DIR, default target/release), the Ubuntu-built
+# browser source helper, the desktop entry, icons, install.sh and
 # README.txt (packaging/linux). No OpenH264: install.sh downloads Cisco's
 # binary on the user's computer.
 #
-#   scripts/package-linux.sh [BIN_DIR]
+#   scripts/package-linux.sh [BIN_DIR [BROWSER_HELPER]]
 set -eu
 bin=${1:-target/release}
+helper=${2:-$bin/isocast-browser}
 for tool in nm strings strip; do
   command -v "$tool" >/dev/null || { echo "package-linux: $tool is needed (binutils)" >&2; exit 1; }
 done
@@ -16,16 +17,18 @@ name=isocast-linux-$arch
 out=dist/$name
 rm -rf "$out" "dist/$name.tar.gz"
 mkdir -p "$out"
-for exe in isocast isocastd isocast-browser isocast-ui; do
-  test -x "$bin/$exe" || { echo "package-linux: no $bin/$exe" >&2; exit 1; }
+for exe in isocast isocastd isocast-ui isocast-browser; do
+  src=$bin/$exe
+  if [ "$exe" = isocast-browser ]; then src=$helper; fi
+  test -x "$src" || { echo "package-linux: no $src" >&2; exit 1; }
   # No OpenH264 compiled in: Cisco's licence covers only its own binary,
   # which install.sh downloads (crates/isocast-openh264 loads it).
-  symbols=$(nm "$bin/$exe")
+  symbols=$(nm "$src")
   if printf '%s\n' "$symbols" | grep -E -q ' [TtWw] _?(WelsCreateSVCEncoder|WelsCreateDecoder)$'; then
-    echo "package-linux: $bin/$exe has OpenH264 compiled in; build without openh264's source feature" >&2
+    echo "package-linux: $src has OpenH264 compiled in; build without openh264's source feature" >&2
     exit 1
   fi
-  cp "$bin/$exe" "$out/"
+  cp "$src" "$out/$exe"
   # Symbols off the copies: about half the size (crash logs keep their
   # addresses; the build keeps its own symbols).
   strip "$out/$exe"
@@ -47,5 +50,6 @@ if find "$out" -iname '*openh264*' | grep -q .; then
   echo "package-linux: the package must not contain OpenH264" >&2
   exit 1
 fi
+python3 scripts/linux-glibc-check.py "$out"
 tar -C dist -czf "dist/$name.tar.gz" "$name"
 echo "dist/$name.tar.gz"

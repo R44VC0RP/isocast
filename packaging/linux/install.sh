@@ -214,9 +214,8 @@ mkdir -p "$lib" "$bin" "$apps"
 # The installed copy, run again, has nothing to copy (and copying a file
 # onto itself fails): it refreshes the links and OpenH264.
 if [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
-  # The engine is found beside the app and the CLI, and the browser helper
-  # beside the engine, so all four stay together; this installer and
-  # Cisco's licence too, for later.
+  # Only the sibling browser helper uses the newer Ubuntu runtime. Copy it
+  # without invoking it; an unavailable browser must not block installation.
   for name in isocast isocast-ui isocastd isocast-browser install.sh "$license"; do
     install -m 755 "$here/$name" "$lib/$name"
   done
