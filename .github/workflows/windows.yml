@@ -77,7 +77,10 @@ jobs:
     needs: gate
     if: needs.gate.outputs.linux_distro != 'skip'
     runs-on: ubuntu-24.04
-    container: ${{ matrix.distro }}:latest
+    container:
+      image: ${{ matrix.distro }}:latest
+      volumes:
+        - /usr/local/lib/android/sdk:/runner-android-sdk
     # Allow a cold toolchain/dependency cache; warm builds target 20 minutes.
     timeout-minutes: 90
     strategy:
@@ -93,15 +96,23 @@ jobs:
       LP_NUM_THREADS: 2
       XDG_RUNTIME_DIR: /tmp/isocast-runtime
     steps:
+      - name: Reclaim unused hosted runner Android SDK
+        run: |
+          df -h .
+          # The build shares the host disk. Remove only the mounted SDK's contents.
+          find /runner-android-sdk -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          df -h .
       - name: Arch packaging tools and test dependencies
         if: matrix.distro == 'archlinux'
         run: |
           pacman -Syu --noconfirm --needed base-devel rust git vulkan-swrast ffmpeg python zstd
+          df -h .
       - name: Fedora packaging tools and test dependencies
         if: matrix.distro == 'fedora'
         run: |
           dnf --disablerepo='*cisco*' install -y rpm-build dnf5-plugins git python3 tar gzip zstd patch \
             gstreamer1-plugins-good gstreamer1-plugin-libav mesa-vulkan-drivers noopenh264 ffmpeg-free
+          df -h .
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -124,6 +135,7 @@ jobs:
             dnf --disablerepo='*cisco*' builddep -y packaging/rpm/isocast.spec
           fi
           rustc -Vv
+          df -h .
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: distro-${{ matrix.distro }}
@@ -132,6 +144,7 @@ jobs:
         id: build
         run: |
           export CARGO_TARGET_DIR="$PWD/target"
+          df -h "$GITHUB_WORKSPACE"
           mkdir -p dist "$CARGO_TARGET_DIR"
           if [[ '${{ matrix.distro }}' == archlinux ]]; then
             chown -R builder:builder "$CARGO_TARGET_DIR"
@@ -141,6 +154,7 @@ jobs:
           else
             CARGO_BUILD_JOBS=2 ISOCAST_UI_NO_GALLERY=1 scripts/package-rpm.sh
           fi
+          df -h "$GITHUB_WORKSPACE"
       # Container actions run in fresh sibling containers. Only the workspace
       # is shared; neither build packages nor Cargo are on the runtime PATH.
       - name: Install and record on clean Arch
@@ -160,6 +174,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.distro == 'fedora' }}
         run: |
           # The smoke above intentionally uses the stock stub. Test real encodes below.
+          df -h .
           dnf --enablerepo=fedora-cisco-openh264 swap -y noopenh264 openh264
           dnf --enablerepo=fedora-cisco-openh264 install -y gstreamer1-plugin-openh264
           # RPM Fusion FFmpeg supplies libx264 for generating the unit-test fixtures;
@@ -169,7 +184,12 @@ jobs:
           rpm -q openh264 gstreamer1-plugin-openh264 gstreamer1-plugin-libav ffmpeg
       - name: Linux platform unit tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' && (matrix.distro == 'archlinux' || steps.codecs.outcome == 'success') }}
-        run: cargo test --release --locked -p isocast-platform-linux --lib
+        run: |
+          df -h .
+          cargo test --release --locked -p isocast-platform-linux --lib
+      - name: Final runner disk space
+        if: always()
+        run: df -h .
 
   portable:
     name: portable (${{ matrix.os }})
