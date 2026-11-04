@@ -58,7 +58,7 @@ limiting. Nothing leaves the machine.
 
 Nothing here has been created or deployed yet. You need a Cloudflare account
 on **Workers Paid** (the scan needs more than the free plan's CPU time;
-`limits.cpu_ms` is 60000) and admin on `R44VC0RP/isocast`.
+`limits.cpu_ms` is 60000) and admin on `anomalyco/isocast`.
 
 1. **Install and log in.**
    `cd services/report-worker && npm ci && npx wrangler login`
@@ -68,12 +68,16 @@ on **Workers Paid** (the scan needs more than the free plan's CPU time;
    This opens a page with one button. Approve on GitHub, and the script
    prints `GITHUB_APP_ID=…` and writes the private key to that path (0600).
    When GitHub shows the install page, choose **Only select repositories →
-   R44VC0RP/isocast**.
+   anomalyco/isocast**.
    (By hand instead: GitHub → Settings → Developer settings → New GitHub App,
    with the same permissions and no webhook. Then generate a private key and
    install the App on the repository.)
+   A private App installs only on the account that owns it, so for
+   `anomalyco/isocast` the App must belong to the anomalyco organization:
+   create it in the organization's Developer settings, or move an App made
+   on a personal account there (the App's Advanced → Transfer ownership).
 3. **Make the labels** (if they don't exist yet):
-   `gh label create from-app --repo R44VC0RP/isocast --description "Sent from the Isocast app" --color 5319e7`
+   `gh label create from-app --repo anomalyco/isocast --description "Sent from the Isocast app" --color 5319e7`
    (`bug` exists by default.)
 4. **Create the private R2 bucket** (no public access, no custom domain):
    `npx wrangler r2 bucket create isocast-bug-reports`

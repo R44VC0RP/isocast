@@ -605,7 +605,11 @@ impl App {
                     if !self.toasts.has_key(&key) {
                         self.show_toast(
                             Toast::new(ToastKind::Error, "The recording stopped", error.clone())
-                                .key(key),
+                                .key(key)
+                                .action(
+                                    crate::areas::report::REPORT_LABEL,
+                                    crate::areas::report::opener("The recording stopped", error),
+                                ),
                         );
                     }
                 }

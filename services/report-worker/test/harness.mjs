@@ -42,7 +42,7 @@ export function fakeGitHub(appPublicKey, accessJwk) {
       return send(200, {});
     }
     if (url.pathname === "/cdn-cgi/access/certs") return send(200, { keys: [accessJwk] });
-    if (url.pathname === "/repos/R44VC0RP/isocast/installation" && req.method === "GET") {
+    if (url.pathname === "/repos/anomalyco/isocast/installation" && req.method === "GET") {
       return verifyJwt(req.headers.authorization) ? send(200, { id: 777 }) : send(401, { message: "Bad credentials" });
     }
     if (url.pathname === "/app/installations/777/access_tokens" && req.method === "POST") {
@@ -52,27 +52,27 @@ export function fakeGitHub(appPublicKey, accessJwk) {
       return send(201, { token: installationToken });
     }
     if (req.headers.authorization !== `Bearer ${installationToken}`) return send(401, { message: "Bad credentials" });
-    if (url.pathname === "/repos/R44VC0RP/isocast/issues" && req.method === "POST") {
+    if (url.pathname === "/repos/anomalyco/isocast/issues" && req.method === "POST") {
       if (state.failNext) {
         state.failNext = false;
         return send(503, { message: "Service Unavailable" });
       }
       const issue = JSON.parse(body);
       const number = state.issues.length + 1;
-      state.issues.push({ number, state: "open", ...issue, html_url: `https://github.com/R44VC0RP/isocast/issues/${number}` });
+      state.issues.push({ number, state: "open", ...issue, html_url: `https://github.com/anomalyco/isocast/issues/${number}` });
       return send(201, state.issues.at(-1));
     }
-    if (url.pathname === "/repos/R44VC0RP/isocast/issues" && req.method === "GET") {
+    if (url.pathname === "/repos/anomalyco/isocast/issues" && req.method === "GET") {
       const label = url.searchParams.get("labels");
       const page = Number(url.searchParams.get("page") ?? 1);
       const open = state.issues.filter((i) => i.state === "open" && (!label || i.labels.includes(label))).reverse();
       return send(200, open.slice((page - 1) * 100, page * 100));
     }
-    const comment = /^\/repos\/R44VC0RP\/isocast\/issues\/(\d+)\/comments$/.exec(url.pathname);
+    const comment = /^\/repos\/anomalyco\/isocast\/issues\/(\d+)\/comments$/.exec(url.pathname);
     if (comment && req.method === "POST") {
       const number = Number(comment[1]);
       state.comments.push({ issue: number, ...JSON.parse(body) });
-      return send(201, { html_url: `https://github.com/R44VC0RP/isocast/issues/${number}#issuecomment-${state.comments.length}` });
+      return send(201, { html_url: `https://github.com/anomalyco/isocast/issues/${number}#issuecomment-${state.comments.length}` });
     }
     send(404, { message: "Not Found" });
   });

@@ -118,11 +118,19 @@ export component ConnectingState inherits Rectangle {
                 if root.failed && !root.blocked: HorizontalLayout {
                     alignment: center;
                     padding-top: Theme.space-3;
+                    spacing: Theme.space-2;
                     Button {
                         text: "Try again";
                         variant: ButtonVariant.primary;
                         size: ControlSize.large;
                         clicked => { SettingsArea.retry(); }
+                    }
+                    // A local engine that won't start: the app makes a
+                    // reduced report by itself (a remote one can't be asked).
+                    if !Ui.engine-remote: Button {
+                        text: "Report a Bug…";
+                        size: ControlSize.large;
+                        clicked => { SettingsArea.report-open("Isocast can’t reach its engine", Ui.connection-error); }
                     }
                 }
                 if root.failed: Text {

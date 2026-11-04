@@ -24,7 +24,7 @@ default-members = [
 version = "0.0.10"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/R44VC0RP/isocast"
+repository = "https://github.com/anomalyco/isocast"
 
 # Slint's winit renderer needs an application-owned composition surface on
 # Windows. Pinned upstream sources, with the small WGPU surface hook described

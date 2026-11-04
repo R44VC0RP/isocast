@@ -3,14 +3,23 @@
 On macOS, Windows or Linux, open **Help → Report a Bug…**, describe what you
 did and what you expected, and update the preview. **Send Report** makes the
 previewed issue text public on GitHub and sends the zip privately to maintainers.
-**Save Zip Only** does not send anything. You can open a prefilled issue instead;
-attaching a zip to GitHub yourself makes it **public**. The triage block is
-copied for pasting when the desktop clipboard is available; otherwise use `ISSUE.md`.
+**Save Zip Only** does not send anything. If sending fails, the zip is saved
+and **Retry Send** sends the same preview again; **Open Public Issue…** opens a
+prefilled issue with the text only. The zip holds private logs, settings,
+device names and paths, so the app never offers it for a public issue
+(anything attached to GitHub is **public**). The triage block is copied for
+pasting when the desktop clipboard is available; otherwise use `ISSUE.md`.
 
 If the local engine won't start, the app can still preview, save and send a
 reduced report with your description, app version, OS, and recent local launch
 markers. It omits raw historical logs (the engine owns profile-key redaction),
 devices and live engine checks. Update Preview after reconnecting for a full report.
+The engine-down screen and the "Couldn't start recording", "The recording
+stopped" and "The recording had errors" toasts have **Report a Bug…**, which
+opens the sheet with the error in "What happened". `isocast report` falls back
+to the same reduced report when the local engine can't be reached, and says on
+stderr what it leaves out (an offline `--preview` can't be sent later; use
+`--submit` in one step).
 
 From the CLI:
 
@@ -27,8 +36,8 @@ From the CLI:
    privately for the maintainers under a report id. The issue URL is
    returned. Sending happens only with this explicit flag. If it fails
    (offline, refused, rate limited, no service configured), `submit_error`
-   says why, the command exits nonzero, and the zip is kept: attach it to a
-    new public issue only if you're comfortable sharing it. The built-in endpoint
+   says why, the command exits nonzero, and the zip is kept: send it again
+    later rather than attaching it to a public issue. The built-in endpoint
     is configured. For testing, set `ISOCAST_REPORT_ENDPOINT` in both the daemon
     and app environments to a loopback receiver. Submission uses the OS trust
     store and does not need a command-line HTTP tool.

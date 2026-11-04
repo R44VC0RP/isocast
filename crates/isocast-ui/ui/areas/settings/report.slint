@@ -4,7 +4,9 @@
 // the zip and offers the prefilled GitHub issue and the zip in the
 // Finder, or Send Report files the issue itself: its text becomes public,
 // the zip goes privately to the maintainers. Nothing is sent before Send
-// Report. src/areas/report.rs fills it.
+// Report. If sending fails, Retry Send is the main action; a public issue
+// (its text only, never the zip) is the quiet one on the left.
+// src/areas/report.rs fills it.
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
@@ -25,21 +27,28 @@ component Well inherits Rectangle {
 export component BugReportDialog inherits Dialog {
     property <bool> saved: SettingsArea.report-archive != "";
     property <bool> sent: SettingsArea.report-issue-url != "";
+    property <bool> failed: SettingsArea.report-send-failed && !root.sent;
     title: "Report a Bug";
-    subtitle: root.sent ? "Sent. The issue is public on GitHub; the zip went privately to the maintainers." : SettingsArea.report-copied ? "Triage block copied: paste it into the issue’s Triage field (" + PlatformText.primary + "V), then attach the zip." : root.saved ? "Saved: attach the zip to the issue. Nothing was sent." : "Made on this " + PlatformText.machine + ": you see all of it before anything is sent.";
+    subtitle: root.sent ? "Sent. The issue is public on GitHub; the zip went privately to the maintainers."
+        : SettingsArea.report-copied ? "Triage block copied: paste it into the issue’s Triage field (" + PlatformText.primary + "V). The zip stays on this " + PlatformText.machine + "."
+        : root.failed ? "Not sent. The zip is saved on this " + PlatformText.machine + ", and nothing was made public."
+        : root.saved ? "Saved on this " + PlatformText.machine + ". Nothing was sent."
+        : "Made on this " + PlatformText.machine + ": you see all of it before anything is sent.";
     icon: Icons.alert;
     dialog-width: 640px;
     dialog-height: 620px;
-    ok-text: root.sent ? "Open Issue" : root.saved ? "Open GitHub Issue" : "Send Report";
+    ok-text: root.sent ? "Open Issue" : root.failed ? "Retry Send" : root.saved ? "Open GitHub Issue" : "Send Report";
     ok-enabled: !SettingsArea.report-busy;
     apply-text: root.saved ? "Show in " + PlatformText.file-manager : "Save Zip Only";
     apply-enabled: !SettingsArea.report-busy;
-    extra-text: root.saved ? "" : "Update Preview";
+    extra-text: root.failed ? "Open Public Issue…" : root.saved ? "" : "Update Preview";
     extra-enabled: !SettingsArea.report-busy;
     cancel-text: root.saved ? "Close" : "Cancel";
     note: SettingsArea.report-sending ? "Sending…" : SettingsArea.report-busy ? "Collecting…" : "";
     accepted => {
-        if root.saved {
+        if root.failed {
+            SettingsArea.report-send();
+        } else if root.saved {
             SettingsArea.report-open-issue();
         } else {
             SettingsArea.report-send();
@@ -52,7 +61,13 @@ export component BugReportDialog inherits Dialog {
             SettingsArea.report-create();
         }
     }
-    extra => { SettingsArea.report-preview(); }
+    extra => {
+        if root.failed {
+            SettingsArea.report-open-issue();
+        } else {
+            SettingsArea.report-preview();
+        }
+    }
     cancelled => { Ui.close-dialog(); }
 
     VerticalLayout {
@@ -154,7 +169,9 @@ export component BugReportDialog inherits Dialog {
             }
         }
         GroupHint {
-            text: root.saved ? SettingsArea.report-archive : "Send Report makes the issue’s text above public on GitHub; the zip stays private to the maintainers. Keys, tokens and stream URLs are redacted; no video or audio.";
+            text: root.sent ? SettingsArea.report-archive
+                : root.saved ? "The zip (" + SettingsArea.report-archive + ") holds logs, settings, device names and file paths from this " + PlatformText.machine + ". It’s private: " + (root.failed ? "Retry Send shares it only with the maintainers. A public issue gets only the text above; don’t attach the zip there." : "a GitHub issue gets only the text above; don’t attach the zip there.")
+                : "Send Report makes the issue’s text above public on GitHub; the zip stays private to the maintainers. Keys, tokens and stream URLs are redacted; no video or audio.";
         }
     }
 }

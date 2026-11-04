@@ -9,8 +9,10 @@ body:
         run `isocast report --describe "what happened"` (or use the app's bug reporter).
         Save Zip Only keeps it on your computer. Send Report files the public issue
         and sends the zip privately to maintainers. Its `ISSUE.md` has a summary
-        and a triage block to paste below. Keys, tokens and stream URLs are
-        redacted, but please look through it before attaching.
+        and a triage block to paste below. Don't attach the zip here: anything
+        attached to an issue is public, and the zip holds your logs, settings,
+        device names and file paths. Send Report shares it privately with the
+        maintainers.
 
         Security problem? Don't file it here: see SECURITY.md.
   - type: textarea
@@ -70,7 +72,7 @@ body:
     id: attachments
     attributes:
       label: Report zip
-      description: Optional. Files attached here are public. Review the zip before attaching, or use Send Report in Isocast to share it privately with maintainers.
+      description: Optional. Don't attach the zip (files here are public). To share it privately with maintainers, use Send Report in Isocast or `isocast report --submit`, and paste the report id here.
   - type: checkboxes
     id: checks
     attributes:

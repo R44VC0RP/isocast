@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: Isocast
-Upstream-Contact: https://github.com/R44VC0RP/isocast
-Source: https://github.com/R44VC0RP/isocast
+Upstream-Contact: https://github.com/anomalyco/isocast
+Source: https://github.com/anomalyco/isocast
 Comment:
  Isocast's own code is under MIT or Apache-2.0, at your option. The
  binaries include third-party crates and libraries, listed with their

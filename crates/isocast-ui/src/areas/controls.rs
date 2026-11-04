@@ -2284,7 +2284,11 @@ fn toggle_recording(app: &Rc<App>) {
                         "Couldn’t start recording",
                         error.message.clone(),
                     )
-                    .key(format!("rec-error:{}", error.message)),
+                    .key(format!("rec-error:{}", error.message))
+                    .action(
+                        crate::areas::report::REPORT_LABEL,
+                        crate::areas::report::opener("Couldn’t start recording", &error.message),
+                    ),
                 );
             }
             done(app);
@@ -3419,7 +3423,11 @@ fn saved_toast(app: &Rc<App>, report: &isocast_protocol::api::Report) {
             .key("recording-saved")
             .action(crate::areas::remote::reveal_label(app), move |app| {
                 show_file(app, &shown)
-            }),
+            })
+            .action2(
+                crate::areas::report::REPORT_LABEL,
+                crate::areas::report::opener("The recording had errors", &report.errors.join("; ")),
+            ),
         );
         return;
     }

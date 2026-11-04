@@ -51,7 +51,7 @@ const server = createServer(async (req, res) => {
   res.end();
   console.log(`App created: ${app.slug} (id ${app.id}). Private key written to ${out}.`);
   console.log(`GITHUB_APP_ID=${app.id}`);
-  console.log(`Next: install it on R44VC0RP/isocast only: ${install}`);
+  console.log(`Next: install it on anomalyco/isocast only: ${install}`);
   server.close();
 });
 server.listen(3999, "127.0.0.1", () => {

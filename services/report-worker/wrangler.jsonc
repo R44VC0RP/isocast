@@ -12,7 +12,7 @@
   "observability": { "enabled": true },
   "vars": {
     "GITHUB_API": "https://api.github.com",
-    "GITHUB_REPO": "R44VC0RP/isocast",
+    "GITHUB_REPO": "anomalyco/isocast",
     // The GitHub App's numeric id (README step 2).
     "GITHUB_APP_ID": "5316809",
     // Optional Cloudflare Access for the maintainer route (README).

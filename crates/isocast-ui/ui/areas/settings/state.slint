@@ -341,11 +341,15 @@ export global SettingsArea {
     // Send Report: posting it, then the issue it made (or added to).
     in-out property <bool> report-sending;
     in-out property <string> report-issue-url;
+    // Send Report failed: the zip is saved, and Retry Send is the main action.
+    in-out property <bool> report-send-failed;
     callback report-preview();
     callback report-create();
     callback report-send();
     callback report-open-issue();
     callback report-reveal();
+    // Report a Bug… from a failure: its title and text fill "What happened".
+    callback report-open(/* title */ string, /* detail */ string);
 
     // ---- Advanced
     in-out property <bool> reconnect-on;

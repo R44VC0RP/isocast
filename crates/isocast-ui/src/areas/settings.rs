@@ -723,7 +723,7 @@ impl Area for Settings {
             *self.draft.borrow_mut() = None;
             self.hotkeys.closed(app);
             if kind == "bug-report" {
-                self.report.opened(app);
+                self.report.opened(app, arg);
             }
             return;
         }
