@@ -203,6 +203,7 @@ impl<F: Clone> Routes<F> {
             // writer's existing queue-overflow counter.
             if matches!(
                 tx.try_send(Packet::AudioGap {
+                    track,
                     from: until - duration,
                     until
                 }),

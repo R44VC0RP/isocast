@@ -265,14 +265,14 @@ pub(super) fn write_files<W: FileWriter>(
                 }
                 let end = shared.end();
                 let (result, newest) = match packet {
-                    Packet::AudioGap { from, until } => {
+                    Packet::AudioGap { track, from, until } => {
                         if let Some(c) = &mut closing {
-                            c.file.source_gap(from, until.min(c.at).min(end));
+                            c.file.source_gap(track, from, until.min(c.at).min(end));
                         }
                         let split = next.as_ref().map_or(end, |(at, ..)| end.min(*at));
-                        file.source_gap(from, until.min(split));
+                        file.source_gap(track, from, until.min(split));
                         if let Some((at, _, new)) = &mut next {
-                            new.source_gap(from.max(*at), until.min(end));
+                            new.source_gap(track, from.max(*at), until.min(end));
                         }
                         (Ok(()), until)
                     }
@@ -544,6 +544,7 @@ impl<W: FileWriter> OpenFile<W> {
                 written: 0,
                 received: 0,
                 dropouts: 0,
+                marked_gaps: Vec::new(),
             })
             .collect();
         let trace =
@@ -684,12 +685,20 @@ impl<W: FileWriter> OpenFile<W> {
     }
 
     /// Count a source-reported interval only if this take retained any of it.
-    fn source_gap(&mut self, from: Time, until: Time) {
+    fn source_gap(&mut self, track: usize, from: Time, until: Time) {
         let epoch = Time::from_nanos(self.plan.epoch.load(Ordering::Acquire));
         let cuts = self.clock.state.read();
         let start = cuts.map(from.max(epoch));
-        if self.start.map_or(start, |picture| start.max(picture)) < cuts.map(until) {
+        let until = cuts.map(until);
+        if self.start.map_or(start, |picture| start.max(picture)) < until {
             self.lost_packets += 1;
+            // The mix forwards input losses, not gaps in its own output clock.
+            // Sparse tracks don't infer losses from timestamps at all.
+            if self.plan.audio[track] != isocast_protocol::PROGRAM
+                && !self.tracks[track].timing.sparse
+            {
+                self.tracks[track].marked_gaps.push((start, until));
+            }
         }
     }
 
@@ -906,6 +915,8 @@ struct AudioTrack {
     received: u64,
     /// Missing continuous input, late sparse input and encoder refusals.
     dropouts: u64,
+    /// Already counted capture holes, on the same pause-mapped clock as audio.
+    marked_gaps: Vec<(Time, Time)>,
 }
 
 impl AudioTrack {
@@ -937,7 +948,13 @@ impl AudioTrack {
         // Clock-driven padding must not hide an actual gap in a capture
         // or program track. Media/browser silence is expected instead.
         if !self.timing.sparse && self.received > 0 && at > self.received as i64 + tolerance {
-            self.dropouts += 1;
+            let covered = self.marked_gaps.iter().any(|&(from, until)| {
+                from.ticks_since(start, SAMPLE_RATE) <= self.received as i64 + tolerance
+                    && until.ticks_since(start, SAMPLE_RATE) >= at - tolerance
+            });
+            if !covered {
+                self.dropouts += 1;
+            }
         } else if at < written - tolerance
             && (at + frames as i64).min(written) > at.max(self.received as i64)
         {
@@ -945,6 +962,7 @@ impl AudioTrack {
             // lost; don't relabel those (or refused packets) as normal silence.
             self.dropouts += 1;
         }
+        self.marked_gaps.retain(|&(_, until)| until > pts);
         let mut skip = 0;
         if at > written + tolerance {
             self.write_silence(writer, track, start, (at - written) as u64)?;
@@ -1144,6 +1162,38 @@ mod tests {
     const CHUNK: usize = 480;
 
     #[test]
+    fn a_capture_gap_counts_once_on_its_own_track() {
+        for (markers, next, expected) in [
+            (vec![(0, 480, 960)], 480, 1),   // marker alone
+            (vec![], 960, 1),                // unmarked PTS jump
+            (vec![(0, 480, 960)], 960, 1),   // both describe the same hole
+            (vec![(1, 480, 960)], 960, 2),   // other track's marker
+            (vec![(0, 1440, 1920)], 960, 2), // same track, unrelated marker
+        ] {
+            let mut plan = plan("camera", ZERO);
+            let p = Arc::get_mut(&mut plan).unwrap();
+            for id in ["mic", "desktop"] {
+                p.audio.push(id.into());
+                p.audio_timing.push(AudioTiming::new(None));
+                p.spec.audio.push(crate::AudioTrackSpec { channels: 1 });
+            }
+            let clock = Arc::new(RecordingClock::new(ZERO, [30].into_iter()));
+            let mut file = OpenFile::new(Count::default(), plan, clock);
+            let end = at(3200);
+            let samples = Arc::from([0.1; CHUNK]);
+            file.audio(0, &samples, ZERO, end).unwrap();
+            for &(track, from, until) in &markers {
+                file.source_gap(track, at(from), at(until));
+            }
+            file.audio(0, &samples, at(next), end).unwrap();
+            // Audio and markers can already be queued before the first picture.
+            file.video(Some(&()), ZERO, end).unwrap();
+            let report = file.finish(end, Ok(())).unwrap();
+            assert_eq!(report.audio_dropouts, expected, "{markers:?}, {next}");
+        }
+    }
+
+    #[test]
     fn explicit_loss_counts_on_sparse_and_mixed_files_only_inside_the_take() {
         use super::super::engine::Routes;
         use std::sync::mpsc::sync_channel;
@@ -1173,10 +1223,10 @@ mod tests {
             let end = epoch.add_ticks(6, 30);
             file.video(Some(&()), epoch, end).unwrap();
             for packet in rx.try_iter() {
-                let Packet::AudioGap { from, until } = packet else {
+                let Packet::AudioGap { track, from, until } = packet else {
                     panic!("expected a gap")
                 };
-                file.source_gap(from, until);
+                file.source_gap(track, from, until);
             }
             assert_eq!(file.finish(end, Ok(())).unwrap().audio_dropouts, 1);
         }
@@ -1197,6 +1247,7 @@ mod tests {
             written: 0,
             received: 0,
             dropouts: 0,
+            marked_gaps: Vec::new(),
         };
         for &start in starts {
             track
