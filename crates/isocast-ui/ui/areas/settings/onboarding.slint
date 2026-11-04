@@ -357,7 +357,9 @@ component DevicesStep inherits VerticalLayout {
     alignment: start;
     StepTitle {
         title: "Choose your devices";
-        lead: PlatformText.engine-linux ? (SettingsArea.ob-linux-hint != "" ? SettingsArea.ob-linux-hint : "You pick which screen to share in the desktop’s sharing dialog once setup finishes.")
+        lead: PlatformText.engine-linux ? (SettingsArea.ob-linux-hint != "" ? SettingsArea.ob-linux-hint
+                : SettingsArea.ob-x11 ? "Isocast asks which screen to record in a small window of its own, each time it starts."
+                : "You pick which screen to share in the desktop’s sharing dialog once setup finishes.")
             + (SettingsArea.ob-pipewire-unavailable ? "\nAudio unavailable: install pipewire and wireplumber and run them in your desktop session." : "")
             + (SettingsArea.ob-codec-hint != "" ? "\n" + SettingsArea.ob-codec-hint : "")
             : "What to capture. You can add more sources, and change these, once you’re in.";

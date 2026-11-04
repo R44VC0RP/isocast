@@ -53,6 +53,8 @@ pub struct App {
     replies: RefCell<HashMap<u64, Reply>>,
     pub session: RefCell<Session>,
     pub toasts: ToastList,
+    /// H.264 unavailable on Linux: its fix and status bar notice.
+    pub codec: crate::codec::Codec,
     pub mode: Mode,
     pending: Cell<Changed>,
     flush_timer: slint::Timer,
@@ -126,6 +128,7 @@ impl App {
             replies: RefCell::default(),
             session: RefCell::default(),
             toasts: ToastList::default(),
+            codec: crate::codec::Codec::default(),
             mode,
             pending: Cell::new(Changed::NONE),
             flush_timer: slint::Timer::default(),
@@ -155,6 +158,7 @@ impl App {
         app.session.borrow_mut().extra_choice =
             isocast_protocol::CanvasId::parse(&window.global::<Ui>().get_extra_choice()).ok();
         app.connect(window);
+        crate::codec::Codec::connect(&app, window);
         for area in app.areas() {
             area.connect(&app, window);
         }
@@ -614,7 +618,11 @@ impl App {
                 // Areas may take warnings they show better (dropped frames).
                 let taken = self.areas().iter().any(|a| a.warning(self, message));
                 if !taken {
-                    self.toast(ToastKind::Warning, "Warning", sentence(message));
+                    self.toast(
+                        ToastKind::Warning,
+                        warning_title(message),
+                        sentence(message),
+                    );
                 }
             }
             Event::Marker { .. } => {}
@@ -691,17 +699,21 @@ impl App {
             });
             ui.set_connection_error(s.link_error.as_str().into());
             if let Some(hello) = crate::engine::hello() {
-                ui.set_engine_versions(
+                // Versions; the builds' commits only when those are the
+                // same (development builds).
+                let ours = env!("CARGO_PKG_VERSION");
+                let text = if hello.build.version == ours {
                     format!(
-                        "This app: {} ({})\n{}: {} ({})",
-                        env!("CARGO_PKG_VERSION"),
+                        "This app: {ours} ({})\n{}: {} ({})",
                         short_commit(isocast_client::COMMIT),
                         hello.name,
                         hello.build.version,
                         short_commit(&hello.build.commit),
                     )
-                    .into(),
-                );
+                } else {
+                    format!("This app: {ours}\n{}: {}", hello.name, hello.build.version)
+                };
+                ui.set_engine_versions(text.into());
             }
         }
         if changed.any(Changed::SETUP | Changed::LINK) {
@@ -1889,6 +1901,44 @@ impl App {
                 .key("audio-stops")
                 .rows(rows),
         );
+    }
+}
+
+/// A title for an engine warning, from its words: the warning event
+/// carries no kind, so the kinds the engine's wording makes plain get a
+/// title of their own; the rest keep "Warning".
+fn warning_title(message: &str) -> &'static str {
+    let starts = |prefix: &str| message.starts_with(prefix);
+    if starts("hotkey") {
+        "Hotkey problem"
+    } else if starts("plugin ") {
+        "Plugin problem"
+    } else if starts("previous isocastd launch ended abnormally")
+        || starts("previous daemon launch ended abnormally")
+    {
+        "Isocast quit unexpectedly last time"
+    } else if starts("the change is live but") {
+        "Setup not saved"
+    } else if starts("diagnostics unavailable") {
+        "Diagnostics unavailable"
+    } else if starts("Automatic quality monitoring stopped")
+        || starts("output headroom monitoring unavailable")
+    {
+        "Automatic quality unavailable"
+    } else if message.contains(" had ") && message.contains(" audio dropout(s) at ") {
+        "Audio dropped out"
+    } else if message.contains(" dropped ") && message.contains(" frame(s) at ") {
+        "The recording dropped frames"
+    } else if (starts("The program missed") || starts("The vertical program missed"))
+        && message.contains(" frame(s) while ")
+    {
+        "The program missed frames"
+    } else if message.contains("replay buffer missed ") {
+        "The replay buffer missed frames"
+    } else if starts("vertical ") || starts("the vertical canvas stopped") {
+        "Vertical canvas problem"
+    } else {
+        "Warning"
     }
 }
 

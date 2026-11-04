@@ -391,6 +391,9 @@ export global SettingsArea {
     in-out property <bool> ob-access: true;
     in-out property <string> ob-linux-hint;
     in-out property <string> ob-codec-hint;
+    // An X11 session: Isocast's own picker asks for the screen, not the
+    // desktop's sharing dialog.
+    in-out property <bool> ob-x11;
     in-out property <bool> ob-pipewire-unavailable;
     // A live setup exists: the first run can be closed.
     in-out property <bool> can-close;

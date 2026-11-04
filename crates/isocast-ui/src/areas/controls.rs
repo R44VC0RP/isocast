@@ -50,6 +50,7 @@ pub const STATES: &[&str] = &[
     "pause",
     "resume",
     "toast-saved (the toast a stopped recording shows)",
+    "codec-missing[:FIX] (a start refused without OpenH264, and the status bar's notice)",
 ];
 
 /// The transition kinds, in the web app's order and words.
@@ -659,6 +660,24 @@ impl Area for Controls {
                 );
                 app.show_toast(
                     Toast::new(ToastKind::Info, "Removed “Intro Clip”", "").action("Undo", |_| {}),
+                );
+            }
+            "codec-missing" => {
+                let fix = if arg.is_empty() {
+                    "/home/me/.local/lib/isocast/install.sh --openh264"
+                } else {
+                    arg
+                };
+                let refusal = format!(
+                    "program: No OpenH264 found.\ncould not load libopenh264.so.8: \
+                     libopenh264.so.8: cannot open shared object file: No such file or \
+                     directory (system libopenh264.so.8; no per-user Cisco download); fix: {fix}"
+                );
+                app.codec.refused(
+                    app,
+                    "Couldn’t start recording",
+                    &refusal,
+                    format!("rec-error:{refusal}"),
                 );
             }
             "toast-drops" => {
@@ -2278,6 +2297,14 @@ fn toggle_recording(app: &Rc<App>) {
             if let Err(error) = result {
                 // Keyed as the engine's `stopped` toast with the same
                 // words, so a refused start shows one toast, not two.
+                let key = format!("rec-error:{}", error.message);
+                if app
+                    .codec
+                    .refused(app, "Couldn’t start recording", &error.message, key)
+                {
+                    done(app);
+                    return;
+                }
                 app.show_toast(
                     Toast::new(
                         ToastKind::Error,
@@ -3160,9 +3187,16 @@ fn toggle_stream(app: &Rc<App>) {
                     app.toast(
                         ToastKind::Info,
                         "Streaming isn’t in this engine yet",
-                        "Go live arrives with the streaming update to isocastd.",
+                        "Update the engine to go live.",
                     );
-                } else {
+                } else if on
+                    || !app.codec.refused(
+                        app,
+                        "Couldn’t go live",
+                        &error.message,
+                        format!("stream-error:{}", error.message),
+                    )
+                {
                     app.failed(
                         if on {
                             "Couldn’t stop the stream"

@@ -35,6 +35,7 @@ pub const STATES: &[&str] = &[
     "wizard-speed:SPEED_TEST.json",
     "wizard-first-launch",
     "wizard-act:import|test-upload|apply|close",
+    "x11-session (screens chosen in Isocast's own X11 picker)",
 ];
 
 #[derive(Default)]
@@ -65,6 +66,10 @@ pub struct Wizard {
     state: RefCell<State>,
     /// Looked for OBS at the first launch already (once per run).
     offered: Cell<bool>,
+    /// See [`Wizard::x11`].
+    x11: Cell<bool>,
+    /// The X11 "asks again" note was shown this run.
+    pub x11_noted: Cell<bool>,
 }
 
 impl Area for Wizard {
@@ -120,9 +125,11 @@ impl Area for Wizard {
         // The first launch: no setup yet.
         if first {
             self.discover(app, true);
-            if crate::engine::os() == isocast_protocol::hello::EngineOs::Linux {
-                self.linux_first_run(app, true);
-            }
+        }
+        // Every launch: whether H.264 works (the status bar says when it
+        // doesn't); the first also offers to download it.
+        if crate::engine::os() == isocast_protocol::hello::EngineOs::Linux {
+            self.linux_first_run(app, first);
         }
     }
 
@@ -215,6 +222,12 @@ impl Area for Wizard {
                 self.show(app);
             }
             "wizard-first-launch" => self.discover(app, true),
+            "x11-session" => {
+                self.x11.set(true);
+                if let Some(window) = app.window() {
+                    window.global::<crate::SettingsArea>().set_ob_x11(true);
+                }
+            }
             "wizard-act" => match arg {
                 "import" => self.import(app),
                 "test-upload" => self.test_upload(app),
@@ -232,68 +245,10 @@ impl Area for Wizard {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn offer_codec(app: &Rc<App>) {
-    use crate::toasts::Toast;
-    app.show_toast(Toast::new(ToastKind::Info, "Enable software H.264 and live previews?",
-        "OpenH264 Video Codec provided by Cisco Systems, Inc. Download from Cisco for your user; no sudo. Remove later with isocast-openh264-install --remove.")
-        .action2("Not now", |_| {})
-        .action("Download", download_codec));
-}
-
-#[cfg(target_os = "linux")]
-fn download_codec(app: &Rc<App>) {
-    use crate::toasts::Toast;
-    const KEY: &str = "openh264-download";
-    let mut progress = Toast::new(
-        ToastKind::Info,
-        "Downloading OpenH264",
-        "Fetching and verifying Cisco’s codec…",
-    )
-    .key(KEY);
-    progress.persistent = true;
-    app.show_toast(progress);
-    std::thread::spawn(|| {
-        // Never execute a PATH lookup or a command supplied by an engine.
-        let result = std::process::Command::new("/usr/bin/isocast-openh264-install").output();
-        let _ = slint::invoke_from_event_loop(move || {
-            crate::window::with_app(|app| {
-                let notice = match result {
-                    Ok(o) if o.status.success() => {
-                        app.wizard.linux_first_run(app, false);
-                        Toast::new(
-                            ToastKind::Success,
-                            "OpenH264 installed",
-                            "Software H.264 and live previews are available.",
-                        )
-                    }
-                    Ok(o) => {
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        let reason = stderr
-                            .lines()
-                            .rev()
-                            .map(str::trim)
-                            .find(|s| !s.is_empty())
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| format!("Installer exited with {}.", o.status));
-                        Toast::new(ToastKind::Error, "OpenH264 wasn’t installed", reason)
-                    }
-                    Err(error) => Toast::new(
-                        ToastKind::Error,
-                        "Couldn’t start isocast-openh264-install",
-                        error.to_string(),
-                    ),
-                };
-                app.show_toast(notice.key(KEY));
-            })
-        });
-    });
-}
-
 impl Wizard {
     /// Use the engine's doctor report, including for a remote Linux engine.
     /// Remediation shown by another machine is text, never a command to execute.
-    pub(super) fn linux_first_run(&self, app: &Rc<App>, offer_download: bool) {
+    pub(crate) fn linux_first_run(&self, app: &Rc<App>, offer_download: bool) {
         use isocast_protocol::api::{CheckStatus, Doctor, DoctorParams};
         let params = DoctorParams {
             setup: None,
@@ -304,15 +259,24 @@ impl Wizard {
             let area = window.global::<crate::SettingsArea>();
             let Ok(doctor) = result else {
                 area.set_ob_linux_hint(
-                    "Couldn’t check capture support. Run isocast doctor on the engine’s computer."
+                    "Couldn’t check screen capture and H.264 support. You can carry on; Isocast says what’s missing when you add a screen or record."
                         .into(),
                 );
                 return;
             };
             for check in doctor.checks {
+                // The X11 picker (Isocast's own) instead of the desktop's
+                // sharing dialog: doctor says "X11 capture active" or
+                // "X11 fallback available".
+                if check.name == "ScreenCast portal" {
+                    let x11 = check.status == CheckStatus::Ok && check.detail.starts_with("X11 ");
+                    app.wizard.x11.set(x11);
+                    area.set_ob_x11(x11);
+                }
                 if check.status == CheckStatus::Ok {
                     if check.name == "codec: OpenH264" {
                         area.set_ob_codec_hint(format!("Using {}.", check.detail).into());
+                        app.codec.set_engine(app, None);
                     }
                     continue;
                 }
@@ -321,34 +285,26 @@ impl Wizard {
                         area.set_ob_linux_hint(format!("No screen picker: {fix}").into())
                     }
                     ("codec: OpenH264", Some(fix)) => {
-                        let where_to_run = if crate::engine::is_local() {
-                            "as your user"
-                        } else {
-                            "on the engine’s computer as its desktop user"
-                        };
-                        // Doctor keeps the loader diagnostic on the next line
-                        // for an absent codec. Rejections keep their reason.
-                        let hint = if let Some((summary, _)) = check.detail.split_once('\n') {
-                            format!("{summary} For software H.264 and live previews, run {fix} {where_to_run}.")
-                        } else {
-                            format!("{}. For software H.264 and live previews: {fix} ({where_to_run}).", check.detail)
-                        };
-                        area.set_ob_codec_hint(hint.into());
+                        let missing = crate::codec::Missing::from_check(&check.detail, &fix);
+                        area.set_ob_codec_hint(missing.hint().into());
+                        app.codec.set_engine(app, Some(missing));
                         #[cfg(not(target_os = "linux"))]
                         let _ = offer_download;
                         #[cfg(target_os = "linux")]
-                        if offer_download
-                            && crate::engine::is_local()
-                            && fix == "/usr/bin/isocast-openh264-install"
-                            && std::env::var_os(isocast_openh264::ENV).is_none()
-                        {
-                            offer_codec(app);
+                        if offer_download && crate::codec::can_offer(&fix) {
+                            crate::codec::offer(app);
                         }
                     }
                     _ => {}
                 }
             }
         });
+    }
+
+    /// Screens are chosen in Isocast's own X11 picker, not the desktop's
+    /// sharing dialog (the engine's doctor said so).
+    pub fn x11(&self) -> bool {
+        self.x11.get()
     }
 
     /// Whether OBS collections were found (Welcome's Import from OBS… then
@@ -828,7 +784,7 @@ impl Wizard {
 
         area.set_optimizing(s.optimizing);
         area.set_applying(s.applying);
-        area.set_error(s.error.as_str().into());
+        area.set_error(crate::app::sentence(&s.error).into());
         match &s.optimized {
             Some(o) => {
                 area.set_summary(o.summary.as_str().into());

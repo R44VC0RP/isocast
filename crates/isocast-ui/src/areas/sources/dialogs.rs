@@ -2398,6 +2398,18 @@ pub fn pick_screen(app: &Rc<App>, id: String) {
                                  its picture until the recording stops.",
                             );
                         }
+                        // X11 picks are never remembered: said once a run,
+                        // as a fact, not a warning on every pick.
+                        Ok(picked) if !picked.remembered && app.wizard.x11() => {
+                            if !app.wizard.x11_noted.replace(true) {
+                                app.toast(
+                                    ToastKind::Info,
+                                    "Isocast asks again next time",
+                                    "On X11, Isocast asks which screen to record each time \
+                                     the source starts.",
+                                );
+                            }
+                        }
                         Ok(picked) if !picked.remembered => {
                             app.toast(
                                 ToastKind::Warning,

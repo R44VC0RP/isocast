@@ -20,7 +20,7 @@ slint::slint! {
             HorizontalLayout {
                 alignment: end; spacing: 8px;
                 Button { text: "Cancel"; clicked => { root.finish(-1); } }
-                Button { text: "Share"; variant: ButtonVariant.primary; clicked => { root.finish(round(choice.value.to-float())); } }
+                Button { text: "Record"; variant: ButtonVariant.primary; clicked => { root.finish(round(choice.value.to-float())); } }
             }
         }
     }

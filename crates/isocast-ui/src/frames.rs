@@ -661,6 +661,9 @@ impl Feed {
                 // failing on it: the engine's stills instead.
                 Err(error) if crate::video::no_decoder(&error) || error.is::<Undecodable>() => {
                     isocast_diagnostics::diagnostic!("warn"; "video: can't decode the engine's video, stills instead: {error:#}");
+                    // Without OpenH264 the status bar says so, with the fix.
+                    #[cfg(target_os = "linux")]
+                    crate::codec::decoder_missing();
                     return self.receive_stills(deliver);
                 }
                 Err(error) => deliver(Incoming::Lost(format!("{error:#}"))),

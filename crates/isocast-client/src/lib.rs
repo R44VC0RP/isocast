@@ -548,11 +548,13 @@ impl Client {
         match decision? {
             Handoff::Keep => (),
             Handoff::Busy(activity) => {
+                // Versions, as people know them; the commits only tell
+                // builds of the same version apart (development builds).
                 let label = |version: &str, commit: &str| {
                     if build.version == env!("CARGO_PKG_VERSION") {
-                        short_commit(commit).to_owned()
+                        format!("build {}", short_commit(commit))
                     } else {
-                        format!("{version}, {}", short_commit(commit))
+                        version.to_owned()
                     }
                 };
                 let pending = PendingEngineUpdate {

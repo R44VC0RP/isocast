@@ -76,12 +76,14 @@ export component ConnectingState inherits Rectangle {
                 }
                 if root.failed: Lead {
                     text: Ui.connection == ConnectionState.mismatch
-                        ? Ui.engine-name + " runs another version of Isocast. The app and the engine must be the same version: update the older one, then this window connects by itself. Recording and streaming on " + Ui.engine-name + " aren’t affected."
+                        ? (Ui.engine-remote && Ui.engine-name != ""
+                            ? Ui.engine-name + " runs another version of Isocast. This app and " + Ui.engine-name + " must be the same version: update the older one, and this window connects by itself. Recording and streaming on " + Ui.engine-name + " aren’t affected."
+                            : "The running engine is a different version of Isocast from this app. Quit and reopen Isocast to finish updating. Recording and streaming aren’t affected.")
                         : Ui.connection == ConnectionState.identity-changed
                         ? Ui.engine-name + " answered with a different identity than the one this computer paired with, so Isocast won’t control it. If it was reinstalled, forget it and pair again with a code shown on " + Ui.engine-name + "."
                         : Ui.engine-remote
                         ? "This window controls " + Ui.engine-name + "’s engine over the network, and it didn’t answer. Check that " + Ui.engine-name + " is on and on the same network. Recording and streaming there aren’t affected."
-                        : "The app talks to isocastd, which does the capturing and recording. It didn’t start or answer.";
+                        : "Isocast’s engine does the capturing and recording, and it didn’t start or answer.";
                 }
                 if Ui.connection == ConnectionState.mismatch && Ui.engine-versions != "": Text {
                     text: Ui.engine-versions;

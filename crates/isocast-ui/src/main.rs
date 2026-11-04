@@ -42,6 +42,7 @@ mod background;
 #[cfg(windows)]
 mod chrome_windows;
 mod clock;
+mod codec;
 mod daemon;
 mod engine;
 mod form;

@@ -173,6 +173,15 @@ fn verify(path: &Path, bytes: &[u8], build: &Build) -> Result<(), String> {
     ))
 }
 
+/// The command that removes Cisco's per-user copy, from the one that
+/// installs it.
+fn remove_command(fix: &str) -> String {
+    match fix.strip_suffix(" --openh264") {
+        Some(installer) => format!("{installer} --remove-openh264"),
+        None => format!("{fix} --remove"),
+    }
+}
+
 /// `path` opened, read and checked through the one open file, which is
 /// returned: loading it through that file (`/proc/self/fd/N`) loads the
 /// very bytes checked, whatever replaces the path meanwhile.
@@ -183,11 +192,20 @@ fn open_verified(path: &Path, build: &Build, fix: &str) -> Result<File, Unavaila
     };
     let mut file = match File::open(path) {
         Ok(file) => file,
+        // `locate` found something at the path: a link to a missing file,
+        // or a file removed since. Isocast uses only this file while it
+        // is there, never the system library instead.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(unavailable(format!(
-                "H.264 needs Cisco's OpenH264 {VERSION}, which isn't installed at {}",
-                path.display()
-            )));
+            let remove = remove_command(fix);
+            return Err(Unavailable {
+                reason: format!(
+                    "Cisco's OpenH264 {VERSION} is missing from {} (a broken link?)",
+                    path.display()
+                ),
+                fix: format!(
+                    "{fix} to download it again, or {remove} to use your system's OpenH264"
+                ),
+            });
         }
         Err(error) => {
             return Err(unavailable(format!(
@@ -203,15 +221,12 @@ fn open_verified(path: &Path, build: &Build, fix: &str) -> Result<File, Unavaila
             path.display()
         )));
     }
-    verify(path, &bytes, build).map_err(|reason| {
-        let remove = match fix.strip_suffix(" --openh264") {
-            Some(installer) => format!("{installer} --remove-openh264"),
-            None => format!("{fix} --remove"),
-        };
-        Unavailable {
-            reason,
-            fix: format!("{fix} to replace it, or {remove} to use the system library"),
-        }
+    verify(path, &bytes, build).map_err(|reason| Unavailable {
+        reason,
+        fix: format!(
+            "{fix} to replace it, or {} to use the system library",
+            remove_command(fix)
+        ),
     })?;
     Ok(file)
 }
@@ -501,10 +516,13 @@ mod tests {
         let reason = |path: &Path| open_verified(path, build, "FIX").unwrap_err();
         let missing = reason(&dir.join("absent.so"));
         assert!(
-            missing.reason.contains("isn't installed at") && missing.reason.contains("absent.so"),
+            missing.reason.contains("is missing from") && missing.reason.contains("absent.so"),
             "{missing}"
         );
-        assert_eq!(missing.fix, "FIX");
+        assert_eq!(
+            missing.fix,
+            "FIX to download it again, or FIX --remove to use your system's OpenH264"
+        );
         // A folder opens but can't be read.
         let unreadable = reason(&dir);
         assert!(
@@ -540,12 +558,12 @@ mod tests {
     #[test]
     fn unavailable_names_the_fix() {
         let error = Unavailable {
-            reason: "H.264 needs Cisco's OpenH264 2.6.0, which isn't installed at /p".into(),
+            reason: "Cisco's OpenH264 2.6.0 is missing from /p (a broken link?)".into(),
             fix: "/i/install.sh --openh264".into(),
         };
         assert_eq!(
             error.to_string(),
-            "H.264 needs Cisco's OpenH264 2.6.0, which isn't installed at /p; fix: /i/install.sh --openh264"
+            "Cisco's OpenH264 2.6.0 is missing from /p (a broken link?); fix: /i/install.sh --openh264"
         );
         assert!(fix_command().ends_with("install.sh --openh264"));
     }
