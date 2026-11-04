@@ -2,6 +2,7 @@
 //! adapter does not translate recording quality into a guessed live bitrate.
 
 mod audio;
+mod recovery;
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -16,6 +17,7 @@ use isocast_protocol::{Codec, Container};
 
 use crate::{Frame, VideoEncoding, WindowsVideoEncoder};
 use audio::{AudioTrack, MAX_BATCH, MAX_HELD, RATE};
+use recovery::{CodecFault, Recovery};
 
 const FRAME_DURATION: u32 = 2000;
 // MF admits at most eight pictures; NVENC admits four. Keep our timestamp
@@ -34,11 +36,13 @@ const DRAIN_WAIT: Duration = Duration::from_secs(5);
 struct Pending {
     pts: Time,
     repeated: bool,
+    submitted: Instant,
 }
 
 pub struct VideoWriter {
     spec: WriterSpec,
-    encoder: WindowsVideoEncoder,
+    encoder: Option<WindowsVideoEncoder>,
+    recovery: Recovery,
     reserved: Option<mp4::Writer>,
     mux: Option<isocast_mux::Writer>,
     audio: Vec<AudioTrack>,
@@ -57,7 +61,7 @@ pub struct VideoWriter {
     accepted_originals: u64,
     completed: u64,
     repeated: u64,
-    reported_losses: u64,
+    losses: recovery::LossCounts,
     last_written: Option<u64>,
     first_video_packet: Option<Box<dyn FnOnce() + Send>>,
     failed: Option<String>,
@@ -117,7 +121,8 @@ impl VideoWriter {
             })?;
         let mut writer = Self {
             spec: spec.clone(),
-            encoder,
+            encoder: Some(encoder),
+            recovery: Recovery::default(),
             reserved: Some(reserved),
             mux: None,
             audio,
@@ -134,7 +139,7 @@ impl VideoWriter {
             accepted_originals: 0,
             completed: 0,
             repeated: 0,
-            reported_losses: 0,
+            losses: Default::default(),
             last_written: None,
             first_video_packet: None,
             failed: None,
@@ -145,7 +150,11 @@ impl VideoWriter {
         // even if the first picture has not completed. MF may expose it later.
         // Keep the established video-only reservation/first-picture path.
         if !writer.audio.is_empty()
-            && let Ok(config) = writer.encoder.decoder_config()
+            && let Ok(config) = writer
+                .encoder
+                .as_ref()
+                .expect("just opened")
+                .decoder_config()
         {
             writer.configure(config)?;
         }
@@ -213,6 +222,7 @@ impl VideoWriter {
 
     fn keep_error<T>(&mut self, result: Result<T>) -> Result<T> {
         result.map_err(|error| {
+            self.end_incident(&error);
             let error = error.context(format!("recording {}", self.spec.path.display()));
             if self.failed.is_none() {
                 self.failed = Some(format!("{error:#}"));
@@ -464,25 +474,49 @@ impl VideoWriter {
     }
 
     fn check_losses(&self) -> Result<()> {
-        let lost = self.encoder.dropped();
+        let lost = self.encoder.as_ref().map_or(0, |e| e.dropped());
         if lost != 0 {
             // These providers currently report accepted-input loss only on
             // failure. A count alone cannot identify which FIFO timestamp to
             // remove. Never guess and pair the next output with another input.
-            bail!(
+            return Err(anyhow!(
                 "native video encoder lost {lost} accepted picture(s); cannot safely continue its timestamp FIFO"
-            );
+            ).context(CodecFault));
         }
         Ok(())
     }
 
     fn append(&mut self, frame: &Frame, pts: Time, repeated: bool) -> Result<bool> {
+        if !self.poll_reopen()? {
+            return Ok(false);
+        }
+        #[cfg(debug_assertions)]
+        if !repeated {
+            self.inject_fault()?;
+        }
         self.drain_ready()?;
+        if !repeated
+            && self.recovery.context.is_some()
+            && self
+                .pending
+                .front()
+                .is_some_and(|p| p.submitted.elapsed() >= Duration::from_secs(2))
+        {
+            return Err(
+                anyhow!("accepted pictures made no output progress for two seconds")
+                    .context(CodecFault),
+            );
+        }
         self.drain_audio()?;
         let ticks = self.ticks(pts)?;
         // Scale once on this file's worker, not on the compositor or on
         // each retry. A repeat reuses the already sized accepted picture.
-        let Some(frame) = self.encoder.prepare(frame, pts)? else {
+        let Some(frame) = self
+            .encoder
+            .as_mut()
+            .expect("ready encoder")
+            .prepare(frame, pts)?
+        else {
             return Ok(false);
         };
         if (frame.width(), frame.height()) != (self.spec.video.width, self.spec.video.height) {
@@ -523,7 +557,12 @@ impl VideoWriter {
             .unwrap_or(now + wait);
         loop {
             if self.pending.len() < MAX_PENDING
-                && self.encoder.try_encode(&frame, pts, self.accepted == 0)?
+                && self
+                    .encoder
+                    .as_mut()
+                    .expect("ready encoder")
+                    .try_encode(&frame, pts, self.accepted == 0)
+                    .context(CodecFault)?
             {
                 break;
             }
@@ -537,7 +576,10 @@ impl VideoWriter {
             self.admission_wait_until = Some(deadline);
             if let Some(packet) = self
                 .encoder
-                .receive_timeout(remaining.min(Duration::from_millis(5)))?
+                .as_mut()
+                .expect("ready encoder")
+                .receive_timeout(remaining.min(Duration::from_millis(5)))
+                .context(CodecFault)?
             {
                 self.collect(packet)?;
                 self.drain_ready()?;
@@ -551,7 +593,11 @@ impl VideoWriter {
                 );
             }
         }
-        self.pending.push_back(Pending { pts, repeated });
+        self.pending.push_back(Pending {
+            pts,
+            repeated,
+            submitted: Instant::now(),
+        });
         self.accepted += 1;
         self.accepted_originals += u64::from(!repeated);
         self.last_video = Some((frame.into_owned(), pts));
@@ -559,9 +605,10 @@ impl VideoWriter {
     }
 
     fn collect(&mut self, packet: EncodedVideo) -> Result<()> {
-        self.completed += 1;
         let result = self.collect_inner(packet);
-        if result.is_err() {
+        if result.is_ok() {
+            self.completed += 1;
+        } else {
             // A later inter-picture packet may reference the refused picture.
             // Retain the decodable prefix, not a corrupt continuation of it.
             self.output_failed = true;
@@ -583,7 +630,6 @@ impl VideoWriter {
             );
         }
         let repeated = pending.repeated;
-        self.pending.pop_front();
         if self.output_failed {
             bail!(
                 "video: cannot append dependent pictures after an invalid encoded packet; valid prefix retained"
@@ -591,6 +637,8 @@ impl VideoWriter {
         }
         let config = self
             .encoder
+            .as_ref()
+            .context("encoded packet without its generation")?
             .decoder_config()
             .context("video.decoder_config: native encoder has no actual configuration")?;
         // H.264's native packet boundary strips SPS/PPS from the payload, so
@@ -613,6 +661,7 @@ impl VideoWriter {
         } else {
             self.configure(config)?;
         }
+        let boundary = self.check_boundary(&packet)?;
         let pts = self.ticks(packet.pts)?;
         self.mux
             .as_mut()
@@ -624,7 +673,14 @@ impl VideoWriter {
                 sync: packet.keyframe,
                 framing: Framing::LengthPrefixed,
             })?;
+        self.pending.pop_front();
         self.last_written = Some(pts);
+        if let Some((ticket, checked_at)) = boundary {
+            // The packet mux normally holds the newest picture. Announce the
+            // resumed generation only once its independently decodable IDR is on disk.
+            self.commit_packets()?;
+            self.publish_resume(ticket, packet.pts, checked_at);
+        }
         self.publish_first_video_packet();
         self.repeated += u64::from(repeated);
         Ok(())
@@ -648,7 +704,10 @@ impl VideoWriter {
         // A correct provider returns no more than our eight pending pictures.
         // The extra poll also pumps MF's input-credit events when it is empty.
         for _ in 0..=MAX_PENDING {
-            let Some(packet) = self.encoder.receive()? else {
+            let Some(encoder) = self.encoder.as_mut() else {
+                return Ok(());
+            };
+            let Some(packet) = encoder.receive().context(CodecFault)? else {
                 return self.check_losses();
             };
             self.collect(packet)?;
@@ -665,7 +724,10 @@ impl VideoWriter {
         }
         if let Some(packet) = self
             .encoder
-            .receive_timeout(remaining.min(Duration::from_millis(50)))?
+            .as_mut()
+            .context("video: no encoder to drain")?
+            .receive_timeout(remaining.min(Duration::from_millis(50)))
+            .context(CodecFault)?
         {
             self.collect(packet)?;
         } else {
@@ -707,7 +769,13 @@ impl VideoWriter {
         // must leave this encoder usable for the next append.
         let mut failure = None;
         if let Err(error) = self.drain_accepted(Instant::now() + DRAIN_WAIT) {
-            note_error(&mut failure, error);
+            if error.is::<CodecFault>() {
+                if let Err(error) = self.handle_codec_fault(error) {
+                    note_error(&mut failure, error);
+                }
+            } else {
+                note_error(&mut failure, error);
+            }
         }
         // AAC can retain partial PCM and 2–3 processing blocks. Pump only
         // normal output, never pad/EOS to manufacture a stronger watermark.
@@ -801,6 +869,17 @@ impl VideoWriter {
         // Drop must not attempt a second adapter drain after an error.
         self.closed = true;
         let mut failure = self.failed.take().map(anyhow::Error::msg);
+        if self.recovery.incident.is_some() {
+            self.abandon_pending();
+            // Never manufacture an IDR/last-frame repeat after Stop.
+            note_error(
+                &mut failure,
+                anyhow!(
+                    "video ended during encoder recovery; complete prefix and actual audio retained"
+                ),
+            );
+            self.retire_without_reopen();
+        }
         let meaningful = !self.empty();
         let requested_audio_end = match end.filter(|end| *end != Time::MAX) {
             Some(end) if meaningful => match self.audio_ticks(end) {
@@ -831,7 +910,11 @@ impl VideoWriter {
         if let Err(error) = self.drain_ready() {
             note_error(&mut failure, error);
         }
-        match self.encoder.finish() {
+        match self
+            .encoder
+            .as_mut()
+            .map_or_else(|| Ok(Vec::new()), WindowsVideoEncoder::finish)
+        {
             Ok(packets) => {
                 for packet in packets {
                     if let Err(error) = self.collect(packet) {
@@ -1093,14 +1176,20 @@ impl VideoWriter {
         }
     }
 
+    fn native_losses(&self) -> u64 {
+        self.encoder
+            .as_ref()
+            .map_or(0, |e| e.dropped())
+            .min(self.accepted_originals)
+    }
+
     fn take_losses(&mut self) -> u64 {
         // try_encode never counts refusals. Repeats only occur during finish;
         // any failure there returns actual mux counts via RepairedFile instead
         // of attributing an unidentified native loss to an original picture.
-        let lost = self.encoder.dropped().min(self.accepted_originals);
-        let delta = lost.saturating_sub(self.reported_losses);
-        self.reported_losses = lost;
-        delta
+        let (abandoned, delta) = self.losses.take(self.native_losses());
+        self.recovery.intentional_drops += abandoned;
+        abandoned + delta
     }
 
     fn empty(&self) -> bool {
@@ -1140,15 +1229,28 @@ impl VideoWriter {
 impl FileWriter for VideoWriter {
     type Frame = Frame;
 
+    fn intentional_video_drops(&self) -> u64 {
+        self.recovery.intentional_drops
+    }
+
+    fn set_recovery(&mut self, context: isocast_engine::record::recovery::OutputRecovery) {
+        if self.recovery.recipe.is_some() {
+            self.recovery.context = Some(context);
+        }
+    }
+
     fn hardware_accelerated(&self) -> Option<bool> {
         Some(!matches!(
-            self.encoder.backend(),
+            self.encoder.as_ref()?.backend(),
             crate::EncoderBackend::MediaFoundationSoftware(_)
         ))
     }
 
     fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
-        self.encoder.prioritize_video(canvas);
+        self.recovery.priority = Some(canvas);
+        if let Some(encoder) = &mut self.encoder {
+            encoder.prioritize_video(canvas);
+        }
     }
 
     fn start(&mut self, at: Time) -> Result<()> {
@@ -1168,6 +1270,13 @@ impl FileWriter for VideoWriter {
 
     fn append_video(&mut self, frame: &Frame, pts: Time) -> Result<bool> {
         let result = self.healthy().and_then(|()| self.append(frame, pts, false));
+        let result = match result {
+            Err(e) if e.is::<CodecFault>() => self.handle_codec_fault(e).map(|()| false),
+            other => other,
+        };
+        if matches!(result, Ok(false)) && self.recovery.incident.is_some() {
+            self.recovery.intentional_drops += 1;
+        }
         self.keep_error(result)
     }
 
@@ -1176,6 +1285,13 @@ impl FileWriter for VideoWriter {
             .healthy()
             .and_then(|()| self.drain_ready())
             .and_then(|()| self.drain_audio());
+        let result = match result {
+            Err(e) if e.is::<CodecFault>() => self.handle_codec_fault(e),
+            other => other,
+        };
+        if result.is_ok() && self.recovery.incident.is_some() {
+            self.recovery.intentional_drops += 1;
+        }
         self.keep_error(result)
     }
 

@@ -305,6 +305,10 @@ pub(super) fn write_files<W: FileWriter>(
                             } else {
                                 Ok(())
                             };
+                            // Commit itself may have encountered an encoder
+                            // fault. Bound the old incident now; Stop never
+                            // passes through this successful split handoff.
+                            clock.recovery.output_split(&old.plan.source, at);
                             let ended = Closing {
                                 at,
                                 take,
@@ -537,6 +541,10 @@ struct OpenFile<W: FileWriter> {
 
 impl<W: FileWriter> OpenFile<W> {
     fn new(mut writer: W, plan: Arc<FilePlan>, clock: Arc<RecordingClock>) -> Self {
+        writer.set_recovery(super::recovery::OutputRecovery {
+            clock: clock.clone(),
+            plan: plan.clone(),
+        });
         plan.output_active.store(0, Ordering::Release);
         let active = plan.clone();
         if !writer.on_first_video_packet(Box::new(move || {
@@ -687,13 +695,14 @@ impl<W: FileWriter> OpenFile<W> {
         let lost = self.writer.lost_frames();
         // Every canvas's program file (`program`, `<id>-program`, #84).
         if let Some(canvas) = super::program_canvas(&self.plan) {
-            crate::governor::protected_loss(
-                canvas,
-                lost + u64::from(
-                    matches!(appended, Ok(false))
-                        && self.writer.intentional_video_drops() == intentional_before,
-                ),
-            );
+            let missing = lost + u64::from(matches!(appended, Ok(false)));
+            let intentional = self
+                .writer
+                .intentional_video_drops()
+                .saturating_sub(intentional_before);
+            // Recovery abandons both the current tick and sometimes accepted
+            // pictures. These are real file losses but not encoder overload.
+            crate::governor::protected_loss(canvas, missing.saturating_sub(intentional));
         }
         if lost > 0 {
             self.frames = self.frames.saturating_sub(lost);
@@ -1162,6 +1171,47 @@ mod tests {
                 created: std::time::SystemTime::UNIX_EPOCH,
             },
         })
+    }
+
+    #[test]
+    fn an_output_recovers_at_the_idr_pts_not_at_native_delivery_time() {
+        let epoch = Time::from_nanos(0);
+        let at = |n| epoch.add_ticks(n, 30);
+        let clock = Arc::new(RecordingClock::new(epoch, [30].into_iter()));
+        let context = super::super::recovery::OutputRecovery {
+            clock: clock.clone(),
+            plan: plan("bars", epoch),
+        };
+        clock.change(true, at(20), None).unwrap();
+        clock.change(false, at(50), None).unwrap();
+        let id = context
+            .interrupted(at(31), at(63), "submit failed")
+            .unwrap();
+        let old = context.attempt(id, at(64)).unwrap();
+        context.failed_attempt(old, at(65));
+        let new = context.attempt(id, at(80)).unwrap();
+        assert!(!context.can_resume(old, at(51), at(84)));
+        assert!(!context.can_resume(new, at(29), at(84)));
+        assert!(context.can_resume(new, at(51), at(84)));
+        context.resumed(new, at(51), at(84), "native", true);
+        let snapshot = clock.recovery.snapshot(&clock.state.read(), epoch, at(95));
+        let [e] = snapshot.incidents.as_slice() else {
+            panic!("expected one incident")
+        };
+        assert_eq!(
+            (
+                e.first_lost_slot,
+                e.end_slot_exclusive,
+                e.lost_slots,
+                e.attempts_started
+            ),
+            (31, 51, 20, 2)
+        );
+        assert_eq!(
+            e.state,
+            isocast_protocol::manifest::VideoRecoveryState::Resumed
+        );
+        assert_eq!(context.plan.output_active.load(Ordering::Acquire), 1);
     }
 
     /// #149 review: a stop at a host time in (B, B + 1 ns], B a picture's

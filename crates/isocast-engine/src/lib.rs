@@ -971,6 +971,9 @@ pub trait FramePool: Send {
 pub trait FileWriter: Send {
     type Frame;
 
+    /// Opt-in per-output recovery. Other writers retain finish-early behavior.
+    fn set_recovery(&mut self, _context: record::recovery::OutputRecovery) {}
+
     /// Cumulative deliberate admission refusals. Read around append_video
     /// so a later policy restoration cannot reclassify a refused picture.
     fn intentional_video_drops(&self) -> u64 {

@@ -137,6 +137,10 @@ static LEDGER: Mutex<Ledger> = parking_lot::const_mutex(Ledger {
     active: std::collections::BTreeMap::new(),
 });
 static ADMISSION: Mutex<()> = parking_lot::const_mutex(());
+// A recovering output owns admission logically, not the shared mutex. A
+// blocked vendor open can then refuse a new split/start promptly rather than
+// wedging its coordinator (and hence Stop). Existing sessions keep encoding.
+static RECOVERY_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// Serializes plan-and-open, and every other platform encoder open, across
 /// this process: two batches can never both plan against an empty ledger.
@@ -144,17 +148,48 @@ static ADMISSION: Mutex<()> = parking_lot::const_mutex(());
 /// accounted (or released after a partial failure). Releasing a session
 /// takes only the ledger's own lock, never this one.
 pub struct NvencAdmission {
-    _serial: parking_lot::MutexGuard<'static, ()>,
+    _serial: Option<parking_lot::MutexGuard<'static, ()>>,
+    _recovery: Option<RecoveryAdmission>,
+}
+
+/// A sendable reservation, acquired on the file worker without waiting. It
+/// follows the native open worker, including a vendor call stuck past expiry.
+pub(crate) struct RecoveryAdmission(());
+
+impl RecoveryAdmission {
+    pub(crate) fn try_acquire() -> Option<Self> {
+        let _guard = ADMISSION.try_lock()?;
+        RECOVERY_OPEN
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(Self(()))
+    }
+    pub(crate) fn into_admission(self) -> NvencAdmission {
+        NvencAdmission {
+            _serial: None,
+            _recovery: Some(self),
+        }
+    }
 }
 
 impl NvencAdmission {
     pub(crate) fn try_begin() -> Option<Self> {
-        ADMISSION.try_lock().map(|guard| Self { _serial: guard })
+        let guard = ADMISSION.try_lock()?;
+        (!RECOVERY_OPEN.load(Ordering::Acquire)).then_some(Self {
+            _serial: Some(guard),
+            _recovery: None,
+        })
     }
-    pub fn begin() -> Self {
-        Self {
-            _serial: ADMISSION.lock(),
-        }
+    pub fn begin() -> Result<Self> {
+        let guard = ADMISSION.lock();
+        anyhow::ensure!(
+            !RECOVERY_OPEN.load(Ordering::Acquire),
+            "encoder admission reserved by a mid-take recovery; retry shortly. If the vendor open is hung past the recovery deadline, stop healthy recordings before restarting the engine"
+        );
+        Ok(Self {
+            _serial: Some(guard),
+            _recovery: None,
+        })
     }
 
     /// Account an open session. The owner must drop `NvencClosing` before
@@ -277,6 +312,12 @@ impl NvencAdmission {
             entry.accounted.fps = entry.accounted.fps.max(fps);
         }
         Ok(())
+    }
+}
+
+impl Drop for RecoveryAdmission {
+    fn drop(&mut self) {
+        RECOVERY_OPEN.store(false, Ordering::Release);
     }
 }
 
@@ -1208,6 +1249,13 @@ pub struct NvencEncoder {
 }
 
 impl NvencEncoder {
+    #[cfg(debug_assertions)]
+    pub(crate) fn inject_rejection(&self) {
+        // Known non-submission: do not call the driver, change a fence or
+        // simulate safe ownership after a real indeterminate submission.
+        self.session
+            .reject("injected NVENC known input rejection".into());
+    }
     pub fn new(device: &GraphicsDevice, spec: &LiveVideoSpec) -> Result<Self> {
         Self::with_format(device, spec, VideoEncoding::H264, PixelFormat::Bgra8)
     }

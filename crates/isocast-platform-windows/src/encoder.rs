@@ -399,6 +399,23 @@ pub struct WindowsVideoEncoder {
 }
 
 impl WindowsVideoEncoder {
+    pub(crate) fn retire_failed(self) {
+        if let Encoder::Mf(mf) = &self.encoder {
+            mf.retire_failed();
+        }
+        // Preserve field drop order: budget_closing, native session, budget.
+        drop(self);
+    }
+    #[cfg(debug_assertions)]
+    pub(crate) fn inject_failure(&self, output: bool) -> Result<()> {
+        match &self.encoder {
+            Encoder::Nvenc(e) => {
+                e.inject_rejection();
+                Ok(())
+            }
+            Encoder::Mf(e) => e.inject_failure(output),
+        }
+    }
     pub fn new(device: &GraphicsDevice, spec: &LiveVideoSpec) -> Result<Self> {
         Self::with_format(device, spec, VideoEncoding::H264, PixelFormat::Bgra8)
     }
@@ -899,7 +916,7 @@ impl VideoEncoder for WindowsVideoEncoder {
         // Recording sessions keep the native fixed-rate error unchanged.
         let _admission = match (&self.budget, &self.budget_device, self.quality) {
             (Some(reservation), Some(device), None) => {
-                let admission = NvencAdmission::begin();
+                let admission = NvencAdmission::begin()?;
                 if let Err(error) = admission.raise_fps(device, reservation, fps) {
                     let message = format!(
                         "encoder.budget: admission denied rate increase to {fps} fps; stream must reopen: {error:#}"

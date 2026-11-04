@@ -698,7 +698,18 @@ impl SessionControl {
     }
 
     fn take_split(&self) -> Option<mpsc::Sender<SplitReply>> {
-        self.state.lock().split.take()
+        let mut state = self.state.lock();
+        let reply = state.split.take()?;
+        if state
+            .clock
+            .as_ref()
+            .is_some_and(|c| c.recovery.reopening_output())
+        {
+            state.splitting = false;
+            let _ = reply.send(Err(SplitRefused {ending:false, busy:true, message:"split refused while a recording encoder is recovering; retry after its boundary".into()}));
+            return None;
+        }
+        Some(reply)
     }
 
     /// The recording has ended: a split still waiting is refused, and so is
