@@ -187,8 +187,7 @@ pub fn doctor_check() -> isocast_protocol::api::Check {
             .build()?;
         runtime.block_on(async {
             tokio::time::timeout(Duration::from_secs(3), async {
-                let portal =
-                    Screencast::with_connection(zbus::Connection::session().await?).await?;
+                let portal = screencast().await?;
                 ensure!(
                     portal
                         .available_source_types()
@@ -422,15 +421,38 @@ pub fn saved_size(target: &ScreenTarget<'_>) -> Option<(u32, u32)> {
 
 type Session = ashpd::desktop::Session<Screencast>;
 
+async fn screencast() -> Result<Screencast> {
+    // Registration is per D-Bus unique name. Doctor and every new share
+    // use their own connection (and runtime), even in the same process.
+    const APP_ID: &str = "dev.isocast.Isocast";
+    static FALLBACK_LOG: std::sync::Once = std::sync::Once::new();
+    let connection = zbus::Connection::session().await?;
+    if ashpd::is_sandboxed() {
+        FALLBACK_LOG.call_once(
+            || isocast_diagnostics::diagnostic!("info"; "using the sandbox-provided portal app ID"),
+        );
+    } else {
+        let register =
+            ashpd::register_host_app_with_connection(connection.clone(), APP_ID.try_into()?);
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(1), register)
+            .await
+            .context("Registry timed out")
+            .and_then(|result| Ok(result?))
+        {
+            FALLBACK_LOG.call_once(|| isocast_diagnostics::diagnostic!("info"; "portal app ID registration unavailable ({error}); continuing without registration"));
+        }
+    }
+    Screencast::with_connection(connection)
+        .await
+        .context("connect to desktop ScreenCast portal")
+}
+
 /// The ScreenCast portal on a connection of its own, and a new session.
 async fn connect() -> Result<(Screencast, Session)> {
     // A dedicated connection belongs to the caller's runtime. ASHPD's
     // process-global connection would outlive the first runtime.
     tokio::time::timeout(Duration::from_secs(10), async {
-        let connection = zbus::Connection::session().await?;
-        let portal = Screencast::with_connection(connection)
-            .await
-            .context("connect to desktop ScreenCast portal")?;
+        let portal = screencast().await?;
         let session = portal.create_session(Default::default()).await?;
         Ok::<_, anyhow::Error>((portal, session))
     })
