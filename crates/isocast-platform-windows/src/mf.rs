@@ -45,6 +45,7 @@ pub struct MfEncoder {
     jobs: Option<mpsc::SyncSender<Job>>,
     worker: Option<JoinHandle<()>>,
     info: MfEncoderInfo,
+    pub(crate) rejected: Vec<String>,
     low_latency: bool,
     recording: bool,
     ready: VecDeque<EncodedVideo>,
@@ -64,7 +65,7 @@ impl MfEncoder {
         encoding: VideoEncoding,
         input: PixelFormat,
     ) -> Result<Self> {
-        Self::open(device, spec, mode, encoding, input, None)
+        Self::open(device, spec, mode, encoding, input, None, None)
     }
 
     /// Recording at the nearest accepted native MF quality (0..=100), not
@@ -80,7 +81,19 @@ impl MfEncoder {
         input: PixelFormat,
         quality: u32,
     ) -> Result<Self> {
-        Self::open(device, spec, mode, encoding, input, Some(quality))
+        Self::recording_candidate(device, spec, mode, encoding, input, quality, None)
+    }
+
+    pub(crate) fn recording_candidate(
+        device: &GraphicsDevice,
+        spec: &LiveVideoSpec,
+        mode: MfMode,
+        encoding: VideoEncoding,
+        input: PixelFormat,
+        quality: u32,
+        probe: Option<Frame>,
+    ) -> Result<Self> {
+        Self::open(device, spec, mode, encoding, input, Some(quality), probe)
     }
 
     fn open(
@@ -90,6 +103,7 @@ impl MfEncoder {
         encoding: VideoEncoding,
         input: PixelFormat,
         quality: Option<u32>,
+        probe: Option<Frame>,
     ) -> Result<Self> {
         encoding.validate(input)?;
         if spec.profile != H264Profile::High && encoding != VideoEncoding::H264 {
@@ -124,9 +138,17 @@ impl MfEncoder {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
                         let _apartment = Apartment::new()?;
                         let _runtime = Runtime::new()?;
-                        let mut session =
-                            Session::open(&device, &settings, mode, encoding, input, quality)?;
-                        if started.send(Ok(session.info.clone())).is_err() {
+                        let (mut session, rejected) = Session::open(
+                            &device,
+                            &settings,
+                            mode,
+                            encoding,
+                            input,
+                            quality,
+                            probe.as_ref(),
+                        )?;
+                        drop(probe);
+                        if started.send(Ok((session.info.clone(), rejected))).is_err() {
                             return Ok(());
                         }
                         while let Ok(job) = rx.recv() {
@@ -143,7 +165,7 @@ impl MfEncoder {
             })?;
         // The engine's bounded native-open workers own the startup deadline;
         // do not detach a new stuck COM worker on every retry.
-        let info = match startup.recv() {
+        let (info, rejected) = match startup.recv() {
             Ok(Ok(info)) => info,
             result => {
                 drop(tx);
@@ -161,6 +183,7 @@ impl MfEncoder {
             jobs: Some(tx),
             worker: Some(worker),
             info,
+            rejected,
             low_latency: spec.low_latency,
             recording: quality.is_some(),
             ready: VecDeque::new(),
@@ -466,11 +489,12 @@ impl Session {
         encoding: VideoEncoding,
         input: PixelFormat,
         quality: Option<u32>,
-    ) -> Result<Self> {
+        probe: Option<&Frame>,
+    ) -> Result<(Self, Vec<String>)> {
         let mut failures = Vec::new();
         let hardware = mode == MfMode::Hardware;
         for activation in candidates(hardware, hardware.then(|| device.adapter_luid()), encoding)? {
-            let label = name(&activation)?;
+            let label = name(&activation).unwrap_or_else(|_| "unnamed MFT".into());
             match Self::open_one(
                 device,
                 spec,
@@ -479,8 +503,14 @@ impl Session {
                 encoding,
                 input,
                 quality,
-            ) {
-                Ok(session) => return Ok(session),
+            )
+            .and_then(|mut session| {
+                if let Some(frame) = probe {
+                    session.probe(frame)?;
+                }
+                Ok(session)
+            }) {
+                Ok(session) => return Ok((session, failures)),
                 Err(error) => failures.push(format!("{label}: {error:#}")),
             }
         }
@@ -791,6 +821,61 @@ impl Session {
             }
         }
         self.parameters.headers(&bytes)?;
+        Ok(())
+    }
+
+    fn probe(&mut self, frame: &Frame) -> Result<()> {
+        use crate::encoder::{PROBE_FRAMES, check_probe_packet, probe_pts};
+        let deadline = Instant::now() + FINISH_WAIT;
+        let mut received = 0;
+        for index in 0..PROBE_FRAMES {
+            let pts = probe_pts(index, self.fps);
+            self.validate_frame(frame, pts)?;
+            while !self.encode(frame, pts, index == 0)? {
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "MF preflight: timed out submitting picture {index}"
+                );
+                if let Some(packet) = self.receive(Duration::from_millis(1))? {
+                    check_probe_packet(&packet, received, self.fps)?;
+                    received += 1;
+                } else {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        // Even a low-latency MFT may buffer its last picture. Drain the test
+        // stream and start a new one on the same activated transform. No
+        // pending sample, PTS or counter is carried into the take.
+        let mut tail = Vec::new();
+        self.deadline = Some(deadline);
+        self.finish(&mut tail)?;
+        for packet in tail {
+            check_probe_packet(&packet, received, self.fps)?;
+            received += 1;
+        }
+        anyhow::ensure!(
+            received == PROBE_FRAMES,
+            "MF preflight: received {received}/{PROBE_FRAMES} access units"
+        );
+        self.parameters.check_probe(frame)?;
+        self.deadline = None;
+        self.finished = false;
+        self.finishing = false;
+        self.drain_complete = false;
+        self.last_pts = None;
+        self.counts = EncodeStats::default();
+        unsafe {
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
+        }
+        self.wait_input_credit(FINISH_WAIT)?;
+        anyhow::ensure!(
+            !self.info.asynchronous || self.need_input > 0,
+            "MF preflight: no input credit for take after drain"
+        );
         Ok(())
     }
 

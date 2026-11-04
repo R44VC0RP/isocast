@@ -3083,6 +3083,9 @@ pub struct ChannelLevel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LiveFile {
     pub source: String,
+    /// This output's actual encoder and any preflight downgrade, also saved in the take manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<crate::manifest::ManifestEncoder>,
     /// Codec of this take, not the editable setup's next-take settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec: Option<crate::Codec>,

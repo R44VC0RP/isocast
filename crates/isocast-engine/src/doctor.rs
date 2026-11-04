@@ -188,6 +188,16 @@ pub fn doctor_writing<P: Platform>(
         ));
     }
     checks.extend(platform.doctor_checks());
+    checks.extend(platform.encoder_self_test(setup.map(|setup| {
+        let program = &setup.recording.program;
+        let (width, height) = program.size(&setup.canvas);
+        VideoTrackSpec {
+            width,
+            height,
+            fps: setup.canvas.fps,
+            encoder: program.encoder.clone(),
+        }
+    })));
 
     let Some(setup) = setup else {
         checks.push(check(

@@ -205,8 +205,8 @@ pub struct ManifestFile {
 /// opened.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ManifestEncoder {
-    /// `planned` (its preset was selected by the budget before opening) or
-    /// `unplanned` (an adapter without an encoder profile; see `reason`).
+    /// `planned` (budget-selected presets), `replanned` (a planned provider
+    /// failed preflight), or `unplanned` (an adapter without a budget profile).
     pub admission: String,
     /// Where the throughput figures came from: `calibrated` or `reference`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,7 +227,7 @@ pub struct ManifestEncoder {
     /// already open beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_load: Option<f64>,
-    /// Why measured figures were not applied, or why it is unplanned.
+    /// Why the provider or its quality changed, or why budget figures were not applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

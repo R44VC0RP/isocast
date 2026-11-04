@@ -1116,6 +1116,12 @@ jobs:
           name: windows-app-audio
           path: windows-app-audio.json
 
+      - name: Record with the preflight fallback after an injected NVENC open failure
+        timeout-minutes: 5
+        run: |
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_encoder_preflight --engine-env ISOCAST_TEST_FAIL_NVENC_OPEN=1 --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-preflight" --report windows-preflight.json
+          python -c 'import json; r, = json.load(open("windows-preflight.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
+
       - name: Recover recordings and check isolated workspaces (hosted breakaway skip)
         timeout-minutes: 10
         run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --only win_isolated --only win_machine_profile --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json

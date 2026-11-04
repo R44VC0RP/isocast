@@ -10391,6 +10391,17 @@
             "minimum": 0,
             "type": "integer"
           },
+          "encoder": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManifestEncoder"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This output's actual encoder and any preflight downgrade, also saved in the take manifest."
+          },
           "frames": {
             "format": "uint64",
             "minimum": 0,
@@ -11061,7 +11072,7 @@
         "description": "One file's encoder admission, as decided before any file of its take\nopened.",
         "properties": {
           "admission": {
-            "description": "`planned` (its preset was selected by the budget before opening) or\n`unplanned` (an adapter without an encoder profile; see `reason`).",
+            "description": "`planned` (budget-selected presets), `replanned` (a planned provider\nfailed preflight), or `unplanned` (an adapter without a budget profile).",
             "type": "string"
           },
           "applied_preset": {
@@ -11105,7 +11116,7 @@
             ]
           },
           "reason": {
-            "description": "Why measured figures were not applied, or why it is unplanned.",
+            "description": "Why the provider or its quality changed, or why budget figures were not applied.",
             "type": [
               "string",
               "null"

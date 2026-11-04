@@ -1383,7 +1383,7 @@ fn create_writers<P: Platform>(
                 applied_preset: output.applied_preset,
                 backend: output.backend.clone(),
                 estimated_load: admission.estimated_load,
-                reason: admission.reason.clone(),
+                reason: output.fallback.clone().or_else(|| admission.reason.clone()),
             });
         }
     }
@@ -1434,11 +1434,15 @@ fn admission_note(admission: &crate::EncoderAdmission) -> String {
         .map(|output| {
             let preset = |preset: Option<u32>| preset.map_or("-".to_string(), |p| format!("P{p}"));
             format!(
-                "{} planned {} applied {} ({})",
+                "{} planned {} applied {} ({}){}",
                 output.output,
                 preset(output.planned_preset),
                 preset(output.applied_preset),
-                output.backend
+                output.backend,
+                output
+                    .fallback
+                    .as_ref()
+                    .map_or(String::new(), |why| format!("; {why}"))
             )
         })
         .collect();
@@ -1544,6 +1548,7 @@ fn live_status(
                 let committed = plan.committed.load(Ordering::Relaxed);
                 LiveFile {
                     source: plan.source.clone(),
+                    encoder: plan.encoder.lock().clone(),
                     codec: Some(plan.spec.video.encoder.codec),
                     hardware_accelerated: match plan.hardware_accelerated.load(Ordering::Relaxed) {
                         0 => Some(false),

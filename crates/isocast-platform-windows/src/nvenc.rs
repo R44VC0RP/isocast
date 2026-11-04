@@ -148,6 +148,9 @@ pub struct NvencAdmission {
 }
 
 impl NvencAdmission {
+    pub(crate) fn try_begin() -> Option<Self> {
+        ADMISSION.try_lock().map(|guard| Self { _serial: guard })
+    }
     pub fn begin() -> Self {
         Self {
             _serial: ADMISSION.lock(),
@@ -1403,6 +1406,27 @@ impl NvencEncoder {
     /// spent waiting for the caller to receive an already-completed packet.
     pub fn completion_latency(&self) -> Duration {
         self.session.state.lock().completion_latency
+    }
+
+    /// All test pictures have left this exact session before a writer can
+    /// own it. Take timestamps are on the host clock; probe PTS start at zero.
+    pub(crate) fn probe(&mut self, frame: &Frame, fps: u32) -> Result<()> {
+        let deadline = Instant::now() + FINISH_WAIT;
+        for index in 0..crate::encoder::PROBE_FRAMES {
+            let pts = crate::encoder::probe_pts(index, fps);
+            while !self.try_encode(frame, pts, index == 0)? {
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "NVENC preflight: timed out submitting picture {index}"
+                );
+                std::thread::sleep(BUSY_RETRY);
+            }
+            let packet = self
+                .receive_timeout(deadline.saturating_duration_since(Instant::now()))?
+                .context("NVENC preflight: no access unit before deadline")?;
+            crate::encoder::check_probe_packet(&packet, index, fps)?;
+        }
+        self.session.native.lock().parameters.check_probe(frame)
     }
 
     /// avcC or hvcC for the encoded-packet muxer. No B-frame reordering.
