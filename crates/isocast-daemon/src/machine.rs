@@ -433,10 +433,7 @@ impl Daemon {
 }
 
 /// Called before normal daemon initialization and permission preflight.
-pub(super) fn worker() -> Option<std::process::ExitCode> {
-    if std::env::args().nth(1).as_deref() != Some("--machine-calibration-worker") {
-        return None;
-    }
+pub(super) fn worker(_scratch: &Path) -> std::process::ExitCode {
     // Also bound a helper whose parent is killed. Native calls may never
     // return, so this watchdog exits the disposable process, not a thread.
     std::thread::spawn(|| {
@@ -445,12 +442,9 @@ pub(super) fn worker() -> Option<std::process::ExitCode> {
     });
     #[cfg(target_os = "macos")]
     let result = (|| -> anyhow::Result<()> {
-        let scratch = std::env::args_os()
-            .nth(2)
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("missing scratch folder"))?;
+        let scratch = _scratch;
         let mut profile =
-            isocast_engine::machine_profile::measure(crate::platform::native(), &scratch)?;
+            isocast_engine::machine_profile::measure(crate::platform::native(), scratch)?;
         profile.app_build = crate::daemon_build().build;
         let mut file = OpenOptions::new()
             .write(true)
@@ -461,11 +455,11 @@ pub(super) fn worker() -> Option<std::process::ExitCode> {
     })();
     #[cfg(not(target_os = "macos"))]
     let result: anyhow::Result<()> = Err(anyhow::anyhow!("no calibration backend"));
-    Some(match result {
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("machine calibration: {error:#}");
             std::process::ExitCode::FAILURE
         }
-    })
+    }
 }
