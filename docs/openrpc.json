@@ -18484,6 +18484,11 @@
             "type": "string"
           },
           {
+            "const": "paused",
+            "description": "Still open, holding its last picture until capture resumes.",
+            "type": "string"
+          },
+          {
             "const": "failed",
             "description": "It couldn't open, or its device went away; retried when the setup\nnext changes.",
             "type": "string"

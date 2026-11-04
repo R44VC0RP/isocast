@@ -27,6 +27,7 @@ pub struct LinuxPlatform;
 // Each native backend owns its shutdown; no capture thread is detached.
 pub enum Capture {
     Screen(portal::Capture),
+    X11(crate::x11::Capture),
     Browser(browser::Capture),
     Audio(pipewire_audio::Capture),
     Camera(camera::Capture),
@@ -429,8 +430,10 @@ impl Platform for LinuxPlatform {
         cursor: bool,
         sink: VideoSink<Frame>,
     ) -> Result<(Capture, CaptureFormat)> {
-        let (capture, format) = portal::capture(target, fps, ten_bit, cursor, sink)?;
-        Ok((Capture::Screen(capture), format))
+        portal::capture(target, fps, ten_bit, cursor, sink)
+    }
+    fn capture_paused(capture: &Capture) -> bool {
+        matches!(capture, Capture::X11(c) if c.paused())
     }
     fn capture_camera(
         &self,

@@ -520,6 +520,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
         sink: VideoSink<Self::Frame>,
     ) -> anyhow::Result<(Self::Capture, CaptureFormat)>;
 
+    /// The capture is still open but intentionally holding its last frame
+    /// until the source becomes available again (e.g. a minimized window).
+    fn capture_paused(_capture: &Self::Capture) -> bool {
+        false
+    }
+
     /// Start capturing a camera (an id, name or part of a name from
     /// [`Platform::devices`]) in the format `request` asks for, or its best
     /// format for `canvas`.

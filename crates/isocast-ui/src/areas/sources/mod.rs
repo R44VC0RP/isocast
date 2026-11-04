@@ -1329,6 +1329,9 @@ fn show_lists(app: &Rc<App>) {
                 if missing {
                     name.push_str(" · missing");
                 }
+                if run.is_some_and(|r| r.state == isocast_protocol::api::SourceRun::Paused) {
+                    name.push_str(" · paused");
+                }
                 if let Some(run) = run
                     .filter(|r| r.state == isocast_protocol::api::SourceRun::WaitingForPermission)
                 {

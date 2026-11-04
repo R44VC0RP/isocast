@@ -413,6 +413,9 @@ enum Running<P: Platform> {
 }
 
 impl<P: Platform> Opened<P> {
+    pub(crate) fn paused(&self) -> bool {
+        matches!(&self._running, Running::Capture { _capture, .. } if P::capture_paused(_capture))
+    }
     pub(crate) fn failure(&self) -> Option<String> {
         let get = |g: &Generator| g.failure.lock().clone();
         match &self._running {

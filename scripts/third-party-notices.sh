@@ -154,6 +154,7 @@ header = root / "crates/isocast-platform-windows/native/nvEncodeAPI.h"
 notice = header.read_text().split("*/", 1)[0].splitlines()[1:]
 print("\n".join(line.removeprefix(" *").removeprefix(" ") for line in notice).strip())
 
+print("\nLinux X11 capture uses x11rb and x11rb-protocol (MIT OR Apache-2.0,\nhttps://github.com/psychon/x11rb) for RandR, Composite, MIT-SHM and XFixes.")
 section("System libraries")
 print("""The Linux build links dynamically to libraries of the system it runs on;
 they are not distributed with Isocast:
