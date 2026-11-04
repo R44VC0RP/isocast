@@ -556,6 +556,10 @@ mod mac {
         });
         let Some(stale) = stale else { return };
         if let Some(what) = busy {
+            // The shared local handshake already showed its busy notice.
+            if !app.session.borrow().link_error.is_empty() {
+                return;
+            }
             if STALE_TOLD.replace(Some(stale.pid)) != Some(stale.pid) {
                 isocast_diagnostics::diagnostic!("info";
                     "updates: isocastd {} is older than this app (build {}); restarting it after {what} stops",
@@ -588,6 +592,16 @@ mod mac {
             "updates: isocastd {} is older than this app (build {}); restarting it",
             stale.running, stale.expected);
         std::thread::spawn(move || {
+            // This window can outlive its app bundle on disk. The numeric
+            // periodic fallback must not bypass the handshake's identity guard.
+            if let Err(why) = isocast_client::verify_installed_engine() {
+                let _ = slint::invoke_from_event_loop(move || {
+                    FINISHING.set(false);
+                    QUIET_UNTIL.set(None);
+                    isocast_diagnostics::diagnostic!("warn"; "updates: keeping the running engine: {why}");
+                });
+                return;
+            }
             let result = stop_engine();
             let _ = slint::invoke_from_event_loop(move || {
                 FINISHING.set(false);

@@ -121,6 +121,14 @@ mod whep;
 static PARENT_OWNED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> ExitCode {
+    // Read-only package identity. Never initialize logging, open a socket,
+    // acquire the daemon lock or touch an engine just to identify a binary.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--build-identity")) {
+        return match serde_json::to_writer(std::io::stdout().lock(), &callers::build_identity()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     if let Some(code) = machine::worker() {
         return code;
     }
@@ -1567,17 +1575,18 @@ impl Daemon {
     /// set on success (the connection then runs `graceful_shutdown`).
     fn shutdown_if_idle(&self) -> Result<(), RpcError> {
         let _gate = self.starting.write();
+        if let Some(busy) = self.busy() {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: format!("isocastd keeps running while {busy}"),
+            });
+        }
+        // Still under the output-start write gate. A busy refusal never
+        // makes other clients briefly see a shutting-down engine.
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
                 message: "the daemon is already shutting down".into(),
-            });
-        }
-        if let Some(busy) = self.busy() {
-            self.shutting_down.store(false, Ordering::SeqCst);
-            return Err(RpcError {
-                code: RpcError::WRONG_STATE,
-                message: format!("isocastd keeps running while {busy}"),
             });
         }
         Ok(())
@@ -2497,10 +2506,9 @@ impl Daemon {
         };
         // Kept beside the setup file, for `start` to check against.
         let memory = capacity::memory_path(state.file.legacy());
-        // Not under the `starting` gate (a benchmark takes minutes, and a
-        // restart would wait for it rather than be refused, #45): checked
-        // under the state lock instead, which `shutdown_if_idle` takes
-        // after setting `shutting_down`, so one of the two sees the other.
+        // Take the start gate only for admission, not for the benchmark.
+        // Idle shutdown either sees `tuning` or has already closed the gate
+        // to new work when we get here.
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
