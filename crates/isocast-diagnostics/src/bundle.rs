@@ -390,8 +390,7 @@ fn collect_report(
             &mut omitted,
         );
     }
-    // Like macOS crash reports, only when the engine is reachable: the
-    // disconnected report exports no free text.
+    // As on macOS: the disconnected report exports no free text.
     #[cfg(target_os = "linux")]
     if live {
         collect_coredumps(&mut contents, &mut redactor, &mut omitted);
@@ -702,8 +701,7 @@ const CRASH_PREFIXES: [&str; 6] = [
     "isocastd_",
 ];
 
-/// Isocast's executables on Linux. Core dumps match these names exactly, so
-/// cargo test and contract binaries named `isocast_*` stay out.
+/// Isocast's executable names on Linux.
 #[cfg(target_os = "linux")]
 const LINUX_EXECUTABLES: [&str; 5] = [
     "isocastd",
@@ -713,8 +711,7 @@ const LINUX_EXECUTABLES: [&str; 5] = [
     "isocast-browser",
 ];
 
-/// `coredumpctl info` fields that identify the person or machine (user and
-/// host names, machine and boot ids, session units), left out of reports.
+/// `coredumpctl info` lines that identify the person or machine.
 #[cfg(target_os = "linux")]
 const COREDUMP_PRIVATE: [&str; 11] = [
     "UID:",
@@ -730,10 +727,8 @@ const COREDUMP_PRIVATE: [&str; 11] = [
     "Slice:",
 ];
 
-/// The newest ten of this user's systemd-coredump records for Isocast
-/// executables, as `coredumpctl info` prints them (with a backtrace when
-/// symbols are available), under `linux-crashes/`. Nothing when
-/// `coredumpctl` is missing or fails.
+/// This user's Isocast core dump records under `linux-crashes/`, as
+/// `coredumpctl info` prints them; nothing when `coredumpctl` is missing.
 #[cfg(target_os = "linux")]
 fn collect_coredumps(
     contents: &mut BTreeMap<String, String>,
@@ -760,10 +755,7 @@ fn collect_coredumps(
     for (time, pid, exe, path) in coredump_entries(&entries, uid) {
         let name = format!("linux-crashes/{time}-{pid}-{exe}.txt");
         let current: usize = contents.values().map(String::len).sum();
-        // A bare PID matches every record with that PID, from any boot,
-        // program or (for a privileged reader) user. `time` is the journal
-        // entry's time in microseconds; the one-second window, the UID and
-        // the path select this record, and -1 keeps a single one.
+        // A bare PID matches records of any boot, program or user.
         let since = time / 1_000_000;
         let Some(info) = run(&[
             "info",
@@ -786,8 +778,8 @@ fn collect_coredumps(
     }
 }
 
-/// The newest ten `coredumpctl list --json=short` entries of `uid` for
-/// [`LINUX_EXECUTABLES`], newest first: (time, pid, executable name, path).
+/// The ten newest `coredumpctl list` entries of `uid` for
+/// [`LINUX_EXECUTABLES`]: (time, pid, executable name, path).
 #[cfg(target_os = "linux")]
 fn coredump_entries(entries: &[Value], uid: u64) -> Vec<(u64, u64, &str, &str)> {
     let mut ours =
@@ -806,8 +798,8 @@ fn coredump_entries(entries: &[Value], uid: u64) -> Vec<(u64, u64, &str, &str)> 
     ours
 }
 
-/// `coredumpctl info` output without [`COREDUMP_PRIVATE`] lines, the UID in
-/// `Message:` or the report-relative age in `Timestamp:`, redacted.
+/// `coredumpctl info` output, redacted, without [`COREDUMP_PRIVATE`] lines,
+/// the message's UID or the timestamp's age.
 #[cfg(target_os = "linux")]
 fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
     info.lines()
@@ -841,9 +833,8 @@ fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
         + "\n"
 }
 
-/// A `linux-crashes/` record's triage summary. The process name comes from
-/// the `PID:` line (`4242 (isocastd)`), which strict mode leaves readable;
-/// the `Executable:` path is fingerprinted there.
+/// A `linux-crashes/` record's triage entry. The process name comes from
+/// the `PID:` line: strict mode fingerprints the `Executable:` path.
 fn coredump_summary(name: &str, text: &str) -> Value {
     let field = |key: &str| {
         text.lines()
