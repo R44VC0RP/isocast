@@ -12,7 +12,7 @@ import time
 
 
 def cli(*args, check=True):
-    result = subprocess.run(["target/debug/isocast", *args], text=True, capture_output=True, timeout=60)
+    result = subprocess.run(["/usr/bin/isocast", *args], text=True, capture_output=True, timeout=60)
     print(result.stdout, result.stderr, flush=True)
     if check:
         result.check_returncode()
@@ -50,17 +50,19 @@ items = [{{ source = "bars", rect = {{ x = 0, y = 0, width = 320, height = 180 }
     assert doctor.returncode == int(any(c['status'] == 'problem' for c in checks)), doctor.returncode
     assert report['machine']['hardware_encoders'] == [], report['machine']
     codec, = (c for c in checks if c['name'] == 'codec: OpenH264')
-    if distro == 'archlinux':
+    if distro in ('archlinux', 'fedora-cisco'):
         assert codec['status'] == 'ok', codec
         provider = re.fullmatch(r"your system's OpenH264 [\d.]+ \((/[^)]+)\)", codec['detail'])
         assert provider, codec
-        owner = subprocess.check_output(['pacman', '-Qoq', Path(provider[1]).resolve()], text=True).strip()
+        query = ['pacman', '-Qoq'] if distro == 'archlinux' else ['rpm', '-qf', '--qf', '%{NAME}']
+        owner = subprocess.check_output([*query, Path(provider[1]).resolve()], text=True).strip()
         assert owner == 'openh264', owner
     else:
         assert distro == 'fedora' and codec['status'] == 'problem' and 'noopenh264' in codec['detail'], codec
 
     start = cli('start', setup, '--json', check=False)
-    if distro == 'fedora' and start.returncode == 1:
+    if distro == 'fedora':
+        assert start.returncode == 1, start
         assert re.search(r'openh264', start.stderr, re.I), 'recording refusal did not identify the codec'
         return
     start.check_returncode()
