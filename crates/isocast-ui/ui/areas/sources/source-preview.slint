@@ -1,8 +1,9 @@
 // A live picture of the source a sheet is about (Properties, Filters): the
 // kit's PreviewWell (Paper's Properties sheet) with the source's format,
 // name and picture, 20px in from the sheet's sides and 16px above what
-// follows; or a note where there is no picture. The picture is the
-// daemon's shared frames of that source (src/areas/sources/preview.rs).
+// follows; or a note where there is no picture, and a caption on its foot
+// while it lacks the source's effects. The picture is the daemon's shared
+// frames of that source (src/areas/sources/preview.rs).
 
 import { Theme } from "../../theme.slint";
 import { PreviewWell } from "../../kit.slint";
@@ -43,6 +44,26 @@ export component SourcePreview inherits VerticalLayout {
                 y: well.picture-y;
                 width: well.picture-w;
                 height: well.picture-h;
+            }
+        }
+        // What the picture lacks (the source's effects), centred on its
+        // foot (wider than a narrow picture if need be).
+        if SourcesArea.preview-caption != "" && SourcesArea.preview-note == "": Rectangle {
+            x: (well.width - self.width) / 2;
+            y: well.picture-y + well.picture-h - self.height - Theme.space-2;
+            width: min(caption.preferred-width + 2 * Theme.space-2, well.width - 2 * Theme.space-3);
+            height: Theme.badge-h;
+            background: Theme.surface-overlay.with-alpha(0.85);
+            border-radius: Theme.r-mini;
+            caption := Text {
+                x: Theme.space-2;
+                width: parent.width - 2 * Theme.space-2;
+                text: SourcesArea.preview-caption;
+                color: Theme.text-2;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-xs;
+                vertical-alignment: center;
+                overflow: elide;
             }
         }
     }

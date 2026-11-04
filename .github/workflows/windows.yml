@@ -519,6 +519,36 @@ jobs:
           target/release/isocast apply --revision 0 packaging/linux/test-setup.toml
           target/release/isocast-ui --snapshot "$work/main.png" --size 1280x800 --wait-ms 3000
           target/release/isocast-ui --snapshot "$work/settings.png" --size 1280x800 --state settings:output
+          # Filters shows its source live and through its filters: the
+          # setup's white "tint" square, tinted magenta, fills the dialog's
+          # picture (the program shows it only as a small corner).
+          target/release/isocast-ui --snapshot "$work/filters.png" --size 1280x800 --state dialog:filters:tint --state wait:3000
+          python3 - "$work/filters.png" <<'PY'
+          import struct, sys, zlib
+          data = open(sys.argv[1], "rb").read()
+          width, height, depth, kind = struct.unpack(">IIBB", data[16:26])
+          assert (depth, kind) == (8, 6), "expected an 8-bit RGBA PNG"
+          at, idat = 8, b""
+          while at < len(data):
+              size, name = struct.unpack(">I4s", data[at:at + 8])
+              if name == b"IDAT":
+                  idat += data[at + 8:at + 8 + size]
+              at += size + 12
+          raw, stride, rows, prev = zlib.decompress(idat), width * 4, [], bytearray(width * 4)
+          for y in range(height):
+              f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+              for i in range(stride):
+                  a, b, c = line[i - 4] if i >= 4 else 0, prev[i], prev[i - 4] if i >= 4 else 0
+                  p = a + b - c
+                  pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                  line[i] = (line[i] + (0, a, b, (a + b) // 2, a if pa <= pb and pa <= pc else b if pb <= pc else c)[f]) & 255
+              rows.append(line)
+              prev = line
+          tinted = sum(1 for line in rows for x in range(0, stride, 4) if line[x] > 200 and line[x + 1] < 60 and line[x + 2] > 200)
+          white = sum(1 for line in rows for x in range(0, stride, 4) if min(line[x:x + 3]) > 235)
+          print(f"filters.png: {tinted} magenta (filtered) pixels, {white} white")
+          assert tinted > 20000, "the Filters preview doesn't show its source filtered"
+          PY
           target/release/isocast engine shutdown || true
 
       - name: Package
