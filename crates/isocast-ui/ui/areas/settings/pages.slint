@@ -836,7 +836,8 @@ export component OutputPage inherits SetPage {
         resettable: true;
         reset-label: "Put Program back as saved";
         reset => { SettingsArea.revert-group("program"); }
-        hint: "Record Program writes the canvas as everyone sees it, with the program mix.";
+        hint: "Record Program writes the canvas as everyone sees it, with the program mix."
+            + (SettingsArea.encoder-name != "" ? "\nEncoder: " + SettingsArea.encoder-name + (SettingsArea.encoder-note != "" ? ". " + SettingsArea.encoder-note : "") : "");
         SwitchRow {
             label: "Record Program";
             place: SettingsArea.program-on ? RowPlace.first : RowPlace.only;

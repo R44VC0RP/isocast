@@ -164,7 +164,7 @@ export component SourcesDock inherits Dock {
                 // A row without ISO (a box, text, a group's child): its name
                 // runs on into the empty ISO lane (and its gap, the lane
                 // being 0 wide in a narrow dock) before it elides.
-                label-room: !item.can-iso && item.state != "failed" && item.state != "waiting for permission" && item.state != "opening" ? (root.narrow ? 0px : Theme.lane) + Theme.space-2 : 0px;
+                label-room: !item.can-iso && item.state != "failed" && item.state != "waiting for permission" && item.state != "opening" && item.warning == "" ? (root.narrow ? 0px : Theme.lane) + Theme.space-2 : 0px;
                 icon: Icons.named(item.icon);
                 selected: parent.chosen || item.marked;
                 dim: !item.visible;
@@ -224,6 +224,25 @@ export component SourcesDock inherits Dock {
                     Tooltip {
                         Tip {
                             text: item.state == "waiting for permission" ? item.error + " Click to allow it." : item.error;
+                        }
+                    }
+                }
+                // A running source's known limitation (its system-audio
+                // mode, a fallback encoder): an orange warning, the words
+                // in its tooltip.
+                if item.warning != "" && item.state == "": Rectangle {
+                    width: Theme.control-h-sm;
+                    accessible-role: text;
+                    accessible-label: "Warning";
+                    accessible-description: item.warning;
+                    Icon {
+                        path: Icons.warning;
+                        size: Theme.icon-sm;
+                        color: Theme.warning;
+                    }
+                    Tooltip {
+                        Tip {
+                            text: item.warning;
                         }
                     }
                 }

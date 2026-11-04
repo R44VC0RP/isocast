@@ -73,6 +73,7 @@
 pub mod canvas;
 pub mod controls;
 pub mod developer;
+pub mod diagnostics;
 pub mod hotkeys;
 pub mod library;
 pub mod menubar;

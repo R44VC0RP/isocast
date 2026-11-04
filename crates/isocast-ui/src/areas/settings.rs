@@ -65,6 +65,7 @@ pub const STATES: &[&str] = &[
     "bug-report-create",
     "bug-report-send",
     "hotkey-record:INDEX",
+    "doctor:PATH",
 ];
 
 /// Settings' pages in the sidebar's order and groups (Paper's Settings
@@ -126,6 +127,13 @@ const TABS: &[(&str, &str, &str, &str, &str)] = &[
         "link",
         "System",
         "Control other computers running Isocast, or let them control this one, on the local network.",
+    ),
+    (
+        "diagnostics",
+        "Diagnostics",
+        "gauge",
+        "System",
+        "What the engine checked about capture, encoding, audio, the disk and itself, and what to do about each warning.",
     ),
 ];
 
@@ -442,6 +450,11 @@ pub struct Settings {
     pub hotkeys: super::hotkeys::HotkeysPage,
     /// Help › Report a Bug… (src/areas/report.rs).
     pub report: super::report::Report,
+    /// The Diagnostics page and the engine's doctor report
+    /// (src/areas/diagnostics.rs).
+    pub diagnostics: super::diagnostics::DiagnosticsPage,
+    /// The encoder line shown, and whether for a Linux engine.
+    encoder: RefCell<Option<(super::diagnostics::EncoderLine, bool)>>,
 }
 
 impl Area for Settings {
@@ -463,22 +476,7 @@ impl Area for Settings {
             }
         })));
         // What makes the files (shown after the codec: Paper's Encoder row).
-        // The engine machine's encoder (decision 22).
-        let linux = crate::engine::os() == isocast_protocol::hello::EngineOs::Linux;
-        let engine = if engine_is_mac() {
-            "Apple VideoToolbox"
-        } else if linux {
-            "OpenH264 (software)"
-        } else {
-            ""
-        };
-        // A Linux engine records H.264 only (its software encoder).
-        area.set_codecs(model(
-            CODECS
-                .iter()
-                .filter(|(value, _)| !linux || *value == "h264")
-                .map(|(value, label)| kit::option(value, label, engine)),
-        ));
+        self.encoder_shown(app);
         area.set_pan_laws(model(
             PAN_LAWS
                 .iter()
@@ -499,6 +497,7 @@ impl Area for Settings {
         area.on_server_valid(|text| server_valid(&text));
         super::hotkeys::HotkeysPage::connect(app, &area);
         super::report::Report::connect(app, &area);
+        super::diagnostics::DiagnosticsPage::connect(app, &area);
 
         macro_rules! on {
             ($setter:ident, | $app:ident $(, $arg:ident)* | $body:expr) => {{
@@ -671,6 +670,10 @@ impl Area for Settings {
         {
             self.show(app);
         }
+        // The program file's actual encoder, while recording.
+        if open && changed.any(Changed::STATUS) {
+            self.encoder_shown(app);
+        }
         // Another client, a profile switch or our own change: the
         // bindings at the new revision.
         if open && changed.any(Changed::CONFIRMED) {
@@ -842,6 +845,13 @@ impl Area for Settings {
                 self.hotkeys.sample(app);
             }
             "hotkey-record" => self.hotkeys.sample_record(app, arg.parse().unwrap_or(0)),
+            // A doctor report from a file (`isocast doctor --json`) on
+            // Diagnostics, Recording's encoder line and the Sources dock.
+            "doctor" => {
+                if let Err(error) = self.diagnostics.sample(app, arg) {
+                    return Some(Err(error));
+                }
+            }
             "iso-source" => self.set_iso_source(app, arg, true),
             // Output's quality numbers, under Advanced.
             "advanced-quality" => {
@@ -918,7 +928,8 @@ impl Settings {
         app.close_dialog();
     }
 
-    /// A page came up: Audio asks for the devices again.
+    /// A page came up: Audio asks for the devices again, Diagnostics and
+    /// Recording the engine's doctor.
     fn tab_shown(&self, app: &Rc<App>, tab: &str) {
         if let (Some(window), Some((_, title, icon, _, about))) =
             (app.window(), TABS.iter().find(|(id, ..)| *id == tab))
@@ -939,6 +950,44 @@ impl Settings {
         if tab == "remote" {
             app.remote.page_shown(app);
         }
+        // Doctor writes a test file and, on Windows, opens an encoder: only
+        // for Diagnostics and Recording's encoder line.
+        if tab == "diagnostics" || tab == "output" {
+            self.diagnostics.load(app);
+        }
+    }
+
+    /// The encoder recording uses, from the doctor report and status
+    /// (src/areas/diagnostics.rs): after each codec in the Encoder menus
+    /// (Paper's Encoder row), and in words under Program.
+    pub(crate) fn encoder_shown(&self, app: &Rc<App>) {
+        let Some(window) = app.window() else { return };
+        let area = window.global::<SettingsArea>();
+        let line = {
+            let s = app.session.borrow();
+            let live = s
+                .status
+                .as_ref()
+                .and_then(|status| status.live.as_ref())
+                .map_or(&[][..], |live| &live.files[..]);
+            super::diagnostics::encoder(self.diagnostics.doctor().as_ref(), live, engine_is_mac())
+        }
+        .unwrap_or_default();
+        // A Linux engine records H.264 only.
+        let linux = crate::engine::os() == isocast_protocol::hello::EngineOs::Linux;
+        let shown = Some((line.clone(), linux));
+        if *self.encoder.borrow() == shown {
+            return;
+        }
+        *self.encoder.borrow_mut() = shown;
+        area.set_codecs(model(
+            CODECS
+                .iter()
+                .filter(|(value, _)| !linux || *value == "h264")
+                .map(|(value, label)| kit::option(value, label, &line.name)),
+        ));
+        area.set_encoder_name(line.name.into());
+        area.set_encoder_note(line.note.into());
     }
 
     /// Change the draft by a merge patch.

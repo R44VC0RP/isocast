@@ -404,6 +404,14 @@ impl Area for Sources {
         // A selection made otherwise (a click, the canvas) ends a ⌘/Shift
         // one, and so does another scene.
         let mut lists = changed.any(Changed::SETUP | Changed::SCENES | Changed::RUNNING);
+        // A recording file's encoder change badges its source.
+        if changed.any(Changed::STATUS) {
+            let s = app.session.borrow();
+            lists |= s
+                .status
+                .as_ref()
+                .is_some_and(|status| status.live.is_some());
+        }
         if changed.any(Changed::SELECTION | Changed::SCENES) {
             let selected = window.global::<Ui>().get_selected_item().to_string();
             let mut marked = self.marked.borrow_mut();
@@ -1251,7 +1259,7 @@ fn item_transition(app: &Rc<App>, field: &str, kind: &str) {
 // ---------- The lists ----------
 
 /// The Scenes and Sources lists.
-fn show_lists(app: &Rc<App>) {
+pub(crate) fn show_lists(app: &Rc<App>) {
     let s = app.session.borrow();
     let Some(setup) = s.setup.clone() else {
         app.sources.scene_rows.set_vec(Vec::new());
@@ -1292,6 +1300,8 @@ fn show_lists(app: &Rc<App>) {
             running: &'a std::collections::HashMap<String, isocast_protocol::api::SourceStatus>,
             collapsed: &'a HashSet<String>,
             marked: &'a [String],
+            live: &'a [isocast_protocol::api::LiveFile],
+            doctor: Option<&'a isocast_protocol::api::Doctor>,
         }
         fn walk(
             w: &Walk,
@@ -1388,6 +1398,19 @@ fn show_lists(app: &Rc<App>) {
                     missing,
                     parent: prefix.into(),
                     marked: w.marked.contains(&path),
+                    warning: if found.is_some() {
+                        super::diagnostics::source_warning(
+                            &source,
+                            &setup_model::item_label(w.setup, item),
+                            run,
+                            w.live,
+                            w.doctor,
+                        )
+                        .unwrap_or_default()
+                        .into()
+                    } else {
+                        SharedString::new()
+                    },
                 });
                 if group && expanded {
                     walk(w, &item.children, &path, depth + 1, rows);
@@ -1395,11 +1418,18 @@ fn show_lists(app: &Rc<App>) {
             }
         }
         let marked = app.sources.marked.borrow();
+        let doctor = app.settings.diagnostics.doctor();
         let w = Walk {
             setup: &setup,
             running: &s.running,
             collapsed: &collapsed,
             marked: &marked,
+            live: s
+                .status
+                .as_ref()
+                .and_then(|status| status.live.as_ref())
+                .map_or(&[][..], |live| &live.files[..]),
+            doctor: doctor.as_ref(),
         };
         walk(&w, &scene.items, "", 0, &mut rows);
     }
