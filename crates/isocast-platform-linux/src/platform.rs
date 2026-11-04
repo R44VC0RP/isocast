@@ -451,6 +451,21 @@ impl Platform for LinuxPlatform {
         let (capture, channels) = pipewire_audio::microphone(device, channels, sink)?;
         Ok((Capture::Audio(capture), channels))
     }
+    fn system_audio_mode(
+        &self,
+        _exclude: &[String],
+        monitoring: bool,
+    ) -> Option<isocast_engine::SystemAudioMode> {
+        Some(isocast_engine::SystemAudioMode {
+            name: if monitoring {
+                "playback-links-exclude-own"
+            } else {
+                "sink-monitor"
+            },
+            captures_monitor: !monitoring,
+            warning: None,
+        })
+    }
     fn capture_system_audio(
         &self,
         exclude: &[String],

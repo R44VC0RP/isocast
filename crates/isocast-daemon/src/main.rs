@@ -3304,6 +3304,10 @@ impl Daemon {
             data: Some(self.data.status()),
             diagnostics: Some({
                 let mut health = isocast_diagnostics::health();
+                #[cfg(target_os = "linux")]
+                if let Some(warning) = isocast_platform_linux::audio_scheduling_warning() {
+                    health["audio_scheduling_warning"] = warning.into();
+                }
                 health["frame_budget"] = native().frame_budget().unwrap_or(serde_json::Value::Null);
                 health["metadata_pending"] = serde_json::json!(metadata_pending);
                 health

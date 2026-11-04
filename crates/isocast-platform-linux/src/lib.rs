@@ -20,6 +20,7 @@ mod usb_setup;
 mod video_encoder;
 mod writer;
 
+pub use pipewire_audio::audio_scheduling_warning;
 pub use platform::LinuxPlatform;
 
 /// Check discovery/permissions without becoming a producer. Regular status
