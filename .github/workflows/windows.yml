@@ -337,6 +337,31 @@ jobs:
           fi
           cargo build --release --locked -p isocast-daemon -p isocast-cli
 
+      - name: Daemon queries do not start an engine
+        if: env.MODE == 'full'
+        run: |
+          home=$(mktemp -d)
+          probe() {
+            env -i HOME="$home" PATH="$PATH" XDG_RUNTIME_DIR="$home" \
+              ISOCAST_SOCKET="$home/engine.sock" ISOCAST_LOG_DIR="$home/logs" \
+              timeout -k 1 5 target/release/isocastd "$@"
+          }
+          version=$(probe --build-identity | jq -er .version)
+          for flag in --version -V; do
+            test "$(probe "$flag")" = "isocastd $version"
+          done
+          help=$(probe --help)
+          test "$(probe -h)" = "$help"
+          grep -Fq -- '--exit-on-stdin-close' <<< "$help"
+          for flag in '' --version --exit-on-stdin-close; do
+            code=0
+            probe ${flag:+"$flag"} --bogus >"$RUNNER_TEMP/options.out" 2>"$RUNNER_TEMP/options.err" || code=$?
+            test "$code" = 2
+            test ! -s "$RUNNER_TEMP/options.out"
+            test "$(tail -n +2 "$RUNNER_TEMP/options.err")" = "$help"
+          done
+          rmdir "$home"  # fails even for a single hidden file or socket
+
       # Cisco's OpenH264 binary, as install.sh downloads it (pinned version
       # and SHA-256; Isocast compiles none): the encoder and decoder tests
       # and the e2e load it from ~/.local/lib/isocast.
