@@ -31,9 +31,12 @@ use windows::core::{BOOL, BSTR, GUID, HRESULT, Interface, PCWSTR, PWSTR, impleme
 use crate::native::{Apartment, Event};
 
 mod application;
+mod process_clock;
 mod rate;
 pub(crate) use application::probe_system_audio;
-pub use application::{capture_application_audio, probe_application_audio};
+pub use application::{
+    capture_application_audio, probe_application_audio, process_audio_helper_main,
+};
 
 const MAX_FRAMES: u32 = 48_000;
 const MAX_CHANNELS: u32 = 32;
@@ -82,12 +85,21 @@ pub struct AudioCaptureStats {
     pub rate_clamped: u64,
     /// Maximum endpoint clock phase error observed before a correction/reset.
     pub rate_error_nanos: u64,
+    /// Seamless process-loopback session handoffs before the OS 200 ms ring wraps.
+    pub splices: u64,
+    /// Process-loopback session handoffs or clock degradations where exact single-clock
+    /// sample alignment was unavailable and a fallback was counted instead of guessing.
+    pub splice_fallbacks: u64,
+    /// Standby process-loopback open, pipe or buffer-overflow failures retried before wrap.
+    pub standby_failures: u64,
+    /// Passive render-endpoint clock resolution, open or poll failures.
+    pub clock_failures: u64,
 }
 
-struct State {
-    stop: Event,
-    data: Event,
-    stopping: AtomicBool,
+pub(super) struct State {
+    pub(super) stop: Event,
+    pub(super) data: Event,
+    pub(super) stopping: AtomicBool,
     invalidated: AtomicU32,
     packets: AtomicU64,
     delivered_frames: AtomicU64,
@@ -100,6 +112,11 @@ struct State {
     rate_resets: AtomicU64,
     rate_clamped: AtomicU64,
     rate_error_nanos: AtomicU64,
+    splices: AtomicU64,
+    pub(super) splice_fallbacks: AtomicU64,
+    pub(super) standby_failures: AtomicU64,
+    pub(super) clock_failures: AtomicU64,
+    pub(super) dual_output_warned: AtomicBool,
 }
 
 impl State {
@@ -120,6 +137,11 @@ impl State {
             rate_resets: AtomicU64::new(0),
             rate_clamped: AtomicU64::new(0),
             rate_error_nanos: AtomicU64::new(0),
+            splices: AtomicU64::new(0),
+            splice_fallbacks: AtomicU64::new(0),
+            standby_failures: AtomicU64::new(0),
+            clock_failures: AtomicU64::new(0),
+            dual_output_warned: AtomicBool::new(false),
         }))
     }
 
@@ -168,6 +190,10 @@ impl AudioCapture {
             rate_resets: self.state.rate_resets.load(Ordering::Relaxed),
             rate_clamped: self.state.rate_clamped.load(Ordering::Relaxed),
             rate_error_nanos: self.state.rate_error_nanos.load(Ordering::Relaxed),
+            splices: self.state.splices.load(Ordering::Relaxed),
+            splice_fallbacks: self.state.splice_fallbacks.load(Ordering::Relaxed),
+            standby_failures: self.state.standby_failures.load(Ordering::Relaxed),
+            clock_failures: self.state.clock_failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -182,10 +208,10 @@ impl Drop for AudioCapture {
             let _ = worker.join();
             let stats = self.stats();
             isocast_diagnostics::diagnostic!("info";
-                "Windows audio capture ended: device={}, native_rate={}, packets={}, delivered_frames={}, gap_frames={}, timestamp_errors={}, qpc_corrections={}, qpc_overlap_frames={}, rate_resets={}, rate_clamped={}, rate_error_nanos={}",
+                "Windows audio capture ended: device={}, native_rate={}, packets={}, delivered_frames={}, gap_frames={}, timestamp_errors={}, qpc_corrections={}, qpc_overlap_frames={}, rate_resets={}, rate_clamped={}, rate_error_nanos={}, splices={}, splice_fallbacks={}, standby_failures={}, clock_failures={}",
                 self.device.name, self.device.sample_rate, stats.packets,
                 stats.delivered_frames, stats.gap_frames, stats.timestamp_errors, stats.qpc_corrections, stats.qpc_overlap_frames,
-                stats.rate_resets, stats.rate_clamped, stats.rate_error_nanos
+                stats.rate_resets, stats.rate_clamped, stats.rate_error_nanos, stats.splices, stats.splice_fallbacks, stats.standby_failures, stats.clock_failures
             );
         }
         // A callback may itself drop the handle. It cannot join itself; the
@@ -423,7 +449,7 @@ fn capture(
     }
 }
 
-struct ComAllocation<T>(*mut T);
+pub(super) struct ComAllocation<T>(pub(super) *mut T);
 
 impl<T> Drop for ComAllocation<T> {
     fn drop(&mut self) {
@@ -470,13 +496,13 @@ fn reported_default_id(enumerator: &IMMDeviceEnumerator, flow: EDataFlow) -> Opt
 }
 
 pub(crate) struct EndpointIdentity {
-    raw: IMMDevice,
+    pub(crate) raw: IMMDevice,
     pub(crate) id: String,
     pub(crate) name: String,
 }
 
 impl EndpointIdentity {
-    fn new(raw: IMMDevice, flow: EDataFlow) -> Result<Self> {
+    pub(crate) fn new(raw: IMMDevice, flow: EDataFlow) -> Result<Self> {
         let id = device_id(&raw)?;
         let endpoint: IMMEndpoint = raw.cast()?;
         if unsafe { endpoint.GetDataFlow() }? != flow {
@@ -528,7 +554,7 @@ pub(crate) fn endpoint_identities(
     Ok(endpoints)
 }
 
-fn resolve(
+pub(super) fn resolve(
     enumerator: &IMMDeviceEnumerator,
     flow: EDataFlow,
     query: &str,
@@ -735,7 +761,7 @@ impl IAudioSessionEvents_Impl for SessionEvents_Impl {
     }
 }
 
-struct SessionNotifications {
+pub(in crate::audio) struct SessionNotifications {
     control: IAudioSessionControl,
     events: IAudioSessionEvents,
 }
@@ -749,11 +775,29 @@ impl Drop for SessionNotifications {
     }
 }
 
-struct Session {
-    // Unregister before releasing the client; callbacks retain only State.
-    _notifications: Option<SessionNotifications>,
-    client: IAudioClient,
-    capture: IAudioCaptureClient,
+pub(in crate::audio) enum SessionClient {
+    Wasapi {
+        // Unregister before releasing the client; callbacks retain only State.
+        _notifications: Option<SessionNotifications>,
+        client: IAudioClient,
+        capture: IAudioCaptureClient,
+    },
+    Helper(application::HelperClient),
+}
+
+impl SessionClient {
+    #[allow(non_snake_case)]
+    pub(in crate::audio) unsafe fn Start(&self) -> windows::core::Result<()> {
+        match self {
+            Self::Wasapi { client, .. } => unsafe { client.Start() },
+            Self::Helper(_) => Ok(()),
+        }
+    }
+}
+
+pub(in crate::audio) struct Session {
+    pub(in crate::audio) client: SessionClient,
+    event: Event,
     channels: usize,
     pick: Vec<usize>,
     frames: u32,
@@ -782,16 +826,14 @@ impl Session {
         // IsFormatSupported S_FALSE/closest native format for our PCM format.
         unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, &format.Format, None) }
             .with_context(|| format!("WASAPI Initialize {:?}: shared {count}-channel 48000 Hz float32 with OS conversion{}", endpoint.device.name, if input { "" } else { " and loopback" }))?;
-        let mut session = Self::initialized(
-            client,
-            count,
-            pick,
-            endpoint.device.sample_rate,
-            input,
-            state,
-        )?;
+        let mut session =
+            Self::initialized(client, count, pick, endpoint.device.sample_rate, input)?;
+        let session_client = match &session.client {
+            SessionClient::Wasapi { client, .. } => client.clone(),
+            SessionClient::Helper(_) => unreachable!(),
+        };
         let notifications = SessionNotifications {
-            control: unsafe { session.client.GetService() }.context("WASAPI session control")?,
+            control: unsafe { session_client.GetService() }.context("WASAPI session control")?,
             events: SessionEvents {
                 state: state.clone(),
             }
@@ -803,7 +845,9 @@ impl Session {
                 .RegisterAudioSessionNotification(&notifications.events)
         }
         .context("WASAPI session-disconnection notifications")?;
-        session._notifications = Some(notifications);
+        if let SessionClient::Wasapi { _notifications, .. } = &mut session.client {
+            *_notifications = Some(notifications);
+        }
         Ok(session)
     }
 
@@ -813,30 +857,33 @@ impl Session {
         pick: Vec<usize>,
         native_rate: u32,
         microphone: bool,
-        state: &Arc<State>,
     ) -> Result<Self> {
         let frames = unsafe { client.GetBufferSize() }?;
-        Self::with_buffer(client, count, pick, native_rate, microphone, frames, state)
+        let event = Event::new()?;
+        Self::with_buffer(client, event, count, pick, native_rate, microphone, frames)
     }
 
     fn with_buffer(
         client: IAudioClient,
+        event: Event,
         count: u32,
         pick: Vec<usize>,
         native_rate: u32,
         microphone: bool,
         frames: u32,
-        state: &Arc<State>,
     ) -> Result<Self> {
         if !(1..=MAX_FRAMES).contains(&frames) {
             bail!("WASAPI buffer size {frames}; supported frames: 1..={MAX_FRAMES}");
         }
-        unsafe { client.SetEventHandle(state.data.handle()) }.context("WASAPI SetEventHandle")?;
+        unsafe { client.SetEventHandle(event.handle()) }.context("WASAPI SetEventHandle")?;
         let capture = unsafe { client.GetService() }.context("WASAPI capture service")?;
         Ok(Self {
-            _notifications: None,
-            client,
-            capture,
+            client: SessionClient::Wasapi {
+                _notifications: None,
+                client,
+                capture,
+            },
+            event,
             channels: count as usize,
             pick,
             frames,
@@ -846,70 +893,53 @@ impl Session {
         })
     }
 
-    fn run(
+    fn from_helper(helper: application::HelperClient, event: Event) -> Self {
+        Self {
+            client: SessionClient::Helper(helper),
+            event,
+            channels: 2,
+            pick: vec![0, 1],
+            frames: MAX_FRAMES,
+            native_rate: SAMPLE_RATE,
+            microphone: false,
+            process_loopback: true,
+        }
+    }
+
+    fn start_client(&self) -> Result<()> {
+        unsafe { self.client.Start() }.context("process-loopback Start")
+    }
+
+    fn next_packet(
         &self,
         state: &State,
-        sink: &AudioSink,
-        process: Option<windows::Win32::Foundation::HANDLE>,
-    ) -> Result<()> {
-        let mut samples = Vec::with_capacity(self.frames as usize * self.pick.len());
-        let mut clock = PacketClock::new(self.native_rate, self.frames, self.microphone);
-        // Endpoint oscillators drift relative to QPC even after Windows SRC.
-        // Feed the validated, phase-filtered/debt-corrected timestamp below,
-        // not raw microphone noise or the virtual process clock.
-        let phase_limit = if self.microphone {
-            MIC_PHASE_ERROR
-        } else {
-            MAX_PHASE_ERROR
-        };
-        let mut rate = (!self.process_loopback)
-            .then(|| rate::RateFollower::new(self.pick.len(), self.frames as usize, phase_limit));
-        let mut emit = |samples: &[f32], time| {
-            // A callback may itself drop capture. A gap can flush the old tail
-            // and deliver new PCM, so observe stop before each callback.
-            if state.stopping.load(Ordering::Acquire) {
-                return;
-            }
-            (sink.samples)(samples, time);
-            state
-                .delivered_frames
-                .fetch_add((samples.len() / self.pick.len()) as u64, Ordering::Relaxed);
-        };
-        let mut handles = vec![state.stop.handle(), state.data.handle()];
-        if let Some(process) = process {
-            handles.push(process);
-        }
-        'capture: loop {
-            if state.stopping.load(Ordering::Acquire) {
-                break;
-            }
-            state.check_device()?;
-            // Windows 10 1703+ loopback and capture signal the event for data.
-            // Endpoint changes signal `data` too, and Drop signals `stop`.
-            // Process loopback additionally wakes when its pinned process exits.
-            let wait = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
-            if wait == WAIT_OBJECT_0 {
-                break;
-            }
-            if wait == WAIT_FAILED {
-                return Err(windows::core::Error::from_thread()).context("WASAPI wait");
-            }
-            let exited = process.is_some() && wait.0 == WAIT_OBJECT_0.0 + 2;
-            if wait.0 != WAIT_OBJECT_0.0 + 1 && !exited {
-                bail!("unexpected WASAPI wait result: {}", wait.0);
-            }
-            loop {
-                if state.stopping.load(Ordering::Acquire) {
-                    break 'capture;
-                }
-                state.check_device()?;
-                let next = unsafe { self.capture.GetNextPacketSize() }
-                    .context("WASAPI GetNextPacketSize")?;
-                if next == 0 {
-                    if exited {
-                        break 'capture;
+        clock: &mut PacketClock,
+        samples: &mut Vec<f32>,
+        count_stats: bool,
+    ) -> Result<Option<(Time, u64, u32)>> {
+        let (frames, flags, position, qpc) = match &self.client {
+            SessionClient::Helper(helper) => {
+                let Some((frames, flags, qpc)) = helper.next_packet(samples)? else {
+                    return Ok(None);
+                };
+                if count_stats {
+                    state.packets.fetch_add(1, Ordering::Relaxed);
+                    if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 {
+                        state.discontinuities.fetch_add(1, Ordering::Relaxed);
                     }
-                    break;
+                    if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                        state
+                            .silent_frames
+                            .fetch_add(u64::from(frames), Ordering::Relaxed);
+                    }
+                }
+                (frames, flags, 0, qpc)
+            }
+            SessionClient::Wasapi { capture, .. } => {
+                let next =
+                    unsafe { capture.GetNextPacketSize() }.context("WASAPI GetNextPacketSize")?;
+                if next == 0 {
+                    return Ok(None);
                 }
                 if next > self.frames {
                     bail!("WASAPI packet {next} exceeds buffer {}", self.frames);
@@ -917,7 +947,7 @@ impl Session {
                 let mut data = std::ptr::null_mut();
                 let (mut frames, mut flags, mut position, mut qpc) = (0, 0, 0, 0);
                 unsafe {
-                    self.capture.GetBuffer(
+                    capture.GetBuffer(
                         &mut data,
                         &mut frames,
                         &mut flags,
@@ -930,13 +960,15 @@ impl Session {
                     bail!("WASAPI returned an empty packet after announcing {next} frames");
                 }
                 let lease = Packet {
-                    capture: &self.capture,
+                    capture,
                     frames,
                     held: true,
                 };
-                state.packets.fetch_add(1, Ordering::Relaxed);
-                if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 {
-                    state.discontinuities.fetch_add(1, Ordering::Relaxed);
+                if count_stats {
+                    state.packets.fetch_add(1, Ordering::Relaxed);
+                    if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 {
+                        state.discontinuities.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 if frames > self.frames {
                     bail!(
@@ -945,35 +977,11 @@ impl Session {
                     );
                 }
                 let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
-                if silent {
+                if silent && count_stats {
                     state
                         .silent_frames
                         .fetch_add(u64::from(frames), Ordering::Relaxed);
                 }
-                let previous_overlaps = clock.qpc_overlap_frames;
-                let timestamp = if self.process_loopback {
-                    clock.process_timestamp(frames, qpc, flags)
-                } else {
-                    clock.timestamp(frames, position, qpc, flags)
-                };
-                let (time, gap) = timestamp
-                    .inspect_err(|_| {
-                        state.timestamp_errors.fetch_add(1, Ordering::Relaxed);
-                    })
-                    .with_context(|| {
-                        format!(
-                            "WASAPI invalid/uncertain timing: flags={flags:#x}, native position={position}, native rate={}, QPC100ns={qpc}",
-                            self.native_rate
-                        )
-                    })?;
-                state.gap_frames.fetch_add(gap, Ordering::Relaxed);
-                state.qpc_overlap_frames.fetch_add(
-                    clock.qpc_overlap_frames - previous_overlaps,
-                    Ordering::Relaxed,
-                );
-                state
-                    .qpc_corrections
-                    .store(clock.qpc_corrections, Ordering::Relaxed);
                 samples.clear();
                 if silent {
                     samples.resize(frames as usize * self.pick.len(), 0.0);
@@ -991,30 +999,305 @@ impl Session {
                     {
                         bail!("WASAPI returned an invalid float32 packet pointer/length");
                     }
-                    // WASAPI owns this checked, bounded region until ReleaseBuffer.
                     let source = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), length) };
-                    copy_float_samples(source, self.channels, &self.pick, &mut samples)?;
+                    copy_float_samples(source, self.channels, &self.pick, samples)?;
                 }
-                // Never hold the native packet while user code runs or stalls.
                 lease.release()?;
+                (frames, flags, position, qpc)
+            }
+        };
+        let previous_overlaps = clock.qpc_overlap_frames;
+        let timestamp = if self.process_loopback {
+            clock.process_timestamp(frames, qpc, flags)
+        } else {
+            clock.timestamp(frames, position, qpc, flags)
+        };
+        let (raw_time, gap) = timestamp
+            .inspect_err(|_| {
+                if count_stats {
+                    state.timestamp_errors.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .with_context(|| {
+                format!(
+                    "WASAPI invalid/uncertain timing: flags={flags:#x}, native position={position}, native rate={}, QPC100ns={qpc}",
+                    self.native_rate
+                )
+            })?;
+        if count_stats {
+            state.gap_frames.fetch_add(gap, Ordering::Relaxed);
+            state.qpc_overlap_frames.fetch_add(
+                clock.qpc_overlap_frames - previous_overlaps,
+                Ordering::Relaxed,
+            );
+            state
+                .qpc_corrections
+                .store(clock.qpc_corrections, Ordering::Relaxed);
+        }
+        Ok(Some((raw_time, gap, flags)))
+    }
+
+    fn run(
+        self,
+        state: &State,
+        sink: &AudioSink,
+        process: Option<windows::Win32::Foundation::HANDLE>,
+    ) -> Result<()> {
+        self.run_with_clock(state, sink, process, None)
+    }
+
+    fn run_with_clock(
+        mut self,
+        state: &State,
+        sink: &AudioSink,
+        process: Option<windows::Win32::Foundation::HANDLE>,
+        process_clock: Option<&process_clock::SharedProcessClock>,
+    ) -> Result<()> {
+        let packet_capacity = if self.process_loopback {
+            480
+        } else {
+            self.frames as usize
+        };
+        let mut samples = Vec::with_capacity(packet_capacity * self.pick.len());
+        let mut standby_samples = Vec::with_capacity(if self.process_loopback {
+            packet_capacity * self.pick.len()
+        } else {
+            0
+        });
+        let mut splice_extra = Vec::with_capacity(if self.process_loopback {
+            process_clock::NEW_BUF_CAP_FRAMES * self.pick.len()
+        } else {
+            0
+        });
+        let mut splice_buf = process_clock.map(|_| process_clock::SpliceBuffer::new());
+        let mut standby: Option<(Self, PacketClock)> = None;
+        let mut last_time: Option<Time> = None;
+        let mut force_discontinuity = false;
+
+        let mut clock = PacketClock::new(self.native_rate, self.frames, self.microphone);
+        let mut process_timeline = process_clock::ProcessTimeline::new();
+        let phase_limit = if self.microphone {
+            MIC_PHASE_ERROR
+        } else {
+            MAX_PHASE_ERROR
+        };
+        let mut rate = (!self.process_loopback || process_clock.is_some())
+            .then(|| rate::RateFollower::new(self.pick.len(), packet_capacity, phase_limit));
+        let pick_len = self.pick.len();
+        let mut emit = |samples: &[f32], time| {
+            // A callback may itself drop capture. A gap can flush the old tail
+            // and deliver new PCM, so observe stop before each callback.
+            if state.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            (sink.samples)(samples, time);
+            state
+                .delivered_frames
+                .fetch_add((samples.len() / pick_len) as u64, Ordering::Relaxed);
+        };
+        'capture: loop {
+            if state.stopping.load(Ordering::Acquire) {
+                break;
+            }
+            state.check_device()?;
+            if let Some(pc) = process_clock
+                && standby.is_none()
+                && let Some(Some(opened)) = pc.poll_standby()
+            {
+                if let Some(buf) = &mut splice_buf {
+                    buf.reset_standby();
+                }
+                standby = Some((opened.0, PacketClock::new(SAMPLE_RATE, MAX_FRAMES, false)));
+            }
+            let mut handles = [windows::Win32::Foundation::HANDLE::default(); 5];
+            handles[0] = state.stop.handle();
+            handles[1] = state.data.handle();
+            handles[2] = self.event.handle();
+            let mut count = 3;
+            if let Some((sb, _)) = &standby {
+                handles[count] = sb.event.handle();
+                count += 1;
+            }
+            let process_idx = process.map(|handle| {
+                let idx = count as u32;
+                handles[count] = handle;
+                count += 1;
+                idx
+            });
+            let wait = unsafe { WaitForMultipleObjects(&handles[..count], false, INFINITE) };
+            if wait == WAIT_OBJECT_0 {
+                break;
+            }
+            if wait == WAIT_FAILED {
+                return Err(windows::core::Error::from_thread()).context("WASAPI wait");
+            }
+            let idx = wait.0.wrapping_sub(WAIT_OBJECT_0.0);
+            if idx >= count as u32 {
+                bail!("unexpected WASAPI wait result: {}", wait.0);
+            }
+            let exited = process_idx == Some(idx);
+
+            loop {
                 if state.stopping.load(Ordering::Acquire) {
                     break 'capture;
                 }
                 state.check_device()?;
-                if let Some(rate) = &mut rate {
-                    rate.push(
-                        &samples,
-                        time,
-                        gap > 0 || flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0,
-                        &mut emit,
-                    );
+                let Some((raw_time, gap, flags)) =
+                    self.next_packet(state, &mut clock, &mut samples, true)?
+                else {
+                    if exited {
+                        break 'capture;
+                    }
+                    break;
+                };
+                if state.stopping.load(Ordering::Acquire) {
+                    break 'capture;
+                }
+                state.check_device()?;
+                if let (Some(pc), Some(buf)) = (process_clock, &mut splice_buf) {
+                    let survived = buf.accept_active(&samples);
+                    if !survived.is_empty() {
+                        let out_frames = (survived.len() / pick_len) as u32;
+                        let time = process_timeline.packet_time(
+                            raw_time,
+                            out_frames,
+                            gap,
+                            pc.frame_units(),
+                        );
+                        last_time = Some(time);
+                        if process_timeline.check_unspliced_drift_limit() {
+                            state.discontinuities.fetch_add(1, Ordering::Relaxed);
+                            state.splice_fallbacks.fetch_add(1, Ordering::Relaxed);
+                            (sink.report_gap)(time, std::time::Duration::from_millis(30));
+                            pc.warn_unspliced_drift(process_timeline.drift_frames(), pc.ppm());
+                        }
+                        let disc = gap > 0 || std::mem::take(&mut force_discontinuity);
+                        if let Some(rate) = &mut rate {
+                            rate.push(survived, time, disc, &mut emit);
+                            state.rate_resets.store(rate.resets, Ordering::Relaxed);
+                            state.rate_clamped.store(rate.clamped, Ordering::Relaxed);
+                            state
+                                .rate_error_nanos
+                                .store(rate.max_error_nanos, Ordering::Relaxed);
+                        } else {
+                            emit(survived, time);
+                        }
+                    }
+                    if standby.is_none()
+                        && process_timeline.should_request_splice()
+                        && pc.request_standby()
+                    {
+                        process_timeline.mark_attempt();
+                    }
+                } else if let Some(rate) = &mut rate {
+                    let discontinuity =
+                        gap > 0 || flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0;
+                    rate.push(&samples, raw_time, discontinuity, &mut emit);
                     state.rate_resets.store(rate.resets, Ordering::Relaxed);
                     state.rate_clamped.store(rate.clamped, Ordering::Relaxed);
                     state
                         .rate_error_nanos
                         .store(rate.max_error_nanos, Ordering::Relaxed);
                 } else {
-                    emit(&samples, time);
+                    emit(&samples, raw_time);
+                }
+            }
+
+            if let (Some(pc), Some(buf)) = (process_clock, &mut splice_buf)
+                && standby.is_some()
+            {
+                let mut standby_failure = None;
+                while let Some((sb_session, sb_clock)) = &mut standby {
+                    match sb_session.next_packet(state, sb_clock, &mut standby_samples, false) {
+                        Ok(Some(_)) => {
+                            if !buf.push_standby(&standby_samples) {
+                                standby_failure =
+                                    Some(process_clock::StandbyFailure::BufferOverflow);
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            standby_failure =
+                                Some(process_clock::StandbyFailure::SessionEnded(err.to_string()));
+                            break;
+                        }
+                    }
+                }
+                if let Some(reason) = standby_failure {
+                    buf.reset_standby();
+                    state.standby_failures.fetch_add(1, Ordering::Relaxed);
+                    if let Some((failed_session, _)) = standby.take() {
+                        pc.drop_session(failed_session, reason);
+                    }
+                } else {
+                    match buf.try_align(process_timeline.drift_frames().round() as i64) {
+                        process_clock::SpliceDecision::NeedMoreFrames => {}
+                        process_clock::SpliceDecision::Matched {
+                            next_new_frame,
+                            lag_frames,
+                            silent,
+                        } => {
+                            let (new_session, new_clock) = standby.take().expect("checked");
+                            let drift_before = process_timeline.drift_frames();
+                            let old_session = std::mem::replace(&mut self, new_session);
+                            clock = new_clock;
+                            process_timeline.reset_drift();
+                            let number = state.splices.fetch_add(1, Ordering::Relaxed) + 1;
+                            pc.retire_session(
+                                old_session,
+                                process_clock::SpliceTelemetry::Matched {
+                                    number,
+                                    silent,
+                                    lag_frames,
+                                    drift_before,
+                                    ppm: pc.ppm(),
+                                },
+                            );
+                            buf.commit_matched(next_new_frame, &mut splice_extra);
+                            if !splice_extra.is_empty() {
+                                let extra_frames = (splice_extra.len() / pick_len) as u32;
+                                let raw_now = last_time.unwrap_or_else(crate::now);
+                                let time = process_timeline.packet_time(
+                                    raw_now,
+                                    extra_frames,
+                                    0,
+                                    pc.frame_units(),
+                                );
+                                last_time = Some(time);
+                                if let Some(rate) = &mut rate {
+                                    rate.push(&splice_extra, time, false, &mut emit);
+                                    state.rate_resets.store(rate.resets, Ordering::Relaxed);
+                                    state.rate_clamped.store(rate.clamped, Ordering::Relaxed);
+                                    state
+                                        .rate_error_nanos
+                                        .store(rate.max_error_nanos, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        process_clock::SpliceDecision::Failed { best_norm_sad } => {
+                            let (new_session, new_clock) = standby.take().expect("checked");
+                            let drift_before = process_timeline.drift_frames();
+                            let old_session = std::mem::replace(&mut self, new_session);
+                            clock = new_clock;
+                            process_timeline.reset_drift();
+                            buf.reset_standby();
+                            state.discontinuities.fetch_add(1, Ordering::Relaxed);
+                            let number = state.splice_fallbacks.fetch_add(1, Ordering::Relaxed) + 1;
+                            pc.retire_session(
+                                old_session,
+                                process_clock::SpliceTelemetry::Fallback {
+                                    number,
+                                    best_norm_sad,
+                                    drift_before,
+                                },
+                            );
+                            if let Some(at) = last_time {
+                                (sink.report_gap)(at, std::time::Duration::from_millis(20));
+                            }
+                            force_discontinuity = true;
+                        }
+                    }
                 }
             }
         }
@@ -1060,7 +1343,9 @@ fn capture_format(count: u32, mask: u32) -> WAVEFORMATEXTENSIBLE {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = unsafe { self.client.Stop() };
+        if let SessionClient::Wasapi { client, .. } = &self.client {
+            let _ = unsafe { client.Stop() };
+        }
     }
 }
 

@@ -240,7 +240,7 @@ pub(crate) fn devices() -> Result<Devices> {
         notes.push(format!("Audio applications could not be listed: {error:#}"));
         Vec::new()
     });
-    notes.push("Audio application id is the executable path; listed names and binaries also match. Use the full executable path to select an app before launch. Process-loopback capture requires Windows 10 2004 (build 19041) or later and follows the selected process tree across restarts. Long-take alignment is unqualified: application audio drifted about 46 ppm relative to desktop audio (about 165 ms/hour) on the tested Windows host; absolute video alignment remains unverified.".into());
+    notes.push("Audio application id is the executable path; listed names and binaries also match. Use the full executable path to select an app before launch. Process-loopback capture requires Windows 10 2004 (build 19041) or later, follows the selected process tree across restarts, and disciplines its rate to the application's active render output (refusing to start during simultaneous playback to multiple outputs, and degrading with a warning if a second output opens mid-take).".into());
     Ok(Devices {
         displays: displays.into_iter().map(|info| info.display).collect(),
         windows,

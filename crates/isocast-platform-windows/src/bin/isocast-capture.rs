@@ -1,5 +1,8 @@
 #[cfg(windows)]
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--process-loopback") {
+        isocast_platform_windows::process_audio_helper_main();
+    }
     isocast_platform_windows::capture_helper_main();
 }
 

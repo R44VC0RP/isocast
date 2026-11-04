@@ -26,7 +26,19 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{HRESULT, Interface, Owned, PWSTR};
 
+use crate::audio::EndpointIdentity;
 use crate::native::Apartment;
+
+/// Render endpoint(s) where a captured application currently has active output sessions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AppEndpoint {
+    /// No active (`AudioSessionStateActive`) render session; fall back to default `eRender`.
+    Default,
+    /// Active render session(s) on a single render endpoint.
+    Single { id: String, name: String },
+    /// Active render sessions on multiple distinct render endpoints simultaneously.
+    Multiple(Vec<(String, String)>),
+}
 
 /// Bounds on everything read across the FFI boundary: endpoints, sessions
 /// in total, and UTF-16 units per string (also the longest Win32 path).
@@ -127,6 +139,117 @@ pub(crate) fn current_apps(report: bool) -> Result<Vec<AudioApp>> {
         return Err(error.context("no active audio output could list its sessions"));
     }
     Ok(finish(entries))
+}
+
+/// Find which active render endpoint(s) `identity` (or any PID in `tree_pids`)
+/// is actively playing to (`AudioSessionStateActive`). Caller must be in MTA.
+pub(crate) fn app_endpoint(identity: &str, tree_pids: &[u32]) -> Result<AppEndpoint> {
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+            .context("create the audio endpoint enumerator")?;
+    let collection = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }
+        .context("list active audio outputs")?;
+    let count = (unsafe { collection.GetCount() }.context("count active audio outputs")? as usize)
+        .min(MAX_ENTRIES);
+    let own = std::process::id();
+    let mut buffer = vec![0u16; MAX_TEXT];
+    let mut budget = MAX_ENTRIES;
+    let mut observed = Vec::new();
+    for index in 0..count as u32 {
+        let Ok(device) = (unsafe { collection.Item(index) }) else {
+            continue;
+        };
+        let Ok(endpoint) = EndpointIdentity::new(device.clone(), eRender) else {
+            continue;
+        };
+        let Ok(manager): std::result::Result<IAudioSessionManager2, _> =
+            (unsafe { device.Activate(CLSCTX_ALL, None) })
+        else {
+            continue;
+        };
+        let Ok(sessions) = (unsafe { manager.GetSessionEnumerator() }) else {
+            continue;
+        };
+        let session_count =
+            usize::try_from(unsafe { sessions.GetCount() }.unwrap_or(0)).unwrap_or(0);
+        for session_idx in 0..session_count.min(budget) as i32 {
+            budget -= 1;
+            let Ok(control) = (unsafe { sessions.GetSession(session_idx) }) else {
+                continue;
+            };
+            let Ok(state) = (unsafe { control.GetState() }) else {
+                continue;
+            };
+            if state != AudioSessionStateActive {
+                continue;
+            }
+            let Ok(control2): std::result::Result<IAudioSessionControl2, _> = control.cast() else {
+                continue;
+            };
+            if unsafe { control2.IsSystemSoundsSession() } == S_OK {
+                continue;
+            }
+            let mut pid = 0u32;
+            if unsafe {
+                (Interface::vtable(&control2).GetProcessId)(Interface::as_raw(&control2), &mut pid)
+            }
+            .is_err()
+                || pid == 0
+                || pid == own
+            {
+                continue;
+            }
+            let matched = tree_pids.contains(&pid)
+                || process_path(pid, &mut buffer)
+                    .is_ok_and(|path| path.eq_ignore_ascii_case(identity));
+            if matched {
+                observed.push((endpoint.id.clone(), endpoint.name.clone(), true));
+                break;
+            }
+        }
+    }
+    Ok(select_app_endpoint(observed))
+}
+
+fn select_app_endpoint(sessions: impl IntoIterator<Item = (String, String, bool)>) -> AppEndpoint {
+    let mut active: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for (id, name, playing) in sessions {
+        if playing {
+            active.entry(id.to_lowercase()).or_insert((id, name));
+        }
+    }
+    match active.len() {
+        0 => AppEndpoint::Default,
+        1 => {
+            let (id, name) = active.into_values().next().expect("checked len");
+            AppEndpoint::Single { id, name }
+        }
+        _ => AppEndpoint::Multiple(active.into_values().collect()),
+    }
+}
+
+pub(crate) fn format_multiple_endpoints(identity: &str, endpoints: &[(String, String)]) -> String {
+    let names = choices(endpoints.iter().map(|(id, name)| format!("{name} ({id})")));
+    format!(
+        "application_audio.app: {identity:?} is playing to multiple audio outputs simultaneously ({names}); route it to a single audio output so its clock can be followed"
+    )
+}
+
+pub(crate) fn check_single_endpoint(identity: &str, tree_pids: &[u32]) -> Result<()> {
+    let identity = identity.to_owned();
+    let tree = tree_pids.to_vec();
+    thread::Builder::new()
+        .name("Windows audio endpoint check".into())
+        .spawn(move || -> std::result::Result<(), String> {
+            let _apartment = Apartment::new().map_err(|e| format!("{e:#}"))?;
+            if let Ok(AppEndpoint::Multiple(endpoints)) = app_endpoint(&identity, &tree) {
+                return Err(format_multiple_endpoints(&identity, &endpoints));
+            }
+            Ok(())
+        })?
+        .join()
+        .map_err(|_| anyhow!("Windows audio endpoint check panicked"))?
+        .map_err(anyhow::Error::msg)
 }
 
 /// One readable app session; `None` for sessions that are not an app's:
@@ -541,5 +664,39 @@ mod tests {
         processes.sort();
         processes.dedup();
         assert_eq!(processes.len(), apps.len());
+    }
+
+    #[test]
+    fn app_endpoint_selection_deduplicates_one_output_and_diagnoses_multiple() {
+        assert_eq!(select_app_endpoint([]), AppEndpoint::Default);
+        assert_eq!(
+            select_app_endpoint([("id-a".into(), "Speakers".into(), false)]),
+            AppEndpoint::Default
+        );
+        // Two active streams on the same endpoint (case-insensitive ID) are one clock.
+        assert_eq!(
+            select_app_endpoint([
+                ("ID-A".into(), "Speakers".into(), true),
+                ("id-a".into(), "Speakers".into(), true),
+                ("id-b".into(), "Headphones".into(), false),
+            ]),
+            AppEndpoint::Single {
+                id: "ID-A".into(),
+                name: "Speakers".into(),
+            }
+        );
+        // Simultaneous active streams on distinct endpoints are diagnosed, never guessed.
+        let multiple = select_app_endpoint([
+            ("id-b".into(), "Headphones".into(), true),
+            ("id-a".into(), "Speakers".into(), true),
+        ]);
+        let AppEndpoint::Multiple(list) = multiple else {
+            panic!("expected Multiple, got {multiple:?}");
+        };
+        assert_eq!(list.len(), 2);
+        let msg = format_multiple_endpoints(SPOTIFY, &list);
+        assert!(msg.contains("application_audio.app"), "{msg}");
+        assert!(msg.contains("Speakers (id-a)"), "{msg}");
+        assert!(msg.contains("Headphones (id-b)"), "{msg}");
     }
 }

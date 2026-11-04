@@ -39,6 +39,7 @@ pub use aac::{AacFinish, AacPacket, AacStats, MfAacEncoder};
 pub use audio::{
     AudioCapture, AudioCaptureStats, AudioDevice, audio_devices, capture_loopback,
     capture_microphone, capture_system_audio, probe_loopback, probe_microphone,
+    process_audio_helper_main,
 };
 pub use broker::{
     IsolatedCapture, IsolatedCaptureStats, capture_helper_main, isolated_capture_screen,
