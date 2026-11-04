@@ -1,9 +1,9 @@
-//! Portal-authorized PipeWire video, copied from mapped SHM into bounded BGRA
+//! Portal-authorized PipeWire video, copied from SHM or LINEAR DMA-BUF into bounded BGRA
 //! frames. All PipeWire objects and callbacks stay on one owned thread.
 
 use std::cell::{Cell, RefCell};
 use std::io::Cursor;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail, ensure};
 use isocast_engine::{CaptureFormat, FramePool as _, Time, VideoSink};
 use pipewire::{self as pw, properties::properties, spa};
 use spa::buffer::meta::{MetaHeader, MetaHeaderFlags};
-use spa::param::video::{VideoFormat, VideoInfoRaw};
+use spa::param::video::{VideoFlags, VideoFormat, VideoInfoRaw};
 use spa::pod::{ChoiceValue, Object, Pod, Property, Value};
 use spa::utils::{Choice, ChoiceEnum, ChoiceFlags};
 
@@ -25,6 +25,7 @@ use crate::frames::{Frame, FramePool};
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const LOOP_WAIT: Duration = Duration::from_millis(20);
 const MAX_DIMENSION: u32 = 8192;
+const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 
 pub struct Capture {
     cancel: Arc<AtomicBool>,
@@ -105,6 +106,8 @@ struct State {
     /// even; a stream of another size is scaled to fit it.
     stream: (u32, u32),
     pixels: VideoFormat,
+    /// None while unconfigured, including between two Format events.
+    linear_dma: Option<bool>,
     pool: Option<FramePool>,
     sink: Arc<VideoSink<Frame>>,
     cancel: Arc<AtomicBool>,
@@ -179,6 +182,7 @@ fn run(
         format: None,
         stream: (0, 0),
         pixels: VideoFormat::BGRA,
+        linear_dma: None,
         pool: None,
         sink,
         cancel: cancel.clone(),
@@ -207,6 +211,7 @@ fn run(
             if id != spa::param::ParamType::Format.as_raw() {
                 return;
             }
+            state.linear_dma = None;
             let Some(param) = param else { return };
             if let Err(error) = configure(stream, state, param, fps) {
                 state
@@ -228,13 +233,23 @@ fn run(
         })
         .register()?;
     let format = serialize(format_offer(fps))?;
+    let mut linear = format_offer(fps);
+    linear.properties.push(Property {
+        key: spa::sys::SPA_FORMAT_VIDEO_modifier,
+        flags: spa::pod::PropertyFlags::MANDATORY,
+        value: Value::Long(DRM_FORMAT_MOD_LINEAR as i64),
+    });
+    let linear = serialize(linear)?;
     stream.connect(
         spa::utils::Direction::Input,
         Some(node),
         pw::stream::StreamFlags::AUTOCONNECT
             | pw::stream::StreamFlags::MAP_BUFFERS
             | pw::stream::StreamFlags::DONT_RECONNECT,
-        &mut [Pod::from_bytes(&format).context("invalid video format pod")?],
+        &mut [
+            Pod::from_bytes(&format).context("invalid SHM format pod")?,
+            Pod::from_bytes(&linear).context("invalid LINEAR format pod")?,
+        ],
     )?;
     while !cancel.load(Ordering::Acquire) {
         if node_removed.get() {
@@ -263,7 +278,20 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         "expected raw video"
     );
     let mut raw = VideoInfoRaw::new();
+    // An optional SPA long of the wrong type is left untouched by parse.
+    raw.set_modifier(u64::MAX);
     raw.parse(pod)?;
+    let linear = raw.flags().contains(VideoFlags::MODIFIER);
+    // The allocating peer may still be choosing a modifier. It publishes a
+    // fixed Format before buffers arrive; never interpret an unfixed plane.
+    if raw.flags().bits() & spa::sys::SPA_VIDEO_FLAG_MODIFIER_FIXATION_REQUIRED != 0 {
+        return Ok(());
+    }
+    ensure!(
+        !linear || raw.modifier() == DRM_FORMAT_MOD_LINEAR,
+        "expected DRM_FORMAT_MOD_LINEAR; got {:#x}",
+        raw.modifier()
+    );
     ensure!(
         matches!(
             raw.format(),
@@ -307,10 +335,11 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         size.height,
         raw.format()
     );
-    // Explicitly exclude DMA-BUF, even when the compositor offers it first.
-    // MAP_BUFFERS maps MemFd and adjusts data for mapoffset; do not add that
-    // file offset again when reading the mapped pointer.
-    let types = (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd);
+    let types = if linear {
+        1 << spa::sys::SPA_DATA_DmaBuf
+    } else {
+        (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd)
+    };
     let buffers = serialize(Object {
         type_: spa::sys::SPA_TYPE_OBJECT_ParamBuffers,
         id: spa::sys::SPA_PARAM_Buffers,
@@ -343,6 +372,7 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         Pod::from_bytes(&buffers).context("invalid buffer pod")?,
         Pod::from_bytes(&header).context("invalid metadata pod")?,
     ])?;
+    state.linear_dma = Some(linear);
     Ok(())
 }
 
@@ -388,7 +418,7 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return Ok(());
     };
-    let Some(format) = state.format else {
+    let (Some(format), Some(linear)) = (state.format, state.linear_dma) else {
         return Ok(());
     };
     let header = buffer.find_meta::<MetaHeader>();
@@ -423,13 +453,6 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
             data.maxsize
         );
     }
-    if !matches!(
-        data.type_,
-        spa::sys::SPA_DATA_MemPtr | spa::sys::SPA_DATA_MemFd
-    ) || data.data.is_null()
-    {
-        return Ok(());
-    }
     // Input buffers mapped by PipeWire are readable. portal-wlr 0.7.1 leaves
     // spa_data.flags at NONE even for its valid mapped MemFd buffers; requiring
     // the optional READABLE flag would silently discard every screen frame.
@@ -454,39 +477,77 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
     } else {
         state.stream
     };
-    let Some(layout) = Layout::new(
-        data.maxsize,
-        chunk.offset,
-        chunk.size,
-        chunk_stride(chunk.stride, chunk.size, state.stream, state.pixels),
-        width,
-        height,
-        state.pixels,
-    ) else {
-        return Ok(());
-    };
-    // SAFETY: MAP_BUFFERS supplied a readable mapping of maxsize bytes. The
-    // validated layout's end lies within it and within the advertised chunk.
-    // The immutable slice neither claims writable access nor outlives buffer.
-    let source = unsafe { std::slice::from_raw_parts(data.data.cast::<u8>(), layout.end) };
     let pixels = state.pixels;
-    let frame = state
+    let pool = state
         .pool
         .as_mut()
-        .context("missing negotiated frame pool")?
-        .draw(&mut |target, _| {
+        .context("missing negotiated frame pool")?;
+    let mut draw = |source: &[u8], layout: &Layout| {
+        pool.draw(&mut |target, _| {
             if direct {
-                copy_bgra(source, target, &layout, pixels);
+                copy_bgra(source, target, layout, pixels);
             } else {
                 scale_bgra(
                     source,
                     target,
-                    &layout,
+                    layout,
                     pixels,
                     (format.width, format.height),
                 );
             }
-        })?;
+        })
+    };
+    let frame = if linear && data.type_ == spa::sys::SPA_DATA_DmaBuf {
+        let fd = i32::try_from(data.fd).context("invalid DMA-BUF fd")?;
+        ensure!(fd >= 0, "missing DMA-BUF fd");
+        // SAFETY: PipeWire owns this fd until the borrowed buffer is requeued.
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        // SPA permits DMA-BUF maxsize and chunk.size to be zero or a token
+        // size. Bound the read by the exporter's immutable allocation instead.
+        // SAFETY: SEEK_END with offset zero is the DMA-BUF size query.
+        let len = unsafe { libc::lseek(fd.as_raw_fd(), 0, libc::SEEK_END) };
+        if len < 0 {
+            return Err(std::io::Error::last_os_error()).context("query DMA-BUF size");
+        }
+        let offset = usize::try_from(u64::from(data.mapoffset) + u64::from(chunk.offset))?;
+        let Some(layout) = Layout::packed(offset, chunk.stride, width, height, pixels) else {
+            return Ok(());
+        };
+        ensure!(
+            layout.end as u64 <= len as u64,
+            "DMA-BUF rows exceed allocation"
+        );
+        let mut mapping = DmaRead::map(fd, layout.end)?;
+        let frame = draw(mapping.bytes(), &layout);
+        mapping.end()?;
+        frame?
+    } else if !linear
+        && matches!(
+            data.type_,
+            spa::sys::SPA_DATA_MemPtr | spa::sys::SPA_DATA_MemFd
+        )
+        && !data.data.is_null()
+    {
+        // MAP_BUFFERS already adjusts the SHM pointer for data.mapoffset.
+        let Some(layout) = Layout::new(
+            data.maxsize,
+            chunk.offset,
+            chunk.size,
+            chunk_stride(chunk.stride, chunk.size, state.stream, pixels),
+            width,
+            height,
+            pixels,
+        ) else {
+            return Ok(());
+        };
+        // SAFETY: The checked rows fit within the mapped SHM chunk.
+        draw(
+            unsafe { std::slice::from_raw_parts(data.data.cast::<u8>(), layout.end) },
+            &layout,
+        )?
+    } else {
+        return Ok(());
+    };
     // Requeue before calling the sink: downstream retains only our own copy.
     drop(buffer);
     if let Some(frame) = frame {
@@ -528,12 +589,23 @@ impl Layout {
         height: u32,
         format: VideoFormat,
     ) -> Option<Self> {
-        if maxsize == 0
-            || size == 0
-            || size > maxsize
-            || !(1..=MAX_DIMENSION).contains(&width)
-            || !(1..=MAX_DIMENSION).contains(&height)
-        {
+        if maxsize == 0 || size > maxsize {
+            return None;
+        }
+        // SPA offsets in a SHM chunk are modulo maxsize; reject wrapped rows.
+        let offset = (offset % maxsize) as usize;
+        let layout = Self::packed(offset, stride, width, height, format)?;
+        (layout.end - offset <= size as usize && layout.end <= maxsize as usize).then_some(layout)
+    }
+
+    fn packed(
+        offset: usize,
+        stride: i32,
+        width: u32,
+        height: u32,
+        format: VideoFormat,
+    ) -> Option<Self> {
+        if !(1..=MAX_DIMENSION).contains(&width) || !(1..=MAX_DIMENSION).contains(&height) {
             return None;
         }
         let pixel_bytes = pixel_bytes(format)?;
@@ -544,11 +616,8 @@ impl Layout {
             return None;
         }
         let span = step.checked_mul(height as usize - 1)?.checked_add(row)?;
-        // SPA offsets are modulo maxsize. Wrapped video chunks cannot be
-        // represented by a single mapped slice and are rejected below.
-        let offset = (offset % maxsize) as usize;
         let end = offset.checked_add(span)?;
-        if span > size as usize || end > maxsize as usize || end > isize::MAX as usize {
+        if end > isize::MAX as usize {
             return None;
         }
         Some(Self {
@@ -561,6 +630,84 @@ impl Layout {
             bottom_up: stride < 0,
             end,
         })
+    }
+}
+
+/// A read-only mapping for one dequeued LINEAR plane. Drop ends CPU access
+/// even on unwind, unmaps, and never takes ownership of the producer's fd.
+struct DmaRead<'a> {
+    fd: BorrowedFd<'a>,
+    ptr: *mut libc::c_void,
+    len: usize,
+    active: bool,
+}
+
+impl<'a> DmaRead<'a> {
+    fn map(fd: BorrowedFd<'a>, len: usize) -> Result<Self> {
+        // SAFETY: len is nonzero and within the kernel-reported allocation.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error()).context("mmap LINEAR DMA-BUF");
+        }
+        let mut mapping = Self {
+            fd,
+            ptr,
+            len,
+            active: false,
+        };
+        mapping.sync(1).context("DMA_BUF_SYNC_START | READ")?;
+        mapping.active = true;
+        Ok(mapping)
+    }
+
+    fn sync(&self, flags: u64) -> std::io::Result<()> {
+        // linux/dma-buf.h: _IOW('b', 0, struct dma_buf_sync { __u64 flags; })
+        loop {
+            // SAFETY: fd lives through the ioctl, whose only input is one u64.
+            if unsafe {
+                libc::ioctl(
+                    self.fd.as_raw_fd(),
+                    libc::_IOW::<u64>(b'b'.into(), 0),
+                    &flags,
+                )
+            } == 0
+            {
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            if !matches!(err.raw_os_error(), Some(libc::EINTR | libc::EAGAIN)) {
+                return Err(err);
+            }
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: map succeeds and START completes before exposing any bytes.
+        unsafe { std::slice::from_raw_parts(self.ptr.cast(), self.len) }
+    }
+
+    fn end(&mut self) -> Result<()> {
+        self.active = false;
+        self.sync(1 | 4).context("DMA_BUF_SYNC_END | READ")
+    }
+}
+
+impl Drop for DmaRead<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.end();
+        }
+        // SAFETY: the mapping belongs to this guard and its borrow has ended.
+        unsafe { libc::munmap(self.ptr, self.len) };
     }
 }
 
@@ -774,6 +921,59 @@ fn format_offer(fps: u32) -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the standalone LINEAR-only PipeWire producer"]
+    fn linear_dmabuf_only_pixels() -> Result<()> {
+        let node = std::env::var("ISOCAST_DMABUF_NODE")?.parse()?;
+        let path = std::path::PathBuf::from(
+            std::env::var_os("XDG_RUNTIME_DIR").context("no runtime dir")?,
+        )
+        .join("pipewire-0");
+        let remote = std::os::unix::net::UnixStream::connect(path)?;
+        let (send, receive) = mpsc::sync_channel(1);
+        let (capture, format) = start(
+            remote.into(),
+            node,
+            30,
+            || "producer disappeared".into(),
+            VideoSink {
+                frame: Box::new(move |frame, _| {
+                    let _ = send.try_send(frame);
+                }),
+                stopped: Box::new(|reason| eprintln!("{reason}")),
+            },
+        )?;
+        assert_eq!((format.width, format.height), (64, 32));
+        let expected: Vec<_> = (0..32u8)
+            .flat_map(|y| (0..64u8).flat_map(move |x| [x, y, x ^ y, 255]))
+            .collect();
+        for _ in 0..3 {
+            let frame = receive.recv_timeout(Duration::from_secs(2))?;
+            assert_eq!(frame.read_bgra()?, expected);
+        }
+        let mut swapped = expected.clone();
+        for pixel in swapped.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut new_frames = 0;
+        while new_frames < 3 {
+            let frame = receive.recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            let bytes = frame.read_bgra()?;
+            if bytes == swapped {
+                new_frames += 1;
+            } else {
+                assert_eq!(new_frames, 0, "format reverted after renegotiation");
+                assert_eq!(bytes, expected);
+            }
+        }
+        drop(capture);
+        eprintln!(
+            "LINEAR DMA-BUF: matched all 8192 bytes per frame before and after BGRA → RGBA renegotiation"
+        );
+        Ok(())
+    }
 
     #[test]
     fn handle_is_send() {

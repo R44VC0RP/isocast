@@ -8,6 +8,7 @@
 #   scripts/linux-capture-fixture.sh start DIR [WxH] the session; writes
 #                                                    DIR/session.env
 #   scripts/linux-capture-fixture.sh stop DIR        stop everything it started
+#   scripts/linux-capture-fixture.sh dmabuf DIR      pixel-exact DMA-BUF test (source session.env first)
 #
 # start runs, as this user and under $XDG_RUNTIME_DIR:
 # - a private D-Bus session bus;
@@ -230,10 +231,29 @@ stop() {
     fi
 }
 
+dmabuf() (
+    dir="$(mkdir -p "$1" && cd "$1" && pwd)"
+    cc -Wall -Werror scripts/linux/linear-dmabuf-producer.c -o "$dir/dmabuf-source" $(pkg-config --cflags --libs libpipewire-0.3)
+    # Build *before* launching the producer (which has a bounded lifetime).
+    cargo test --release --locked -p isocast-platform-linux --lib --no-run
+    [ -c /dev/udmabuf ] || sudo -n modprobe udmabuf
+    # Only opening the allocator needs privilege. Don't change the device
+    # permissions; both PipeWire peers and the test binary run as this user.
+    : >"$dir/dmabuf-node"  # A previous run's node id may have been recycled.
+    sudo -n sh -c 'exec 3<>/dev/udmabuf; exec setpriv --reuid="$1" --regid="$2" --init-groups env XDG_RUNTIME_DIR="$3" "$4"' \
+        sh "$(id -u)" "$(id -g)" "$XDG_RUNTIME_DIR" "$dir/dmabuf-source" >"$dir/dmabuf-node" &
+    launcher=$!
+    trap 'kill "$launcher" 2>/dev/null || :; wait "$launcher" 2>/dev/null || :' EXIT
+    wait_for 10 'DMA-BUF source node' grep -Eq '^[0-9]+$' "$dir/dmabuf-node"
+    ISOCAST_DMABUF_NODE="$(cat "$dir/dmabuf-node")" cargo test --release --locked \
+        -p isocast-platform-linux --lib linear_dmabuf_only_pixels -- --ignored --nocapture
+)
+
 case "${1:-}" in
 deps) deps ;;
 build-portal) [ $# -eq 2 ] || die "usage: build-portal DIR"; build_portal "$2" >/dev/null ;;
 start) [ $# -ge 2 ] || die "usage: start DIR [WxH]"; start "$2" "${3:-640x360}" ;;
 stop) [ $# -eq 2 ] || die "usage: stop DIR"; stop "$2" ;;
+dmabuf) [ $# -eq 2 ] || die "usage: dmabuf DIR"; dmabuf "$2" ;;
 *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

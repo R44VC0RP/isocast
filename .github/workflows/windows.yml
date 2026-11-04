@@ -368,6 +368,13 @@ jobs:
         timeout-minutes: 10
         run: scripts/linux-capture-fixture.sh start "$FIXTURE" 640x360
 
+      - name: Capture a DMA-BUF-only source pixel-exactly
+        if: env.MODE == 'full'
+        timeout-minutes: 15
+        run: |
+          . "$FIXTURE/session.env"
+          scripts/linux-capture-fixture.sh dmabuf "$FIXTURE"
+
       - name: PipeWire callbacks run on the worker thread
         if: env.MODE == 'full'
         timeout-minutes: 15
