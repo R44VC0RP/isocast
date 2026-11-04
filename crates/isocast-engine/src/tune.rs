@@ -349,7 +349,8 @@ fn iso_format<P: Platform>(platform: &P, setup: &Setup, id: &str) -> Result<(u32
     }
     let timeline = Arc::new(Timeline::default());
     timeline.set_start(platform.now());
-    let opened = source::open(platform, setup, id, &timeline, &Default::default())
+    let budget = source::begin_open(platform, setup, id);
+    let opened = source::open(platform, setup, id, &timeline, &Default::default(), budget)
         .with_context(|| format!("source {id:?}: could not open it"))?;
     let video = opened
         .video

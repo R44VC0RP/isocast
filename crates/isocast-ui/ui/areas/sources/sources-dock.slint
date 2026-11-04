@@ -159,7 +159,7 @@ export component SourcesDock inherits Dock {
             height: Theme.row;
 
             row := ListRow {
-                text: item.name;
+                text: item.detail == "" ? item.name : item.name + " · " + item.detail;
                 trailing-pad: Theme.space-1;
                 // A row without ISO (a box, text, a group's child): its name
                 // runs on into the empty ISO lane (and its gap, the lane
@@ -236,7 +236,7 @@ export component SourcesDock inherits Dock {
                     }
                     Tooltip {
                         Tip {
-                            text: "Starting…";
+                            text: item.detail == "" ? "Starting…" : item.detail;
                         }
                     }
                 }
@@ -293,7 +293,7 @@ export component SourcesDock inherits Dock {
             // the ISO badge beside it) shows whole on hover.
             if item.missing || (row.elided && root.drag-from < 0 && SourcesArea.renaming-item != item.path): Tooltip {
                 Tip {
-                    text: item.missing ? "No source “" + item.name + "” in the setup" : item.name;
+                    text: item.missing ? "No source “" + item.name + "” in the setup" : row.text;
                 }
             }
 

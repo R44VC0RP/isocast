@@ -40,6 +40,7 @@ use crate::{
 pub struct WindowsPlatform {
     device: Arc<Mutex<Option<GraphicsDevice>>>,
     outputs: Arc<crate::playback::Outputs>,
+    browser_open_attempted: Arc<AtomicBool>,
 }
 
 /// Dropping any native guard stops and joins its capture worker.
@@ -390,6 +391,28 @@ impl Platform for WindowsPlatform {
     type SharedSurface = isocast_surfaces::Surface;
 
     const CAMERA_IS_MONITOR: bool = true;
+
+    fn source_open_timeout(&self, source: &SourceKind) -> Duration {
+        // Upper bound for a recording waiting on an already opening source.
+        if matches!(source, SourceKind::Browser(_)) {
+            Duration::from_secs(35) // Includes the helper's 30 s REDY deadline.
+        } else {
+            Duration::from_secs(8)
+        }
+    }
+
+    fn begin_source_open(&self, source: &SourceKind) -> (Duration, Option<&'static str>) {
+        if matches!(source, SourceKind::Browser(_))
+            && !self.browser_open_attempted.swap(true, Ordering::Relaxed)
+        {
+            (
+                self.source_open_timeout(source),
+                Some("starting the web engine"),
+            )
+        } else {
+            (Duration::from_secs(8), None)
+        }
+    }
 
     fn virtual_camera_sink(
         &self,
@@ -1068,6 +1091,32 @@ impl Platform for WindowsPlatform {
 mod tests {
     use super::*;
     use isocast_protocol::{MicrophoneSource, SystemAudioSource};
+
+    #[test]
+    fn only_the_first_browser_attempt_claims_the_cold_start_deadline() {
+        let platform = WindowsPlatform::default();
+        let web = SourceKind::Browser(isocast_protocol::BrowserSource {
+            url: Some("about:blank".into()),
+            file: None,
+            css: String::new(),
+            width: 320,
+            height: 180,
+            fps: 30,
+            control_audio: false,
+            shutdown_when_hidden: false,
+            refresh_when_shown: false,
+        });
+        let strict = (Duration::from_secs(8), None);
+        let audio = SourceKind::SystemAudio(SystemAudioSource { exclude: vec![] });
+        assert_eq!(platform.begin_source_open(&audio), strict);
+        let wait = platform.source_open_timeout(&web);
+        assert_eq!(wait, Duration::from_secs(35));
+        assert_eq!(
+            platform.clone().begin_source_open(&web),
+            (wait, Some("starting the web engine"))
+        );
+        assert_eq!(platform.begin_source_open(&web), strict);
+    }
 
     #[test]
     fn audio_sources_probe_the_selected_endpoint() {

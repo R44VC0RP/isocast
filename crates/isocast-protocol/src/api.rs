@@ -2902,6 +2902,9 @@ pub struct ScenesInfo {
 pub struct SourceStatus {
     pub source: String,
     pub state: SourceRun,
+    /// Progress detail while the source is opening, not a warning or failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// Desktop audio capture backend selected when this source opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_mode: Option<String>,
