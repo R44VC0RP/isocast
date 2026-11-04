@@ -14,6 +14,76 @@ use serde::{Deserialize, Serialize};
 /// The manifest format version.
 pub const MANIFEST_VERSION: u32 = 1;
 
+/// Video interruptions observed on the take clock. This is not a second count
+/// of codec drops: a missing source layer can coexist with a healthy program.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VideoRecovery {
+    /// Count of detailed incidents overlapping this take. A lower bound if history_limited.
+    pub incident_count: u64,
+    /// The recording exhausted its bounded incident history; absence is not proof of health.
+    pub history_limited: bool,
+    pub incidents: Vec<VideoIncident>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoRecoveryScope {
+    Source,
+    Output,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoRecoveryState {
+    Interrupted,
+    Recovering,
+    Resumed,
+    EndedEarly,
+    /// The take stopped while the owner was still interrupted or recovering.
+    Stopped,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Classify at the owner, never by searching a platform error message. The
+/// legacy writer cannot distinguish a storage error from a codec/drain error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoFaultKind {
+    CaptureStopped,
+    CompositorFailed,
+    WriterFailed,
+    EncoderFailed,
+    StorageFailed,
+    DeviceLost,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VideoIncident {
+    /// Stable across snapshots of this recording, including user splits.
+    pub incident_id: u64,
+    pub scope: VideoRecoveryScope,
+    /// Source id or logical recording output id, according to scope.
+    pub owner_id: String,
+    pub state: VideoRecoveryState,
+    pub fault_kind: VideoFaultKind,
+    pub attempts_started: u8,
+    pub reason: String,
+    /// Slot zero is the take's epoch; user pauses consume no slots.
+    pub fps: u32,
+    pub first_lost_slot: u64,
+    /// Exclusive, through the snapshot or Stop if still unavailable.
+    pub end_slot_exclusive: u64,
+    /// Slots of observed unavailability, not a count of missing native samples.
+    /// For an output that ended early, these slots overlap the tail counted in
+    /// that file's `dropped_frames`. Do not add the two counts.
+    pub lost_slots: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionManifest {
     /// Manifest format version. Currently 1.
@@ -29,6 +99,9 @@ pub struct SessionManifest {
     /// Length of the session timeline; absent while recording.
     pub duration_seconds: Option<f64>,
     pub files: Vec<ManifestFile>,
+    /// Absent in older recordings; an observed healthy take has zero incidents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_recovery: Option<VideoRecovery>,
     /// Markers added while recording, in order.
     #[serde(default)]
     pub markers: Vec<Marker>,
@@ -257,4 +330,31 @@ pub struct ManifestAudio {
     /// The id of the audio source.
     pub source: String,
     pub channels: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn future_recovery_values_do_not_hide_the_take_or_its_gap() {
+        let manifest: SessionManifest = serde_json::from_value(serde_json::json!({
+            "version": 1, "setup": "studio", "status": "failed", "started_at": "2026-11-04T12:00:00Z",
+            "host_time_ns": 0, "files": [], "errors": [],
+            "video_recovery": {"incident_count": 1, "history_limited": false, "incidents": [{
+                "incident_id": 1, "scope": "adapter", "owner_id": "screen", "state": "sealing_prefix",
+                "fault_kind": "driver_reset", "attempts_started": 0, "reason": "lost device",
+                "fps": 30, "first_lost_slot": 30, "end_slot_exclusive": 60, "lost_slots": 30
+            }]}
+        })).unwrap();
+        let recovery = manifest.video_recovery.unwrap();
+        let incident = &recovery.incidents[0];
+        assert_eq!(incident.scope, VideoRecoveryScope::Unknown);
+        assert_eq!(incident.state, VideoRecoveryState::Unknown);
+        assert_eq!(incident.fault_kind, VideoFaultKind::Unknown);
+        assert_eq!(
+            (incident.owner_id.as_str(), incident.lost_slots),
+            ("screen", 30)
+        );
+    }
 }

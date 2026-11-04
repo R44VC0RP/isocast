@@ -39,6 +39,7 @@ mod opus_stream;
 mod pause;
 pub mod pressure;
 mod program;
+pub mod recovery;
 mod scene_feeds;
 mod scenes;
 mod shared_frames;
@@ -575,6 +576,9 @@ impl SessionControl {
     fn end_recording(&self, at: Time) {
         let mut state = self.state.lock();
         state.end = Some(state.end.map_or(at, |end| end.min(at)));
+        if let Some(clock) = &state.clock {
+            clock.recovery.stop_at(at);
+        }
     }
 
     /// Make `transition` ready to run in this session: a stinger lasts as
@@ -1511,6 +1515,13 @@ fn live_status(
     let status = cuts.status(now.min(shared.end()));
     LiveStatus {
         levels,
+        video_recovery: plans.first().map(|p| {
+            clock.recovery.snapshot(
+                &cuts,
+                Time::from_nanos(p.epoch.load(Ordering::Acquire)),
+                now.min(shared.end()),
+            )
+        }),
         monitor: None,
         elapsed_seconds: status.elapsed_seconds,
         paused: status.paused,
@@ -1666,6 +1677,19 @@ fn take_manifest<P: Platform>(
     });
     SessionManifest {
         version: MANIFEST_VERSION,
+        video_recovery: control.and_then(|control| {
+            let state = control.state.lock();
+            let clock = state.clock.as_ref()?;
+            let until = take
+                .end
+                .unwrap_or_else(|| platform.now())
+                .min(state.end.unwrap_or(Time::MAX));
+            Some(
+                clock
+                    .recovery
+                    .snapshot(&clock.state.read(), take.epoch, until),
+            )
+        }),
         setup: setup.name.clone(),
         status,
         started_at: take

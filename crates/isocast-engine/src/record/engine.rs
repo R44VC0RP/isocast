@@ -21,7 +21,7 @@ use chrono::Local;
 use isocast_protocol::api::{
     AudioLevel, ChannelLevel, EngineInfo, ScenesInfo, SourceRun, SourceStatus,
 };
-use isocast_protocol::manifest::SessionStatus;
+use isocast_protocol::manifest::{SessionStatus, VideoFaultKind, VideoRecoveryScope};
 use isocast_protocol::{
     Canvas, CanvasId, Codec, Monitoring, PROGRAM, Setup, SourceKind, Transition, TransitionKind,
 };
@@ -3817,6 +3817,38 @@ impl Rates {
     }
 }
 
+/// An ISO clock observes its exact first missing tick itself. For a source
+/// used only in composition, an old desktop picture is NOT evidence of a
+/// gap. Start at the explicit stop observation; end at the first picture of
+/// the reopened slot, not at the housekeeping poll or at native-open success.
+fn observe_layer<P: Platform>(
+    clock: &super::pause::RecordingClock,
+    timeline: &Timeline,
+    id: &str,
+    live: &Live<P>,
+    stopped: Option<&str>,
+    now: Time,
+) {
+    let Some(video) = &live.video else { return };
+    if let Some(reason) = stopped {
+        if !timeline.on_recorded_canvas(id, &clock.recorded_canvases) {
+            return;
+        }
+        clock.recovery.interrupted(
+            (VideoRecoveryScope::Source, id),
+            video.fps,
+            now,
+            now,
+            VideoFaultKind::CaptureStopped,
+            reason,
+        );
+    } else if clock.recovery.revision() != 0
+        && let Some(&at) = video.slot.first_picture.get()
+    {
+        clock.recovery.observe_reopened_source(id, at);
+    }
+}
+
 /// Measure levels for clients, notice sources that stopped, and try
 /// failed ones again now and then.
 fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
@@ -3844,6 +3876,16 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                 }
             }
             let setup = state.setup.clone();
+            let clock = if inner.recording.load(Ordering::Acquire) {
+                let control = inner.control.state.lock();
+                (!control.finished
+                    && control.epoch.is_some_and(|epoch| now >= epoch)
+                    && control.end.is_none_or(|end| now < end))
+                .then(|| control.clock.clone())
+                .flatten()
+            } else {
+                None
+            };
             for (id, live) in state.sources.iter_mut() {
                 if let Some(audio) = &live.audio {
                     let (peak_db, rms_db) = audio.meter.take();
@@ -3855,6 +3897,16 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                     });
                 }
                 if !matches!(live.run, SourceRun::Running | SourceRun::Paused) {
+                    // An already stopped layer may be switched on air. Count
+                    // from the observation that affects a recorded canvas, not
+                    // retrospectively from when the off-air capture failed.
+                    if live.run == SourceRun::Failed
+                        && let Some(clock) = &clock
+                        && !clock.iso_sources.contains(id)
+                        && let Some(reason) = &live.error
+                    {
+                        observe_layer(clock, &inner.timeline, id, live, Some(reason), now);
+                    }
                     continue;
                 }
                 let stopped = live
@@ -3867,6 +3919,11 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                             .and_then(|audio| audio.feed.stopped.lock().clone())
                     })
                     .or_else(|| live.opened.as_ref().and_then(|o| o.failure()));
+                if let Some(clock) = &clock
+                    && !clock.iso_sources.contains(id)
+                {
+                    observe_layer(clock, &inner.timeline, id, live, stopped.as_deref(), now);
+                }
                 if let Some(reason) = stopped {
                     if let Some(video) = &live.video {
                         video.slot.stop(reason.clone());
@@ -4056,6 +4113,7 @@ fn run_iso<P: Platform>(
     mut runner: IsoRunner<P>,
     gpu: &IsoGpu,
     shared: &Shared,
+    recovery: &super::recovery::VideoRecoveryLedger,
 ) -> Result<()> {
     platform.real_time_thread();
     let epoch = shared.epoch;
@@ -4094,6 +4152,16 @@ fn run_iso<P: Platform>(
                 .peek_until_timed(Time::MAX)
                 .is_none_or(|(_, at)| at + frame / 2 <= tick)
         {
+            if let Some(incident) = recovery.interrupted(
+                (VideoRecoveryScope::Source, &runner.id),
+                fps,
+                tick,
+                tick,
+                VideoFaultKind::CaptureStopped,
+                &reason,
+            ) {
+                recovery.ended_early(incident, tick);
+            }
             bail!(
                 "{}: the capture stopped, so its file ends early: {reason}",
                 runner.id
@@ -4822,10 +4890,19 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         epoch,
         end: AtomicI64::new(i64::MAX),
     };
-    let clock = Arc::new(super::pause::RecordingClock::new(
-        epoch,
-        plans.iter().map(|plan| plan.spec.video.fps),
-    ));
+    let mut clock =
+        super::pause::RecordingClock::new(epoch, plans.iter().map(|plan| plan.spec.video.fps));
+    clock.iso_sources.extend(
+        plans
+            .iter()
+            .filter(|p| !is_program(p))
+            .map(|p| p.source.clone()),
+    );
+    clock.recorded_canvases = plans
+        .iter()
+        .filter_map(|p| super::program_canvas(p))
+        .collect();
+    let clock = Arc::new(clock);
     if let Some(duration) = options.duration {
         shared.stop_at(shared.epoch + duration);
     }
@@ -4985,14 +5062,16 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             .collect();
         drop(done_tx);
         let iso_gpu = &iso_gpu;
+        let recovery = &clock.recovery;
         let iso_threads: Vec<_> = runners
             .into_values()
-            .map(|runner| scope.spawn(move || run_iso(platform, runner, iso_gpu, shared)))
+            .map(|runner| scope.spawn(move || run_iso(platform, runner, iso_gpu, shared, recovery)))
             .collect();
 
         let mut all_started = false;
         let mut handover = false;
         let mut audio_stops_seen = inner.audio_stop_changes.load(Ordering::SeqCst);
+        let mut video_changes_seen = 0;
         // A pause's commit barrier under way: its generation, cut and deadline.
         let mut pending_commit: Option<(u64, Time, Time)> = None;
         let disk_probe = DiskProbe::start(platform, &folder);
@@ -5177,11 +5256,14 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     // Best effort: the final manifest is written at the end.
                     let _ = write(current, SessionStatus::Recording, &[]);
                 }
-                // An audio source stopped (or came back): say so in the
+                // An audio source stopped (or came back), or a video owner
+                // changed recovery state: say so in the
                 // manifest at once, so a crash keeps it.
                 let changes = inner.audio_stop_changes.load(Ordering::SeqCst);
-                if changes != audio_stops_seen {
+                let video_changes = recovery.revision();
+                if changes != audio_stops_seen || video_changes != video_changes_seen {
                     audio_stops_seen = changes;
+                    video_changes_seen = video_changes;
                     let _ = write(current, SessionStatus::Recording, &[]);
                 }
                 // A stop asked for comes before a split asked for at the same
@@ -5450,6 +5532,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             shared.stop_at(platform.now().max(shared.epoch));
         }
         // No take begins from here on: a split asked for is refused at once.
+        clock.recovery.stop_at(shared.end());
         control.finish_recording();
 
         // Only Stop drains the live mix early, and only through the last
@@ -5634,6 +5717,11 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     }
 
     Ok(Report {
+        video_recovery: Some(
+            clock
+                .recovery
+                .snapshot(&clock.state.read(), takes[last].epoch, end),
+        ),
         folder,
         disk: DiskReport {
             file_system: volume.file_system,
@@ -6379,6 +6467,202 @@ encoder = { codec = "hevc", quality = 70 }
 "##,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn running_layer_only_reports_loss_on_a_recorded_canvas() {
+        let timeline = Arc::new(Timeline::default());
+        let epoch = Time::from_nanos(0);
+        let now = epoch.add_ticks(1, 30);
+        let mut clock = super::super::pause::RecordingClock::new(epoch, [30].into_iter());
+        clock.recorded_canvases.push(CanvasId::Main);
+        timeline.track_on_air();
+        timeline.set_on_air(CanvasId::Main, ["screen"], epoch);
+        timeline.set_on_air(CanvasId::Vertical, ["camera"], epoch);
+        let live: Live<inert::Inert> = Live {
+            run: SourceRun::Running,
+            video: Some(Video {
+                slot: Arc::new(FrameSlot::new(timeline.clone())),
+                width: 64,
+                height: 64,
+                fps: 30,
+            }),
+            ..Live::failed(serde_json::Value::Null, String::new())
+        };
+        live.video.as_ref().unwrap().slot.push((), epoch);
+        observe_layer(
+            &clock,
+            &timeline,
+            "camera",
+            &live,
+            Some("capture stopped"),
+            now,
+        );
+        let snapshot = || {
+            clock
+                .recovery
+                .snapshot(&clock.state.read(), epoch, epoch.add_ticks(10, 30))
+        };
+        assert_eq!(snapshot().incident_count, 0);
+        // The recorded canvas switches to the same layer. Only now does a
+        // capture failure affect that take, independently of the other canvas.
+        timeline.set_on_air(CanvasId::Main, ["camera"], now);
+        observe_layer(
+            &clock,
+            &timeline,
+            "camera",
+            &live,
+            Some("capture stopped"),
+            now,
+        );
+        let snapshot = snapshot();
+        assert_eq!(snapshot.incident_count, 1);
+        assert_eq!(snapshot.incidents[0].owner_id, "camera");
+    }
+
+    #[test]
+    fn live_and_manifest_share_recovery_slots_through_pause_split_and_stop() {
+        use isocast_protocol::manifest::{
+            VideoRecoveryScope as Scope, VideoRecoveryState as Phase,
+        };
+        let setup = empty_engine_setup();
+        let epoch = Time::from_nanos(1_000_000_000);
+        let tick = |i| epoch.add_ticks(i, 30);
+        let clock = Arc::new(crate::record::pause::RecordingClock::new(
+            epoch,
+            [30].into_iter(),
+        ));
+        let control = SessionControl::default();
+        control.begin_recording(epoch, clock.clone());
+        let formats = Formats {
+            video: Default::default(),
+            audio: Default::default(),
+            cameras: Default::default(),
+            recording: 1,
+        };
+        let mut take = Take::begin(
+            plan_take(&setup, &formats, Path::new("."), 1).unwrap(),
+            epoch,
+            Local::now(),
+        );
+        let shared = Shared {
+            epoch,
+            end: AtomicI64::new(i64::MAX),
+        };
+        let s = clock
+            .recovery
+            .interrupted(
+                (Scope::Source, "bars"),
+                30,
+                tick(12),
+                tick(13),
+                VideoFaultKind::CaptureStopped,
+                "capture ended",
+            )
+            .unwrap();
+        assert_eq!(
+            clock.recovery.interrupted(
+                (Scope::Source, "bars"),
+                30,
+                tick(13),
+                tick(14),
+                VideoFaultKind::CaptureStopped,
+                "duplicate"
+            ),
+            Some(s)
+        );
+        let attempt = clock.recovery.begin_attempt(s, tick(14), epoch).unwrap();
+        let pause = clock.change(true, tick(20), None).unwrap();
+        assert_eq!(pause, tick(21));
+        let o = clock
+            .recovery
+            .interrupted(
+                (Scope::Output, PROGRAM),
+                30,
+                tick(25),
+                tick(25),
+                VideoFaultKind::StorageFailed,
+                "write failed",
+            )
+            .unwrap();
+        clock.recovery.ended_early(o, tick(25));
+        let status = |take: &Take, now| {
+            live_status(&take.plans, vec![], &shared, now, &clock)
+                .video_recovery
+                .unwrap()
+        };
+        let paused = status(&take, tick(30));
+        assert_eq!(
+            (paused.incidents[0].state, paused.incidents[0].lost_slots),
+            (Phase::Recovering, 9)
+        );
+        assert_eq!(paused.incidents[1].lost_slots, 0);
+        assert_eq!(clock.change(false, tick(50), None).unwrap(), tick(51));
+        clock.recovery.finish_attempt(attempt, tick(60), true);
+        clock.recovery.finish_attempt(attempt, tick(61), true); // late old callback
+        assert!(clock.recovery.begin_attempt(o, tick(61), epoch).is_err());
+        let stop = tick(80) + Duration::from_millis(3);
+        shared.stop_at(stop);
+        control.end_recording(stop);
+        take.end = Some(stop);
+        let finalized = |take| {
+            take_manifest(
+                &inert::Inert,
+                &setup,
+                take,
+                SessionStatus::Failed,
+                &[],
+                &[],
+                Some(&control),
+                &[],
+                &formats.cameras,
+            )
+            .video_recovery
+            .unwrap()
+        };
+        let live = status(&take, tick(150)); // finalizers cannot extend the gap
+        assert_eq!(finalized(&take), live);
+        assert_eq!(live.incident_count, 2);
+        let (source, output) = (&live.incidents[0], &live.incidents[1]);
+        assert_eq!(
+            (
+                source.scope,
+                source.owner_id.as_str(),
+                source.state,
+                source.first_lost_slot,
+                source.end_slot_exclusive,
+                source.lost_slots
+            ),
+            (Scope::Source, "bars", Phase::Resumed, 12, 30, 18)
+        );
+        assert_eq!(
+            (
+                output.scope,
+                output.owner_id.as_str(),
+                output.state,
+                output.first_lost_slot,
+                output.end_slot_exclusive,
+                output.lost_slots
+            ),
+            (Scope::Output, PROGRAM, Phase::EndedEarly, 21, 51, 30)
+        );
+        let mut next = Take::begin(
+            plan_take(&setup, &formats, Path::new("."), 2).unwrap(),
+            tick(70),
+            Local::now(),
+        );
+        next.end = Some(stop);
+        let split = status(&next, tick(150));
+        assert_eq!(split, finalized(&next));
+        assert_eq!(split.incident_count, 1);
+        assert_eq!(
+            (
+                split.incidents[0].incident_id,
+                split.incidents[0].first_lost_slot,
+                split.incidents[0].lost_slots
+            ),
+            (o, 0, 11)
+        );
     }
 
     #[test]

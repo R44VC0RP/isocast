@@ -131,6 +131,24 @@ impl Timeline {
         self.on_air.lock().is_none() || self.published.load(Ordering::SeqCst)
     }
 
+    /// Whether a recorded program currently uses this source. Preview and
+    /// unrecorded programs also keep captures open, but don't lose take slots.
+    pub(crate) fn on_recorded_canvas(
+        &self,
+        id: &str,
+        recorded: &[isocast_protocol::CanvasId],
+    ) -> bool {
+        let air = self.on_air.lock();
+        let Some((_, shown)) = air.as_ref().and_then(|sources| sources.get(id)) else {
+            return false;
+        };
+        self.canvas_bits
+            .lock()
+            .iter()
+            .enumerate()
+            .any(|(i, canvas)| shown & (1u64 << i.min(63)) != 0 && recorded.contains(canvas))
+    }
+
     /// Since when source `id` has been on air, if it is; with no program,
     /// since the start.
     fn on_air_since(&self, id: &str) -> Option<Time> {
@@ -144,6 +162,8 @@ impl Timeline {
 /// The latest frames from a source, for frame clocks to choose from.
 pub(crate) struct FrameSlot<F> {
     frames: Mutex<VecDeque<(F, Time)>>,
+    /// First delivered picture of this capture instance (not its open time).
+    pub(crate) first_picture: OnceLock<Time>,
     /// Media's decoded next pictures. Timed readers can select them without
     /// waiting for the producer's delivery wake; untimed readers cannot.
     ahead: Option<Mutex<VecDeque<(F, Time)>>>,
@@ -174,6 +194,7 @@ impl<F: Clone> FrameSlot<F> {
     pub(crate) fn with_capacity(timeline: Arc<Timeline>, capacity: usize) -> Self {
         Self {
             frames: Mutex::new(VecDeque::with_capacity(capacity)),
+            first_picture: OnceLock::new(),
             ahead: None,
             capacity: capacity.max(1),
             arrived: Condvar::new(),
@@ -185,6 +206,7 @@ impl<F: Clone> FrameSlot<F> {
     }
 
     pub(crate) fn push(&self, frame: F, at: Time) {
+        self.first_picture.get_or_init(|| at);
         let now = Instant::now();
         let mut arrivals = self.arrivals.lock();
         while arrivals

@@ -423,6 +423,13 @@ pub(super) fn write_files<W: FileWriter>(
                     finish(c.file, c.at, c.take, c.failure);
                 }
                 if let Err(err) = result {
+                    // The failed operation may have accepted an input before
+                    // returning its error. Do not guess its fate. No later
+                    // original can enter this worker: report that known tail.
+                    file.note_output_end(
+                        isocast_protocol::manifest::VideoFaultKind::WriterFailed,
+                        &format!("{err:#}"),
+                    );
                     failure = Err(err);
                     break;
                 }
@@ -452,6 +459,12 @@ pub(super) fn write_files<W: FileWriter>(
         if failure.is_ok()
             && let Some(reason) = source.as_ref().and_then(|slot| slot.stopped())
         {
+            if super::is_program(&file.plan) {
+                file.note_output_end(
+                    isocast_protocol::manifest::VideoFaultKind::CompositorFailed,
+                    &reason,
+                );
+            }
             failure = Err(anyhow!("the capture stopped: {reason}"));
         }
         if let Some(c) = closing {
@@ -569,6 +582,27 @@ impl<W: FileWriter> OpenFile<W> {
 
     fn fps(&self) -> u32 {
         self.plan.spec.video.fps
+    }
+
+    fn note_output_end(&self, kind: isocast_protocol::manifest::VideoFaultKind, reason: &str) {
+        let from = self.newest_input.map_or_else(
+            || Time::from_nanos(self.plan.epoch.load(Ordering::Acquire)),
+            |at| at.add_ticks(1, self.fps()),
+        );
+        let recovery = &self.clock.recovery;
+        if let Some(id) = recovery.interrupted(
+            (
+                isocast_protocol::manifest::VideoRecoveryScope::Output,
+                &self.plan.source,
+            ),
+            self.fps(),
+            from,
+            from,
+            kind,
+            reason,
+        ) {
+            recovery.ended_early(id, from);
+        }
     }
 
     fn publish_committed(&self) {

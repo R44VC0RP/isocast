@@ -10568,6 +10568,17 @@
             "description": "Total time cut out so far, including the current pause.",
             "format": "double",
             "type": "number"
+          },
+          "video_recovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoRecovery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Source and output interruptions on the current take's saved timeline."
           }
         },
         "required": [
@@ -15354,6 +15365,17 @@
             },
             "type": "array"
           },
+          "video_recovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoRecovery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Video interruptions of the last take, as in its manifest."
+          },
           "warnings": {
             "items": {
               "type": "string"
@@ -16559,6 +16581,17 @@
               "$ref": "#/components/schemas/SceneChangeResult"
             },
             "type": "array"
+          },
+          "video_recovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoRecovery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent in older recordings; an observed healthy take has zero incidents."
           }
         },
         "required": [
@@ -21948,6 +21981,19 @@
         ],
         "type": "object"
       },
+      "VideoFaultKind": {
+        "description": "Classify at the owner, never by searching a platform error message. The\nlegacy writer cannot distinguish a storage error from a codec/drain error.",
+        "enum": [
+          "capture_stopped",
+          "compositor_failed",
+          "writer_failed",
+          "encoder_failed",
+          "storage_failed",
+          "device_lost",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "VideoFormat": {
         "properties": {
           "frame_rate_ranges": {
@@ -21989,6 +22035,129 @@
           "frame_rate_ranges"
         ],
         "type": "object"
+      },
+      "VideoIncident": {
+        "properties": {
+          "attempts_started": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "end_slot_exclusive": {
+            "description": "Exclusive, through the snapshot or Stop if still unavailable.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fault_kind": {
+            "$ref": "#/components/schemas/VideoFaultKind"
+          },
+          "first_lost_slot": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fps": {
+            "description": "Slot zero is the take's epoch; user pauses consume no slots.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "incident_id": {
+            "description": "Stable across snapshots of this recording, including user splits.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lost_slots": {
+            "description": "Slots of observed unavailability, not a count of missing native samples.\nFor an output that ended early, these slots overlap the tail counted in\nthat file's `dropped_frames`. Do not add the two counts.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "owner_id": {
+            "description": "Source id or logical recording output id, according to scope.",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/VideoRecoveryScope"
+          },
+          "state": {
+            "$ref": "#/components/schemas/VideoRecoveryState"
+          }
+        },
+        "required": [
+          "incident_id",
+          "scope",
+          "owner_id",
+          "state",
+          "fault_kind",
+          "attempts_started",
+          "reason",
+          "fps",
+          "first_lost_slot",
+          "end_slot_exclusive",
+          "lost_slots"
+        ],
+        "type": "object"
+      },
+      "VideoRecovery": {
+        "description": "Video interruptions observed on the take clock. This is not a second count\nof codec drops: a missing source layer can coexist with a healthy program.",
+        "properties": {
+          "history_limited": {
+            "description": "The recording exhausted its bounded incident history; absence is not proof of health.",
+            "type": "boolean"
+          },
+          "incident_count": {
+            "description": "Count of detailed incidents overlapping this take. A lower bound if history_limited.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "incidents": {
+            "items": {
+              "$ref": "#/components/schemas/VideoIncident"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "incident_count",
+          "history_limited",
+          "incidents"
+        ],
+        "type": "object"
+      },
+      "VideoRecoveryScope": {
+        "enum": [
+          "source",
+          "output",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "VideoRecoveryState": {
+        "oneOf": [
+          {
+            "enum": [
+              "interrupted",
+              "recovering",
+              "resumed",
+              "ended_early",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "stopped",
+            "description": "The take stopped while the owner was still interrupted or recovering.",
+            "type": "string"
+          }
+        ]
       },
       "VirtualCameraRemoval": {
         "description": "What `virtual_camera_remove` did.",
