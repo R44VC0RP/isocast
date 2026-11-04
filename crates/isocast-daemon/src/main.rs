@@ -4121,23 +4121,7 @@ impl Daemon {
         if status.disk.as_ref().is_some_and(|d| d.behind()) {
             return;
         }
-        let mut dropping: Vec<OverloadedFile> = Vec::new();
-        for file in &status.files {
-            let (frames0, dropped0) = watch
-                .baseline
-                .iter()
-                .find(|(s, ..)| *s == file.source)
-                .map_or((0, 0), |(_, f, d)| (*f, *d));
-            let dropped = file.dropped_frames.saturating_sub(dropped0);
-            let due = file.frames.saturating_sub(frames0) + dropped;
-            if overloaded(dropped, due) {
-                dropping.push(OverloadedFile {
-                    output: file.source.clone(),
-                    dropped_frames: dropped,
-                    percent: dropped as f64 * 100.0 / due.max(1) as f64,
-                });
-            }
-        }
+        let mut dropping = overloaded_files(status, &watch.baseline);
         // Only the take's files say the encoders are behind: the stream's
         // count also holds frames a congested or reconnecting connection
         // dropped, which have their own warnings. With a file dropping,
@@ -5743,6 +5727,37 @@ struct OverloadWatch {
     sent: bool,
 }
 
+/// The take's files dropping enough frames to say the encoders are behind,
+/// against the counts at the take's start (`baseline`: source, frames,
+/// dropped). The slots after a file ended early (#275) count as neither
+/// dropped nor due: that file's own notice explains them.
+fn overloaded_files(status: &LiveStatus, baseline: &[(String, u64, u64)]) -> Vec<OverloadedFile> {
+    let mut dropping = Vec::new();
+    for file in &status.files {
+        let (frames0, dropped0) = baseline
+            .iter()
+            .find(|(s, ..)| *s == file.source)
+            .map_or((0, 0), |(_, f, d)| (*f, *d));
+        let ended = status
+            .video_recovery
+            .as_ref()
+            .map_or(0, |r| r.ended_early_slots(&file.source));
+        let dropped = file
+            .dropped_frames
+            .saturating_sub(dropped0)
+            .saturating_sub(ended);
+        let due = file.frames.saturating_sub(frames0) + dropped;
+        if overloaded(dropped, due) {
+            dropping.push(OverloadedFile {
+                output: file.source.clone(),
+                dropped_frames: dropped,
+                percent: dropped as f64 * 100.0 / due.max(1) as f64,
+            });
+        }
+    }
+    dropping
+}
+
 /// Whether `dropped` of `due` pictures is an overload rather than a hiccup:
 /// at least a second's worth at 30 fps and 2% of them.
 fn overloaded(dropped: u64, due: u64) -> bool {
@@ -6301,6 +6316,40 @@ fn to_json(value: impl serde::Serialize) -> Result<serde_json::Value, RpcError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ended_iso_tail_is_not_an_encoder_overload() {
+        // Camera's ISO stopped at slot 192 of 60 fps: 217 slots of its
+        // tail are "dropped". Slides' encoder really fell 90 behind.
+        let status = |slides_dropped: u64| -> LiveStatus {
+            serde_json::from_value(serde_json::json!({
+                "elapsed_seconds": 8.0,
+                "files": [
+                    {"source": "program", "frames": 240, "dropped_frames": 0, "audio_dropouts": 0},
+                    {"source": "camera", "frames": 192, "dropped_frames": 219, "audio_dropouts": 0},
+                    {"source": "slides", "frames": 150, "dropped_frames": slides_dropped, "audio_dropouts": 0},
+                ],
+                "video_recovery": {"incident_count": 1, "history_limited": false, "incidents": [{
+                    "incident_id": 1, "scope": "source", "owner_id": "camera",
+                    "state": "ended_early", "fault_kind": "capture_stopped",
+                    "attempts_started": 0, "reason": "injected capture failure", "fps": 60,
+                    "first_lost_slot": 192, "end_slot_exclusive": 409, "lost_slots": 217,
+                }]},
+            }))
+            .unwrap()
+        };
+        assert!(overloaded_files(&status(0), &[]).is_empty());
+        let backlog = overloaded_files(&status(90), &[]);
+        assert_eq!(backlog.len(), 1);
+        assert_eq!(
+            (backlog[0].output.as_str(), backlog[0].dropped_frames),
+            ("slides", 90)
+        );
+        // Without the incident, the same tail would read as a backlog.
+        let mut unexplained = status(0);
+        unexplained.video_recovery = None;
+        assert_eq!(overloaded_files(&unexplained, &[])[0].output, "camera");
+    }
 
     #[test]
     fn limited_recovery_history_still_identifies_last_retained_incident() {

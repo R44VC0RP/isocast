@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use isocast_protocol::api::{Capacity, EngineState, Event, LiveFile, Method, Overload};
 use isocast_protocol::hello::EngineOs;
+use isocast_protocol::manifest::VideoRecovery;
 use isocast_protocol::platform_text as wording;
 use isocast_protocol::replay::{ReplaySaved, ReplayState, ReplayStatus};
 use isocast_protocol::stream::{StreamService, StreamState, StreamStatus};
@@ -170,6 +171,8 @@ pub struct Controls {
     /// Why the vertical canvas stopped, once told (#96): its notice shows
     /// once per failure.
     vertical_stopped: RefCell<Option<String>>,
+    /// Recovered takes and outputs that ended early, once told.
+    recovery: super::recovery::Recovery,
 }
 
 impl Area for Controls {
@@ -308,6 +311,9 @@ impl Area for Controls {
         if changed.any(Changed::STATUS) {
             self.vertical_came_or_went(app);
         }
+        if changed.any(Changed::STATUS | Changed::SETUP) {
+            self.recovery.status_changed(app);
+        }
         if changed.any(Changed::STREAM | Changed::BUSY) {
             self.show_stream(app, &area);
         }
@@ -383,7 +389,9 @@ impl Area for Controls {
                     self.show_pauses(&window.global::<ControlsArea>());
                 }
             }
-            Event::Status { live } => self.note_drops(app, Some(&live.files), None),
+            Event::Status { live } => {
+                self.note_drops(app, Some((&live.files, live.video_recovery.as_ref())), None)
+            }
             // The main canvas's stream only: the vertical canvas's has
             // its own status (#86).
             Event::Stream { stream, .. } if stream.canvas.is_main() => {
@@ -416,6 +424,15 @@ impl Area for Controls {
         // Drops are counted from `status` (see note_drops); the stream's
         // total comes in its warning.
         if is_file_drop(message) {
+            return true;
+        }
+        // The recovered-take notice says it from the status.
+        if super::recovery::is_recovery_warning(message) {
+            app.refresh_status(true);
+            return true;
+        }
+        if let Some(launch) = super::recovery::abnormal_launch(message) {
+            self.recovery.abnormal(app, launch);
             return true;
         }
         if let Some(total) = stream_drops(message) {
@@ -1444,12 +1461,20 @@ impl Controls {
 
     /// Counts from a recording's status (`files`) or the stream's total so
     /// far: the drops toast shows (or updates) when any of them went up.
-    fn note_drops(&self, app: &Rc<App>, files: Option<&[LiveFile]>, stream_total: Option<u64>) {
+    fn note_drops(
+        &self,
+        app: &Rc<App>,
+        files: Option<(&[LiveFile], Option<&VideoRecovery>)>,
+        stream_total: Option<u64>,
+    ) {
+        let (files, recovery) = files.unwrap_or_default();
         let rows = {
             let mut drops = self.drops.borrow_mut();
             let mut grew = false;
-            for f in files.unwrap_or_default() {
-                let now = (f.dropped_frames, f.audio_dropouts);
+            for f in files {
+                // A file that ended early has its own notice for its tail.
+                let ended = recovery.map_or(0, |r| r.ended_early_slots(&f.source));
+                let now = (f.dropped_frames.saturating_sub(ended), f.audio_dropouts);
                 match drops
                     .files
                     .iter_mut()
@@ -1737,7 +1762,7 @@ fn open_details(app: &Rc<App>, which: &str) {
 
 /// A file's name in the details and the drops toast: "Program", or its
 /// source's name.
-fn file_label(setup: Option<&isocast_protocol::Setup>, source: &str) -> String {
+pub(super) fn file_label(setup: Option<&isocast_protocol::Setup>, source: &str) -> String {
     if source == "program" {
         return "Program".into();
     }

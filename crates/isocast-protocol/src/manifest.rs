@@ -25,6 +25,19 @@ pub struct VideoRecovery {
     pub incidents: Vec<VideoIncident>,
 }
 
+impl VideoRecovery {
+    /// Slots after `owner`'s file ended early (a stopped ISO capture or a
+    /// failed writer), at that file's rate: they're in its `dropped_frames`
+    /// tail, but no encoder dropped them.
+    pub fn ended_early_slots(&self, owner: &str) -> u64 {
+        self.incidents
+            .iter()
+            .filter(|i| i.state == VideoRecoveryState::EndedEarly && i.owner_id == owner)
+            .map(|i| i.lost_slots)
+            .sum()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoRecoveryScope {
