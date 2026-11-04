@@ -7,6 +7,70 @@ use isocast_protocol::api::H264Profile;
 pub(crate) const MAX_PACKET: usize = 24 << 20;
 const MAX_NALS: usize = 1024;
 
+/// Display dimensions (including macroblock cropping) of progressive 8-bit
+/// 4:2:0 AVC. Refuse other layouts rather than advertising the requested one.
+pub(crate) fn size(sps: &[u8]) -> Result<(u32, u32)> {
+    let mut b = crate::hevc::Bits::rbsp(sps.get(1..).context("missing AVC SPS")?)?;
+    let profile = b.read(8)?;
+    b.read(16)?;
+    b.ue()?;
+    match profile {
+        66 | 77 | 88 => (),
+        100 => {
+            anyhow::ensure!(
+                b.ue()? == 1 && b.ue()? == 0 && b.ue()? == 0,
+                "expected 8-bit 4:2:0 AVC"
+            );
+            b.read(1)?;
+            if b.read(1)? != 0 {
+                for list in 0..8 {
+                    if b.read(1)? != 0 {
+                        let mut scale = 8i64;
+                        for _ in 0..if list < 6 { 16 } else { 64 } {
+                            if scale == 0 {
+                                break;
+                            }
+                            let n = i64::from(b.ue()?);
+                            let delta = if n % 2 == 1 { (n + 1) / 2 } else { -n / 2 };
+                            scale = (scale + delta).rem_euclid(256);
+                        }
+                    }
+                }
+            }
+        }
+        _ => bail!("unexpected AVC profile {profile}"),
+    }
+    b.ue()?;
+    match b.ue()? {
+        0 => {
+            b.ue()?;
+        }
+        1 => {
+            b.read(1)?;
+            b.ue()?;
+            b.ue()?;
+            let cycle = b.ue()?;
+            anyhow::ensure!(cycle <= 255, "invalid AVC picture order cycle");
+            for _ in 0..cycle {
+                b.ue()?;
+            }
+        }
+        2 => (),
+        _ => bail!("invalid AVC picture order type"),
+    }
+    b.ue()?;
+    b.read(1)?;
+    let mut w = (i64::from(b.ue()?) + 1) * 16;
+    let mut h = (i64::from(b.ue()?) + 1) * 16;
+    anyhow::ensure!(b.read(1)? == 1, "expected progressive AVC");
+    b.read(1)?;
+    if b.read(1)? != 0 {
+        w -= 2 * (i64::from(b.ue()?) + i64::from(b.ue()?));
+        h -= 2 * (i64::from(b.ue()?) + i64::from(b.ue()?));
+    }
+    Ok((w.try_into()?, h.try_into()?))
+}
+
 pub(crate) fn config(sets: &ParameterSets) -> Result<Vec<u8>> {
     let first = sets
         .sps

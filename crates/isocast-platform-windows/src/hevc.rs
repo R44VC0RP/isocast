@@ -18,6 +18,13 @@ pub(crate) struct Parameters {
 }
 
 impl Parameters {
+    pub(crate) fn size(&self) -> Result<(u32, u32)> {
+        let [w, h, l, r, t, b] = self
+            .description()?
+            .context("HEVC configuration has no SPS")?
+            .dimensions;
+        Ok((w - 2 * (l + r), h - 2 * (t + b)))
+    }
     pub(crate) fn bit_depth(&self) -> Result<u8> {
         let sps = self
             .description()?
@@ -311,7 +318,7 @@ fn profile(bits: &mut Bits, temporal: u32, nested: u32) -> Result<[u8; 12]> {
     Ok(profile)
 }
 
-struct Bits {
+pub(super) struct Bits {
     data: Vec<u8>,
     at: usize,
     end: usize,
@@ -319,20 +326,23 @@ struct Bits {
 
 impl Bits {
     fn new(nal: &[u8]) -> Result<Self> {
-        // Called only for already size-bounded, header-checked parameter sets.
-        let mut data = Vec::with_capacity(nal.len() - 2);
+        Self::rbsp(&nal[2..])
+    }
+
+    pub(super) fn rbsp(payload: &[u8]) -> Result<Self> {
+        let mut data = Vec::with_capacity(payload.len());
         let mut zeros = 0;
-        for (i, &byte) in nal[2..].iter().enumerate() {
+        for (i, &byte) in payload.iter().enumerate() {
             if zeros == 2 {
                 if byte == 3 {
-                    if nal.get(i + 3).is_none_or(|next| *next > 3) {
-                        bail!("invalid HEVC emulation-prevention byte");
+                    if payload.get(i + 1).is_none_or(|next| *next > 3) {
+                        bail!("invalid emulation-prevention byte");
                     }
                     zeros = 0;
                     continue;
                 }
                 if byte < 3 {
-                    bail!("unescaped HEVC start-code sequence");
+                    bail!("unescaped start-code sequence");
                 }
             }
             zeros = if byte == 0 { zeros + 1 } else { 0 };
@@ -341,15 +351,15 @@ impl Bits {
         let last = data
             .last()
             .filter(|byte| **byte != 0)
-            .context("HEVC parameter set has no RBSP stop bit")?;
+            .context("parameter set has no RBSP stop bit")?;
         // The stop bit is not syntax: a truncated ue(v) must not consume it.
         let end = data.len() * 8 - last.trailing_zeros() as usize - 1;
         Ok(Self { data, at: 0, end })
     }
 
-    fn read(&mut self, count: usize) -> Result<u32> {
+    pub(super) fn read(&mut self, count: usize) -> Result<u32> {
         if count > 32 || self.at + count > self.end {
-            bail!("truncated HEVC parameter set");
+            bail!("truncated parameter set");
         }
         let mut value = 0;
         for _ in 0..count {
@@ -359,12 +369,12 @@ impl Bits {
         Ok(value)
     }
 
-    fn ue(&mut self) -> Result<u32> {
+    pub(super) fn ue(&mut self) -> Result<u32> {
         let mut zeros = 0;
         while self.read(1)? == 0 {
             zeros += 1;
             if zeros > 31 {
-                bail!("HEVC Exp-Golomb value is too large");
+                bail!("Exp-Golomb value is too large");
             }
         }
         Ok(((1u32 << zeros) - 1) + self.read(zeros)?)

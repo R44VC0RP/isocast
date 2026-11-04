@@ -146,6 +146,7 @@ SCENARIOS = (
 if sys.platform == "win32":
     SCENARIOS += (
         "win_media",
+        "win_encoder_preflight",
         "win_output_scale",
         "win_metadata",
         "win_vcam_publisher",
@@ -4341,6 +4342,31 @@ def scenario_win_record(e, cfg, evidence):
     require(len(manifest["files"]) == 5, f"files: {[f['source'] for f in manifest['files']]}, expected program, "
                                          f"bars, bars2, vertical-program and square")
     evidence["t0"] = check_pattern_take(e, path, manifest, cfg, layout, evidence, vertical=vertical)
+
+
+def scenario_win_encoder_preflight(e, cfg, evidence):
+    """An unavailable first provider must not fail the take or hide its replacement."""
+    # The knob does not exist in production. This scenario is run against CI's debug binaries.
+    if not e.env.get("ISOCAST_TEST_FAIL_NVENC_OPEN"):
+        raise Skip("requires debug daemon and --engine-env ISOCAST_TEST_FAIL_NVENC_OPEN=1")
+    e.apply(cfg)
+    started = e.rpc("start", {})
+    def selected():
+        files = (e.rpc("status").get("live") or {}).get("files", [])
+        return next((f["encoder"] for f in files if f.get("encoder") and f["frames"] > 2), None)
+    actual = until(selected, description="live file's validated recording encoder")
+    require("injected NVENC open failure" in actual["reason"] and "MediaFoundation" in actual["backend"],
+            f"fallback not reported in status: {actual}")
+    e.rpc("stop")
+    path = Path(started["manifest"])
+    manifest = until(lambda: finished(path), description="fallback take finalization")
+    f, = manifest["files"]
+    require(manifest["status"] == "complete" and f["encoder"] == actual, f"unexpected manifest: {manifest}")
+    video = next(s for s in probe(path.parent / f["path"])["streams"] if s["codec_type"] == "video")
+    require(video["codec_name"] == "h264" and int(video["nb_read_frames"]) == f["frames"] > 2,
+            f"not a complete H.264 fallback take: {video}")
+    ffmpeg("-xerror", "-i", path.parent / f["path"], "-f", "null", "-")
+    evidence.update(encoder=actual, decoded_frames=f["frames"])
 
 
 def scenario_win_output_scale(e, cfg, evidence):

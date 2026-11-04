@@ -1140,6 +1140,13 @@ impl VideoWriter {
 impl FileWriter for VideoWriter {
     type Frame = Frame;
 
+    fn hardware_accelerated(&self) -> Option<bool> {
+        Some(!matches!(
+            self.encoder.backend(),
+            crate::EncoderBackend::MediaFoundationSoftware(_)
+        ))
+    }
+
     fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
         self.encoder.prioritize_video(canvas);
     }

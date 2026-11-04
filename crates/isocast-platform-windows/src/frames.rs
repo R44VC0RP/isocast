@@ -458,6 +458,45 @@ pub struct TexturePool {
 }
 
 impl TexturePool {
+    /// Immutable vertical gray bars in the *actual* source format. No live
+    /// capture, compositor, or file is needed to exercise encoder conversion.
+    pub(crate) fn probe_frame(
+        mut self,
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+    ) -> Result<Frame> {
+        anyhow::ensure!(
+            (2..=16384).contains(&width)
+                && (2..=16384).contains(&height)
+                && width.is_multiple_of(2)
+                && height.is_multiple_of(2),
+            "encoder preflight: invalid size {width}x{height}"
+        );
+        let planar = format == PixelFormat::Nv12;
+        let pitch = if planar { width } else { width * 4 };
+        let rows = if planar { height + height / 2 } else { height };
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(pitch as usize * rows as usize)?;
+        for x in 0..width {
+            let gray = if x < width / 2 { 64u8 } else { 192 };
+            match format {
+                PixelFormat::Nv12 => bytes.push(gray),
+                PixelFormat::Bgra8 => bytes.extend_from_slice(&[gray, gray, gray, 255]),
+                PixelFormat::Rgba10 => {
+                    let v = u32::from(gray) * 4;
+                    bytes.extend_from_slice(&(3 << 30 | v << 20 | v << 10 | v).to_le_bytes());
+                }
+            }
+        }
+        for _ in 1..height {
+            bytes.extend_from_within(..pitch as usize);
+        }
+        bytes.resize(pitch as usize * rows as usize, 128);
+        self.upload(format, width, height, &bytes, pitch)?
+            .context("encoder preflight: no probe texture")
+    }
+
     pub fn new(device: GraphicsDevice) -> Self {
         Self {
             device,

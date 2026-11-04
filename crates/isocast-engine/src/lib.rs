@@ -360,6 +360,14 @@ pub trait Platform: Clone + Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Optional real recording encoder check, without creating a file.
+    fn encoder_self_test(
+        &self,
+        _program: Option<VideoTrackSpec>,
+    ) -> Option<isocast_protocol::api::Check> {
+        None
+    }
+
     /// Ask the OS to run the calling thread ahead of background work: it
     /// paces frames or audio in real time (the program, a file's frame
     /// clock, an audio reader, the mix, a file writer).
@@ -1205,4 +1213,6 @@ pub struct EncoderAdmissionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied_preset: Option<u32>,
     pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
 }

@@ -54,6 +54,26 @@ pub(crate) enum Parameters {
 }
 
 impl Parameters {
+    pub(crate) fn check_probe(&self, frame: &Frame) -> Result<()> {
+        self.config()?; // Requires complete parameter sets and the negotiated depth.
+        let expected = (frame.width(), frame.height());
+        let check = |size| -> Result<()> {
+            anyhow::ensure!(
+                size == expected,
+                "encoder preflight: SPS size {size:?}, expected {expected:?}"
+            );
+            Ok(())
+        };
+        match self {
+            Self::H264 { sets, .. } => {
+                for sps in &sets.sps {
+                    check(h264::size(sps)?)?;
+                }
+            }
+            Self::Hevc { sets, .. } => check(sets.size()?)?,
+        }
+        Ok(())
+    }
     pub(crate) fn new(encoding: VideoEncoding, profile: H264Profile) -> Self {
         match encoding {
             VideoEncoding::H264 => Self::H264 {
@@ -199,6 +219,20 @@ pub enum EncoderBackend {
     MediaFoundationSoftware(String),
 }
 
+impl std::fmt::Display for EncoderBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nvenc => f.write_str("NVENC"),
+            Self::MediaFoundationHardware(name) => {
+                write!(f, "Media Foundation hardware encoder ({name})")
+            }
+            Self::MediaFoundationSoftware(name) => {
+                write!(f, "Media Foundation software encoder ({name})")
+            }
+        }
+    }
+}
+
 /// Windows-native recording controls, not VideoToolbox quality or a bitrate
 /// estimate. NVENC uses this base QP with spatial AQ; MF uses its own 0–100
 /// quality property. Equal labels do not promise equal quality across codecs
@@ -288,6 +322,53 @@ enum Encoder {
     Mf(MfEncoder),
 }
 
+pub(crate) const PROBE_FRAMES: usize = 3;
+
+pub(crate) fn probe_pts(index: usize, fps: u32) -> Time {
+    Time::from_nanos(index as i64 * 1_000_000_000 / i64::from(fps))
+}
+
+pub(crate) fn check_probe_packet(packet: &EncodedVideo, index: usize, fps: u32) -> Result<()> {
+    anyhow::ensure!(
+        packet.pts == probe_pts(index, fps) && packet.dts == packet.pts && !packet.data.is_empty(),
+        "encoder preflight: missing, empty or reordered access unit {index}"
+    );
+    anyhow::ensure!(
+        index != 0 || packet.keyframe,
+        "encoder preflight: first picture is not an IDR"
+    );
+    Ok(())
+}
+
+/// A priced batch may not add an unpriced hardware session alongside another
+/// GPU output. An isolated output can replan onto MF hardware; software never
+/// consumes the reserved NVENC budget. Do not change the requested track spec.
+fn select_recording<T>(
+    allow_mf: bool,
+    allow_mf_hardware: bool,
+    mut open: impl FnMut(Option<MfMode>) -> Result<T>,
+) -> Result<(T, Vec<String>)> {
+    let mut reasons = Vec::new();
+    for (mode, label) in [
+        (None, "NVENC"),
+        (Some(MfMode::Hardware), "Media Foundation hardware"),
+        (Some(MfMode::Software), "Media Foundation software"),
+    ] {
+        if mode.is_some() && !allow_mf {
+            break;
+        }
+        if mode == Some(MfMode::Hardware) && !allow_mf_hardware {
+            reasons.push(format!("{label} not priced alongside reserved GPU outputs"));
+            continue;
+        }
+        match open(mode) {
+            Ok(encoder) => return Ok((encoder, reasons)),
+            Err(error) => reasons.push(format!("{label} failed: {error:#}")),
+        }
+    }
+    bail!("no usable recording encoder: {}", reasons.join("; "))
+}
+
 pub struct WindowsVideoEncoder {
     /// Process-wide NVENC accounting. Declared first: dropping marks the
     /// session closing before `encoder` closes it, so admission waits
@@ -299,6 +380,9 @@ pub struct WindowsVideoEncoder {
     encoding: VideoEncoding,
     quality: Option<RecordingQuality>,
     delivered: u64,
+    // NVENC is reused without EOS. Keep its native lifetime counters intact,
+    // but don't expose consumed probe pictures to a new writer or barrier.
+    probe_frames: u64,
     held: Option<EncodedVideo>,
     scaler: Option<ProgramScaler<WindowsPlatform>>,
     scale_drops: u64,
@@ -355,6 +439,7 @@ impl WindowsVideoEncoder {
                     scaler: None,
                     scale_drops: 0,
                     delivered: 0,
+                    probe_frames: 0,
                     held: None,
                     force_idr: false,
                     terminal: false,
@@ -389,6 +474,7 @@ impl WindowsVideoEncoder {
                         scaler: None,
                         scale_drops: 0,
                         delivered: 0,
+                        probe_frames: 0,
                         held: None,
                         force_idr: false,
                         terminal: false,
@@ -413,7 +499,7 @@ impl WindowsVideoEncoder {
         spec: &VideoTrackSpec,
         input: PixelFormat,
     ) -> Result<Self> {
-        Self::recording_policy(device, spec, input, None)
+        Self::recording_policy(device, spec, input, None, None)
     }
 
     /// Open an output from an aggregate NVENC budget plan. Unlike the default
@@ -425,7 +511,25 @@ impl WindowsVideoEncoder {
         input: PixelFormat,
         preset: u32,
     ) -> Result<Self> {
-        Self::recording_policy(device, spec, input, Some(preset))
+        Self::recording_policy(device, spec, input, Some(preset), None)
+    }
+
+    pub(crate) fn preflight(
+        device: &GraphicsDevice,
+        spec: &VideoTrackSpec,
+        input: PixelFormat,
+        preset: Option<u32>,
+        allow_mf_hardware: bool,
+    ) -> Result<Self> {
+        let frame =
+            crate::TexturePool::new(device.clone()).probe_frame(spec.width, spec.height, input)?;
+        Self::recording_policy(
+            device,
+            spec,
+            input,
+            preset,
+            Some((&frame, allow_mf_hardware)),
+        )
     }
 
     fn recording_policy(
@@ -433,6 +537,7 @@ impl WindowsVideoEncoder {
         spec: &VideoTrackSpec,
         input: PixelFormat,
         preset: Option<u32>,
+        probe: Option<(&Frame, bool)>,
     ) -> Result<Self> {
         let depth = spec.encoder.effective_bit_depth();
         let encoding = match (spec.encoder.codec, depth) {
@@ -458,88 +563,89 @@ impl WindowsVideoEncoder {
                 .context("video.fps: GOP length overflow")?,
             low_latency: true,
         };
-        let mut reasons = Vec::new();
-        match NvencEncoder::with_quantizer_preset(
-            device,
-            &settings,
-            encoding,
-            input,
-            quality.nvenc_qp,
-            preset.unwrap_or(5),
-        ) {
-            Ok(encoder) => {
-                return Ok(Self {
-                    budget_closing: None,
-                    encoder: Encoder::Nvenc(encoder),
-                    backend: EncoderBackend::Nvenc,
-                    fallback_reasons: reasons,
-                    encoding,
-                    quality: Some(quality),
-                    scaler: None,
-                    scale_drops: 0,
-                    delivered: 0,
-                    held: None,
-                    force_idr: true,
-                    terminal: false,
-                    budget: None,
-                    budget_device: None,
-                    rate_refused: None,
-                });
-            }
-            Err(error) => reasons.push(format!("NVENC recording QP: {error:#}")),
-        }
-        if preset.is_some() {
-            bail!(
-                "encoder.budget: planned NVENC output could not open; replan before choosing a different provider: {}",
-                reasons.join("; ")
-            );
-        }
-        for mode in [MfMode::Hardware, MfMode::Software] {
-            match MfEncoder::with_quality(
-                device,
-                &settings,
-                mode,
-                encoding,
-                input,
-                quality.mf_quality,
-            ) {
-                Ok(encoder) => {
-                    let quality = RecordingQuality {
-                        mf_quality: encoder.info().quality.context(
-                            "MF recording quality: provider did not report selected quality",
-                        )?,
-                        ..quality
-                    };
+        let ((encoder, backend, actual_quality), mut reasons) = select_recording(
+            preset.is_none() || probe.is_some(),
+            probe.is_none_or(|(_, allow)| allow),
+            |mode| {
+                if let Some(mode) = mode {
+                    let encoder = MfEncoder::recording_candidate(
+                        device,
+                        &settings,
+                        mode,
+                        encoding,
+                        input,
+                        quality.mf_quality,
+                        probe.map(|(frame, _)| frame.clone()),
+                    )?;
+                    let actual_quality = encoder
+                        .info()
+                        .quality
+                        .context("MF encoder did not report selected quality")?;
                     let name = encoder.info().name.clone();
                     let backend = match mode {
                         MfMode::Hardware => EncoderBackend::MediaFoundationHardware(name),
                         MfMode::Software => EncoderBackend::MediaFoundationSoftware(name),
                     };
-                    return Ok(Self {
-                        budget_closing: None,
-                        encoder: Encoder::Mf(encoder),
-                        backend,
-                        fallback_reasons: reasons,
-                        encoding,
-                        quality: Some(quality),
-                        scaler: None,
-                        scale_drops: 0,
-                        delivered: 0,
-                        held: None,
-                        force_idr: true,
-                        terminal: false,
-                        budget: None,
-                        budget_device: None,
-                        rate_refused: None,
-                    });
+                    return Ok((Encoder::Mf(encoder), backend, actual_quality));
                 }
-                Err(error) => reasons.push(format!("MF {mode:?} recording quality: {error:#}")),
+                #[cfg(debug_assertions)]
+                if probe.is_some() && std::env::var_os("ISOCAST_TEST_FAIL_NVENC_OPEN").is_some() {
+                    bail!("injected NVENC open failure");
+                }
+                let mut encoder = NvencEncoder::with_quantizer_preset(
+                    device,
+                    &settings,
+                    encoding,
+                    input,
+                    quality.nvenc_qp,
+                    preset.unwrap_or(5),
+                )?;
+                if let Some((frame, _)) = probe {
+                    encoder.probe(frame, settings.fps)?;
+                }
+                Ok((
+                    Encoder::Nvenc(encoder),
+                    EncoderBackend::Nvenc,
+                    quality.mf_quality,
+                ))
+            },
+        )
+        .with_context(|| format!("{encoding:?} recording encoder"))?;
+        if let Encoder::Mf(mf) = &encoder {
+            reasons.extend_from_slice(&mf.rejected);
+            if actual_quality != quality.mf_quality {
+                reasons.push(format!(
+                    "requested MF quality {}, provider selected {actual_quality}",
+                    quality.mf_quality
+                ));
             }
         }
-        bail!(
-            "encoder: no {encoding:?} recording-quality provider could open: {}",
-            reasons.join("; ")
-        )
+        let probe_frames = if probe.is_some() && backend == EncoderBackend::Nvenc {
+            PROBE_FRAMES as u64
+        } else {
+            0
+        };
+        Ok(Self {
+            budget_closing: None,
+            encoder,
+            backend,
+            fallback_reasons: reasons,
+            encoding,
+            quality: Some(RecordingQuality {
+                mf_quality: actual_quality,
+                ..quality
+            }),
+            scaler: None,
+            scale_drops: 0,
+            delivered: 0,
+            probe_frames,
+            held: None,
+            force_idr: true,
+            terminal: false,
+            budget: None,
+            budget_device: None,
+            rate_refused: None,
+        })
     }
 
     /// Native recording controls: `mf_quality` is the actual selected value
@@ -665,6 +771,8 @@ impl WindowsVideoEncoder {
             Encoder::Mf(encoder) => encoder.stats(),
         }?;
         stats.ready_packets += usize::from(self.held.is_some());
+        stats.accepted -= self.probe_frames;
+        stats.completed -= self.probe_frames;
         stats.dropped += self.scale_drops;
         Ok(stats)
     }
@@ -807,5 +915,49 @@ impl VideoEncoder for WindowsVideoEncoder {
             Encoder::Nvenc(encoder) => encoder.set_rate(fps, bitrate_kbps),
             Encoder::Mf(encoder) => encoder.set_rate(fps, bitrate_kbps),
         }
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    #[test]
+    fn successful_hardware_fallback_stops_iteration() {
+        let (selected, why) = select_recording(true, true, |mode| match mode {
+            None => bail!("session limit"),
+            Some(MfMode::Hardware) => Ok(mode),
+            Some(MfMode::Software) => panic!("unnecessary software open"),
+        })
+        .unwrap();
+        assert_eq!(selected, Some(MfMode::Hardware));
+        assert_eq!(why, ["NVENC failed: session limit"]);
+    }
+
+    #[test]
+    fn unpriceable_gpu_work_does_not_displace_reservations() {
+        let (_, why) = select_recording(true, false, |mode| match mode {
+            None => bail!("no IDR"),
+            Some(MfMode::Hardware) => panic!("unpriced GPU open"),
+            Some(MfMode::Software) => Ok(()),
+        })
+        .unwrap();
+        assert_eq!(why.len(), 2);
+        assert!(why[1].contains("not priced"));
+    }
+
+    #[test]
+    fn exhaustion_reports_each_failed_provider_in_order() {
+        let mut attempts = Vec::new();
+        let error = select_recording(true, true, |mode| -> Result<()> {
+            attempts.push(mode);
+            bail!("first input rejected")
+        })
+        .unwrap_err();
+        assert_eq!(
+            attempts,
+            [None, Some(MfMode::Hardware), Some(MfMode::Software)]
+        );
+        assert_eq!(error.to_string().matches("first input rejected").count(), 3);
     }
 }

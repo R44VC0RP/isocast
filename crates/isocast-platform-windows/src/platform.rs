@@ -470,6 +470,67 @@ impl Platform for WindowsPlatform {
         crate::encoder::video_encoders(self.graphics().ok().as_ref())
     }
 
+    fn encoder_self_test(
+        &self,
+        program: Option<isocast_engine::VideoTrackSpec>,
+    ) -> Option<isocast_protocol::api::Check> {
+        use isocast_protocol::api::{Check, CheckStatus};
+        let probe = || -> Result<(CheckStatus, String)> {
+            let Some(admission) = NvencAdmission::try_begin() else {
+                return Ok((
+                    CheckStatus::Warning,
+                    "Not tested: encoder admission is busy".into(),
+                ));
+            };
+            if !admission.settled()?.is_empty() {
+                return Ok((
+                    CheckStatus::Warning,
+                    "Not tested: hardware encoder sessions are in use".into(),
+                ));
+            }
+            let video = program.unwrap_or_else(|| isocast_engine::VideoTrackSpec {
+                width: 640,
+                height: 360,
+                fps: 30,
+                encoder: isocast_protocol::Encoder {
+                    codec: isocast_protocol::Codec::H264,
+                    ..Default::default()
+                },
+            });
+            let encoder = WindowsVideoEncoder::preflight(
+                &self.graphics()?,
+                &video,
+                PixelFormat::Bgra8,
+                None,
+                true,
+            )?;
+            let why = encoder.fallback_reasons().join("; ");
+            Ok((
+                CheckStatus::Ok,
+                format!(
+                    "{}x{} at {} fps: 3 validated {:?} pictures, first IDR, using {}{}",
+                    video.width,
+                    video.height,
+                    video.fps,
+                    encoder.encoding(),
+                    encoder.backend(),
+                    if why.is_empty() {
+                        why
+                    } else {
+                        format!("; {why}")
+                    }
+                ),
+            ))
+        };
+        let (status, detail) = probe().unwrap_or_else(|e| (CheckStatus::Problem, format!("{e:#}")));
+        Some(Check {
+            name: "recording encoder self-test".into(),
+            status,
+            detail,
+            fix: None,
+        })
+    }
+
     fn probe(&self, id: &str, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
         self.probe_with_monitoring(id, source, canvas, false)
     }
@@ -690,6 +751,12 @@ impl Platform for WindowsPlatform {
             &cache,
         )
         .context("encoder admission refused before opening any file")?;
+        // An MFT on the same GPU can use NVENC behind our back. Never
+        // introduce this unpriceable work beside a priced GPU output.
+        let allow_mf_hardware = match &figures {
+            Figures::Unplanned(_) => true,
+            Figures::Planned(f) => files.len() == 1 && f.active.is_empty(),
+        };
         let plan = match figures {
             Figures::Unplanned(reason) => {
                 report.reason = Some(reason);
@@ -744,9 +811,9 @@ impl Platform for WindowsPlatform {
                 Some(plan)
             }
         };
-        let mut writers = Vec::with_capacity(files.len());
+        let mut encoders = Vec::with_capacity(files.len());
         for (file, &format) in files.iter().zip(&formats) {
-            let opened = (|| -> Result<(VideoWriter, EncoderAdmissionOutput)> {
+            let opened = (|| -> Result<(WindowsVideoEncoder, EncoderAdmissionOutput)> {
                 let video = &file.spec.video;
                 let planned = match &plan {
                     Some(plan) => Some(
@@ -757,21 +824,28 @@ impl Platform for WindowsPlatform {
                     ),
                     None => None,
                 };
-                let mut encoder = match planned {
-                    // Never falls back to another provider: the plan
-                    // covered only this NVENC session.
-                    Some(preset) => {
-                        WindowsVideoEncoder::recording_with_preset(&device, video, format, preset)?
-                    }
-                    None => WindowsVideoEncoder::recording(&device, video, format)?,
-                };
+                let mut encoder = WindowsVideoEncoder::preflight(
+                    &device,
+                    video,
+                    format,
+                    planned,
+                    allow_mf_hardware,
+                )?;
                 let applied = encoder.nvenc_preset();
-                if let Some(preset) = planned
-                    && applied != Some(preset)
+                if let (Some(preset), Some(actual)) = (planned, applied)
+                    && actual != preset
                 {
                     bail!(
                         "encoder.budget: planned P{preset}, but the opened encoder reports {applied:?}"
                     );
+                }
+                if planned.is_some() && applied.is_none() {
+                    // A failed NVENC close must not be masked by a successful
+                    // software probe. Earlier native candidates are accounted.
+                    admission.settled()?;
+                    report.mode = "replanned";
+                    report.estimated_load = None;
+                    report.calibrated = false;
                 }
                 encoder.account(
                     &admission,
@@ -782,7 +856,7 @@ impl Platform for WindowsPlatform {
                         output: file.output.clone(),
                         size: (video.width, video.height, video.fps),
                         input: format,
-                        planned: planned.is_some(),
+                        planned: planned.is_some() && applied.is_some(),
                     },
                 );
                 let output = EncoderAdmissionOutput {
@@ -792,17 +866,33 @@ impl Platform for WindowsPlatform {
                     planned_preset: planned,
                     applied_preset: applied,
                     backend: format!("{:?}", encoder.backend()),
+                    fallback: (!encoder.fallback_reasons().is_empty()).then(|| {
+                        format!(
+                            "{}: {}; recording with {}",
+                            file.output,
+                            encoder.fallback_reasons().join("; "),
+                            encoder.backend()
+                        )
+                    }),
                 };
                 if !file.iso {
                     encoder.scale_program(self, (video.width, video.height));
                 }
-                Ok((VideoWriter::from_encoder(file.spec, encoder)?, output))
+                Ok((encoder, output))
             })();
-            match opened {
-                Ok((writer, output)) => {
-                    writers.push(writer);
-                    report.outputs.push(output);
-                }
+            let (encoder, output) = opened.with_context(|| {
+                format!(
+                    "{}: encoder preflight refused before opening any file",
+                    file.output
+                )
+            })?;
+            encoders.push(encoder);
+            report.outputs.push(output);
+        }
+        let mut writers = Vec::with_capacity(files.len());
+        for (file, encoder) in files.iter().zip(encoders) {
+            match VideoWriter::from_encoder(file.spec, encoder) {
+                Ok(writer) => writers.push(writer),
                 Err(err) => {
                     // Cancelling drops each encoder, then its reservation,
                     // before the admission lock is released.
