@@ -346,12 +346,12 @@ pub(crate) fn desktop_mode(
             warning: None,
         }
     } else {
+        let warning = process_clock::live_exclude_warning(exclude)
+            .unwrap_or_else(|| application::probe_exclude_warning(exclude));
         isocast_engine::SystemAudioMode {
             name: "process-loopback-exclude",
             captures_monitor: false,
-            warning: Some(
-                "#251: filtered Windows desktop audio can drift against video on long takes and repeat audio without reporting a dropout; for long takes use endpoint loopback (no exclusions and monitoring off)",
-            ),
+            warning,
         }
     }
 }
@@ -1081,8 +1081,7 @@ impl Session {
         } else {
             MAX_PHASE_ERROR
         };
-        let mut rate = (!self.process_loopback || process_clock.is_some())
-            .then(|| rate::RateFollower::new(self.pick.len(), packet_capacity, phase_limit));
+        let mut rate = rate::RateFollower::new(self.pick.len(), packet_capacity, phase_limit);
         let pick_len = self.pick.len();
         let mut emit = |samples: &[f32], time| {
             // A callback may itself drop capture. A gap can flush the old tail
@@ -1155,33 +1154,33 @@ impl Session {
                 }
                 state.check_device()?;
                 if let (Some(pc), Some(buf)) = (process_clock, &mut splice_buf) {
+                    let net_gap = buf.absorb_gap(gap);
                     let survived = buf.accept_active(&samples);
                     if !survived.is_empty() {
                         let out_frames = (survived.len() / pick_len) as u32;
                         let time = process_timeline.packet_time(
                             raw_time,
                             out_frames,
-                            gap,
+                            net_gap,
                             pc.frame_units(),
                         );
                         last_time = Some(time);
+                        if net_gap > 0 {
+                            (sink.report_gap)(time, frames_duration(net_gap));
+                        }
                         if process_timeline.check_unspliced_drift_limit() {
                             state.discontinuities.fetch_add(1, Ordering::Relaxed);
                             state.splice_fallbacks.fetch_add(1, Ordering::Relaxed);
                             (sink.report_gap)(time, std::time::Duration::from_millis(30));
                             pc.warn_unspliced_drift(process_timeline.drift_frames(), pc.ppm());
                         }
-                        let disc = gap > 0 || std::mem::take(&mut force_discontinuity);
-                        if let Some(rate) = &mut rate {
-                            rate.push(survived, time, disc, &mut emit);
-                            state.rate_resets.store(rate.resets, Ordering::Relaxed);
-                            state.rate_clamped.store(rate.clamped, Ordering::Relaxed);
-                            state
-                                .rate_error_nanos
-                                .store(rate.max_error_nanos, Ordering::Relaxed);
-                        } else {
-                            emit(survived, time);
-                        }
+                        let disc = net_gap > 0 || std::mem::take(&mut force_discontinuity);
+                        rate.push(survived, time, disc, &mut emit);
+                        state.rate_resets.store(rate.resets, Ordering::Relaxed);
+                        state.rate_clamped.store(rate.clamped, Ordering::Relaxed);
+                        state
+                            .rate_error_nanos
+                            .store(rate.max_error_nanos, Ordering::Relaxed);
                     }
                     if standby.is_none()
                         && process_timeline.should_request_splice()
@@ -1189,7 +1188,8 @@ impl Session {
                     {
                         process_timeline.mark_attempt();
                     }
-                } else if let Some(rate) = &mut rate {
+                } else {
+                    debug_assert!(!self.process_loopback);
                     let discontinuity =
                         gap > 0 || flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0;
                     rate.push(&samples, raw_time, discontinuity, &mut emit);
@@ -1198,8 +1198,6 @@ impl Session {
                     state
                         .rate_error_nanos
                         .store(rate.max_error_nanos, Ordering::Relaxed);
-                } else {
-                    emit(&samples, raw_time);
                 }
             }
 
@@ -1207,6 +1205,7 @@ impl Session {
                 && standby.is_some()
             {
                 let mut standby_failure = None;
+                let mut standby_advanced = false;
                 while let Some((sb_session, sb_clock)) = &mut standby {
                     match sb_session.next_packet(state, sb_clock, &mut standby_samples, false) {
                         Ok(Some(_)) => {
@@ -1215,6 +1214,7 @@ impl Session {
                                     Some(process_clock::StandbyFailure::BufferOverflow);
                                 break;
                             }
+                            standby_advanced = true;
                         }
                         Ok(None) => break,
                         Err(err) => {
@@ -1230,7 +1230,7 @@ impl Session {
                     if let Some((failed_session, _)) = standby.take() {
                         pc.drop_session(failed_session, reason);
                     }
-                } else {
+                } else if standby_advanced {
                     match buf.try_align(process_timeline.drift_frames().round() as i64) {
                         process_clock::SpliceDecision::NeedMoreFrames => {}
                         process_clock::SpliceDecision::Matched {
@@ -1265,14 +1265,12 @@ impl Session {
                                     pc.frame_units(),
                                 );
                                 last_time = Some(time);
-                                if let Some(rate) = &mut rate {
-                                    rate.push(&splice_extra, time, false, &mut emit);
-                                    state.rate_resets.store(rate.resets, Ordering::Relaxed);
-                                    state.rate_clamped.store(rate.clamped, Ordering::Relaxed);
-                                    state
-                                        .rate_error_nanos
-                                        .store(rate.max_error_nanos, Ordering::Relaxed);
-                                }
+                                rate.push(&splice_extra, time, false, &mut emit);
+                                state.rate_resets.store(rate.resets, Ordering::Relaxed);
+                                state.rate_clamped.store(rate.clamped, Ordering::Relaxed);
+                                state
+                                    .rate_error_nanos
+                                    .store(rate.max_error_nanos, Ordering::Relaxed);
                             }
                         }
                         process_clock::SpliceDecision::Failed { best_norm_sad } => {
@@ -1303,6 +1301,11 @@ impl Session {
         }
         Ok(())
     }
+}
+
+fn frames_duration(frames: u64) -> std::time::Duration {
+    let nanos = (u128::from(frames) * 1_000_000_000 / u128::from(SAMPLE_RATE)).max(1);
+    std::time::Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
 fn copy_float_samples(
@@ -1944,5 +1947,67 @@ mod tests {
         rate.finish(&mut emit);
         assert_eq!(rate.resets, 0);
         assert!(rate.max_error_nanos < 2_000_000);
+    }
+
+    #[test]
+    fn process_loopback_qpc_gaps_report_exact_duration_and_absorb_splice_skip() {
+        let mut clock = PacketClock::new(SAMPLE_RATE, MAX_FRAMES, false);
+        let mut timeline = process_clock::ProcessTimeline::new();
+        let mut buf = process_clock::SpliceBuffer::new();
+        let mut rate = rate::RateFollower::new(2, 480, MAX_PHASE_ERROR);
+        let mut gaps = Vec::new();
+        let mut emitted = Vec::new();
+        let pkt = vec![0.05_f32; 960];
+
+        let mut step = |qpc: u64,
+                        buf: &mut process_clock::SpliceBuffer,
+                        rate: &mut rate::RateFollower,
+                        gaps: &mut Vec<(Time, std::time::Duration)>| {
+            let (raw_time, gap) = clock.process_timestamp(480, qpc, 0).unwrap();
+            let net_gap = buf.absorb_gap(gap);
+            let survived = buf.accept_active(&pkt);
+            if !survived.is_empty() {
+                let out_frames = (survived.len() / 2) as u32;
+                let time = timeline.packet_time(
+                    raw_time,
+                    out_frames,
+                    net_gap,
+                    process_clock::NOMINAL_FRAME_UNITS,
+                );
+                if net_gap > 0 {
+                    gaps.push((time, frames_duration(net_gap)));
+                }
+                rate.push(survived, time, net_gap > 0, &mut |s, at| {
+                    emitted.push((s.len() / 2, at));
+                });
+            }
+        };
+
+        let mut qpc = 10_000_000_u64;
+        for _ in 0..5 {
+            step(qpc, &mut buf, &mut rate, &mut gaps);
+            qpc += 100_000;
+        }
+        assert!(gaps.is_empty());
+        assert_eq!(rate.resets, 0);
+
+        // ~35.15 ms QPC jump (1,687 missing frames, as observed during dual-output graph changes).
+        qpc += 351_458;
+        step(qpc, &mut buf, &mut rate, &mut gaps);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].1, frames_duration(1_687));
+        assert_eq!(
+            gaps[0].0.as_nanos(),
+            1_000_000_000 + (5 * 480 + 1_687) * 1_000_000_000 / i64::from(SAMPLE_RATE)
+        );
+        assert_eq!(rate.resets, 1);
+
+        // Post-splice duplicate skip absorbs overlapping part of a subsequent packet gap.
+        let mut extra = Vec::new();
+        buf.commit_matched(200, &mut extra);
+        qpc += 100_000 + 125_000; // 600-frame QPC gap minus 200-frame skip = 400-frame net gap
+        step(qpc, &mut buf, &mut rate, &mut gaps);
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps[1].1, frames_duration(400));
     }
 }

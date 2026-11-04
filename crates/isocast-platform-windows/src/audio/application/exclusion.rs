@@ -74,6 +74,28 @@ pub(crate) fn probe_system_audio(exclude: &[String]) -> Result<String> {
     Ok(plan(exclude)?.description)
 }
 
+pub(in crate::audio) fn probe_exclude_warning(exclude: &[String]) -> Option<String> {
+    let exclude = exclude.to_vec();
+    thread::Builder::new()
+        .name("Windows exclude audio check".into())
+        .spawn(move || -> Option<String> {
+            let _apt = Apartment::new().ok()?;
+            let plan = plan(&exclude).ok()?;
+            let mut excluded = descendant_pids(plan.pid);
+            let own = std::process::id();
+            if !excluded.contains(&own) {
+                excluded.extend(descendant_pids(own));
+            }
+            audio_apps::non_default_output_warning(&excluded)
+                .ok()
+                .flatten()
+        })
+        .ok()?
+        .join()
+        .ok()
+        .flatten()
+}
+
 pub(in crate::audio) fn capture_desktop(
     exclude: &[String],
     sink: AudioSink,
@@ -92,15 +114,46 @@ pub(in crate::audio) fn capture_desktop(
         let _apt = Apartment::new()?;
         let plan = plan(&exclude)?;
         thread_start();
-        let capture = activate(plan.pid, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, state)
-            .context("system_audio.exclude: could not activate filtered desktop audio; unfiltered capture is not a fallback")?;
-        unsafe { capture.client.Start() }
-            .context("system_audio.exclude: start process loopback")?;
+        let capture = open_started_process_loopback(
+            plan.pid,
+            PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+            state,
+        )
+        .context("system_audio.exclude: could not activate filtered desktop audio; unfiltered capture is not a fallback")?;
+        let opener: super::super::process_clock::ProcessSessionOpener = {
+            let pid = plan.pid;
+            let state = state.clone();
+            Arc::new(move || {
+                let session = open_started_process_loopback(
+                    pid,
+                    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+                    &state,
+                )
+                .context("system_audio.exclude")?;
+                Ok(super::super::process_clock::MtaSession(session))
+            })
+        };
+        let process_clock = super::super::process_clock::ProcessClock::start(
+            super::super::process_clock::ClockTarget::DefaultRender {
+                exclude_key: exclude.clone(),
+                root_pid: plan.pid,
+            },
+            Some(opener),
+            state.clone(),
+            true,
+        )?;
         isocast_diagnostics::diagnostic!("info"; "Windows system audio opened: mode=process-loopback-exclude");
         let process = plan.root.as_ref().map(|handle| **handle);
         let _ = started.send(Ok(()));
         *running = true;
-        capture.run(state, sink, process)?;
+        if let Err(error) =
+            capture.run_with_clock(state, sink, process, Some(process_clock.shared()))
+            && plan.root.as_ref().is_none_or(
+                |root| unsafe { WaitForSingleObject(**root, EXIT_GRACE_MS) } != WAIT_OBJECT_0,
+            )
+        {
+            return Err(error);
+        }
         ensure!(
             state.stopping.load(Ordering::Acquire),
             "system_audio.exclude: excluded tree root exited; reopen capture with a running tree or use exclude=[]"
@@ -145,5 +198,17 @@ mod tests {
                 .unwrap()
                 .contains("no other apps excluded")
         );
+        let default = crate::audio::desktop_mode(&[], false);
+        assert_eq!(default.name, "endpoint-loopback");
+        assert!(default.captures_monitor);
+        assert!(default.warning.is_none());
+        for filtered in [
+            crate::audio::desktop_mode(&[], true),
+            crate::audio::desktop_mode(&["Tone".into()], false),
+        ] {
+            assert_eq!(filtered.name, "process-loopback-exclude");
+            assert!(!filtered.captures_monitor);
+            assert!(filtered.warning.is_none());
+        }
     }
 }

@@ -252,6 +252,98 @@ pub(crate) fn check_single_endpoint(identity: &str, tree_pids: &[u32]) -> Result
         .map_err(anyhow::Error::msg)
 }
 
+/// Detect whether any non-excluded process (`!excluded_pids.contains(&pid)`) is
+/// actively rendering (`AudioSessionStateActive`) on a non-default `eRender`
+/// endpoint. Caller must be in MTA.
+pub(crate) fn non_default_output_warning(excluded_pids: &[u32]) -> Result<Option<String>> {
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+            .context("create the audio endpoint enumerator")?;
+    let Some(default_id) = crate::audio::default_id(&enumerator, eRender)? else {
+        return Ok(None);
+    };
+    let collection = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }
+        .context("list active audio outputs")?;
+    let count = (unsafe { collection.GetCount() }.context("count active audio outputs")? as usize)
+        .min(MAX_ENTRIES);
+    let mut budget = MAX_ENTRIES;
+    let mut observed = Vec::new();
+    for index in 0..count as u32 {
+        let Ok(device) = (unsafe { collection.Item(index) }) else {
+            continue;
+        };
+        let Ok(endpoint) = EndpointIdentity::new(device.clone(), eRender) else {
+            continue;
+        };
+        let is_default = endpoint.id.eq_ignore_ascii_case(&default_id);
+        let Ok(manager): std::result::Result<IAudioSessionManager2, _> =
+            (unsafe { device.Activate(CLSCTX_ALL, None) })
+        else {
+            continue;
+        };
+        let Ok(sessions) = (unsafe { manager.GetSessionEnumerator() }) else {
+            continue;
+        };
+        let session_count =
+            usize::try_from(unsafe { sessions.GetCount() }.unwrap_or(0)).unwrap_or(0);
+        for session_idx in 0..session_count.min(budget) as i32 {
+            budget -= 1;
+            let Ok(control) = (unsafe { sessions.GetSession(session_idx) }) else {
+                continue;
+            };
+            let Ok(state) = (unsafe { control.GetState() }) else {
+                continue;
+            };
+            let playing = state == AudioSessionStateActive;
+            if !playing {
+                continue;
+            }
+            let Ok(control2): std::result::Result<IAudioSessionControl2, _> = control.cast() else {
+                continue;
+            };
+            if unsafe { control2.IsSystemSoundsSession() } == S_OK {
+                continue;
+            }
+            let mut pid = 0u32;
+            if unsafe {
+                (Interface::vtable(&control2).GetProcessId)(Interface::as_raw(&control2), &mut pid)
+            }
+            .is_err()
+                || pid == 0
+            {
+                continue;
+            }
+            observed.push((
+                endpoint.id.clone(),
+                endpoint.name.clone(),
+                is_default,
+                pid,
+                playing,
+            ));
+        }
+    }
+    Ok(select_non_default_warning(observed, excluded_pids))
+}
+
+fn select_non_default_warning(
+    sessions: impl IntoIterator<Item = (String, String, bool, u32, bool)>,
+    excluded_pids: &[u32],
+) -> Option<String> {
+    let mut outputs: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for (id, name, is_default, pid, playing) in sessions {
+        if playing && !is_default && !excluded_pids.contains(&pid) {
+            outputs.entry(id.to_lowercase()).or_insert((id, name));
+        }
+    }
+    if outputs.is_empty() {
+        return None;
+    }
+    let names = choices(outputs.values().map(|(id, name)| format!("{name} ({id})")));
+    Some(format!(
+        "non-excluded audio is playing on non-default output {names}; process-loopback-exclude follows the default output's clock, so audio on other outputs drifts at their oscillator difference against video and can wrap on long takes (route apps to the default output, or use application_audio for apps on other outputs)"
+    ))
+}
+
 /// One readable app session; `None` for sessions that are not an app's:
 /// system sounds, expired, this process, or without a process.
 struct Session {
@@ -698,5 +790,34 @@ mod tests {
         assert!(msg.contains("application_audio.app"), "{msg}");
         assert!(msg.contains("Speakers (id-a)"), "{msg}");
         assert!(msg.contains("Headphones (id-b)"), "{msg}");
+    }
+
+    #[test]
+    fn non_default_output_warning_ignores_default_excluded_and_inactive_sessions() {
+        let excluded = [100_u32, 101];
+        // Playing on default, excluded PID on secondary, and inactive PID on secondary: no warning.
+        assert_eq!(
+            select_non_default_warning(
+                [
+                    ("ep-def".into(), "LG HDR 4K".into(), true, 200, true),
+                    ("ep-usb".into(), "Elgato Wave XLR".into(), false, 101, true),
+                    ("ep-usb".into(), "Elgato Wave XLR".into(), false, 300, false),
+                ],
+                &excluded
+            ),
+            None
+        );
+        // Non-excluded PID actively playing on non-default output warns with device name.
+        let warn = select_non_default_warning(
+            [
+                ("ep-def".into(), "LG HDR 4K".into(), true, 200, true),
+                ("ep-usb".into(), "Elgato Wave XLR".into(), false, 300, true),
+                ("EP-USB".into(), "Elgato Wave XLR".into(), false, 301, true),
+            ],
+            &excluded,
+        )
+        .expect("expected non-default warning");
+        assert!(warn.contains("Elgato Wave XLR (ep-usb)"), "{warn}");
+        assert!(warn.contains("application_audio"), "{warn}");
     }
 }

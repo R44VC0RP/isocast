@@ -4941,8 +4941,8 @@ def scenario_win_audio_exclude(e, cfg, evidence):
                 and "application_audio" in refused["detail"], f"independent tree wasn't refused: {refused}")
         cfg["sources"][-2]["exclude"] = [launcher.name]
         planned = preflight()
-        require(planned["status"] == "warning" and "#251" in planned["detail"] and launcher.name in planned["detail"]
-                and "Isocast" in planned["detail"], f"missing named tree in preflight: {planned}")
+        require(planned["status"] == "ok" and "#251" not in planned["detail"] and launcher.name in planned["detail"]
+                and "Isocast" in planned["detail"], f"unexpected named tree preflight: {planned}")
         evidence["preflight"] = {"unrelated": refused["status"], "launcher": planned["status"]}
         e.apply(cfg)
         e.rpc("engine", {"running": True})
@@ -4950,7 +4950,7 @@ def scenario_win_audio_exclude(e, cfg, evidence):
         actual = modes()
         for source in ("filtered", "selfonly"):
             require(actual[source].get("capture_mode") == "process-loopback-exclude" and
-                    "#251" in actual[source].get("warning", ""), f"missing live warning: {actual[source]}")
+                    not actual[source].get("warning"), f"unexpected live warning or mode: {actual[source]}")
         def playing():
             m = (e.rpc("status").get("live") or {}).get("monitor") or {}
             return m["frames"] if m.get("frames", 0) > RATE else None
