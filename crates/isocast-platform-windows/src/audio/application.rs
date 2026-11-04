@@ -43,8 +43,8 @@ use super::*;
 use crate::audio_apps;
 
 mod exclusion;
-pub(in crate::audio) use exclusion::capture_desktop;
 pub(crate) use exclusion::probe_system_audio;
+pub(in crate::audio) use exclusion::{capture_desktop, probe_exclude_warning};
 
 const MIN_BUILD: u32 = 19041;
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
@@ -706,13 +706,6 @@ pub(super) fn open_started_process_loopback(
     let session = activate_mode(pid, mode, state)?;
     session.start_client()?;
     Ok(session)
-}
-
-// Exclude-mode desktop audio (#252) intentionally stays in-process here and
-// starts its own client once in exclusion.rs; application audio opens started
-// helper sessions through open_started_process_loopback.
-fn activate(pid: u32, mode: PROCESS_LOOPBACK_MODE, state: &Arc<State>) -> Result<Session> {
-    activate_mode(pid, mode, state)
 }
 
 fn image_name(process: HANDLE) -> windows::core::Result<String> {

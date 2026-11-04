@@ -302,16 +302,37 @@ refused: stop the engine after recording, then enable monitoring before
 reopening desktop audio. A take keeps the capture it started with; switching
 monitoring off doesn't replace a source pinned by that take.
 
-**Long takes ([#251](https://github.com/anomalyco/isocast/issues/251)):**
-The exclude stream mixes audio from **all render endpoints**. Its packet
-timestamps follow the virtual client's nominal 48 kHz sample count, not a
-measured hardware clock. PCM on the measured single-output system followed
-the physical playback oscillator, drifting about 26 ms per ten minutes
-against video and repeating 200 ms after roughly 16 minutes. Audio playing
-on a second device is included on the same virtual timeline, not on its own
-clocked track. Windows provides no per-device timing in this mix; Isocast
-doesn't correct the devices' relative drift or guarantee their alignment.
-For a clock-corrected desktop recording, use the default endpoint path.
+**Clock reference and default-output changes:** `process-loopback-exclude` runs
+in its own `isocast-capture` helper, follows the **default `eConsole` render
+endpoint's** hardware DMA clock into the rate follower, and splices to a fresh
+helper session before 15 ms of cumulative drift. Audio played to the default
+output stays aligned with video across long takes without `audiodg`'s 200 ms
+ring-buffer wrap (measured on Windows 10 19045 over 20 minutes on an HDMI
+output at +42.7 ppm: 0.15 ms peak-to-peak excursion against video, 3
+sample-match splices, 0 dropouts, and 107–112 dB monitor rejection). When the
+Windows default render output changes mid-take, both the passive clock
+reference and monitor playback switch automatically to the new default output,
+and any `audiodg` handover packet gap is reported in `audio_dropouts`.
+
+**Apps rendering to a non-default output:** Unlike `endpoint-loopback`,
+Windows's exclude stream mixes non-excluded audio from **all active render
+endpoints** onto one virtual 48 kHz stream without exposing per-device clocks
+(while still excluding the recorder/monitor and any named tree across all
+outputs). Audio played directly to a non-default device is included in the
+recorded mix, resampled at the **default** output's clock rate rather than its
+own device's rate: **it drifts against video at the difference between the two
+devices' oscillators** (measured over 20 minutes with a USB output at ~+85.4 ppm
+while the default HDMI output ran at +42.6 ppm: −42.8 ppm = −50.5 ms drift
+against video across 3 clean splices, because both active and standby exclude
+sessions see the same secondary stream and sample-match without counting a
+fallback). If the default output's oscillator is closer to QPC than a secondary
+output's so splices occur less often than the secondary output's ~35–40 ms
+`audiodg` buffer margin fills, secondary-output audio can also wrap and repeat
+200 ms. `isocast doctor` and live source `status` warn whenever a non-excluded
+app is actively playing to a non-default output. Route apps to the default
+output, use `endpoint-loopback` (monitoring off and `exclude = []`) to omit
+other outputs, or use `application_audio` sources to follow individual apps on
+non-default outputs with their own endpoint clocks.
 
 In exclude mode, `exclude = []` excludes only the engine tree. One additional running app can
 be named (use its executable path or a name from `isocast devices`) **only

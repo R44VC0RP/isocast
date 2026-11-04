@@ -2112,8 +2112,8 @@ fn statuses<P: Platform>(state: &State<P>) -> Vec<SourceStatus> {
             source: id.clone(),
             state: live.run,
             detail: live.detail.map(String::from),
-            capture_mode: live.desktop_mode.map(|m| m.name.into()),
-            warning: live.desktop_mode.and_then(|m| m.warning.map(String::from)),
+            capture_mode: live.desktop_mode.as_ref().map(|m| m.name.into()),
+            warning: live.desktop_mode.as_ref().and_then(|m| m.warning.clone()),
             error: live.error.clone(),
             needs_pick: live.needs_pick,
             width: live.video.as_ref().map(|v| v.width),
@@ -2203,6 +2203,7 @@ fn setup_refusal<P: Platform>(
             .position(|s| s.audio.monitor != Monitoring::Off)
         && let Some((id, mode)) = state.sources.iter().find_map(|(id, s)| {
             s.desktop_mode
+                .as_ref()
                 .filter(|m| m.captures_monitor)
                 .map(|m| (id, m.name))
         })
@@ -2682,8 +2683,8 @@ impl<P: Platform> Live<P> {
             source: id.to_string(),
             state: self.run,
             detail: self.detail.map(String::from),
-            capture_mode: self.desktop_mode.map(|m| m.name.into()),
-            warning: self.desktop_mode.and_then(|m| m.warning.map(String::from)),
+            capture_mode: self.desktop_mode.as_ref().map(|m| m.name.into()),
+            warning: self.desktop_mode.as_ref().and_then(|m| m.warning.clone()),
             error: self.error.clone(),
             needs_pick: self.needs_pick,
             width: self.video.as_ref().map(|v| v.width),
@@ -3949,8 +3950,21 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                     } else {
                         SourceRun::Running
                     };
+                    let mut changed = false;
                     if live.run != run {
                         live.run = run;
+                        changed = true;
+                    }
+                    if let Some(mode) = &mut live.desktop_mode
+                        && !mode.captures_monitor
+                        && let Some(SourceKind::SystemAudio(s)) = setup.source(id).map(|s| &s.kind)
+                        && let Some(cur) = inner.platform.system_audio_mode(&s.exclude, true)
+                        && cur.warning != mode.warning
+                    {
+                        mode.warning = cur.warning;
+                        changed = true;
+                    }
+                    if changed {
                         events.push(live.status(id));
                     }
                 }

@@ -60,11 +60,11 @@ pub struct DoctorWarning {
 }
 
 /// A platform where desktop capture selects a different stream for monitoring.
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemAudioMode {
     pub name: &'static str,
     pub captures_monitor: bool,
-    pub warning: Option<&'static str>,
+    pub warning: Option<String>,
 }
 
 /// The video encoders found by [`Platform::video_encoders`], by name, in

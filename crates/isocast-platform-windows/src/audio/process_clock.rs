@@ -14,8 +14,9 @@
 //!    aligns the two streams to an exact sample boundary (or across verified
 //!    silence) and retires the old session off-thread before its OS ring wraps.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result, bail};
@@ -81,11 +82,64 @@ pub(super) type ProcessSessionOpener = Arc<dyn Fn() -> Result<MtaSession> + Send
 pub(crate) enum ClockTarget {
     /// Follow the default `eConsole` render endpoint (for exclude-mode process
     /// loopback, where there is no single captured application).
-    #[allow(dead_code)]
-    DefaultRender,
+    DefaultRender {
+        exclude_key: Vec<String>,
+        root_pid: u32,
+    },
     /// Follow the active render endpoint of a captured application's process
     /// tree, falling back to the default `eConsole` render endpoint when idle.
     App { root_pid: u32, identity: String },
+}
+
+impl ClockTarget {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::DefaultRender { .. } => "Windows filtered desktop audio",
+            Self::App { .. } => "Windows application audio",
+        }
+    }
+}
+
+type LiveExcludeMap = HashMap<Vec<String>, (usize, Option<String>)>;
+
+static LIVE_EXCLUDE_WARNINGS: LazyLock<parking_lot::Mutex<LiveExcludeMap>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+pub(super) fn live_exclude_warning(exclude: &[String]) -> Option<Option<String>> {
+    LIVE_EXCLUDE_WARNINGS
+        .lock()
+        .get(exclude)
+        .map(|(_, warning)| warning.clone())
+}
+
+struct LiveExcludeGuard {
+    key: Option<Vec<String>>,
+}
+
+impl Drop for LiveExcludeGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            let mut map = LIVE_EXCLUDE_WARNINGS.lock();
+            if let Some((refs, _)) = map.get_mut(&key) {
+                if *refs <= 1 {
+                    map.remove(&key);
+                } else {
+                    *refs -= 1;
+                }
+            }
+        }
+    }
+}
+
+fn check_exclude_non_default_warning(root_pid: u32) -> Option<String> {
+    let mut excluded = descendant_pids(root_pid);
+    let own = std::process::id();
+    if !excluded.contains(&own) {
+        excluded.extend(descendant_pids(own));
+    }
+    audio_apps::non_default_output_warning(&excluded)
+        .ok()
+        .flatten()
 }
 
 #[derive(Clone, Copy, Default)]
@@ -242,8 +296,9 @@ impl ProcessTimeline {
         };
         self.prev_frames = frames;
         let ratio_minus_one = (frame_units as f64 / NOMINAL_FRAME_UNITS as f64) - 1.0;
-        self.drift_frames += f64::from(frames) * ratio_minus_one;
-        self.frames_since_attempt = self.frames_since_attempt.saturating_add(u64::from(frames));
+        let total_frames = u64::from(frames).saturating_add(gap);
+        self.drift_frames += (total_frames as f64) * ratio_minus_one;
+        self.frames_since_attempt = self.frames_since_attempt.saturating_add(total_frames);
         Time::from_nanos((current / UNIT_PER_NS) as i64)
     }
 
@@ -471,8 +526,12 @@ pub(super) fn align_splice(
 
     let norm_sad = full_min / best_l1;
     if norm_sad > MAX_NORM_SAD {
-        return SpliceDecision::Failed {
-            best_norm_sad: norm_sad,
+        return if at_limit {
+            SpliceDecision::Failed {
+                best_norm_sad: norm_sad,
+            }
+        } else {
+            SpliceDecision::NeedMoreFrames
         };
     }
     let next_new_frame = m_o + best_t_off - best_k;
@@ -534,6 +593,14 @@ impl SpliceBuffer {
             standby_total_frames: 0,
             skip_frames: 0,
         }
+    }
+
+    /// Consume any pending post-splice duplicate skip against a QPC packet gap,
+    /// returning the remaining net missing output frames.
+    pub(super) fn absorb_gap(&mut self, gap: u64) -> u64 {
+        let absorbed = (self.skip_frames as u64).min(gap);
+        self.skip_frames -= absorbed as usize;
+        gap - absorbed
     }
 
     /// Trim any duplicate post-splice frames from an `active` packet and record
@@ -678,7 +745,7 @@ struct PassiveEndpointClock {
 }
 
 impl PassiveEndpointClock {
-    fn open(enumerator: &IMMDeviceEnumerator, id: &str) -> Result<Self> {
+    fn open(enumerator: &IMMDeviceEnumerator, id: &str, label: &str) -> Result<Self> {
         let identity = resolve(enumerator, eRender, id)?;
         let client: IAudioClient = unsafe {
             identity
@@ -712,7 +779,7 @@ impl PassiveEndpointClock {
         let _clock: IAudioClock = unsafe { client.GetService() }?;
         unsafe { client.Start() }?;
         isocast_diagnostics::diagnostic!("info";
-            "Windows application audio: following render endpoint {:?} ({})",
+            "{label}: following render endpoint {:?} ({})",
             identity.name, identity.id
         );
         Ok(Self {
@@ -1018,7 +1085,9 @@ fn query_desired_endpoint(
     target: &ClockTarget,
 ) -> Result<DesiredEndpoint> {
     match target {
-        ClockTarget::DefaultRender => Ok(DesiredEndpoint::Single(default_id(enumerator, eRender)?)),
+        ClockTarget::DefaultRender { .. } => {
+            Ok(DesiredEndpoint::Single(default_id(enumerator, eRender)?))
+        }
         ClockTarget::App { root_pid, identity } => {
             let mut tree = descendant_pids(*root_pid);
             if !tree.contains(root_pid) {
@@ -1040,6 +1109,7 @@ fn query_desired_endpoint(
 
 fn apply_endpoint_decision(
     enumerator: &IMMDeviceEnumerator,
+    label: &str,
     passive: &mut Option<PassiveEndpointClock>,
     shared: &SharedProcessClock,
     state: &State,
@@ -1050,7 +1120,7 @@ fn apply_endpoint_decision(
         state.splice_fallbacks.fetch_add(1, Ordering::Relaxed);
         if !state.dual_output_warned.swap(true, Ordering::Relaxed) {
             isocast_diagnostics::diagnostic!("warn";
-                "Windows application audio: {message}; degrading to default render endpoint clock while multiple outputs are active"
+                "{label}: {message}; degrading to default render endpoint clock while multiple outputs are active"
             );
         }
     }
@@ -1062,7 +1132,7 @@ fn apply_endpoint_decision(
     }
     *passive = None;
     match desired {
-        Some(id) => match PassiveEndpointClock::open(enumerator, &id) {
+        Some(id) => match PassiveEndpointClock::open(enumerator, &id, label) {
             Ok(clock) => {
                 *clock_error_warned = false;
                 *passive = Some(clock);
@@ -1072,7 +1142,7 @@ fn apply_endpoint_decision(
                 if !*clock_error_warned {
                     *clock_error_warned = true;
                     isocast_diagnostics::diagnostic!("warn";
-                        "Windows application audio: passive render endpoint clock open failed: {err:#}"
+                        "{label}: passive render endpoint clock open failed: {err:#}"
                     );
                 }
                 shared
@@ -1101,6 +1171,7 @@ fn clock_worker(
     strict_start: bool,
     ready: mpsc::SyncSender<Result<()>>,
 ) -> Result<()> {
+    let label = target.label();
     let _apartment = match Apartment::new() {
         Ok(apt) => apt,
         Err(err) => {
@@ -1118,10 +1189,30 @@ fn clock_worker(
     let mut passive: Option<PassiveEndpointClock> = None;
     let mut tracker = EndpointTracker::new();
     let mut clock_error_warned = false;
+    let mut non_default_warned = false;
+    let mut _live_exclude_guard = LiveExcludeGuard { key: None };
+    if let ClockTarget::DefaultRender {
+        exclude_key,
+        root_pid,
+    } = &target
+    {
+        let initial_warn = check_exclude_non_default_warning(*root_pid);
+        if let Some(msg) = &initial_warn {
+            non_default_warned = true;
+            isocast_diagnostics::diagnostic!("warn"; "{label}: {msg}");
+        }
+        let mut map = LIVE_EXCLUDE_WARNINGS.lock();
+        let entry = map.entry(exclude_key.clone()).or_insert((0, None));
+        entry.0 += 1;
+        entry.1 = initial_warn;
+        drop(map);
+        _live_exclude_guard.key = Some(exclude_key.clone());
+    }
     match query_desired_endpoint(&enumerator, &target) {
         Ok(initial) => match tracker.startup(strict_start, initial) {
             Ok(decision) => apply_endpoint_decision(
                 &enumerator,
+                label,
                 &mut passive,
                 &shared,
                 &state,
@@ -1137,7 +1228,7 @@ fn clock_worker(
             state.clock_failures.fetch_add(1, Ordering::Relaxed);
             clock_error_warned = true;
             isocast_diagnostics::diagnostic!("warn";
-                "Windows application audio: could not query render endpoint clock at startup: {err:#}"
+                "{label}: could not query render endpoint clock at startup: {err:#}"
             );
         }
     }
@@ -1163,7 +1254,7 @@ fn clock_worker(
                         Err(err) => {
                             state.standby_failures.fetch_add(1, Ordering::Relaxed);
                             isocast_diagnostics::diagnostic!("warn";
-                                "Windows application audio: standby session open failed: {err:#}"
+                                "{label}: standby session open failed: {err:#}"
                             );
                             None
                         }
@@ -1178,12 +1269,12 @@ fn clock_worker(
                     match reason {
                         StandbyFailure::BufferOverflow => {
                             isocast_diagnostics::diagnostic!("warn";
-                                "Windows application audio: standby session overflowed alignment window; will retry before OS ring wrap"
+                                "{label}: standby session overflowed alignment window; will retry before OS ring wrap"
                             );
                         }
                         StandbyFailure::SessionEnded(err) => {
                             isocast_diagnostics::diagnostic!("warn";
-                                "Windows application audio: standby session ended before splice ({err}); will retry before OS ring wrap"
+                                "{label}: standby session ended before splice ({err}); will retry before OS ring wrap"
                             );
                         }
                     }
@@ -1199,7 +1290,7 @@ fn clock_worker(
                             ppm,
                         } => {
                             isocast_diagnostics::diagnostic!("info";
-                                "Windows application audio: spliced process-loopback session #{number} (mode={}, lag_frames={lag_frames}, drift_frames_before={drift_before:.1}, endpoint_ppm={ppm:.2})",
+                                "{label}: spliced process-loopback session #{number} (mode={}, lag_frames={lag_frames}, drift_frames_before={drift_before:.1}, endpoint_ppm={ppm:.2})",
                                 if silent { "silent" } else { "sample-match" }
                             );
                         }
@@ -1209,7 +1300,7 @@ fn clock_worker(
                             drift_before,
                         } => {
                             isocast_diagnostics::diagnostic!("warn";
-                                "Windows application audio: process-loopback splice #{number} fell back to reported discontinuity (best_norm_sad={best_norm_sad:.4}, drift_frames_before={drift_before:.1})"
+                                "{label}: process-loopback splice #{number} fell back to reported discontinuity (best_norm_sad={best_norm_sad:.4}, drift_frames_before={drift_before:.1})"
                             );
                         }
                     }
@@ -1217,7 +1308,7 @@ fn clock_worker(
                 WorkerCommand::WarnUnsplicedDrift { drift_frames, ppm } => {
                     let drift_ms = drift_frames * 1000.0 / f64::from(SAMPLE_RATE);
                     isocast_diagnostics::diagnostic!("warn";
-                        "Windows application audio: process-loopback drift reached {drift_ms:.1} ms ({drift_frames:.1} frames at {ppm:.2} ppm) without a splice; reported gap before OS ring wrap"
+                        "{label}: process-loopback drift reached {drift_ms:.1} ms ({drift_frames:.1} frames at {ppm:.2} ppm) without a splice; reported gap before OS ring wrap"
                     );
                 }
             }
@@ -1227,11 +1318,28 @@ fn clock_worker(
         }
         tick = tick.wrapping_add(1);
         if tick.is_multiple_of(ENDPOINT_SCAN_TICKS) {
+            if let ClockTarget::DefaultRender {
+                exclude_key,
+                root_pid,
+            } = &target
+            {
+                let warn = check_exclude_non_default_warning(*root_pid);
+                if let Some(msg) = &warn
+                    && !non_default_warned
+                {
+                    non_default_warned = true;
+                    isocast_diagnostics::diagnostic!("warn"; "{label}: {msg}");
+                }
+                if let Some(entry) = LIVE_EXCLUDE_WARNINGS.lock().get_mut(exclude_key) {
+                    entry.1 = warn;
+                }
+            }
             match query_desired_endpoint(&enumerator, &target) {
                 Ok(scan) => {
                     let decision = tracker.observe(scan);
                     apply_endpoint_decision(
                         &enumerator,
+                        label,
                         &mut passive,
                         &shared,
                         &state,
@@ -1244,7 +1352,7 @@ fn clock_worker(
                     if !clock_error_warned {
                         clock_error_warned = true;
                         isocast_diagnostics::diagnostic!("warn";
-                            "Windows application audio: render endpoint query failed: {err:#}"
+                            "{label}: render endpoint query failed: {err:#}"
                         );
                     }
                 }
@@ -1262,7 +1370,7 @@ fn clock_worker(
                     if !clock_error_warned {
                         clock_error_warned = true;
                         isocast_diagnostics::diagnostic!("warn";
-                            "Windows application audio: passive render endpoint clock read failed: {err:#}"
+                            "{label}: passive render endpoint clock read failed: {err:#}"
                         );
                     }
                 }
@@ -1505,12 +1613,17 @@ mod tests {
         let actual_next = sine[(new_start + next_new_frame) * 2];
         assert!((expected_next - actual_next).abs() < 1e-6);
 
-        // 4. Uncorrelated audio fails closed instead of repeating or guessing,
-        //    including at the 4 s ceiling when new is silent while old had audio.
+        // 4. Uncorrelated audio waits while !at_limit (e.g. a pulse still entering old_stereo)
+        //    and fails closed at the 4 s ceiling instead of repeating or guessing,
+        //    including when new is silent while old had audio.
         let a = synthetic_chirp_stream(10_000);
         let b: Vec<f32> = (0..4_320 * 2)
             .map(|i| (i as f32 * 0.37).cos() * 0.08)
             .collect();
+        assert_eq!(
+            align_splice(&a, &b, 720, false, false),
+            SpliceDecision::NeedMoreFrames
+        );
         assert!(matches!(
             align_splice(&a, &b, 720, false, true),
             SpliceDecision::Failed { .. }
