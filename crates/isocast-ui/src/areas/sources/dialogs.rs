@@ -2439,6 +2439,7 @@ mod tests {
             SourceStatus {
                 source: source.into(),
                 state,
+                detail: None,
                 error: None,
                 needs_pick,
                 capture_mode: None,

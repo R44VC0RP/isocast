@@ -1371,6 +1371,10 @@ fn show_lists(app: &Rc<App>) {
                     group,
                     expanded,
                     state: state.into(),
+                    detail: run
+                        .and_then(|r| r.detail.as_deref())
+                        .unwrap_or_default()
+                        .into(),
                     error: run
                         .and_then(|r| r.error.clone())
                         .unwrap_or_else(|| {

@@ -192,6 +192,15 @@ pub trait Platform: Clone + Send + Sync + 'static {
         std::time::Duration::from_secs(8)
     }
 
+    /// Claim the deadline for an actual open. Merely estimating how long a
+    /// recording should wait must not consume a platform's first-open allowance.
+    fn begin_source_open(
+        &self,
+        source: &SourceKind,
+    ) -> (std::time::Duration, Option<&'static str>) {
+        (self.source_open_timeout(source), None)
+    }
+
     /// Ask the desktop which screen or window `target` shows, where apps
     /// can't list them (Linux's sharing dialog), and remember the choice
     /// for it; `cursor` is whether the source shows the pointer. Refused

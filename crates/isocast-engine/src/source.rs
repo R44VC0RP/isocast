@@ -667,6 +667,17 @@ fn bounded_open<T: Send + 'static>(
     }
 }
 
+/// Reserve an actual open before publishing its pending status.
+pub(crate) fn begin_open<P: Platform>(
+    platform: &P,
+    setup: &Setup,
+    id: &str,
+) -> (Duration, Option<&'static str>) {
+    setup.source(id).map_or((OPEN_TIMEOUT, None), |s| {
+        platform.begin_source_open(&s.kind)
+    })
+}
+
 /// Open the setup's source `id`, on the timeline that starts at `timeline`;
 /// text showing a data key shows `data`'s value.
 pub(crate) fn open<P: Platform>(
@@ -675,6 +686,7 @@ pub(crate) fn open<P: Platform>(
     id: &str,
     timeline: &Arc<Timeline>,
     data: &Arc<DataStore>,
+    (timeout, notice): (Duration, Option<&'static str>),
 ) -> Result<Opened<P>> {
     let kind = setup.source(id).map(|s| &s.kind);
     let permission = kind.and_then(|kind| platform.source_permission(kind));
@@ -710,7 +722,9 @@ pub(crate) fn open<P: Platform>(
         data.clone(),
     );
     let (key, began) = (format!("source {id:?}"), std::time::Instant::now());
-    let timeout = kind.map_or(OPEN_TIMEOUT, |kind| platform.source_open_timeout(kind));
+    if let Some(notice) = notice {
+        isocast_diagnostics::diagnostic!("info"; "{key}: {notice} (up to {} s)", timeout.as_secs());
+    }
     let opened = bounded_open(slot, help, timeout, move || {
         open_native(&platform, &setup, &id, &timeline, &data)
     });

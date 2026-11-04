@@ -292,7 +292,8 @@ pub fn take_frame<P: Platform>(
     // Generators start their timeline now.
     let timeline = Arc::new(Timeline::default());
     timeline.set_start(platform.now());
-    let opened = source::open(platform, setup, id, &timeline, data)?;
+    let budget = source::begin_open(platform, setup, id);
+    let opened = source::open(platform, setup, id, &timeline, data, budget)?;
     let Some(video) = &opened.video else {
         let kind = setup.source(id).map_or("audio", |s| s.kind.label());
         bail!("{id:?} is a {kind} source, which has no picture");

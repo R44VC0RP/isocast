@@ -848,6 +848,7 @@ struct Live<P: Platform> {
     definition: serde_json::Value,
     desktop_mode: Option<crate::SystemAudioMode>,
     run: SourceRun,
+    detail: Option<&'static str>,
     error: Option<String>,
     /// Waiting for `screen_pick`: nothing is chosen for it in the desktop's
     /// sharing dialog ([`crate::NotChosen`]).
@@ -2110,6 +2111,7 @@ fn statuses<P: Platform>(state: &State<P>) -> Vec<SourceStatus> {
         .map(|(id, live)| SourceStatus {
             source: id.clone(),
             state: live.run,
+            detail: live.detail.map(String::from),
             capture_mode: live.desktop_mode.map(|m| m.name.into()),
             warning: live.desktop_mode.and_then(|m| m.warning.map(String::from)),
             error: live.error.clone(),
@@ -2414,6 +2416,8 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
             .source(&id)
             .and_then(|s| inner.platform.source_permission(&s.kind));
         let mut pending = Live::failed(definition.clone(), String::new());
+        let budget = source::begin_open(&inner.platform, &setup, &id);
+        pending.detail = budget.1;
         pending.run = if permission.is_some() {
             SourceRun::WaitingForPermission
         } else {
@@ -2443,6 +2447,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
                         &id,
                         &inner.timeline,
                         inner.control.data(),
+                        budget,
                     )
                 })
                 .map_err(anyhow::Error::msg)
@@ -2613,6 +2618,7 @@ impl<P: Platform> Live<P> {
         Self {
             definition,
             run: SourceRun::Running,
+            detail: None,
             desktop_mode: desktop_mode(&inner.platform, setup, id),
             error: None,
             needs_pick: false,
@@ -2627,6 +2633,7 @@ impl<P: Platform> Live<P> {
             definition,
             run: SourceRun::Failed,
             desktop_mode: None,
+            detail: None,
             error: Some(error),
             needs_pick: false,
             video: None,
@@ -2660,6 +2667,7 @@ impl<P: Platform> Live<P> {
         Self {
             definition: serde_json::Value::Null,
             desktop_mode: None,
+            detail: None,
             run: SourceRun::Failed,
             error: None,
             needs_pick: false,
@@ -2673,6 +2681,7 @@ impl<P: Platform> Live<P> {
         EngineEvent::Source(SourceStatus {
             source: id.to_string(),
             state: self.run,
+            detail: self.detail.map(String::from),
             capture_mode: self.desktop_mode.map(|m| m.name.into()),
             warning: self.desktop_mode.and_then(|m| m.warning.map(String::from)),
             error: self.error.clone(),

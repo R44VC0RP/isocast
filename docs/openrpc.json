@@ -18530,6 +18530,13 @@
               "null"
             ]
           },
+          "detail": {
+            "description": "Progress detail while the source is opening, not a warning or failure.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "error": {
             "description": "Why it couldn't open, or stopped.",
             "type": [

@@ -88,6 +88,42 @@ impl FramePool for Pool {
 }
 
 #[test]
+fn an_unresponsive_helper_fails_instead_of_opening_a_blank_source() {
+    let helper = Helper {
+        program: python(),
+        prefix: vec!["-c".into(), "import time; time.sleep(60)".into()],
+    };
+    let failure = isocast_browser_host::start(
+        Arc::new(helper),
+        Timing {
+            start: Duration::from_secs(1),
+            ..Timing::default()
+        },
+        &BrowserPage {
+            location: PageLocation::Url("about:blank"),
+            width: 8,
+            height: 4,
+            fps: 30,
+            css: "",
+        },
+        || Ok(Pool),
+        VideoSink {
+            frame: Box::new(|_, _| panic!("hung helper sent a frame")),
+            stopped: Box::new(|_| {}),
+        },
+        None,
+    )
+    .err()
+    .expect("a helper that never reports ready must fail");
+    assert!(
+        failure
+            .to_string()
+            .contains("didn't start the page within 1 s"),
+        "{failure:#}"
+    );
+}
+
+#[test]
 fn the_helpers_own_processes_end_with_the_source() {
     // WebView2's browser processes are the helper's children: they share
     // its job and end with it, even if the helper never cleans up.
