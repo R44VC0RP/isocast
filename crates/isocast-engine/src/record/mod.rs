@@ -986,6 +986,7 @@ type Output<F> = SyncSender<Packet<F>>;
 pub enum Packet<F> {
     /// A capture-reported hole on a file's audio track (host clock).
     AudioGap {
+        track: usize,
         from: Time,
         until: Time,
     },
