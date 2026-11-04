@@ -390,8 +390,12 @@ fn collect_report(
             &mut omitted,
         );
     }
+    // Like macOS crash reports, only when the engine is reachable: the
+    // disconnected report exports no free text.
     #[cfg(target_os = "linux")]
-    collect_coredumps(&mut contents, &mut redactor, &mut omitted);
+    if live {
+        collect_coredumps(&mut contents, &mut redactor, &mut omitted);
+    }
     let mut manifests = manifest_folders
         .iter()
         .flat_map(|dir| files(dir))
@@ -444,12 +448,7 @@ fn collect_report(
             }
         }
         if name.starts_with("linux-crashes/") {
-            let field = |key: &str| {
-                text.lines()
-                    .find_map(|line| line.trim_start().strip_prefix(key))
-                    .map(str::trim)
-            };
-            native_crashes.push(json!({"file":name,"pid":field("PID:"),"process":field("Executable:"),"capture_time":field("Timestamp:"),"signal":field("Signal:")}));
+            native_crashes.push(coredump_summary(name, text));
         }
         if name.ends_with(".crash.json") {
             let mut crash =
@@ -788,6 +787,29 @@ fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
         + "\n"
 }
 
+/// A `linux-crashes/` record's triage summary. The process name comes from
+/// the `PID:` line (`4242 (isocastd)`), which strict mode leaves readable;
+/// the `Executable:` path is fingerprinted there.
+fn coredump_summary(name: &str, text: &str) -> Value {
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.trim_start().strip_prefix(key))
+            .map(str::trim)
+    };
+    let pid_line = field("PID:").unwrap_or_default();
+    let (pid, process) = match pid_line.split_once(' ') {
+        Some((pid, process)) => (
+            pid,
+            process
+                .trim()
+                .strip_prefix('(')
+                .and_then(|p| p.strip_suffix(')')),
+        ),
+        None => (pid_line, None),
+    };
+    json!({"file":name,"pid":pid.parse::<u64>().ok(),"process":process,"capture_time":field("Timestamp:"),"signal":field("Signal:")})
+}
+
 fn collect(
     path: &Path,
     name: String,
@@ -885,6 +907,19 @@ mod tests {
                 "20261101T035454.655409600Z-6700-private-app.run"
             ))
             .is_none()
+        );
+    }
+
+    #[test]
+    fn coredump_summary_names_the_process_from_the_pid_line() {
+        let text = "           PID: 4242 (isocastd)\n        Signal: 6 (ABRT)\n     Timestamp: Sun 2026-10-18 10:20:00 CEST\n    Executable: [hmac:0f]\n";
+        assert_eq!(
+            super::coredump_summary("linux-crashes/1-4242-isocastd.txt", text),
+            serde_json::json!({"file":"linux-crashes/1-4242-isocastd.txt","pid":4242,"process":"isocastd","capture_time":"Sun 2026-10-18 10:20:00 CEST","signal":"6 (ABRT)"})
+        );
+        assert_eq!(
+            super::coredump_summary("linux-crashes/x.txt", "")["pid"],
+            serde_json::Value::Null
         );
     }
 }
