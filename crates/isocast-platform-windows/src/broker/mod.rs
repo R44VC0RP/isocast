@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Fence, ID
 
 use crate::native::{Apartment, SharedHandle};
 use crate::{CaptureStats, CaptureTarget, Frame, GraphicsDevice};
-use process::Process;
+pub(crate) use process::Process;
 use wire::{Init, MAX_LEASES, MAX_SURFACES, Message, Picture};
 
 pub use helper::capture_helper_main;

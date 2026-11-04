@@ -30,7 +30,7 @@ unsafe impl Sync for Job {}
 
 /// Owns the real Child handle throughout assignment, startup, streaming and
 /// teardown. No process lookup by PID, no OpenProcess and no public endpoint.
-pub(super) struct Process {
+pub(crate) struct Process {
     child: Mutex<Child>,
     job: Job,
     // Borrowed from child; child is never taken out of its mutex. Stored as an
@@ -41,6 +41,13 @@ pub(super) struct Process {
 
 impl Process {
     pub(super) fn spawn(path: &Path) -> Result<(Self, ChildStdin, ChildStdout)> {
+        Self::spawn_with_args(path, &[])
+    }
+
+    pub(crate) fn spawn_with_args(
+        path: &Path,
+        args: &[&str],
+    ) -> Result<(Self, ChildStdin, ChildStdout)> {
         if !path.is_absolute() || !path.is_file() {
             bail!(
                 "capture helper missing: install isocast-capture.exe beside the executable (explicit helper paths must be absolute)"
@@ -64,6 +71,7 @@ impl Process {
         // handles are explicitly non-inheritable; do not rely on Command to
         // filter unrelated inheritable handles created elsewhere in the host.
         let child = Command::new(path)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -126,7 +134,7 @@ impl Process {
         let _ = unsafe { TerminateProcess(self.handle(), 1) };
     }
 
-    pub(super) fn shutdown(&self, graceful: bool) {
+    pub(crate) fn shutdown(&self, graceful: bool) {
         if self.shut_down.swap(true, Ordering::AcqRel) {
             return;
         }
