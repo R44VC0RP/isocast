@@ -1425,6 +1425,7 @@ fn api_spec(json: bool) -> Result<ExitCode> {
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
+    let explicit_engine = cli.engine.is_some() || std::env::var_os("ISOCAST_ENGINE").is_some();
     let target = match cli.engine {
         Some(target) => isocast_client::Engine::parse(&target)?,
         None => isocast_client::Engine::selected()?,
@@ -1694,7 +1695,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => stop(wait, session, json),
         Command::Pause { json } => pause(true, json),
         Command::Resume { json } => pause(false, json),
-        Command::Status { json } => status(json),
+        Command::Status { json } => status(json, explicit_engine),
         Command::Hello { json } => hello(json),
         Command::Get {
             resolved,
@@ -2886,11 +2887,18 @@ fn hello(json: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn status(json: bool) -> Result<ExitCode> {
+fn status(json: bool, explicit_engine: bool) -> Result<ExitCode> {
     let status = match Client::connect()? {
-        Some(mut client) => {
+        Some(client) => {
+            let mut client = if explicit_engine {
+                client
+            } else {
+                client.use_installed_engine()?
+            };
             let status: Status = client.call(Method::Status)?;
-            client::warn_if_stale(status.daemon.as_ref());
+            if client.handoff_warning().is_none() {
+                client::warn_if_stale(status.daemon.as_ref());
+            }
             status
         }
         None => Status {
@@ -2998,8 +3006,8 @@ fn status(json: bool) -> Result<ExitCode> {
     }
     if let Some(daemon) = &status.daemon {
         println!(
-            "Engine: isocastd {} (build {}, pid {})",
-            daemon.version, daemon.build, daemon.pid
+            "Engine: isocastd {} (build {}, commit {}, pid {})",
+            daemon.version, daemon.build, daemon.commit, daemon.pid
         );
     }
     if let Some(data) = status.data.as_ref().filter(|data| data.keys > 0) {

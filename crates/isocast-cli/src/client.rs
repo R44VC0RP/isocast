@@ -86,7 +86,7 @@ pub fn warn_if_stale(daemon: Option<&isocast_protocol::api::DaemonBuild>) {
 /// asks for it only in a distribution, where there is a bundled engine to
 /// compare with.
 pub fn check_engine(client: &mut Client) {
-    if isocast_client::bundled_build().is_none() {
+    if client.handoff_warning().is_some() || isocast_client::bundled_build().is_none() {
         return;
     }
     if let Ok(status) = client.call::<isocast_protocol::api::Status>(Method::Status) {

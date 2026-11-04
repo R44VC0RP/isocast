@@ -24,6 +24,7 @@ use isocast_protocol::api::{
     Event, FrameStream, FramesParams, Live, Method, Notification, Request, Response, RpcError,
     WatchParams, lock_path, socket_path,
 };
+use isocast_protocol::hello::{BuildIdentity, Hello};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -36,6 +37,216 @@ pub const COMMIT: &str = env!("ISOCAST_CLIENT_COMMIT");
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a running daemon may refuse connections before giving up.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
+enum Handoff {
+    Keep,
+    Busy(String),
+    Replace,
+}
+
+fn same_local_build(build: &BuildIdentity) -> bool {
+    build.version == env!("CARGO_PKG_VERSION") && build.commit == COMMIT
+}
+
+/// No launch or shutdown of a live endpoint. A legacy executable may ignore
+/// the flag, so give it an impossible socket path *inside a regular file*.
+/// Bound the probe and reap only our private child, never the running engine.
+pub fn verify_installed_engine() -> Result<PathBuf> {
+    use std::io::{Read, Seek};
+    use std::process::{Command, Stdio};
+    let path = daemon_path().map_err(|_| anyhow::anyhow!("The installed engine binary is missing or unavailable. Reinstall Isocast or use the app or CLI from the engine's installation."))?;
+    let mut output = tempfile::NamedTempFile::new()?;
+    let mut command = Command::new(&path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    let mut child = command
+        .arg("--build-identity")
+        .env("ISOCAST_SOCKET", output.path().join("probe.sock"))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(output.as_file().try_clone()?)
+        .spawn()
+        .with_context(|| format!("could not identify {}", path.display()))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            bail!("installed engine did not report its build");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if !status.success() {
+        bail!("installed engine does not report its build");
+    }
+    output.rewind()?;
+    let build: BuildIdentity = serde_json::from_reader(output.take(4096))
+        .context("installed engine did not report a valid build")?;
+    if !same_local_build(&build) {
+        bail!(
+            "This client ({}) is out of date for the installed engine ({}). Reopen the updated app or CLI.",
+            describe_build(env!("CARGO_PKG_VERSION"), COMMIT),
+            describe_build(&build.version, &build.commit)
+        );
+    }
+    Ok(path)
+}
+
+fn describe_build(version: &str, commit: &str) -> String {
+    format!("{version} ({})", short_commit(commit))
+}
+
+fn short_commit(commit: &str) -> &str {
+    if commit.len() == 40 && commit.bytes().all(|c| c.is_ascii_hexdigit()) {
+        &commit[..12]
+    } else {
+        commit
+    }
+}
+
+/// A verified update waiting for the running engine's work to finish. The
+/// app supplies its own restart instructions instead of displaying CLI prose.
+#[derive(Clone)]
+pub struct PendingEngineUpdate {
+    pub running: String,
+    pub target: String,
+    pub activity: String,
+    pub automatic_in_app: bool,
+}
+
+impl PendingEngineUpdate {
+    pub fn when(&self) -> &'static str {
+        if self.activity == "recording" {
+            "after this take"
+        } else {
+            "after this work finishes"
+        }
+    }
+}
+
+/// The RPC itself decides whether anything is running, under the same gate
+/// as starting a take. A busy status snapshot is never permission to stop.
+fn local_handoff(
+    build: &BuildIdentity,
+    stop_if_idle: impl FnOnce() -> Result<()>,
+) -> Result<Handoff> {
+    if same_local_build(build) {
+        return Ok(Handoff::Keep);
+    }
+    match stop_if_idle() {
+        Ok(()) => Ok(Handoff::Replace),
+        Err(error) => {
+            let Some(refusal) = error
+                .downcast_ref::<DaemonError>()
+                .filter(|e| e.code() == RpcError::WRONG_STATE)
+            else {
+                return Err(error);
+            };
+            if matches!(
+                refusal.0.message.as_str(),
+                "the daemon is already shutting down"
+                    | "the daemon is shutting down; wait for it to finish"
+            ) {
+                // Another client won the race. Wait for this same connection to close.
+                return Ok(Handoff::Replace);
+            }
+            let activity = refusal
+                .0
+                .message
+                .strip_prefix("isocastd keeps running while ")
+                .and_then(|reason| reason.split(';').next())
+                .unwrap_or("busy");
+            Ok(Handoff::Busy(activity.into()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+    use isocast_protocol::hello::Provenance;
+
+    #[test]
+    fn same_build_does_not_ask_to_stop() {
+        let same = BuildIdentity {
+            version: env!("CARGO_PKG_VERSION").into(),
+            commit: COMMIT.into(),
+            provenance: Provenance::Dev,
+        };
+        assert!(matches!(
+            local_handoff(&same, || panic!("must not stop")),
+            Ok(Handoff::Keep)
+        ));
+    }
+
+    #[test]
+    fn idle_version_or_commit_mismatch_replaces() {
+        for (version, commit) in [
+            ("older-version", COMMIT),
+            (env!("CARGO_PKG_VERSION"), "older-commit"),
+        ] {
+            let old = BuildIdentity {
+                version: version.into(),
+                commit: commit.into(),
+                provenance: Provenance::Dev,
+            };
+            assert!(matches!(
+                local_handoff(&old, || Ok(())),
+                Ok(Handoff::Replace)
+            ));
+        }
+    }
+
+    #[test]
+    fn refusal_keeps_busy_engine_with_reason_and_next_action() {
+        let old = BuildIdentity {
+            version: "older-version".into(),
+            commit: "older-commit".into(),
+            provenance: Provenance::Dev,
+        };
+        for activity in [
+            "recording",
+            "streaming",
+            "keeping a replay buffer",
+            "feeding the virtual camera",
+        ] {
+            let refusal = || {
+                Err(DaemonError(RpcError {
+                    code: RpcError::WRONG_STATE,
+                    message: format!("isocastd keeps running while {activity}; stop it first"),
+                })
+                .into())
+            };
+            let Handoff::Busy(reason) = local_handoff(&old, refusal).unwrap() else {
+                panic!("must not replace busy engine")
+            };
+            assert_eq!(reason, activity);
+        }
+        assert!(local_handoff(&old, || bail!("lost connection")).is_err());
+        for message in [
+            "the daemon is already shutting down",
+            "the daemon is shutting down; wait for it to finish",
+        ] {
+            let shutting_down = || {
+                Err(DaemonError(RpcError {
+                    code: RpcError::WRONG_STATE,
+                    message: message.into(),
+                })
+                .into())
+            };
+            assert!(matches!(
+                local_handoff(&old, shutting_down),
+                Ok(Handoff::Replace)
+            ));
+        }
+    }
+}
 
 #[cfg(test)]
 mod remote_tests {
@@ -99,6 +310,8 @@ pub struct Client {
     next_id: u64,
     hello: Option<isocast_protocol::hello::Hello>,
     compatibility_error: Option<String>,
+    handoff_warning: Option<String>,
+    pending_update: Option<PendingEngineUpdate>,
 }
 
 /// An error the daemon returned, with its JSON-RPC code.
@@ -230,6 +443,228 @@ impl Client {
 
     pub fn connect_local_or_launch() -> Result<Self> {
         if let Some(client) = Self::connect_local()? {
+            return client.use_installed_engine();
+        }
+        Self::launch_local()
+    }
+
+    /// Reconcile an existing connection with the local installation. `status`
+    /// uses this without waking an absent engine. Explicit test sockets and
+    /// helpers, remote connections and connect-only lifecycle probes stay put.
+    pub fn use_installed_engine(mut self) -> Result<Self> {
+        if self.is_remote()
+            || std::env::var_os("ISOCAST_SOCKET").is_some()
+            || std::env::var_os("ISOCAST_DAEMON").is_some()
+        {
+            return Ok(self);
+        }
+        self.local_timeout(Some(BUSY_TIMEOUT))?;
+        let build = match self.call::<Hello>(Method::Hello) {
+            Ok(hello) => hello.build,
+            // Older bundles predate hello; the Mac updater still knows how
+            // to compare their numeric build from status.
+            Err(error)
+                if error
+                    .downcast_ref::<DaemonError>()
+                    .is_some_and(|e| e.code() == RpcError::METHOD_NOT_FOUND) =>
+            {
+                self.local_timeout(None)?;
+                return Ok(self);
+            }
+            // A concurrent handoff can close our endpoint before hello answers.
+            Err(error)
+                if error.downcast_ref::<DaemonError>().is_none() && self.writer.hung_up() =>
+            {
+                return Self::connect_replacement();
+            }
+            Err(error) => return Err(error),
+        };
+        let mut automatic_in_app = false;
+        if !same_local_build(&build) {
+            let installed = match verify_installed_engine() {
+                Ok(path) => path,
+                Err(reason) => {
+                    return self.keep_engine(format!(
+                        "Keeping engine {}. {reason}",
+                        describe_build(&build.version, &build.commit)
+                    ));
+                }
+            };
+            let status = match self.call::<Value>(Method::Status) {
+                Ok(status) => status,
+                Err(_) if self.writer.hung_up() => return Self::connect_replacement(),
+                Err(error) => return Err(error),
+            };
+            let daemon = &status["daemon"];
+            let mac_order = bundled_build()
+                .and_then(|n| n.parse::<u64>().ok())
+                .zip(daemon["build"].as_str().and_then(|n| n.parse::<u64>().ok()))
+                .map(|(own, running)| own.cmp(&running));
+            automatic_in_app = mac_order == Some(std::cmp::Ordering::Greater);
+            let product = |v: &str| -> Option<[u64; 3]> {
+                let mut parts = v.split('.');
+                let nums = [
+                    parts.next()?.parse().ok()?,
+                    parts.next()?.parse().ok()?,
+                    parts.next()?.parse().ok()?,
+                ];
+                parts.next().is_none().then_some(nums)
+            };
+            let version_order = product(env!("CARGO_PKG_VERSION"))
+                .zip(product(&build.version))
+                .map(|(own, running)| own.cmp(&running));
+            if [version_order, mac_order].contains(&Some(std::cmp::Ordering::Less)) {
+                return self.keep_engine(format!("This client is out of date. Keeping the newer engine {}. Open the updated app or CLI.", describe_build(&build.version, &build.commit)));
+            }
+            // Two installations at the same version can have unrelated git
+            // hashes. Don't evict another installed copy on a guess. After
+            // a package upgrade the running executable is at the same path
+            // (or no longer exists); a numbered Mac bundle also has an order.
+            if ![version_order, mac_order].contains(&Some(std::cmp::Ordering::Greater))
+                && let Some(other) = daemon["executable"]
+                    .as_str()
+                    .and_then(|s| Path::new(s).canonicalize().ok())
+                && installed.canonicalize().ok().as_ref() != Some(&other)
+            {
+                return self.keep_engine(format!("Keeping engine {} from a different installation. Open its matching app or CLI.", describe_build(&build.version, &build.commit)));
+            }
+        }
+        let decision = local_handoff(&build, || {
+            let request = Request::new(self.next_id(), Method::ShutdownIfIdle);
+            // Older engines answer only *after* graceful teardown. Wait for
+            // that same reply; never resend the stop on a transport timeout.
+            self.request_until(&request, Some(Instant::now() + Duration::from_secs(45)))
+                .map(|_| ())
+        });
+        // The winning request can also exit the process before this request
+        // receives a refusal. Reconnect and verify, never repeat a stop.
+        if decision
+            .as_ref()
+            .is_err_and(|error| error.downcast_ref::<DaemonError>().is_none())
+            && self.writer.hung_up()
+        {
+            return Self::connect_replacement();
+        }
+        match decision? {
+            Handoff::Keep => (),
+            Handoff::Busy(activity) => {
+                let label = |version: &str, commit: &str| {
+                    if build.version == env!("CARGO_PKG_VERSION") {
+                        short_commit(commit).to_owned()
+                    } else {
+                        format!("{version}, {}", short_commit(commit))
+                    }
+                };
+                let pending = PendingEngineUpdate {
+                    running: label(&build.version, &build.commit),
+                    target: label(env!("CARGO_PKG_VERSION"), COMMIT),
+                    activity,
+                    automatic_in_app,
+                };
+                let message = format!(
+                    "Engine {} is still {}. Run isocast restart {} to use {}.",
+                    describe_build(&build.version, &build.commit),
+                    pending.activity,
+                    pending.when(),
+                    describe_build(env!("CARGO_PKG_VERSION"), COMMIT)
+                );
+                self.pending_update = Some(pending);
+                return self.keep_engine(message);
+            }
+            Handoff::Replace => {
+                // Observe the *old* endpoint. A different client can already
+                // have opened a matching daemon at the same socket/pipe name.
+                let deadline = Instant::now() + BUSY_TIMEOUT;
+                while !self.writer.hung_up() {
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "isocastd did not exit after accepting idle shutdown; no replacement was launched"
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                drop(self);
+                return Self::connect_replacement();
+            }
+        }
+        self.local_timeout(None)?;
+        Ok(self)
+    }
+
+    fn local_timeout(&self, timeout: Option<Duration>) -> Result<()> {
+        self.writer.set_write_timeout(timeout)?;
+        Ok(self.reader.get_ref().set_read_timeout(timeout)?)
+    }
+
+    fn keep_engine(mut self, message: String) -> Result<Self> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| isocast_diagnostics::diagnostic!("warn"; "{message}"));
+        self.handoff_warning = Some(message);
+        self.local_timeout(None)?;
+        Ok(self)
+    }
+
+    fn connect_replacement() -> Result<Self> {
+        let mut client = match Self::connect_local()? {
+            Some(client) => client,
+            None => Self::launch_local()?,
+        };
+        client.local_timeout(Some(BUSY_TIMEOUT))?;
+        let actual = client.call::<Hello>(Method::Hello)?.build;
+        if !same_local_build(&actual) {
+            bail!(
+                "the replacement isocastd is {}; install the engine matching this client ({})",
+                describe_build(&actual.version, &actual.commit),
+                describe_build(env!("CARGO_PKG_VERSION"), COMMIT)
+            );
+        }
+        client.local_timeout(None)?;
+        Ok(client)
+    }
+
+    /// A busy older local engine remains fully usable (unlike a remote
+    /// compatibility error). The watcher shows this in the window.
+    pub fn handoff_warning(&self) -> Option<&str> {
+        self.handoff_warning.as_deref()
+    }
+
+    pub fn pending_update(&self) -> Option<&PendingEngineUpdate> {
+        self.pending_update.as_ref()
+    }
+
+    fn launch_local() -> Result<Self> {
+        // Several clients can all observe the old endpoint close. Serialize
+        // spawning, not just binding: a redundant child waiting for the
+        // daemon lock could otherwise take over on the *next* shutdown.
+        // Keep this separate from the daemon's lifetime lock. Never unlink
+        // it: waiters must all lock the same inode, including after a crash.
+        let path = lock_path().with_extension("launch.lock");
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(dir)?;
+        }
+        let guard = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("could not open isocastd launch lock {}", path.display()))?;
+        let deadline = Instant::now() + BUSY_TIMEOUT;
+        loop {
+            match guard.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(25))
+                }
+                Err(error) => bail!(
+                    "could not acquire isocastd launch lock {}: {error}",
+                    path.display()
+                ),
+            }
+        }
+        if let Some(client) = Self::connect_local()? {
             return Ok(client);
         }
         launch()?;
@@ -257,14 +692,27 @@ impl Client {
             next_id: 1,
             hello: None,
             compatibility_error: None,
+            handoff_warning: None,
+            pending_update: None,
         })
     }
 
     /// Call a method and decode its result. Errors the daemon reports come
     /// back as [`DaemonError`].
     pub fn call<T: DeserializeOwned>(&mut self, method: Method) -> Result<T> {
+        let status = matches!(method, Method::Status);
         let id = self.next_id();
-        let result = self.request(&Request::new(id, method))?;
+        let mut result = self.request(&Request::new(id, method))?;
+        // A running (older) daemon cannot report a client-side handoff
+        // decision. Carry it in the existing diagnostics object for CLI
+        // status --json and MCP get_status without changing the wire schema.
+        if status
+            && let Some(warning) = self.handoff_warning()
+            && result.is_object()
+            && (result["diagnostics"].is_null() || result["diagnostics"].is_object())
+        {
+            result["diagnostics"]["handoff_warning"] = Value::String(warning.into());
+        }
         Ok(serde_json::from_value(result)?)
     }
 
@@ -288,6 +736,14 @@ impl Client {
 
     /// Send one request and read its response's result.
     fn request(&mut self, request: &impl Serialize) -> Result<Value> {
+        self.request_until(request, None)
+    }
+
+    fn request_until(
+        &mut self,
+        request: &impl Serialize,
+        reply_deadline: Option<Instant>,
+    ) -> Result<Value> {
         let started = Instant::now();
         let audit = serde_json::to_value(request)?;
         if let Some(message) = &self.compatibility_error
@@ -318,17 +774,36 @@ impl Client {
         // Learn credentials without persisting arbitrary client params/prose.
         let _ = isocast_diagnostics::redact::Redactor::default().value(&audit);
         let request = serde_json::to_string(request)?;
-        let mut line = String::new();
+        let mut line = Vec::new();
         let received = (|| -> Result<Response> {
             writeln!(self.writer, "{request}").context("lost the connection to isocastd")?;
-            self.reader
-                .read_line(&mut line)
-                .context("lost the connection to isocastd")?;
+            loop {
+                match (self.reader.read_until(b'\n', &mut line), reply_deadline) {
+                    (Ok(_), _) => break,
+                    (Err(err), Some(deadline))
+                        if matches!(
+                            err.kind(),
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                        ) =>
+                    {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            bail!(
+                                "timed out waiting for idle shutdown; no replacement was launched"
+                            );
+                        }
+                        self.reader.get_ref().set_read_timeout(Some(left))?;
+                    }
+                    (Err(error), _) => {
+                        return Err(error).context("lost the connection to isocastd");
+                    }
+                }
+            }
             if line.is_empty() {
                 bail!("isocastd closed the connection");
             }
             isocast_diagnostics::daemon_answered();
-            serde_json::from_str(&line).context("isocastd sent an unreadable response")
+            serde_json::from_slice(&line).context("isocastd sent an unreadable response")
         })();
         let response = match received {
             Ok(response) => response,

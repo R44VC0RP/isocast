@@ -75,6 +75,7 @@ pub enum Update {
     },
     /// The link changed (with why, when it isn't connected).
     Link(Link, String),
+    EngineNotice(&'static str, String),
     /// Watching (again): the live setup as it is now. A daemon that
     /// restarted numbers its revisions afresh.
     Watching(Box<Live>),
@@ -279,12 +280,52 @@ fn watcher(deliver: impl Fn(Update)) {
                 blocked = Some(Link::Mismatch);
                 anyhow::bail!("{why}");
             }
+            let pending = client.pending_update().cloned();
+            let warning = client.handoff_warning().map(str::to_owned);
             let (live, events) = client.watch()?;
+            let notice = if let Some(update) = pending {
+                let next = if update.automatic_in_app {
+                    format!(
+                        "Isocast restarts it {} to use the new build ({}).",
+                        update.when(),
+                        update.target
+                    )
+                } else {
+                    let mut next = format!(
+                        "Restart it {} to use the new build ({}): quit and reopen Isocast.",
+                        update.when(),
+                        update.target
+                    );
+                    if live
+                        .setup
+                        .as_ref()
+                        .is_some_and(|setup| setup.developer.enabled)
+                    {
+                        next.push_str(" You can also choose Developer › Restart Engine.");
+                    }
+                    next
+                };
+                Some((
+                    "Engine update waiting",
+                    format!(
+                        "The running engine ({}) is still {}. {next}",
+                        update.running, update.activity
+                    ),
+                ))
+            } else {
+                warning.map(|s| ("Engine version differs", s))
+            };
             LINK_GENERATION.fetch_add(1, Ordering::SeqCst);
             LINK_UP.store(true, Ordering::SeqCst);
             delay = Duration::from_millis(250);
             ever_connected = true;
-            deliver(Update::Link(Link::Connected, String::new()));
+            deliver(Update::Link(
+                Link::Connected,
+                notice.as_ref().map(|(_, s)| s.clone()).unwrap_or_default(),
+            ));
+            if let Some((title, message)) = notice {
+                deliver(Update::EngineNotice(title, message));
+            }
             deliver(Update::Watching(Box::new(live)));
             for event in events {
                 deliver(Update::Event(Box::new(event?)));

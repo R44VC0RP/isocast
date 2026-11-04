@@ -225,7 +225,15 @@ jobs:
 
       - name: Build daemon and CLI
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --release --locked -p isocast-daemon -p isocast-cli
+        run: |
+          if [ "$MODE" = full ]; then
+            # A separate fixture binary with immutable provenance. No runtime
+            # switch in the shipping daemon can impersonate another build.
+            ISOCAST_BUILD_COMMIT=e2e-older-commit cargo build --release --locked -p isocast-daemon -p isocast-cli
+            cp target/release/isocastd "$RUNNER_TEMP/isocastd-old"
+            cp target/release/isocast "$RUNNER_TEMP/isocast-old"
+          fi
+          cargo build --release --locked -p isocast-daemon -p isocast-cli
 
       # Cisco's OpenH264 binary, as install.sh downloads it (pinned version
       # and SHA-256; Isocast compiles none): the encoder and decoder tests
@@ -257,7 +265,7 @@ jobs:
       # the six-vCPU arm64 VM separately qualifies strict 720p30 zero drops.
       - name: Synthetic program, ISOs, a media file and a stream (hosted 360p30)
         if: env.MODE == 'full'
-        run: python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only linux_media --only linux_shared_frames --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
+        run: ISOCAST_E2E_OLD_DAEMON="$RUNNER_TEMP/isocastd-old" python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only linux_handoff --only linux_media --only linux_shared_frames --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
 
       - name: E2E summary
         if: (always()) && (env.MODE == 'full')

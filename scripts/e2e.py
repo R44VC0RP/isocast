@@ -154,6 +154,7 @@ elif sys.platform.startswith("linux"):
     SCENARIOS += (
         "linux_record",
         "linux_recovery",
+        "linux_handoff",
         "linux_media",
         "linux_capture",
         "linux_browser",
@@ -5343,6 +5344,100 @@ def scenario_linux_recovery(e, cfg, evidence):
     """SIGKILL with committed program/ISO fragments, then restart and verify
     finalized indexes, real decoded counts and persisted recovery metadata."""
     fragment_recovery(e, cfg, evidence)
+
+
+def scenario_linux_handoff(e, cfg, evidence):
+    """A CLI upgrade at the default endpoint: finish the old take first."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    old = os.environ.get("ISOCAST_E2E_OLD_DAEMON")
+    if not old:
+        raise Skip("needs a previous build (ISOCAST_E2E_OLD_DAEMON)")
+    cli = os.environ["ISOCAST_E2E_CLI"]
+    expected = e.rpc("hello")["build"]["commit"]
+    e.stop()
+    # Exercise default discovery, not a socket override. HOME is private too
+    # (a pre-XDG installation can take precedence over XDG_DATA_HOME).
+    runtime = e.root / "runtime"
+    runtime.mkdir(mode=0o700)
+    if "ISOCAST_OPENH264" not in e.env:
+        for codec in (Path.home() / ".local/lib/isocast").glob("libopenh264-*.so"):
+            e.env["ISOCAST_OPENH264"] = str(codec)
+            break
+    e.env.update(HOME=str(e.root), XDG_RUNTIME_DIR=str(runtime), XDG_DATA_HOME=str(e.root / "data"))
+    del e.env["ISOCAST_SOCKET"]
+    e.sock = runtime / "isocast/isocastd.sock"
+    # Replace the executable at its installation path as dpkg does, rather
+    # than starting two live installations and guessing which commit is older.
+    install = e.root / "bin"
+    install.mkdir()
+    installed_daemon = install / "isocastd"
+    shutil.copy2(old, installed_daemon)
+    e.binary = installed_daemon
+    e.start()
+    shutil.copy2(Path(cli).with_name("isocastd"), install / "new")
+    (install / "new").replace(installed_daemon)
+    shutil.copy2(cli, install / "isocast")
+    cli = str(install / "isocast")
+
+    def status(args=(), executable=cli, **env):
+        result = subprocess.run([executable, *args, "status", "--json"], env={**e.env, **env},
+                                text=True, capture_output=True, timeout=40)
+        require(result.returncode == 0, f"isocast status: {result.stderr}")
+        return json.loads(result.stdout), result.stderr
+
+    try:
+        before = e.rpc("status")["daemon"]
+        require(before["commit"] != expected, "old fixture has the client's commit")
+        for explicit in (status(["--engine", "local"]), status(ISOCAST_SOCKET=str(e.sock))):
+            require(explicit[0]["daemon"]["pid"] == before["pid"], "explicit status replaced an engine")
+        e.apply(cfg)
+        take = e.rpc("start", {})
+        busy, warning = status()
+        require(busy["daemon"]["pid"] == before["pid"] and busy["session"] == take["session"],
+                "handoff interrupted the take")
+        require(warning.strip() == busy["diagnostics"]["handoff_warning"] and "still recording" in warning and
+                "isocast restart" in warning and before["commit"][:12] in warning and expected[:12] in warning,
+                f"missing or duplicate upgrade instructions: {warning}")
+        e.rpc("stop")
+        # The app's watcher, worker and preview can all see the old engine
+        # at once. A peer that lost the shutdown race must not report 'busy'.
+        def hello(_):
+            result = subprocess.run([cli, "hello", "--json"], env=e.env, text=True, capture_output=True, timeout=40)
+            require(result.returncode == 0 and json.loads(result.stdout)["build"]["commit"] == expected,
+                    f"concurrent handoff did not reach the installed engine: {result.stderr}")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(hello, range(4)))
+        after, _ = status()
+        after = after["daemon"]
+        require(e.process.wait(timeout=10) == 0, "old daemon did not exit cleanly")
+        require(after["pid"] != before["pid"] and after["commit"] == expected, f"wrong replacement: {after}")
+        require(status()[0]["daemon"]["pid"] == after["pid"], "matching daemon restarted")
+        # The older client remains resident across the upgrade. Its adjacent
+        # helper is now the installed build, not the one it was compiled with.
+        install = e.root / "upgraded-bin"
+        install.mkdir()
+        old_cli = install / "isocast"
+        shutil.copy2(Path(old).with_name("isocast-old"), old_cli)
+        shutil.copy2(Path(cli).with_name("isocastd"), install / "isocastd")
+        for _ in range(2):
+            reverse, notice = status(executable=old_cli)
+            require(reverse["daemon"]["pid"] == after["pid"] and "client" in notice and "out of date" in notice and
+                    reverse["diagnostics"]["handoff_warning"] == notice.strip(), f"reverse handoff: {notice}")
+        (install / "isocastd").unlink()
+        missing, notice = status(executable=old_cli)
+        require(missing["daemon"]["pid"] == after["pid"] and "missing" in notice and
+                missing["diagnostics"]["handoff_warning"] == notice.strip(), f"missing helper: {notice}")
+        evidence.update(old=before, replacement=after, busy_warning=warning.strip())
+        # A second child waiting for the instance lock must not resurrect
+        # a daemon the user explicitly stopped just after a handoff.
+        stopped = subprocess.run([cli, "engine", "shutdown"], env=e.env, text=True, capture_output=True, timeout=45)
+        require(stopped.returncode == 0 and not status()[0].get("daemon"),
+                f"engine still running after explicit shutdown: {stopped.stderr}")
+    finally:
+        # The replacement is detached from the original Engine child handle.
+        if e.process.poll() is not None and e.sock.exists():
+            e.rpc("shutdown_if_idle")
 
 
 def scenario_win_vcam_publisher(e, cfg, evidence):

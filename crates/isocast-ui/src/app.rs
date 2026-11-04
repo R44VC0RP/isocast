@@ -340,6 +340,13 @@ impl App {
                     reply(self, result);
                 }
             }
+            Update::EngineNotice(title, message) => {
+                self.show_toast(
+                    Toast::new(ToastKind::Warning, title, message)
+                        .key("stale-engine")
+                        .action2("OK", |_| {}),
+                );
+            }
             Update::Link(link, why) => {
                 {
                     let mut s = self.session.borrow_mut();
