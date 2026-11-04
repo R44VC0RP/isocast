@@ -15,6 +15,12 @@ pub(super) const FADE: Duration = Duration::from_millis(5);
 
 pub(super) struct RecordingClock {
     pub state: RwLock<Cuts>,
+    pub recovery: super::recovery::VideoRecoveryLedger,
+    /// These video sources have their own ISO tick observer. A video
+    /// source pinned *only* for audio still uses the layer observer.
+    pub iso_sources: std::collections::HashSet<String>,
+    /// Actual program file plans, not canvases open for preview or streaming.
+    pub recorded_canvases: Vec<isocast_protocol::CanvasId>,
     /// Last input inspected by any file, including future-stamped audio.
     /// Published under the read lock; a new cut takes the write lock, so it
     /// can never change the meaning of samples a writer already inspected.
@@ -42,6 +48,9 @@ impl RecordingClock {
             if b == 0 { a } else { gcd(b, a % b) }
         }
         Self {
+            recovery: Default::default(),
+            iso_sources: Default::default(),
+            recorded_canvases: Default::default(),
             state: RwLock::new(Cuts {
                 epoch,
                 rate: rates.fold(gcd(1_000_000_000, SAMPLE_RATE), gcd),

@@ -105,6 +105,7 @@ REPO = Path(__file__).resolve().parent.parent
 SCENARIOS = (
     "setup",
     "record",
+    "video_recovery",
     "iso",
     "split",
     "scenes",
@@ -1072,7 +1073,54 @@ def scenario_setup(e, cfg, evidence):
 def scenario_record(e, cfg, evidence):
     e.apply(cfg)
     path, manifest = take(e)
+    require(manifest["video_recovery"] == {"incident_count": 0, "incidents": [], "history_limited": False},
+            f"healthy recording reported a video interruption: {manifest['video_recovery']}")
     evidence["files"] = check_take(path, manifest, 5, sync=True, expected_sources=["program"], evidence=evidence)
+
+
+def scenario_video_recovery(e, cfg, evidence):
+    """Fail a running ISO capture; its sibling program must outlive it."""
+    e.stop()
+    e.env["ISOCAST_TEST_PATTERN_FAIL_AFTER"] = "bars=0"
+    e.start()
+    cfg = setup(e.root, codec=cfg["recording"]["program"]["encoder"]["codec"], iso=True,
+                width=320, height=180, fps=30)
+    # Keep deliberately missing slots separate from normal throughput evidence.
+    cfg["recording"]["folder"] = str(e.root / "fault-recordings")
+    cfg["recording"]["iso"]["sources"] = ["bars"]
+    cfg["scenes"][0]["items"][0]["source"] = "bars2"
+    e.apply(cfg)
+    path = Path(e.rpc("start", {})["manifest"])
+    live = lambda: e.rpc("status").get("live") or {}
+    def writing():
+        state = live()
+        return state if len(state.get("files", [])) == 2 and all(f["frames"] >= 3 for f in state["files"]) else None
+    before = until(writing, description="both real writers before injection")
+    require(before["video_recovery"]["incident_count"] == 0, f"incident before developer mode: {before}")
+    # The existing fault is gated by developer mode. Arm it after actual
+    # media, rather than racing a fixed timeout against hosted encoder startup.
+    e.rpc("debug_set", {"enabled": True})
+    observed, = until(lambda: live().get("video_recovery", {}).get("incidents"),
+                      description="injected ISO failure in live status")
+    require((observed["scope"], observed["owner_id"], observed["fault_kind"], observed["state"],
+             observed["attempts_started"]) == ("source", "bars", "capture_stopped", "ended_early", 0)
+            and "injected capture failure" in observed["reason"], f"unexpected incident: {observed}")
+    e.rpc("stop")
+    manifest = until(lambda: finished(path), description="failed source manifest finalized")
+    final, = manifest["video_recovery"]["incidents"]
+    same = ("incident_id", "scope", "owner_id", "fault_kind", "state", "reason", "fps", "first_lost_slot", "attempts_started")
+    require(manifest["status"] == "failed" and all(final[k] == observed[k] for k in same),
+            f"live/manifest disagree: {observed} vs {final}")
+    first, end = final["first_lost_slot"], final["end_slot_exclusive"]
+    require(0 < first < end and end >= observed["end_slot_exclusive"] and final["lost_slots"] == end - first,
+            f"invalid final slot interval: {final}")
+    until(lambda: e.rpc("status")["state"] == "idle", description="last finished take visible to doctor")
+    check, = [c for c in e.rpc("doctor", {})["checks"] if c["name"] == "recording video recovery"]
+    require(check["status"] == "warning" and all(s in check["detail"] for s in
+            ("last finished take", "bars", final["scope"], final["state"], final["fault_kind"],
+             f"[{first}, {end})", final["reason"])),
+            f"doctor did not identify the final source gap: {check}")
+    evidence.update(live_incident=observed, final_incident=final, doctor=check)
 
 
 def scenario_iso(e, cfg, evidence):

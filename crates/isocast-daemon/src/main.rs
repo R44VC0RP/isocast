@@ -1137,7 +1137,83 @@ struct State {
     hotkey_holds: HashMap<String, (String, bool)>,
 }
 
+fn recovery_check(
+    which: &str,
+    recovery: &isocast_protocol::manifest::VideoRecovery,
+) -> isocast_protocol::api::Check {
+    use isocast_protocol::api::{Check, CheckStatus};
+    use isocast_protocol::manifest::{VideoFaultKind, VideoRecoveryScope};
+    use serde_json::json;
+    let last = recovery.incidents.last();
+    let mut detail = match last {
+        Some(e) => format!(
+            "{which} take: {} incident(s); scope={}, owner_id={:?}, state={}, fault_kind={}; slots [{}, {}) at {} fps ({} unavailable): {}",
+            recovery.incident_count,
+            json!(e.scope),
+            e.owner_id,
+            json!(e.state),
+            json!(e.fault_kind),
+            e.first_lost_slot,
+            e.end_slot_exclusive,
+            e.fps,
+            e.lost_slots,
+            e.reason
+        ),
+        None if recovery.history_limited => {
+            format!("{which} take: no detailed incident retained for this take")
+        }
+        None => format!("{which} take: no observed video interruptions"),
+    };
+    if recovery.history_limited {
+        detail.push_str("; video interruption history limited; further gaps may not be listed");
+    }
+    let fix = match last {
+        Some(e) if e.fault_kind == VideoFaultKind::CompositorFailed => {
+            Some("Check the program compositor failure in the engine diagnostics.")
+        }
+        Some(e) => Some(match e.scope {
+            VideoRecoveryScope::Source => {
+                "Check the capture target and permission; see video_recovery in the take manifest."
+            }
+            VideoRecoveryScope::Output => {
+                "Check the writer error and destination; see video_recovery in the take manifest."
+            }
+            VideoRecoveryScope::Unknown => {
+                "Inspect the incident in the take manifest with a matching engine version."
+            }
+        }),
+        None if recovery.history_limited => {
+            Some("Inspect the capture and writer errors in the take manifest.")
+        }
+        None => None,
+    };
+    Check {
+        name: "recording video recovery".into(),
+        status: if fix.is_some() {
+            CheckStatus::Warning
+        } else {
+            CheckStatus::Ok
+        },
+        detail,
+        fix: fix.map(str::to_owned),
+    }
+}
+
 impl State {
+    /// Read the live or last finished take, not a probe of native devices.
+    fn video_recovery_check(&self) -> Option<isocast_protocol::api::Check> {
+        Some(match &self.session {
+            Some(session) => recovery_check(
+                "current",
+                session.live.lock().as_ref()?.video_recovery.as_ref()?,
+            ),
+            None => recovery_check(
+                "last finished",
+                self.last.as_ref()?.video_recovery.as_ref()?,
+            ),
+        })
+    }
+
     /// Scene ids of the live setup.
     fn scene_ids(&self) -> Vec<String> {
         self.setup
@@ -1759,6 +1835,9 @@ impl Daemon {
                         .is_ok()
                 };
                 let mut report = doctor(setup.as_ref(), params.folder.as_deref(), &may_write);
+                if let Some(check) = self.state.read().video_recovery_check() {
+                    report.checks.push(check);
+                }
                 if let Some(control) = self.state.read().control() {
                     for detail in control.metadata_pending() {
                         report.checks.push(isocast_protocol::api::Check {
@@ -6222,6 +6301,47 @@ fn to_json(value: impl serde::Serialize) -> Result<serde_json::Value, RpcError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limited_recovery_history_still_identifies_last_retained_incident() {
+        use isocast_protocol::manifest::{
+            VideoFaultKind, VideoIncident, VideoRecovery, VideoRecoveryScope, VideoRecoveryState,
+        };
+        let mut recovery = VideoRecovery {
+            history_limited: true,
+            ..Default::default()
+        };
+        let empty = recovery_check("current", &recovery);
+        assert!(empty.detail.contains("no detailed incident retained"));
+        assert_eq!(empty.status, isocast_protocol::api::CheckStatus::Warning);
+        recovery.incident_count = 1;
+        recovery.incidents.push(VideoIncident {
+            incident_id: 256,
+            scope: VideoRecoveryScope::Output,
+            owner_id: "program".into(),
+            state: VideoRecoveryState::EndedEarly,
+            fault_kind: VideoFaultKind::CompositorFailed,
+            attempts_started: 0,
+            reason: "compositor stopped".into(),
+            fps: 30,
+            first_lost_slot: 30,
+            end_slot_exclusive: 44,
+            lost_slots: 14,
+        });
+        let check = recovery_check("last finished", &recovery);
+        for field in [
+            "history limited",
+            "output",
+            "program",
+            "ended_early",
+            "compositor_failed",
+            "[30, 44)",
+            "compositor stopped",
+        ] {
+            assert!(check.detail.contains(field), "{}", check.detail);
+        }
+        assert!(check.fix.unwrap().contains("compositor"));
+    }
 
     #[test]
     fn removes_a_window_on_remove_rename_or_retype() {

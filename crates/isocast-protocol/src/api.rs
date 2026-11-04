@@ -2955,6 +2955,9 @@ pub enum SourceRun {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LiveStatus {
     pub elapsed_seconds: f64,
+    /// Source and output interruptions on the current take's saved timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_recovery: Option<crate::manifest::VideoRecovery>,
     /// True while recording is paused; elapsed time excludes all pauses.
     #[serde(default)]
     pub paused: bool,
@@ -3117,6 +3120,9 @@ pub struct LiveFile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Report {
     pub folder: PathBuf,
+    /// Video interruptions of the last take, as in its manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_recovery: Option<crate::manifest::VideoRecovery>,
     pub disk: DiskReport,
     /// The manifest of the last take, which lines its files up on one
     /// timeline.
