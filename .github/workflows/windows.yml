@@ -1,6 +1,8 @@
 name: Windows
 
 on:
+  schedule:
+    - cron: '27 5 * * 1'
   workflow_call:
     inputs:
       linux_release_commit:
@@ -43,6 +45,7 @@ jobs:
       linux: ${{ steps.gate.outputs.linux }}
       linux_capture: ${{ steps.gate.outputs.linux_capture }}
       linux_app: ${{ steps.gate.outputs.linux_app }}
+      linux_distro: ${{ steps.gate.outputs.linux_distro }}
       deb: ${{ steps.gate.outputs.deb }}
       win_build: ${{ steps.gate.outputs.win_build }}
       win_release: ${{ steps.gate.outputs.win_release }}
@@ -61,13 +64,81 @@ jobs:
         run: |
           if [[ -n "$RELEASE_COMMIT" ]]; then
             [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-            for job in portable linux linux_capture win_build win_release win_recovery win_wording win_package; do
+            for job in portable linux linux_capture linux_distro win_build win_release win_recovery win_wording win_package; do
               echo "$job=skip" >> "$GITHUB_OUTPUT"
             done
             printf 'linux_app=full\ndeb=full\n' >> "$GITHUB_OUTPUT"
           else
             python3 .github/scripts/ci_gate.py windows
           fi
+
+  linux-distro:
+    name: Linux distro (${{ matrix.distro }}, x86_64)
+    needs: gate
+    if: needs.gate.outputs.linux_distro != 'skip'
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.distro }}:latest
+    # Allow a cold toolchain/dependency cache; warm builds target 20 minutes.
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [archlinux, fedora]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      LP_NUM_THREADS: 2
+      XDG_RUNTIME_DIR: /tmp/isocast-runtime
+    steps:
+      - name: Arch build, runtime and test packages
+        if: matrix.distro == 'archlinux'
+        run: |
+          pacman -Syu --noconfirm --needed base-devel rust cmake nasm clang git python zstd \
+            openssl fontconfig freetype2 libxkbcommon wayland libx11 libxcursor libxrandr libxi libglvnd \
+            libpipewire gstreamer gst-plugins-base gst-plugins-good gst-libav \
+            vulkan-icd-loader vulkan-swrast openh264 ffmpeg
+      - name: Fedora build, runtime and test packages
+        if: matrix.distro == 'fedora'
+        run: |
+          dnf --disablerepo='*cisco*' install -y gcc gcc-c++ make rust cargo cmake nasm clang clang-devel \
+            pkgconf-pkg-config git python3 tar gzip zstd patch perl-core openssl-devel fontconfig-devel \
+            freetype-devel libxkbcommon-devel wayland-devel libX11-devel libXcursor-devel libXrandr-devel \
+            libXi-devel libglvnd-devel pipewire-devel gstreamer1-devel gstreamer1-plugins-base-devel \
+            gstreamer1-plugins-good gstreamer1-plugin-libav vulkan-loader mesa-vulkan-drivers noopenh264 ffmpeg-free
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare headless runtime
+        run: |
+          mkdir -m 700 "$XDG_RUNTIME_DIR"
+          rustc -Vv
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: distro-${{ matrix.distro }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build daemon, CLI and desktop app
+        id: build
+        run: cargo build --locked --bin isocastd --bin isocast --bin isocast-ui
+      - name: Doctor and software recording
+        run: python3 scripts/linux-distro-smoke.py ${{ matrix.distro }}
+      - name: Fedora Workstation codecs and fixture tools
+        id: codecs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.distro == 'fedora' }}
+        run: |
+          # The smoke above intentionally uses the stock stub. Test real encodes below.
+          dnf --enablerepo=fedora-cisco-openh264 swap -y noopenh264 openh264
+          dnf --enablerepo=fedora-cisco-openh264 install -y gstreamer1-plugin-openh264
+          # RPM Fusion FFmpeg supplies libx264 for generating the unit-test fixtures;
+          # it is not an Isocast build or runtime dependency.
+          dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+          dnf swap -y --allowerasing ffmpeg-free ffmpeg
+          rpm -q openh264 gstreamer1-plugin-openh264 gstreamer1-plugin-libav ffmpeg
+      - name: Linux platform unit tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (matrix.distro == 'archlinux' || steps.codecs.outcome == 'success') }}
+        run: cargo test --locked -p isocast-platform-linux --lib
 
   portable:
     name: portable (${{ matrix.os }})

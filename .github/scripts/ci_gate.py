@@ -120,6 +120,7 @@ JOB_RULES = {
         # The only job that compiles isocast-ui (and its dependencies' Linux
         # paths) on Linux: shared and render changes need it too.
         "linux_app": ({"all", "ui", "render", "shared", "linux"}, "Linux app and tarball"),
+        "linux_distro": ({"all", "ui", "render", "shared", "linux"}, "Arch and Fedora source builds and smoke tests"),
         # Built from the same code as the app and tarball (Ubuntu's from the
         # tarball itself), so the same changes need them.
         "deb": ({"all", "ui", "render", "shared", "linux"}, "Linux .deb packages and their install tests"),
@@ -139,7 +140,7 @@ DOCS_MODE = {("ci", "check")}
 # binaries): nothing to warm, so on main they skip instead.
 NO_CACHE = {("windows", "win_recovery"), ("windows", "win_wording"), ("windows", "win_package"),
             # The Debian 12 build's cache is saved only by a full run on main.
-            ("windows", "deb")}
+            ("windows", "deb"), ("windows", "linux_distro")}
 
 
 def idle(workflow, job, on_main):
@@ -296,6 +297,11 @@ def plan(workflow, paths, on_main):
     return out
 
 
+def schedule_plan(workflow):
+    return {job: (("full", "weekly distro check") if job == "linux_distro" else ("skip", "not scheduled"))
+            for job in JOB_RULES[workflow]}
+
+
 def summary(workflow, header, modes, paths):
     lines = [f"### What runs ({workflow})", "", header, "", "| job | mode | why |", "|---|---|---|"]
     for job, (mode, why) in modes.items():
@@ -339,7 +345,10 @@ def main():
             match = identical_green(repo, sha, tree)
         except Exception as e:  # the API is down: decide by paths, never skip blindly
             print(f"::warning::identical-tree check failed ({e}); deciding by paths")
-    if match:
+    if event == "schedule" and workflow == "windows":
+        modes = schedule_plan(workflow)
+        header = "Weekly rolling-distribution check."
+    elif match:
         other, urls = match
         why = f"tree {tree[:12]} already passed as {other[:12]}"
         modes = {}
