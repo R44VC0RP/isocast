@@ -128,6 +128,20 @@ impl RecordingClock {
 }
 
 impl Cuts {
+    /// Inverse for an actual saved media timestamp. At a closed cut the
+    /// first picture after resume owns the boundary; an open cut has no
+    /// post-resume picture yet.
+    pub(super) fn host_time(&self, saved: Time) -> Time {
+        let mut host = saved;
+        for span in &self.spans {
+            if host < span.start {
+                break;
+            }
+            let Some(end) = span.end else { break };
+            host = host + end.saturating_since(span.start);
+        }
+        host
+    }
     pub fn map(&self, at: Time) -> Time {
         if at == Time::MAX {
             return at;

@@ -6,11 +6,123 @@ use isocast_protocol::manifest::{
     VideoRecoveryState as State,
 };
 use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::{file::file_end, pause::Cuts};
 use crate::Time;
+
+/// A writer's view of its take, including its pause mapping. The movie uses
+/// saved PTS; retry deadlines use the uncut host clock. Do not use delivery
+/// time as the end of a media gap (the IDR may arrive several frames late).
+#[derive(Clone)]
+pub struct OutputRecovery {
+    pub(super) clock: Arc<super::pause::RecordingClock>,
+    pub(super) plan: Arc<super::FilePlan>,
+}
+
+impl OutputRecovery {
+    pub fn interrupted(&self, first_missing: Time, now: Time, reason: &str) -> Option<u64> {
+        let from = self.clock.state.read().host_time(first_missing);
+        self.plan.output_active.store(0, Ordering::Release);
+        self.clock.recovery.interrupted(
+            (Scope::Output, &self.plan.source),
+            self.plan.spec.video.fps,
+            from,
+            now,
+            VideoFaultKind::EncoderFailed,
+            reason,
+        )
+    }
+    pub fn attempt(&self, id: u64, now: Time) -> Result<Attempt, RetryRefused> {
+        self.clock.recovery.begin_attempt(
+            id,
+            now,
+            Time::from_nanos(self.plan.epoch.load(Ordering::Acquire)),
+        )
+    }
+    /// A busy native admission gate is not a failed encoder open. Reserve
+    /// it without blocking, then mint a ticket only if that succeeded.
+    pub fn attempt_when<T>(
+        &self,
+        id: u64,
+        now: Time,
+        reserve: impl FnOnce() -> Option<T>,
+    ) -> Result<Option<(Attempt, T)>, RetryRefused> {
+        self.clock.recovery.begin_when(
+            id,
+            now,
+            Time::from_nanos(self.plan.epoch.load(Ordering::Acquire)),
+            reserve,
+        )
+    }
+    pub fn failed_attempt(&self, ticket: Attempt, now: Time) {
+        self.clock.recovery.finish_attempt(ticket, now, false);
+    }
+    pub fn can_resume(&self, ticket: Attempt, saved_pts: Time, now: Time) -> bool {
+        let picture = self.clock.state.read().host_time(saved_pts);
+        let ledger = &self.clock.recovery;
+        now < ticket.deadline
+            && now >= ticket.started
+            && picture < ledger.end()
+            && now < ledger.end()
+            && ledger
+                .entries
+                .lock()
+                .get(ticket.incident as usize - 1)
+                .is_some_and(|e| {
+                    e.attempts.last() == Some(&ticket)
+                        && e.ended.is_none()
+                        && e.resumed.is_none()
+                        && picture >= e.from
+                })
+    }
+    /// Publish only *after* the first real IDR's fragment is committed.
+    pub fn resumed(
+        &self,
+        ticket: Attempt,
+        saved_pts: Time,
+        checked_at: Time,
+        backend: &str,
+        hardware: bool,
+    ) {
+        let picture = self.clock.state.read().host_time(saved_pts);
+        let changed = self
+            .clock
+            .recovery
+            .update(ticket.incident, checked_at, |e| {
+                if e.attempts.last() != Some(&ticket)
+                    || checked_at >= ticket.deadline
+                    || picture < e.from
+                {
+                    return false;
+                }
+                e.resumed = Some(picture);
+                e.reason.push_str("; resumed in the same file with ");
+                e.reason.extend(backend.chars().take(512));
+                true
+            });
+        if !changed {
+            return;
+        }
+        self.plan
+            .hardware_accelerated
+            .store(i64::from(hardware), Ordering::Release);
+        self.plan.output_active.store(1, Ordering::Release);
+    }
+    pub fn ended_early(&self, id: u64, now: Time, why: &str) {
+        self.clock.recovery.update(id, now, |e| {
+            e.ended = Some(now);
+            e.reason.push_str("; ");
+            e.reason.extend(why.chars().take(512));
+            true
+        });
+    }
+    pub fn storage_failed(&self, id: u64, now: Time, why: &str) {
+        self.clock.recovery.storage_failed(id, now, why);
+    }
+}
 
 struct Incident {
     scope: Scope,
@@ -23,6 +135,9 @@ struct Incident {
     attempts: Vec<Attempt>,
     resumed: Option<Time>,
     ended: Option<Time>,
+    /// Media boundary, distinct from observing failure/teardown (which can
+    /// arrive late). Unlike a terminal output, the next file is independent.
+    split_end: Option<Time>,
 }
 
 /// A native result must carry this ticket, not just the source id: a late
@@ -93,7 +208,7 @@ impl VideoRecoveryLedger {
             .iter()
             .rposition(|e| e.scope == scope && e.owner == owner)
         {
-            match entries[i].resumed {
+            match entries[i].split_end.or(entries[i].resumed) {
                 Some(at) if detected >= at => from = from.max(at),
                 _ => return Some(i as u64 + 1),
             }
@@ -119,12 +234,13 @@ impl VideoRecoveryLedger {
             attempts: Vec::new(),
             resumed: None,
             ended: None,
+            split_end: None,
         });
         self.revision.fetch_add(1, Ordering::Release);
         Some(entries.len() as u64)
     }
 
-    fn update(&self, id: u64, at: Time, f: impl FnOnce(&mut Incident) -> bool) {
+    fn update(&self, id: u64, at: Time, f: impl FnOnce(&mut Incident) -> bool) -> bool {
         let mut entries = self.entries.lock();
         if let Some(entry) = id
             .checked_sub(1)
@@ -136,17 +252,29 @@ impl VideoRecoveryLedger {
             && f(entry)
         {
             self.revision.fetch_add(1, Ordering::Release);
+            return true;
         }
+        false
     }
 
-    /// Called only by a future recovery-capable owner. These are uncut host
-    /// deadlines: a user pause cannot extend them. No existing adapter opts in.
+    /// Uncut host deadlines: a user pause cannot extend them.
     pub fn begin_attempt(
         &self,
         id: u64,
         now: Time,
         take_epoch: Time,
     ) -> Result<Attempt, RetryRefused> {
+        self.begin_when(id, now, take_epoch, || Some(()))
+            .map(|r| r.expect("unconditional reservation").0)
+    }
+
+    fn begin_when<T>(
+        &self,
+        id: u64,
+        now: Time,
+        take_epoch: Time,
+        reserve: impl FnOnce() -> Option<T>,
+    ) -> Result<Option<(Attempt, T)>, RetryRefused> {
         let mut entries = self.entries.lock();
         let i = id
             .checked_sub(1)
@@ -187,6 +315,9 @@ impl VideoRecoveryLedger {
         } else if now < e.detected {
             return Err(RetryRefused::WaitUntil(e.detected));
         }
+        let Some(reservation) = reserve() else {
+            return Ok(None);
+        };
         let attempt = Attempt {
             incident: id,
             number: count as u8 + 1,
@@ -196,7 +327,7 @@ impl VideoRecoveryLedger {
         };
         entries[i].attempts.push(attempt);
         self.revision.fetch_add(1, Ordering::Release);
-        Ok(attempt)
+        Ok(Some((attempt, reservation)))
     }
 
     /// `resumed` requires a fresh source picture or validated replacement
@@ -235,8 +366,50 @@ impl VideoRecoveryLedger {
         });
     }
 
+    /// A write/sync failure while sealing or resuming the prefix supersedes
+    /// the codec retry, without creating a second overlapping interval.
+    pub fn storage_failed(&self, id: u64, at: Time, why: &str) {
+        self.update(id, at, |e| {
+            e.kind = VideoFaultKind::StorageFailed;
+            e.ended = Some(at);
+            e.reason.push_str("; storage failed: ");
+            e.reason.extend(why.chars().take(512));
+            true
+        });
+    }
+
     pub(super) fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
+    }
+
+    pub(super) fn reopening_output(&self) -> bool {
+        self.entries.lock().iter().any(|e| {
+            e.scope == Scope::Output
+                && e.kind == VideoFaultKind::EncoderFailed
+                && e.ended.is_none()
+                && e.resumed.is_none()
+        })
+    }
+
+    /// Called synchronously by the old file's sole packet worker *after*
+    /// committing it and *before* sending the first picture to its successor.
+    /// The async finalizer is too late: the same output may have failed again.
+    pub(super) fn output_split(&self, owner: &str, cut: Time) {
+        let mut entries = self.entries.lock();
+        if let Some(e) = entries
+            .iter_mut()
+            .rev()
+            .find(|e| e.scope == Scope::Output && e.owner == owner)
+            && e.resumed.is_none()
+            && e.split_end.is_none()
+        {
+            e.split_end = Some(cut);
+            if e.ended.is_none() {
+                e.ended = Some(cut.max(e.detected));
+                e.reason.push_str("; file ended at split during recovery");
+            }
+            self.revision.fetch_add(1, Ordering::Release);
+        }
     }
 
     pub(super) fn observe_reopened_source(&self, owner: &str, first: Time) {
@@ -266,7 +439,9 @@ impl VideoRecoveryLedger {
             .iter()
             .enumerate()
             .filter_map(|(i, e)| {
-                if e.from >= until || until <= epoch || e.resumed.is_some_and(|at| at <= epoch) {
+                let until = e.split_end.unwrap_or(until).min(until);
+                let media_end = e.split_end.or(e.resumed);
+                if e.from >= until || until <= epoch || media_end.is_some_and(|at| at <= epoch) {
                     return None;
                 }
                 let slot = |at| {
@@ -276,7 +451,7 @@ impl VideoRecoveryLedger {
                         .ticks_since(saved_epoch, e.fps) as u64
                 };
                 let first_lost_slot = slot(e.from.max(epoch));
-                let end_slot_exclusive = slot(e.resumed.unwrap_or(until).min(until));
+                let end_slot_exclusive = slot(media_end.unwrap_or(until).min(until));
                 let by_cut = |at: Option<Time>| at.is_some_and(|at| at <= until);
                 Some(VideoIncident {
                     incident_id: i as u64 + 1,
@@ -289,7 +464,7 @@ impl VideoRecoveryLedger {
                     fps: e.fps,
                     state: if by_cut(e.resumed) {
                         State::Resumed
-                    } else if by_cut(e.ended) {
+                    } else if by_cut(e.ended) || by_cut(e.split_end) {
                         State::EndedEarly
                     } else if until == stop {
                         State::Stopped
@@ -315,6 +490,144 @@ impl VideoRecoveryLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_contention_waits_within_incident_time_without_spending_tickets() {
+        let now = |s| Time::from_nanos(s * 1_000_000_000i64);
+        let ledger = VideoRecoveryLedger::default();
+        let fault = |id| {
+            ledger
+                .interrupted(
+                    (Scope::Output, id),
+                    30,
+                    now(0),
+                    now(0),
+                    VideoFaultKind::EncoderFailed,
+                    "encoder",
+                )
+                .unwrap()
+        };
+        let id = fault("program");
+        for s in 0..12 {
+            assert!(
+                ledger
+                    .begin_when(id, now(s), now(0), || None::<()>)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let (first, ()) = ledger
+            .begin_when(id, now(12), now(0), || Some(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!((first.number, first.deadline), (1, now(15)));
+        let other = fault("camera");
+        assert_eq!(
+            ledger.begin_when(other, now(15), now(0), || None::<()>),
+            Err(RetryRefused::BudgetExhausted)
+        );
+    }
+
+    #[test]
+    fn handing_off_a_recovering_file_ends_its_gap_not_the_next_take() {
+        let epoch = Time::from_nanos(0);
+        let clock = super::super::pause::RecordingClock::new(epoch, [30].into_iter());
+        let ledger = &clock.recovery;
+        let at = |n| epoch.add_ticks(n, 30);
+        // A split already scheduled at slot 30; the old file's queued work
+        // reports the missing slot 24 after its cut, at slot 31.
+        let fault = |from, detected| {
+            ledger
+                .interrupted(
+                    (Scope::Output, "bars"),
+                    30,
+                    at(from),
+                    at(detected),
+                    VideoFaultKind::EncoderFailed,
+                    "submit failed",
+                )
+                .unwrap()
+        };
+        let old = fault(24, 31);
+        let ticket = ledger.begin_attempt(old, at(32), epoch).unwrap();
+        assert!(ledger.reopening_output());
+        ledger.output_split("bars", at(30));
+        ledger.finish_attempt(ticket, at(33), true);
+        assert!(!ledger.reopening_output());
+        let snap = |from, to| ledger.snapshot(&clock.state.read(), at(from), at(to));
+        let first = snap(0, 30);
+        assert_eq!(
+            (first.incidents[0].state, first.incidents[0].lost_slots),
+            (State::EndedEarly, 6)
+        );
+        assert!(
+            first.incidents[0]
+                .reason
+                .contains("file ended at split during recovery")
+        );
+        assert!(snap(30, 40).incidents.is_empty());
+        let new = fault(36, 40);
+        assert_ne!(new, old);
+        assert!(ledger.begin_attempt(new, at(40), at(30)).is_ok());
+        assert_eq!(snap(30, 45).incidents[0].lost_slots, 9);
+        ledger.stop_at(at(45));
+        assert_eq!(snap(30, 50).incidents[0].state, State::Stopped);
+    }
+
+    #[test]
+    fn failed_prefix_sync_terminates_the_original_open_codec_incident() {
+        let zero = Time::from_nanos(0);
+        let clock = super::super::pause::RecordingClock::new(zero, [30].into_iter());
+        let ledger = &clock.recovery;
+        let at = |n| zero.add_ticks(n, 30);
+        let id = ledger
+            .interrupted(
+                (Scope::Output, "bars"),
+                30,
+                at(12),
+                at(14),
+                VideoFaultKind::EncoderFailed,
+                "MF ProcessOutput failed",
+            )
+            .unwrap();
+        let ticket = ledger.begin_attempt(id, at(14), zero).unwrap();
+        assert!(ledger.reopening_output());
+        ledger.storage_failed(id, at(15), "sync: disk full");
+        ledger.finish_attempt(ticket, at(16), true);
+        assert!(!ledger.reopening_output());
+        assert!(ledger.begin_attempt(id, at(17), zero).is_err());
+        let snapshot = ledger.snapshot(&clock.state.read(), zero, at(30));
+        let [entry] = snapshot.incidents.as_slice() else {
+            panic!("one continuous interval")
+        };
+        assert_eq!(
+            (
+                entry.fault_kind,
+                entry.state,
+                entry.attempts_started,
+                entry.lost_slots
+            ),
+            (VideoFaultKind::StorageFailed, State::EndedEarly, 1, 18)
+        );
+        assert!(
+            entry
+                .reason
+                .contains("MF ProcessOutput failed; storage failed: sync: disk full")
+        );
+    }
+
+    #[test]
+    fn picture_pts_invert_the_pause_mapping_without_rebasing_the_retry_clock() {
+        let epoch = Time::from_nanos(0);
+        let at = |n| epoch.add_ticks(n, 30);
+        let clock = super::super::pause::RecordingClock::new(epoch, [30].into_iter());
+        let cut = clock.change(true, at(20), None).unwrap();
+        let resume = clock.change(false, at(50), None).unwrap();
+        let cuts = clock.state.read();
+        assert_eq!(cuts.host_time(cuts.map(at(15))), at(15));
+        assert_eq!(cuts.host_time(cuts.map(cut)), resume);
+        assert_eq!(cuts.host_time(cuts.map(at(70))), at(70));
+    }
 
     #[test]
     fn full_history_returns_no_ticket_but_preserves_existing_incidents() {

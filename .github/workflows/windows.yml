@@ -77,7 +77,10 @@ jobs:
     needs: gate
     if: needs.gate.outputs.linux_distro != 'skip'
     runs-on: ubuntu-24.04
-    container: ${{ matrix.distro }}:latest
+    container:
+      image: ${{ matrix.distro }}:latest
+      volumes:
+        - /usr/local/lib/android/sdk:/runner-android-sdk
     # Allow a cold toolchain/dependency cache; warm builds target 20 minutes.
     timeout-minutes: 90
     strategy:
@@ -93,15 +96,23 @@ jobs:
       LP_NUM_THREADS: 2
       XDG_RUNTIME_DIR: /tmp/isocast-runtime
     steps:
+      - name: Reclaim unused hosted runner Android SDK
+        run: |
+          df -h .
+          # The build shares the host disk. Remove only the mounted SDK's contents.
+          find /runner-android-sdk -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          df -h .
       - name: Arch packaging tools and test dependencies
         if: matrix.distro == 'archlinux'
         run: |
           pacman -Syu --noconfirm --needed base-devel rust git vulkan-swrast ffmpeg python zstd
+          df -h .
       - name: Fedora packaging tools and test dependencies
         if: matrix.distro == 'fedora'
         run: |
           dnf --disablerepo='*cisco*' install -y rpm-build dnf5-plugins git python3 tar gzip zstd patch \
             gstreamer1-plugins-good gstreamer1-plugin-libav mesa-vulkan-drivers noopenh264 ffmpeg-free
+          df -h .
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -124,6 +135,7 @@ jobs:
             dnf --disablerepo='*cisco*' builddep -y packaging/rpm/isocast.spec
           fi
           rustc -Vv
+          df -h .
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: distro-${{ matrix.distro }}
@@ -132,6 +144,7 @@ jobs:
         id: build
         run: |
           export CARGO_TARGET_DIR="$PWD/target"
+          df -h "$GITHUB_WORKSPACE"
           mkdir -p dist "$CARGO_TARGET_DIR"
           if [[ '${{ matrix.distro }}' == archlinux ]]; then
             chown -R builder:builder "$CARGO_TARGET_DIR"
@@ -141,6 +154,7 @@ jobs:
           else
             CARGO_BUILD_JOBS=2 ISOCAST_UI_NO_GALLERY=1 scripts/package-rpm.sh
           fi
+          df -h "$GITHUB_WORKSPACE"
       # Container actions run in fresh sibling containers. Only the workspace
       # is shared; neither build packages nor Cargo are on the runtime PATH.
       - name: Install and record on clean Arch
@@ -160,6 +174,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.distro == 'fedora' }}
         run: |
           # The smoke above intentionally uses the stock stub. Test real encodes below.
+          df -h .
           dnf --enablerepo=fedora-cisco-openh264 swap -y noopenh264 openh264
           dnf --enablerepo=fedora-cisco-openh264 install -y gstreamer1-plugin-openh264
           # RPM Fusion FFmpeg supplies libx264 for generating the unit-test fixtures;
@@ -169,7 +184,12 @@ jobs:
           rpm -q openh264 gstreamer1-plugin-openh264 gstreamer1-plugin-libav ffmpeg
       - name: Linux platform unit tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' && (matrix.distro == 'archlinux' || steps.codecs.outcome == 'success') }}
-        run: cargo test --release --locked -p isocast-platform-linux --lib
+        run: |
+          df -h .
+          cargo test --release --locked -p isocast-platform-linux --lib
+      - name: Final runner disk space
+        if: always()
+        run: df -h .
 
   portable:
     name: portable (${{ matrix.os }})
@@ -336,6 +356,31 @@ jobs:
             cp target/release/isocast "$RUNNER_TEMP/isocast-old"
           fi
           cargo build --release --locked -p isocast-daemon -p isocast-cli
+
+      - name: Daemon queries do not start an engine
+        if: env.MODE == 'full'
+        run: |
+          home=$(mktemp -d)
+          probe() {
+            env -i HOME="$home" PATH="$PATH" XDG_RUNTIME_DIR="$home" \
+              ISOCAST_SOCKET="$home/engine.sock" ISOCAST_LOG_DIR="$home/logs" \
+              timeout -k 1 5 target/release/isocastd "$@"
+          }
+          version=$(probe --build-identity | jq -er .version)
+          for flag in --version -V; do
+            test "$(probe "$flag")" = "isocastd $version"
+          done
+          help=$(probe --help)
+          test "$(probe -h)" = "$help"
+          grep -Fq -- '--exit-on-stdin-close' <<< "$help"
+          for flag in '' --version --exit-on-stdin-close; do
+            code=0
+            probe ${flag:+"$flag"} --bogus >"$RUNNER_TEMP/options.out" 2>"$RUNNER_TEMP/options.err" || code=$?
+            test "$code" = 2
+            test ! -s "$RUNNER_TEMP/options.out"
+            test "$(tail -n +2 "$RUNNER_TEMP/options.err")" = "$help"
+          done
+          rmdir "$home"  # fails even for a single hidden file or socket
 
       # Cisco's OpenH264 binary, as install.sh downloads it (pinned version
       # and SHA-256; Isocast compiles none): the encoder and decoder tests
@@ -1245,6 +1290,12 @@ jobs:
         timeout-minutes: 10
         run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --only win_isolated --only win_machine_profile --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json
 
+      - name: Recover a recording encoder at a same-file IDR
+        timeout-minutes: 10
+        run: |
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_encoder_recovery --engine-env ISOCAST_TEST_RECOVERY_SUITE=1 --codec h264 --timeout 360 --work "$RUNNER_TEMP/encoder-recovery" --keep-failures --report encoder-recovery.json
+          python -c 'import json; r, = json.load(open("encoder-recovery.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
+
       - name: Keep recording recovery evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1252,6 +1303,8 @@ jobs:
           name: windows-recording-recovery
           path: |
             windows-recovery.json
+            encoder-recovery.json
+            ${{ runner.temp }}/encoder-recovery
             ${{ runner.temp }}/windows-recovery
           if-no-files-found: warn
           retention-days: 14

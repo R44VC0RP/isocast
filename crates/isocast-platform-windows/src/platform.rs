@@ -294,6 +294,108 @@ fn budget_id(file: &WriterRequest<'_, Frame>) -> String {
     format!("take{}/{}", file.take, file.output)
 }
 
+/// Admission inputs retained by a recording, never its mux or file handle.
+/// A replacement must pay for every still-open session. It is not a split
+/// and cannot claim credit for handing over an earlier take's output.
+#[derive(Clone)]
+pub(crate) struct RecordingReopen {
+    platform: WindowsPlatform,
+    device: GraphicsDevice,
+    spec: WriterSpec,
+    recording: u64,
+    take: u32,
+    pub output: String,
+    iso: bool,
+    input: PixelFormat,
+}
+
+impl RecordingReopen {
+    pub fn healthy_device(&self) -> Result<()> {
+        unsafe { self.device.raw().GetDeviceRemovedReason() }
+            .context("D3D11 device lost; encoder-only recovery is not safe")
+    }
+    pub fn open(&self, lease: crate::nvenc::RecoveryAdmission) -> Result<WindowsVideoEncoder> {
+        self.healthy_device()?;
+        let admission = lease.into_admission();
+        admission
+            .settled()
+            .context("cannot re-admit beside unsettled or quarantined encoder resources")?;
+        let file = WriterRequest {
+            spec: &self.spec,
+            recording: self.recording,
+            take: self.take,
+            output: self.output.clone(),
+            iso: self.iso,
+            input: None,
+        };
+        let figures = budget_figures(
+            &self.device,
+            &admission,
+            (self.recording, 0),
+            std::slice::from_ref(&file),
+            &[self.input],
+            &budget_cache_path(),
+        )?;
+        let (preset, allow_mf_hardware) = match figures {
+            Figures::Unplanned(_) => (None, true),
+            Figures::Planned(f) => {
+                let id = budget_id(&file);
+                let plan = f.profile.plan_accounted(
+                    &self.device,
+                    &admission,
+                    &f.active,
+                    (self.recording, 0),
+                    &[(
+                        NvencBudgetOutput {
+                            id: id.clone(),
+                            video: self.spec.video.clone(),
+                            iso: self.iso,
+                        },
+                        self.output.clone(),
+                    )],
+                    false,
+                )?;
+                (
+                    Some(
+                        *plan
+                            .presets
+                            .get(&id)
+                            .context("replacement missing from NVENC budget")?,
+                    ),
+                    f.active.is_empty(),
+                )
+            }
+        };
+        let video = &self.spec.video;
+        let mut encoder = WindowsVideoEncoder::preflight(
+            &self.device,
+            video,
+            self.input,
+            preset,
+            allow_mf_hardware,
+        )?;
+        if encoder.nvenc_preset().is_none() {
+            admission.settled()?;
+        }
+        encoder.account(
+            &admission,
+            &self.device,
+            NvencOwner {
+                recording: self.recording,
+                take: self.take,
+                output: self.output.clone(),
+                size: (video.width, video.height, video.fps),
+                input: self.input,
+                planned: preset.is_some() && encoder.nvenc_preset().is_some(),
+            },
+        );
+        if !self.iso {
+            encoder.scale_program(&self.platform, (video.width, video.height));
+        }
+        Ok(encoder)
+    }
+}
+
 impl WindowsPlatform {
     /// One encoder outside a recording batch (a single writer or a live
     /// encoder), serialized with every other open. While planned work is
@@ -309,7 +411,7 @@ impl WindowsPlatform {
         legacy: impl FnOnce(&GraphicsDevice) -> Result<WindowsVideoEncoder>,
     ) -> Result<WindowsVideoEncoder> {
         let device = self.graphics()?;
-        let admission = NvencAdmission::begin();
+        let admission = NvencAdmission::begin()?;
         if !admission.planned_active() {
             let mut encoder = legacy(&device)?;
             encoder.account(&admission, &device, owner);
@@ -742,7 +844,7 @@ impl Platform for WindowsPlatform {
         }
         let device = self.graphics()?;
         // Held until every file is open and accounted, or released.
-        let admission = NvencAdmission::begin();
+        let admission = NvencAdmission::begin()?;
         let cache = budget_cache_path();
         let mut report = EncoderAdmission {
             mode: "unplanned",
@@ -913,9 +1015,21 @@ impl Platform for WindowsPlatform {
             report.outputs.push(output);
         }
         let mut writers = Vec::with_capacity(files.len());
-        for (file, encoder) in files.iter().zip(encoders) {
+        for ((file, encoder), input) in files.iter().zip(encoders).zip(formats) {
             match VideoWriter::from_encoder(file.spec, encoder) {
-                Ok(writer) => writers.push(writer),
+                Ok(mut writer) => {
+                    writer.allow_reopen(RecordingReopen {
+                        platform: self.clone(),
+                        device: device.clone(),
+                        spec: file.spec.clone(),
+                        recording: file.recording,
+                        take: file.take,
+                        output: file.output.clone(),
+                        iso: file.iso,
+                        input,
+                    });
+                    writers.push(writer);
+                }
                 Err(err) => {
                     // Cancelling drops each encoder, then its reservation,
                     // before the admission lock is released.

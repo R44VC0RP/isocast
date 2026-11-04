@@ -54,6 +54,24 @@ pub struct MfEncoder {
 }
 
 impl MfEncoder {
+    /// The file has already sealed the valid prefix and abandoned its input
+    /// FIFO. Release the transform via its normal flush/shutdown on its own
+    /// apartment; do not try a second EOS/drain for abandoned samples.
+    pub(crate) fn retire_failed(&self) {
+        if let Err(error) = self.call(|s| {
+            s.opened = false;
+            Ok(())
+        }) {
+            isocast_diagnostics::diagnostic!("warn"; "MF failed-session retirement: {error:#}");
+        }
+    }
+    #[cfg(debug_assertions)]
+    pub(crate) fn inject_failure(&self, output: bool) -> Result<()> {
+        self.call(move |s| {
+            s.inject_output = Some(output);
+            Ok(())
+        })
+    }
     pub fn new(device: &GraphicsDevice, spec: &LiveVideoSpec, mode: MfMode) -> Result<Self> {
         Self::with_format(device, spec, mode, VideoEncoding::H264, PixelFormat::Bgra8)
     }
@@ -452,6 +470,8 @@ struct Pending {
 }
 
 struct Session {
+    #[cfg(debug_assertions)]
+    inject_output: Option<bool>,
     activation: Activation,
     transform: IMFTransform,
     codec: ICodecAPI,
@@ -766,6 +786,8 @@ impl Session {
                 last_pts: None,
                 counts: EncodeStats::default(),
                 failed: None,
+                #[cfg(debug_assertions)]
+                inject_output: None,
             };
             session.sequence_header()?;
             session
@@ -1011,6 +1033,11 @@ impl Session {
                     return Err(error.into());
                 }
             }
+            #[cfg(debug_assertions)]
+            if self.inject_output == Some(false) {
+                self.inject_output = None;
+                bail!("injected MF ProcessInput failure before native submission");
+            }
             match self.transform.ProcessInput(0, &sample, 0) {
                 Ok(()) => {}
                 Err(error) if error.code() == MF_E_NOTACCEPTING => return Ok(false),
@@ -1035,6 +1062,11 @@ impl Session {
     fn output(&mut self) -> Result<Option<EncodedVideo>> {
         if self.info.asynchronous && self.have_output == 0 {
             return Ok(None);
+        }
+        #[cfg(debug_assertions)]
+        if self.inject_output == Some(true) && !self.pending.is_empty() {
+            self.inject_output = None;
+            bail!("injected MF ProcessOutput failure with accepted input pending");
         }
         let supplied = self.output_info.dwFlags
             & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
