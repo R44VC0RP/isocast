@@ -194,6 +194,22 @@ case "${1:-}" in
   ;;
 esac
 
+# The tarball doesn't have a package manager to resolve dependencies. Check
+# linked libraries (including the browser helper), then those the graphics
+# backend opens on demand. Warn rather than blocking a headless installation.
+for exe in isocast isocastd isocast-ui isocast-browser; do
+  missing=$(LC_ALL=C ldd "$here/$exe" 2>/dev/null | awk '/=> not found/{print $1}')
+  [ -z "$missing" ] || printf 'install.sh: %s needs these system libraries:\n%s\n' "$exe" "$missing" >&2
+done
+ldconfig=$(command -v ldconfig || echo /sbin/ldconfig)
+if libs=$("$ldconfig" -p 2>/dev/null); then
+  for so in libxkbcommon-x11.so.0 libxkbcommon.so.0 libvulkan.so.1 libEGL.so.1 \
+    libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1 libX11.so.6 \
+    libX11-xcb.so.1 libXcursor.so.1 libXrandr.so.2 libXi.so.6; do
+    case " $libs" in *"$so "*) ;; *) echo "install.sh: $so missing from the loader cache; install it with your package manager (see README.txt)" >&2 ;; esac
+  done
+fi
+
 mkdir -p "$lib" "$bin" "$apps"
 # The installed copy, run again, has nothing to copy (and copying a file
 # onto itself fails): it refreshes the links and OpenH264.

@@ -47,8 +47,8 @@ What it needs (install with your package manager)
     Debian/Ubuntu: libvulkan1 mesa-vulkan-drivers
     Fedora:        vulkan-loader mesa-vulkan-drivers
     Arch:          vulkan-icd-loader vulkan-radeon / vulkan-intel / nvidia-utils
-- Fonts and keyboard: fontconfig, freetype, libxkbcommon (installed on any
-  desktop).
+- Fonts and keyboard: fontconfig, freetype, libxkbcommon and its X11 library
+  (libxkbcommon-x11-0 on Debian/Ubuntu; libxkbcommon-x11 on Arch/Fedora).
 - GStreamer 1.x (libgstreamer1.0-0, gstreamer1.0-plugins-base), present on
   any desktop: the engine needs it to start. Media file sources play what
   your distribution's GStreamer plugins decode (VA-API hardware decoders

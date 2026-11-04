@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-24.04
     container: ${{ matrix.distro }}:latest
     # Allow a cold toolchain/dependency cache; warm builds target 20 minutes.
-    timeout-minutes: 65
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -93,37 +93,68 @@ jobs:
       LP_NUM_THREADS: 2
       XDG_RUNTIME_DIR: /tmp/isocast-runtime
     steps:
-      - name: Arch build, runtime and test packages
+      - name: Arch packaging tools and test dependencies
         if: matrix.distro == 'archlinux'
         run: |
-          pacman -Syu --noconfirm --needed base-devel rust cmake nasm clang git python zstd \
-            openssl fontconfig freetype2 libxkbcommon wayland libx11 libxcursor libxrandr libxi libglvnd \
-            libpipewire gstreamer gst-plugins-base gst-plugins-good gst-libav \
-            vulkan-icd-loader vulkan-swrast openh264 ffmpeg
-      - name: Fedora build, runtime and test packages
+          pacman -Syu --noconfirm --needed base-devel rust git vulkan-swrast ffmpeg python zstd
+      - name: Fedora packaging tools and test dependencies
         if: matrix.distro == 'fedora'
         run: |
-          dnf --disablerepo='*cisco*' install -y gcc gcc-c++ make rust cargo cmake nasm clang clang-devel \
-            pkgconf-pkg-config git python3 tar gzip zstd patch perl-core openssl-devel fontconfig-devel \
-            freetype-devel libxkbcommon-devel wayland-devel libX11-devel libXcursor-devel libXrandr-devel \
-            libXi-devel libglvnd-devel pipewire-devel gstreamer1-devel gstreamer1-plugins-base-devel \
-            gstreamer1-plugins-good gstreamer1-plugin-libav vulkan-loader mesa-vulkan-drivers noopenh264 ffmpeg-free
+          dnf --disablerepo='*cisco*' install -y rpm-build dnf5-plugins git python3 tar gzip zstd patch \
+            gstreamer1-plugins-good gstreamer1-plugin-libav mesa-vulkan-drivers noopenh264 ffmpeg-free
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Prepare headless runtime
+      - name: Resolve build dependencies from the package recipe
         run: |
           mkdir -m 700 "$XDG_RUNTIME_DIR"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [[ '${{ matrix.distro }}' == archlinux ]]; then
+            useradd -m builder
+            cd /home/builder
+            cp "$GITHUB_WORKSPACE/packaging/arch/PKGBUILD" .
+            # Seed makepkg's source cache from the exact candidate, not upstream HEAD.
+            git clone --mirror "$GITHUB_WORKSPACE" isocast
+            git -C isocast remote set-url origin https://github.com/anomalyco/isocast.git
+            chown -R builder:builder /home/builder
+            runuser -u builder -- makepkg --printsrcinfo > .SRCINFO
+            mapfile -t deps < <(awk '$1 == "depends" || $1 == "makedepends" {print $3}' .SRCINFO)
+            pacman -S --needed --noconfirm "${deps[@]}"
+          else
+            dnf --disablerepo='*cisco*' builddep -y packaging/rpm/isocast.spec
+          fi
           rustc -Vv
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: distro-${{ matrix.distro }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Build daemon, CLI and desktop app
+      - name: Build native package
         id: build
-        run: cargo build --locked --bin isocastd --bin isocast --bin isocast-ui
-      - name: Doctor and software recording
-        run: python3 scripts/linux-distro-smoke.py ${{ matrix.distro }}
+        run: |
+          export CARGO_TARGET_DIR="$PWD/target"
+          mkdir -p dist "$CARGO_TARGET_DIR"
+          if [[ '${{ matrix.distro }}' == archlinux ]]; then
+            chown -R builder:builder "$CARGO_TARGET_DIR"
+            cd /home/builder
+            runuser -u builder -- makepkg --holdver --noconfirm
+            cp isocast-git-*.pkg.tar.zst "$GITHUB_WORKSPACE/dist/"
+          else
+            CARGO_BUILD_JOBS=2 ISOCAST_UI_NO_GALLERY=1 scripts/package-rpm.sh
+          fi
+      # Container actions run in fresh sibling containers. Only the workspace
+      # is shared; neither build packages nor Cargo are on the runtime PATH.
+      - name: Install and record on clean Arch
+        if: matrix.distro == 'archlinux'
+        uses: docker://archlinux:latest
+        with:
+          entrypoint: bash
+          args: scripts/linux-distro-installed.sh archlinux
+      - name: Install and record on clean Fedora
+        if: matrix.distro == 'fedora'
+        uses: docker://fedora:latest
+        with:
+          entrypoint: bash
+          args: scripts/linux-distro-installed.sh fedora
       - name: Fedora Workstation codecs and fixture tools
         id: codecs
         if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.distro == 'fedora' }}
@@ -138,7 +169,7 @@ jobs:
           rpm -q openh264 gstreamer1-plugin-openh264 gstreamer1-plugin-libav ffmpeg
       - name: Linux platform unit tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' && (matrix.distro == 'archlinux' || steps.codecs.outcome == 'success') }}
-        run: cargo test --locked -p isocast-platform-linux --lib
+        run: cargo test --release --locked -p isocast-platform-linux --lib
 
   portable:
     name: portable (${{ matrix.os }})
