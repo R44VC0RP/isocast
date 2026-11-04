@@ -4299,6 +4299,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "wgpu",
+ "x11rb",
  "xaac-rs",
  "zbus",
 ]

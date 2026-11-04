@@ -319,7 +319,18 @@ fn attach_console() {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod x11_pick;
+#[cfg(target_os = "linux")]
+#[path = "../../isocast-platform-linux/src/x11_session.rs"]
+mod x11_session;
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() && x11_session::x11_session() {
+        // SAFETY: before logging, Slint, or any application threads start.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
     #[cfg(windows)]
     attach_console();
     // A Windows VM can have only Microsoft's CPU/WARP adapter, and a Linux
@@ -344,6 +355,16 @@ fn main() {
         }
     }
     let _logs = isocast_diagnostics::init("isocast-ui", true);
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some("--x11-pick") {
+        exit(match x11_pick::run() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("X11 picker: {error:#}");
+                1
+            }
+        });
+    }
     // Interim, until the Settings → Remote pairing screen (R2 UI lane):
     // pair this app's own identity (its key is the app's, in the Keychain or
     // Credential Manager, which the CLI's pairing can't hand it) with an

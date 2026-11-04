@@ -2938,6 +2938,8 @@ pub struct SourceStatus {
 pub enum SourceRun {
     Opening,
     Running,
+    /// Still open, holding its last picture until capture resumes.
+    Paused,
     /// It couldn't open, or its device went away; retried when the setup
     /// next changes.
     Failed,

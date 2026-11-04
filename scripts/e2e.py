@@ -4126,8 +4126,9 @@ def oracle_selftest(work):
         caught = str(exc)
         require("expected a:0, got a:1" in caught, f"the late copy failed for another reason: {caught}")
     rules = oracle_rules_selftest(work)
+    pattern = pattern_selftest(work)
     shutil.rmtree(work)
-    return {"encoders": encoders, "cases": results, "caught": caught, "rules": rules}
+    return {"encoders": encoders, "cases": results, "caught": caught, "rules": rules, "pattern": pattern}
 
 
 # ---------------------------------------------------------------------------
@@ -4144,6 +4145,7 @@ def oracle_selftest(work):
 
 PATTERN_TAGS = {"bars": 11, "bars2": 12}
 PATTERN_NAMES = {v: k for k, v in PATTERN_TAGS.items()}
+PATTERN_LUMA = (1.0, 1.0 - 0.0722, 1.0 - 0.2126, 0.7152, 0.2848, 0.2126, 0.0722, 0.0)
 
 
 def pattern_period(fps):
@@ -4154,28 +4156,55 @@ def pattern_shift(n, width, fps):
     return n * width // pattern_period(fps) % width
 
 
-def pattern_samples(path, specs, src_w, src_h):
+def pattern_sampled_row(n, width, fps, sampled_width):
+    """Normalized [0..1] BT.709 bar luma across `sampled_width` output pixels
+    under the compositor's 1-tap linear sampling."""
+    shift = pattern_shift(n, width, fps)
+    out = []
+    for p in range(sampled_width):
+        tc = max(0.0, min(width - 1.0, (p + 0.5) * width / sampled_width - 0.5))
+        i0 = int(tc)
+        i1, f = min(width - 1, i0 + 1), tc - i0
+        v0 = PATTERN_LUMA[((i0 + shift) % width) * 8 // width]
+        v1 = PATTERN_LUMA[((i1 + shift) % width) * 8 // width]
+        out.append(v0 * (1.0 - f) + v1 * f)
+    return out
+
+
+def pattern_samples(path, specs, src_w, src_h, period=None):
     """Per decoded picture and per spec: (pts, {name: (bars row, label cell
     level, band level)}). A spec is (name, (x, y, w, h) where the source's
     picture sits in the output, in output pixels, the fraction of the
     source's height the row is read at, (x0, x1) the band's share of the
-    source's width): the row is scaled back to the source's width."""
+    source's width): the row is kept at its native width below `period`, else
+    scaled back to the source's width."""
     s = max(src_h // 120, 1)
-    graph, outs = [f"[0:v]format=gray,split={3 * len(specs)}" + "".join(f"[i{k}]" for k in range(3 * len(specs))) + ";"], []
+    n = len(specs)
+    # Read bar positions from the luma plane directly (`extractplanes=y`),
+    # averaged over a clean vertical strip: `format=gray` converts 4:2:0
+    # YCbCr through BT.601 RGB, mixing half-resolution left-sited chroma and
+    # adjacent-layer border chroma into the bar edges (#266).
+    graph, outs, row_widths = [(f"[0:v]split=2[vy][vg];"
+                                f"[vy]extractplanes=y,split={n}" + "".join(f"[y{k}]" for k in range(n)) + ";"
+                                f"[vg]format=gray,split={2 * n}" + "".join(f"[g{k}]" for k in range(2 * n)) + ";")], [], []
     for k, (name, (x, y, w, h), row, band) in enumerate(specs):
         sx, sy = w / src_w, h / src_h
-        ry = int(y + row * h)
-        graph.append(f"[i{3 * k}]crop={max(1, int(w))}:1:{int(x)}:{ry},scale={src_w}:1:flags=bicubic[r{k}];")
+        rw, rh = max(1, round(w)), max(1, round(0.10 * h))
+        ry = round(y + row * h - rh / 2)
+        native = period is not None and rw < period and rw <= src_w
+        row_widths.append(rw if native else src_w)
+        tail = f"pad={src_w}:1:0:0" if native else f"scale={src_w}:1:flags=bilinear"
+        graph.append(f"[y{k}]crop={rw}:{rh}:{round(x)}:{ry},scale={rw}:1:flags=area,{tail}[r{k}];")
         # Project both edges of the fifth glyph: in the 180p square inset
         # it is only 1.4 x 2 pixels. Flooring the origin and size separately
         # can leave just a black pixel above the '2'. Read the actual mean;
         # resizing a tiny crop to a single row can skip lit strokes.
         left, right = (round(x + col * s * sx) for col in (30, 35))
         top, bottom = (round(y + line * s * sy) for line in (6, 13))
-        graph.append(f"[i{3 * k + 1}]crop={max(1, right-left)}:{max(1, bottom-top)}:{left}:{top},"
+        graph.append(f"[g{2 * k}]crop={max(1, right-left)}:{max(1, bottom-top)}:{left}:{top},"
                      f"geq=lum='psum(W-1,H-1)/(W*H)',scale={src_w}:1:flags=neighbor[c{k}];")
         bx0, bx1 = band
-        graph.append(f"[i{3 * k + 2}]crop={max(1, int(w * (bx1 - bx0)))}:{max(1, int(h / 4))}:"
+        graph.append(f"[g{2 * k + 1}]crop={max(1, int(w * (bx1 - bx0)))}:{max(1, int(h / 4))}:"
                      f"{int(x + w * bx0)}:{int(y + h * 0.75)},scale={src_w}:1:flags=area[b{k}];")
         outs += [f"[r{k}]", f"[c{k}]", f"[b{k}]"]
     graph.append("".join(outs) + f"vstack={len(outs)}[out]")
@@ -4190,7 +4219,7 @@ def pattern_samples(path, specs, src_w, src_h):
         row = {}
         for k, (name, *_rest) in enumerate(specs):
             base = 3 * k * src_w
-            bars = picture[base:base + src_w]
+            bars = picture[base:base + row_widths[k]]
             cell = picture[base + src_w]
             band = sum(picture[base + 2 * src_w:base + 3 * src_w]) / src_w
             row[name] = (bars, cell, band)
@@ -4198,8 +4227,43 @@ def pattern_samples(path, specs, src_w, src_h):
     return rows
 
 
-def pattern_value(bars, cell, width, fps, sampled_width=None):
+def pattern_value(bars, cell, width, fps, sampled_width=None, leads=None):
     """("id", tag, frame mod 4 s) for a sampled source, or ("garbled",)."""
+    period = pattern_period(fps)
+    if sampled_width is not None and sampled_width < period:
+        # Less than one output pixel per frame of scroll: 1-tap linear
+        # downscaling skips source texels, so two adjacent frames can leave
+        # the black/white and green/magenta edges unchanged while other bar
+        # edges advance. Match this picture's native interior output pixels
+        # directly against the resampled luma profile of nearby candidates.
+        sw = round(sampled_width)
+        if sw < 8:
+            return ("garbled",)
+        px = bars if len(bars) == sw else bytes(bars[round((p + 0.5) * len(bars) / sw - 0.5)] for p in range(sw))
+        bits = px.translate(BAR_LEVELS)
+        rise, fall = bits.find(b"01"), bits.find(b"10")
+        if 1 < rise < sw - 3:
+            coarse = (sw - rise - 1) % sw
+        elif 1 < fall < sw - 3:
+            coarse = (sw / 2 - fall - 1) % sw
+        else:
+            return ("garbled",)
+        guess = round(coarse * period / sw)
+        interior = sorted(px[2:sw - 2])
+        plateau = max(3, sw // 12)
+        lo, hi = statistics.median(interior[:plateau]), statistics.median(interior[-plateau:])
+        if hi - lo < 64:
+            return ("garbled",)
+        obs = [(v - lo) / (hi - lo) for v in px[2:sw - 2]]
+        scored = sorted((sum(abs(a - b) for a, b in zip(
+            obs, pattern_sampled_row(cand, width, fps, sw)[2:sw - 2])) / len(obs), cand)
+            for cand in {n % period for n in range(guess - 3, guess + 4)})
+        best_dist, best = scored[0]
+        if best_dist > 0.08:
+            return ("garbled",)
+        if leads is not None and len(scored) > 1:
+            leads.append(scored[1][0] - best_dist)
+        return ("id", PATTERN_TAGS["bars2" if cell > 50 else "bars"], best)
     bits = bars.translate(BAR_LEVELS)
     rise, fall = bits.find(b"01"), bits.find(b"10")
     if 2 < rise < width - 4:
@@ -4208,24 +4272,6 @@ def pattern_value(bars, cell, width, fps, sampled_width=None):
         shift = (width // 2 - fall - 1) % width
     else:
         return ("garbled",)
-    period = pattern_period(fps)
-    if sampled_width is not None and sampled_width < period:
-        # Less than one output pixel per frame of scroll. Two adjacent
-        # frames can put the black/white edge on the same pixel; the other
-        # seven edges land at different pixel fractions. Measure how much
-        # of each side's luma is in a small window around the coarse edge.
-        radius = width // 32
-        corrections = []
-        for stripe in range(8):
-            edge = ((stripe * width + 7) // 8 - shift) % width
-            if radius and radius <= edge <= width - radius:
-                window = bars[edge-radius:edge+radius]
-                left, right = window[0], window[-1]
-                if right != left:
-                    corrections.append((sum(window) - radius * (left + right)) / (right - left))
-        if not corrections:
-            return ("garbled",)
-        shift = (shift + statistics.mean(corrections)) % width
     guess = round(shift * period / width)
     best = min(range(guess - 2, guess + 3), key=lambda n: min(abs(pattern_shift(n % period, width, fps) - shift),
                                                              width - abs(pattern_shift(n % period, width, fps) - shift)))
@@ -4235,16 +4281,148 @@ def pattern_value(bars, cell, width, fps, sampled_width=None):
     return ("id", PATTERN_TAGS["bars2" if cell > 50 else "bars"], best % period)
 
 
-def pattern_rows(path, specs, src, fps):
+def pattern_rows(path, specs, src, fps, leads=None):
     """[(slot, pts, {name: ("id", tag, frame) or ("garbled",)})] of `path`,
     the test pattern read at `specs` (see pattern_samples)."""
     rows = []
     widths = {name: rect[2] for name, rect, _, _ in specs}
-    for t, sampled in pattern_samples(path, specs, *src):
+    for t, sampled in pattern_samples(path, specs, *src, period=pattern_period(fps)):
         slot = round(t * fps)
         require(abs(t * fps - slot) < 0.02, f"{Path(path).name}: a picture at {t:.5f} s is off the frame grid")
-        rows.append((slot, t, {n: pattern_value(b, c, src[0], fps, widths[n]) for n, (b, c, _) in sampled.items()}))
+        rows.append((slot, t, {n: pattern_value(b, c, src[0], fps, widths[n], leads=leads)
+                               for n, (b, c, _) in sampled.items()}))
     return rows
+
+
+def pattern_selftest(work):
+    """The 180p30 letterboxed square test-pattern oracle (#266): 90 px inset
+    over a 120-frame scroll, 1-tap linear sampling and left-sited 4:2:0 NV12
+    through H.264, plus source-substitution and one-tick-late controls."""
+    if "libx264" not in subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout:
+        return "skipped: no libx264"
+    bars_bgra = ((191, 191, 191), (0, 191, 191), (191, 191, 0), (0, 191, 0),
+                 (191, 0, 191), (0, 0, 191), (191, 0, 0), (0, 0, 0))
+    glyph_2 = (0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F)
+    src_w, src_h, out_side, fps, period = 320, 180, 180, 30, 120
+
+    def source_frame(frame, is_bars2):
+        shift = pattern_shift(frame, src_w, fps)
+        row = bytearray()
+        for x in range(src_w):
+            b, g, r = bars_bgra[((x + shift) % src_w) * 8 // src_w]
+            row.extend((b, g, r, 255))
+        buf = bytearray(bytes(row) * src_h)
+        for y in range(4, 33):
+            for x in range(4, 105):
+                buf[(y * src_w + x) * 4:(y * src_w + x + 1) * 4] = b"\x00\x00\x00\xff"
+        if is_bars2:
+            for r_idx, bits in enumerate(glyph_2):
+                for col in range(5):
+                    if bits & (0b10000 >> col):
+                        px = ((6 + r_idx) * src_w + 30 + col) * 4
+                        buf[px:px + 4] = b"\xff\xff\xff\xff"
+        return buf
+
+    def compose_nv12(bars_frame, inset_frame, inset_is_bars2):
+        full = source_frame(bars_frame, False)
+        inset = source_frame(inset_frame, inset_is_bars2)
+        bgra = bytearray(out_side * out_side * 4)
+
+        def blit(src_buf, dx, dy, dw, dh):
+            for py in range(dh):
+                ty = max(0.0, min(src_h - 1.0, (py + 0.5) * src_h / dh - 0.5))
+                y0 = int(ty)
+                y1, fy = min(src_h - 1, y0 + 1), ty - y0
+                for px in range(dw):
+                    tx = max(0.0, min(src_w - 1.0, (px + 0.5) * src_w / dw - 0.5))
+                    x0 = int(tx)
+                    x1, fx = min(src_w - 1, x0 + 1), tx - x0
+                    p00, p10 = (y0 * src_w + x0) * 4, (y0 * src_w + x1) * 4
+                    p01, p11 = (y1 * src_w + x0) * 4, (y1 * src_w + x1) * 4
+                    dst = ((dy + py) * out_side + dx + px) * 4
+                    for c in range(3):
+                        top = src_buf[p00 + c] * (1 - fx) + src_buf[p10 + c] * fx
+                        bot = src_buf[p01 + c] * (1 - fx) + src_buf[p11 + c] * fx
+                        bgra[dst + c] = round(top * (1 - fy) + bot * fy)
+                    bgra[dst + 3] = 255
+
+        blit(full, 0, 39, 180, 102)
+        blit(inset, 90, 90, 90, 51)
+        luma, chroma = bytearray(out_side * out_side), bytearray(out_side * out_side // 2)
+        for idx in range(out_side * out_side):
+            b, g, r = bgra[idx * 4], bgra[idx * 4 + 1], bgra[idx * 4 + 2]
+            luma[idx] = max(16, min(235, 16 + ((11966 * r + 40254 * g + 4064 * b + 32768) >> 16)))
+        for y in range(0, out_side, 2):
+            for x in range(0, out_side, 2):
+                rgb = [0, 0, 0]
+                for row_y in (y, y + 1):
+                    for col_x, wt in ((max(0, x - 1), 1), (x, 2), (x + 1, 1)):
+                        at = (row_y * out_side + col_x) * 4
+                        rgb[0] += bgra[at + 2] * wt
+                        rgb[1] += bgra[at + 1] * wt
+                        rgb[2] += bgra[at] * wt
+                r, g, b = rgb
+                at = (y // 2) * out_side + x
+                chroma[at] = max(16, min(240, 128 + ((-6596 * r - 22189 * g + 28784 * b + 262144) >> 19)))
+                chroma[at + 1] = max(16, min(240, 128 + ((28784 * r - 26145 * g - 2639 * b + 262144) >> 19)))
+        return bytes(luma) + bytes(chroma)
+
+    def encode_clip(path, raw_nv12):
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "nv12", "-colorspace", "bt709",
+                        "-color_range", "tv", "-s", f"{out_side}x{out_side}", "-r", str(fps), "-i", "-",
+                        "-c:v", "libx264", "-crf", "26", "-colorspace", "bt709", "-color_range", "tv", str(path)],
+                       input=raw_nv12, check=True, timeout=120)
+
+    specs = pattern_specs([("bars", (0, 0, 1, 1)), ("bars2", (0.5, 0.5, 0.5, 0.5))],
+                          out_side, out_side, fit_rect((src_w, src_h), (out_side, out_side)))
+    expected = lambda slot, name: ("id", PATTERN_TAGS[name], slot % period)
+    good_frames = [compose_nv12(n, n, True) for n in range(period)]
+    good = work / "square-good.mov"
+    encode_clip(good, b"".join(good_frames))
+    evidence, leads = {}, []
+    oracle_check_rows("selftest square", good, pattern_rows(good, specs, (src_w, src_h), fps, leads=leads), expected, work, evidence)
+    require(len(leads) == period, f"expected {period} sub-pixel lead measurements, got {len(leads)}")
+    evidence["oracle"][0]["min_lead"] = round(min(leads), 6)
+
+    # Negative control 1: holding only the 90 px inset at frame 69 on slot 70
+    # (where stripes 0 and 4 sit on unsampled blind-spot texels) must fail.
+    held_frames = list(good_frames)
+    held_frames[70] = compose_nv12(70, 69, True)
+    held = work / "square-held-70.mov"
+    encode_clip(held, b"".join(held_frames))
+    try:
+        oracle_check_rows("selftest square held", held, pattern_rows(held, specs, (src_w, src_h), fps), expected, work, {})
+        raise Failure("square pattern oracle passed a one-frame-late 90 px inset at slot 70")
+    except Failure as exc:
+        require("expected bars2:70, got bars2:69" in str(exc) and "1 of 240 checks differ" in str(exc),
+                f"square held inset failed unexpectedly: {exc}")
+
+    # Negative control 2: bars2 one tick late on every picture across all 120
+    # phases must catch all 120 phases while keeping bars exact.
+    all_late = work / "square-all-late.mov"
+    encode_clip(all_late, b"".join(compose_nv12(n, (n - 1) % period, True) for n in range(period)))
+    late_rows = pattern_rows(all_late, specs, (src_w, src_h), fps)
+    require(len(late_rows) == period and all(
+        r["bars"] == ("id", PATTERN_TAGS["bars"], n) and r["bars2"] != ("id", PATTERN_TAGS["bars2"], n)
+        for n, (_, _, r) in enumerate(late_rows)),
+        "square all-late control missed a phase or misread bars")
+    try:
+        oracle_check_rows("selftest square all-late", all_late, late_rows, expected, work, {})
+        raise Failure("square pattern oracle passed an all-late 90 px inset")
+    except Failure as exc:
+        require("expected bars2:0, got bars2:119" in str(exc) and "120 of 240 checks differ" in str(exc),
+                f"square all-late inset failed unexpectedly: {exc}")
+
+    # Negative control 3: substituting BARS into the 90 px inset must fail every picture.
+    wrong_src = work / "square-wrong-source.mov"
+    encode_clip(wrong_src, b"".join(compose_nv12(n, n, False) for n in range(period)))
+    try:
+        oracle_check_rows("selftest square source", wrong_src, pattern_rows(wrong_src, specs, (src_w, src_h), fps), expected, work, {})
+        raise Failure("square pattern oracle passed BARS in the BARS2 inset")
+    except Failure as exc:
+        require("expected bars2:0, got bars:0" in str(exc) and "120 of 240 checks differ" in str(exc),
+                f"square substituted source failed unexpectedly: {exc}")
+    return evidence["oracle"][0]
 
 
 def pattern_fit(rows, name, period):
@@ -4308,10 +4486,20 @@ def check_pattern_take(e, path, manifest, cfg, layout, evidence, t0=None, label=
         file, f = manifest_file(path, manifest, source)
         specs = pattern_specs(items, f["width"], f["height"], place)
         offset = round((f.get("start_offset_seconds") or 0) * fps)
-        rows = pattern_rows(file, specs, (w, h), fps)
+        leads = []
+        rows = pattern_rows(file, specs, (w, h), fps, leads=leads)
+        if leads:
+            lead_min = round(min(leads), 6)
+            prev = evidence.get("min_lead")
+            evidence["min_lead"] = lead_min if prev is None else min(prev, lead_min)
         if t0 is None:
             t0 = (pattern_fit(rows, "bars", period) - offset) % period
-        checked = oracle_check_rows(f"{label} {source}", file, rows, expected(offset), e.root, evidence)
+        before_len = len(evidence.get("oracle", ()))
+        try:
+            checked = oracle_check_rows(f"{label} {source}", file, rows, expected(offset), e.root, evidence)
+        finally:
+            if leads and len(evidence.get("oracle", ())) > before_len:
+                evidence["oracle"][-1]["min_lead"] = lead_min
         if f.get("audio") and source in ("program", "bars", "bars2") and not pauses:
             # The tone beeps with every flash of the band (the bottom quarter
             # of the program and ISO pictures; a pause breaks the cadence).

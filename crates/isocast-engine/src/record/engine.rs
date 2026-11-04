@@ -2382,7 +2382,9 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
                         )));
                     }
                 }
-                Some(live) if live.definition == definition && live.run == SourceRun::Running => {}
+                Some(live)
+                    if live.definition == definition
+                        && matches!(live.run, SourceRun::Running | SourceRun::Paused) => {}
                 // Only `screen_pick` (which reopens it) can open it now.
                 Some(live) if live.definition == definition && live.needs_pick => {}
                 Some(live) if live.definition == definition => {
@@ -3842,7 +3844,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                         channels: None,
                     });
                 }
-                if live.run != SourceRun::Running {
+                if !matches!(live.run, SourceRun::Running | SourceRun::Paused) {
                     continue;
                 }
                 let stopped = live
@@ -3874,6 +3876,16 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                     live.run = SourceRun::Failed;
                     live.error = Some(format!("the capture stopped: {reason}"));
                     events.push(live.status(id));
+                } else {
+                    let run = if live.opened.as_ref().is_some_and(|o| o.paused()) {
+                        SourceRun::Paused
+                    } else {
+                        SourceRun::Running
+                    };
+                    if live.run != run {
+                        live.run = run;
+                        events.push(live.status(id));
+                    }
                 }
             }
         }
@@ -4395,7 +4407,9 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     Some(live) if reopening(id, live) => {
                         format!("could not start source {id:?}: its new settings are still opening")
                     }
-                    Some(live) if live.run == SourceRun::Running => continue,
+                    Some(live) if matches!(live.run, SourceRun::Running | SourceRun::Paused) => {
+                        continue;
+                    }
                     Some(live) => live
                         .error
                         .clone()

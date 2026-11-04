@@ -23,7 +23,7 @@ use isocast_engine::{CaptureFormat, NotChosen, PickedScreen, ScreenTarget, Video
 use isocast_protocol::devices::Display;
 use serde::{Deserialize, Serialize};
 
-use crate::{frames::Frame, pipewire_video};
+use crate::{frames::Frame, pipewire_video, x11, x11_session::x11_session};
 
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -39,6 +39,10 @@ const MAX_SAVED: usize = 128;
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
     token: Option<String>,
+    // X11 picks are live-only. Keep any portal grant for a portal session,
+    // but never use that unrelated grant to reopen this choice on X11.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    x11: bool,
     width: u32,
     height: u32,
 }
@@ -67,13 +71,16 @@ fn load(path: &Path) -> Result<BTreeMap<String, Saved>> {
         .with_context(|| format!("invalid Linux capture settings: {}", path.display()))
 }
 
-fn save(key: &str, saved: Saved) -> Result<()> {
+fn save(key: &str, mut saved: Saved) -> Result<()> {
     let _lock = SETTINGS_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("capture settings lock poisoned"))?;
     let path = settings();
     let mut all = load(&path)?;
     check_room(&all, key)?;
+    if saved.x11 {
+        saved.token = all.remove(key).and_then(|old| old.token);
+    }
     all.insert(key.to_owned(), saved);
     write(&path, &all)
 }
@@ -161,7 +168,7 @@ pub fn displays() -> Result<Vec<Display>> {
         .filter(|(id, _)| !id.starts_with(WINDOW_KEY))
         .map(|(id, info)| Display {
             name: if id == "main" {
-                "Choose a screen (desktop portal)".into()
+                "Choose a screen".into()
             } else {
                 format!("Portal screen {id}")
             },
@@ -203,6 +210,25 @@ pub fn doctor_check() -> isocast_protocol::api::Check {
     })
     .join()
     .unwrap_or_else(|_| Err(anyhow::anyhow!("portal check stopped")));
+    if x11_session() {
+        let reason = x11::active_reason()
+            .map(|r| format!("X11 capture active: {r}"))
+            .or_else(|| {
+                result.as_ref().err().and_then(|e| {
+                    x11rb::connect(None)
+                        .ok()
+                        .map(|_| format!("X11 fallback available: ScreenCast unavailable ({e:#})"))
+                })
+            });
+        if let Some(detail) = reason {
+            return Check {
+                name: "ScreenCast portal".into(),
+                status: CheckStatus::Ok,
+                detail,
+                fix: None,
+            };
+        }
+    }
     let fix = result.is_err().then(|| "Install xdg-desktop-portal and your desktop’s screen-sharing backend (e.g. xdg-desktop-portal-gnome or xdg-desktop-portal-kde), then log in to the desktop again.".into());
     Check {
         name: "ScreenCast portal".into(),
@@ -213,7 +239,7 @@ pub fn doctor_check() -> isocast_protocol::api::Check {
         },
         detail: result.err().map_or_else(
             || {
-                "Screen sharing available; choose each screen or window with `isocast screen pick`."
+                "ScreenCast portal + PipeWire preferred: the desktop offers screen sharing. Choose with `isocast screen pick`."
                     .into()
             },
             |e| e.to_string(),
@@ -271,11 +297,23 @@ impl Drop for Capture {
 /// Shares `screen_pick` opened, each kept a few seconds (with a number
 /// telling them apart) for its source to take over when it reopens, so the
 /// person chooses once even where the desktop keeps no restore token.
-static HANDOFF: Mutex<BTreeMap<String, (u64, Share)>> = Mutex::new(BTreeMap::new());
+enum Choice {
+    Portal(Share),
+    X11(x11::Share),
+}
+impl Choice {
+    fn cursor(&self) -> bool {
+        match self {
+            Self::Portal(s) => s.cursor,
+            Self::X11(s) => s.cursor,
+        }
+    }
+}
+static HANDOFF: Mutex<BTreeMap<String, (u64, Choice)>> = Mutex::new(BTreeMap::new());
 const HANDOFF_FOR: Duration = Duration::from_secs(15);
 static NEXT_HANDOFF: AtomicU64 = AtomicU64::new(0);
 
-fn handoff() -> std::sync::MutexGuard<'static, BTreeMap<String, (u64, Share)>> {
+fn handoff() -> std::sync::MutexGuard<'static, BTreeMap<String, (u64, Choice)>> {
     HANDOFF.lock().unwrap_or_else(|error| error.into_inner())
 }
 
@@ -482,7 +520,8 @@ async fn select(
     cursor: Option<CursorMode>,
     token: Option<&str>,
 ) -> Result<Selected> {
-    check_offered(kind, portal.available_source_types().await?)?;
+    check_offered(kind, portal.available_source_types().await?)
+        .context(BackendUnavailable("unsupported source kind"))?;
     let options = SelectSourcesOptions::default()
         .set_sources(Some(kind.source_type().into()))
         .set_multiple(false)
@@ -520,6 +559,7 @@ async fn select(
         key,
         Saved {
             token,
+            x11: false,
             width: selected.width,
             height: selected.height,
         },
@@ -545,6 +585,7 @@ async fn begin_dialog(
     let token = match asked {
         Asked::Start => Some(
             all.remove(key)
+                .filter(|saved| !saved.x11 || !x11_session())
                 .and_then(|saved| saved.token)
                 .ok_or(NotChosen { what: kind.noun() })?,
         ),
@@ -583,16 +624,16 @@ fn open(key: String, kind: Kind, asked: Asked, cursor: bool) -> Result<Share> {
                 };
                 let (portal, session) = tokio::select! {
                     _ = &mut stopped => return Ok(()),
-                    result = connect() => result?,
+                    result = connect() => result.context(BackendUnavailable("ScreenCast connection failed"))?,
                 };
                 let mut closed = tokio::time::timeout(Duration::from_secs(5), session.receive_closed())
                     .await.context("desktop portal signal subscription timed out")??;
                 let opening = async {
                     let available = portal.available_cursor_modes().await?;
                     let requested = if cursor { CursorMode::Embedded } else { CursorMode::Hidden };
-                    ensure!(available.contains(requested), "desktop portal cannot provide the requested cursor mode");
+                    if !available.contains(requested) { bail!(BackendUnavailable("desktop portal cannot provide the requested cursor mode")); }
                     let selected = select(&portal, &session, &key, kind, asked, Some(requested), token.as_deref()).await?;
-                    let fd = portal.open_pipe_wire_remote(&session, Default::default()).await?;
+                    let fd = portal.open_pipe_wire_remote(&session, Default::default()).await.context(BackendUnavailable("portal PipeWire connection failed"))?;
                     Ok::<_, anyhow::Error>((fd, selected))
                 };
                 let opened = tokio::select! {
@@ -663,25 +704,112 @@ fn open(key: String, kind: Kind, asked: Asked, cursor: bool) -> Result<Share> {
     })
 }
 
-/// Show the desktop's sharing dialog for `target` and keep the choice for
-/// it, replacing any it had. Waits up to 3 minutes for the person. The
-/// share stays open for a few seconds, so the source reopening on it
-/// doesn't ask again.
+#[derive(Debug)]
+struct BackendUnavailable(&'static str);
+impl std::fmt::Display for BackendUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for BackendUnavailable {}
+
+fn backend_failure(e: &anyhow::Error) -> bool {
+    use ashpd::{Error, PortalError, desktop::ResponseError};
+    // Only a technical failure can offer a different picker. A timeout
+    // answering, explicit denial, cancel, wrong selection or busy dialog isn't one.
+    let bus_denied = |e: &zbus::Error| match e {
+        zbus::Error::MethodError(name, _, _) => matches!(
+            name.as_str(),
+            "org.freedesktop.DBus.Error.AccessDenied"
+                | "org.freedesktop.DBus.Error.AuthFailed"
+                | "org.freedesktop.portal.Error.NotAllowed"
+                | "org.freedesktop.portal.Error.Cancelled"
+        ),
+        zbus::Error::FDO(e) => matches!(
+            **e,
+            zbus::fdo::Error::AccessDenied(_) | zbus::fdo::Error::AuthFailed(_)
+        ),
+        _ => false,
+    };
+    if e.downcast_ref::<zbus::Error>().is_some_and(bus_denied) {
+        return false;
+    }
+    match e.downcast_ref::<Error>() {
+        Some(Error::Zbus(e) | Error::Portal(PortalError::ZBus(e))) if bus_denied(e) => false,
+        Some(
+            Error::Response(ResponseError::Cancelled)
+            | Error::Portal(PortalError::NotAllowed(_) | PortalError::Cancelled(_)),
+        ) => false,
+        Some(
+            Error::PortalNotFound(_)
+            | Error::RequiresVersion(..)
+            | Error::Response(ResponseError::Other)
+            | Error::Portal(PortalError::Failed(_)),
+        ) => true,
+        _ => e.is::<BackendUnavailable>(),
+    }
+}
+
+// A portal may open its dialog successfully but supply no usable PipeWire
+// frames. Offer X11 on the next *explicit* pick only; never start it silently.
+static VIDEO_FAILURE: Mutex<BTreeMap<String, (std::time::Instant, String)>> =
+    Mutex::new(BTreeMap::new());
+
 pub fn pick(target: &ScreenTarget<'_>, cursor: bool) -> Result<PickedScreen> {
     let (key, kind) = target_key(target)?;
-    let share = open(key.clone(), kind, Asked::Pick, cursor).context("screen_pick")?;
-    // The size it records at: even, or 0 if the portal didn't say.
-    let even = |size: u32| {
-        if size == 0 {
-            0
-        } else {
-            pipewire_video::even(size)
+    let failure = VIDEO_FAILURE
+        .lock()
+        .unwrap()
+        .remove(&key)
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(120) && x11_session())
+        .map(|(_, why)| why);
+    let (share, picked) = match failure.map_or_else(
+        || open(key.clone(), kind, Asked::Pick, cursor).map_err(|e| (backend_failure(&e), e)),
+        |why| Err((true, anyhow::anyhow!(why))),
+    ) {
+        Ok(share) => {
+            // The size it records at: even, or 0 if the portal didn't say.
+            let even = |size: u32| {
+                if size == 0 {
+                    0
+                } else {
+                    pipewire_video::even(size)
+                }
+            };
+            let picked = PickedScreen {
+                width: even(share.selected.width),
+                height: even(share.selected.height),
+                remembered: share.selected.remembered,
+            };
+            (Choice::Portal(share), picked)
         }
-    };
-    let picked = PickedScreen {
-        width: even(share.selected.width),
-        height: even(share.selected.height),
-        remembered: share.selected.remembered,
+        Err((true, e)) if x11_session() => {
+            let _dialog = DIALOG
+                .try_lock()
+                .context("another sharing dialog is open")?;
+            let why = format!("{e:#}");
+            let share = x11::Share::pick(kind == Kind::Window, cursor, why.clone())
+                .with_context(|| format!("ScreenCast unavailable ({why}); X11 picker"))?;
+            let (width, height) = share.size();
+            save(
+                &key,
+                Saved {
+                    token: None,
+                    x11: true,
+                    width,
+                    height,
+                },
+            )?;
+            (
+                Choice::X11(share),
+                PickedScreen {
+                    width,
+                    height,
+                    remembered: false,
+                },
+            )
+        }
+        Err((_, e)) => return Err(e.context("screen_pick")),
     };
     let number = NEXT_HANDOFF.fetch_add(1, Ordering::Relaxed);
     // The expiry starts first: a share is never kept without one.
@@ -710,7 +838,7 @@ pub fn capture(
     ten_bit: bool,
     cursor: bool,
     sink: VideoSink<Frame>,
-) -> Result<(Capture, CaptureFormat)> {
+) -> Result<(crate::platform::Capture, CaptureFormat)> {
     ensure!(
         !ten_bit,
         "Linux screen capture: 10-bit capture is not supported; select 8-bit ISO recording"
@@ -721,13 +849,17 @@ pub fn capture(
     let picked = {
         let mut shares = handoff();
         match shares.get(&key) {
-            Some((_, share)) if share.cursor == cursor => shares.remove(&key),
+            Some((_, share)) if share.cursor() == cursor => shares.remove(&key),
             _ => None,
         }
     };
     let mut share = match picked {
-        Some((_, share)) => share,
-        None => open(key.clone(), kind, Asked::Start, cursor)?,
+        Some((_, Choice::X11(share))) if x11_session() => {
+            let (capture, format) = x11::start(share, fps, sink)?;
+            return Ok((crate::platform::Capture::X11(capture), format));
+        }
+        Some((_, Choice::Portal(share))) => share,
+        _ => open(key.clone(), kind, Asked::Start, cursor)?,
     };
     let on_stopped: Arc<dyn Fn(String) + Send + Sync> = Arc::from(sink.stopped);
     let portal_stopped = on_stopped.clone();
@@ -748,6 +880,7 @@ pub fn capture(
         .context("desktop portal share has no remote")?;
     let closed = share.closed.clone();
     let reason = closed_reason(&target);
+    let picked_key = key.clone();
     let (video, format) = pipewire_video::start(
         remote,
         share.selected.node,
@@ -760,12 +893,27 @@ pub fn capture(
             frame: sink.frame,
             stopped: Box::new(move |reason| on_stopped(reason)),
         },
-    )?;
+    )
+    .inspect_err(|error| {
+        if x11_session() && !share.closed.load(Ordering::Acquire) {
+            let mut failures = VIDEO_FAILURE.lock().unwrap();
+            failures.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(120));
+            if failures.len() < MAX_SAVED {
+                failures.insert(
+                    picked_key,
+                    (
+                        std::time::Instant::now(),
+                        format!("portal video failed: {error:#}"),
+                    ),
+                );
+            }
+        }
+    })?;
     Ok((
-        Capture {
+        crate::platform::Capture::Screen(Capture {
             _video: video,
             share,
-        },
+        }),
         format,
     ))
 }
@@ -796,6 +944,23 @@ fn closed_reason(target: &ScreenTarget<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_declined_or_cancelled_share_is_not_a_backend_failure() {
+        for response in [
+            ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled),
+            ashpd::Error::Portal(ashpd::PortalError::NotAllowed("denied".into())),
+        ] {
+            let e = anyhow::Error::new(response)
+                .context(BackendUnavailable("ScreenCast connection failed"));
+            assert!(!backend_failure(&e));
+        }
+        assert!(!backend_failure(&anyhow::anyhow!(
+            "another sharing dialog is open"
+        )));
+        assert!(backend_failure(&anyhow::anyhow!(BackendUnavailable(
+            "no ScreenCast"
+        ))));
+    }
     use super::*;
 
     fn window(source: &str) -> ScreenTarget<'_> {
@@ -864,6 +1029,7 @@ mod tests {
                 let key = format!("{n:0>width$}", width = MAX_KEY);
                 let saved = Saved {
                     token: Some("f".repeat(64)),
+                    x11: true,
                     width: u32::MAX,
                     height: u32::MAX,
                 };

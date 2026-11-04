@@ -597,6 +597,14 @@ jobs:
           cargo clippy --release --locked --all-targets -p isocast-ui -p isocast-protocol -p isocast-diagnostics -p isocast-browser -- -D warnings
           cargo test --release --locked -p isocast-ui -p isocast-protocol -p isocast-diagnostics -p isocast-browser
 
+      - name: X11 screen and window capture without a portal
+        if: env.MODE == 'full'
+        run: |
+          # winit loads the X11 keyboard library at runtime; libxkbcommon-dev
+          # alone does not install it. The shipped .deb already depends on it.
+          .github/scripts/apt-install.sh xvfb xauth xdotool ffmpeg libxkbcommon-x11-0
+          bash scripts/linux-x11-capture-check.sh
+
       - name: Offscreen snapshot against a local engine
         if: env.MODE == 'full'
         run: |

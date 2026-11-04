@@ -19,6 +19,8 @@ mod system;
 mod usb_setup;
 mod video_encoder;
 mod writer;
+mod x11;
+mod x11_session;
 
 pub use pipewire_audio::audio_scheduling_warning;
 pub use platform::LinuxPlatform;
