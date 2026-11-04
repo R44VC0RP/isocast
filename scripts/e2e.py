@@ -156,6 +156,7 @@ elif sys.platform.startswith("linux"):
         "linux_recovery",
         "linux_media",
         "linux_capture",
+        "linux_audio_exclude",
         "linux_browser",
         "linux_shared_frames",
     )
@@ -4608,6 +4609,47 @@ def tone_amplitudes(path, stream, freqs=(440, 880), start=2, seconds=2):
         im = sum(x * math.sin(w * i) for i, x in enumerate(samples))
         out[f] = 2 * math.hypot(re_, im) / len(samples)
     return out
+
+
+def scenario_linux_audio_exclude(e, cfg, evidence):
+    """Tap the actual output as a positive control: a silent monitor is not rejection."""
+    sink = os.environ.get("ISOCAST_FIXTURE_DESKTOP_SINK")
+    if not sink:
+        raise Skip("needs the Linux capture fixture's private default sink")
+    require(command(["pactl", "get-default-sink"]).stdout.decode().strip() == sink,
+            "refusing to record a non-fixture default output")
+    e.stop()
+    e.env["ISOCAST_MONITOR_SILENT"] = "0"
+    e.start()
+    cfg = setup(e.root, "h264", iso=True, width=320, height=180, fps=30)
+    cfg["sources"][-1].update(frequency=880, audio={"monitor": "monitor_and_output"})
+    cfg["sources"].append({"id": "desktop", "kind": "system_audio"})
+    cfg["recording"]["iso"].update(sources=["bars"], audio=["desktop"])
+    e.apply(cfg)
+    e.rpc("engine", {"running": True})
+    # No external app at open. The first player disappears; its replacement
+    # has a new stream and pid and must be picked up without reopening capture.
+    for hz in (330, 440):
+        player = subprocess.Popen(["ffmpeg", "-nostdin", "-loglevel", "error", "-re", "-f", "lavfi",
+                                   "-i", f"sine=frequency={hz}:sample_rate={RATE}", "-ac", "2",
+                                   "-f", "pulse", "-device", sink, "external-tone"])
+        try:
+            path = Path(e.rpc("start", {"seconds": 7})["manifest"])
+            control = e.root / f"sink-{hz}.wav"
+            ffmpeg("-f", "pulse", "-i", f"{sink}.monitor", "-t", 4, control)
+            manifest = until(lambda: finished(path), 20, "desktop audio recording")
+            iso, _ = manifest_file(path, manifest, "bars")
+            output, desktop = (tone_amplitudes(f, 0, (hz, 880), start=2, seconds=1) for f in (control, iso))
+            require(min(output[hz], output[880], desktop[hz]) > .002,
+                    f"missing playback in control or desktop ISO: {output}, {desktop}")
+            rejection = 20 * math.log10(output[880] / max(desktop[880], 1e-12))
+            evidence[str(hz)] = {"sink": output, "desktop_iso": desktop, "rejection_db": rejection}
+            require(rejection > 60, f"monitor rejected by only {rejection:.1f} dB")
+            require(player.poll() is None, "external player stopped early")
+            until(lambda: e.rpc("status")["state"] == "idle", 10, "idle after capture")
+        finally:
+            player.terminate()
+            player.wait(timeout=10)
 
 
 def scenario_win_audio_exclude(e, cfg, evidence):

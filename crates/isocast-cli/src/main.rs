@@ -2935,6 +2935,14 @@ fn status(json: bool) -> Result<ExitCode> {
     if let Some(warning) = &status.load_warning {
         eprintln!("warning: {}", warning.message);
     }
+    if let Some(warning) = status
+        .diagnostics
+        .as_ref()
+        .and_then(|d| d.get("audio_scheduling_warning"))
+        .and_then(|v| v.as_str())
+    {
+        eprintln!("warning: {warning}");
+    }
     if let Some(machine) = &status.machine_profile {
         println!("Machine: {}", machine.summary);
     }

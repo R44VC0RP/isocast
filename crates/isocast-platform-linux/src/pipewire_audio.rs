@@ -2,8 +2,8 @@
 //!
 //! Requires PipeWire headers/runtime >= 1.0.5 (per-buffer graph timestamps),
 //! and pipewire-rs's `v0_3_77` feature (resampler-delay queries). Linux
-//! Application selection excludes this process's playback. Sink-monitor desktop
-//! capture still includes all sound sent to the selected output.
+//! Desktop audio normally captures the sink monitor. To exclude our playback,
+//! tap external playback ports routed to the default sink before its mixer.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +34,10 @@ const POLL: Duration = Duration::from_millis(20);
 const MAX_CHANNELS: u32 = 64;
 // A malformed server buffer must not trigger an unbounded allocation.
 const MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+const NORMAL_BUFFERS: i32 = 16;
+const NON_RT_BUFFERS: i32 = 32;
+const NON_RT_WARNING: &str =
+    "Audio isn't running with real-time priority; enable RTKit or rtprio for fewer dropouts.";
 
 pub struct Capture {
     cancel: Arc<AtomicBool>,
@@ -69,13 +73,12 @@ pub fn microphone(
     )
 }
 
-pub fn desktop(exclude: &[String], sink: AudioSink, _exclude_own: bool) -> Result<(Capture, u32)> {
+pub fn desktop(exclude: &[String], sink: AudioSink, exclude_own: bool) -> Result<(Capture, u32)> {
     ensure!(
         exclude.is_empty(),
         "desktop_audio.exclude: per-application exclusions are not supported by Linux sink-monitor capture; use an empty list"
     );
-    // Sink-monitor capture currently includes our own playback too.
-    start(Target::Desktop, None, sink)
+    start(Target::Desktop { exclude_own }, None, sink)
 }
 
 pub fn application(app: &str, sink: AudioSink) -> Result<(Capture, u32)> {
@@ -103,7 +106,7 @@ fn validate_application(app: &str) -> Result<()> {
 
 enum Target {
     Microphone(String),
-    Desktop,
+    Desktop { exclude_own: bool },
     Application(String),
 }
 
@@ -244,7 +247,7 @@ fn enumerate(cancel: &AtomicBool, include_apps: bool) -> Result<Inventory> {
     let context = pw::context::ContextRc::new(mainloop.main_loop(), None)?;
     let core = context.connect_rc(None).context("connecting to PipeWire")?;
     let apps = include_apps
-        .then(|| ApplicationWatch::new(&core, false, Rc::default()))
+        .then(|| ApplicationWatch::new(&core, false, false, Rc::default()))
         .transpose()?;
     let registry = core.get_registry_rc()?;
     let inventory = Rc::new(RefCell::new(Inventory::default()));
@@ -506,6 +509,11 @@ struct Applications {
     nodes: BTreeMap<u32, AppNode>,
     clients: BTreeMap<u32, AppClient>,
     ports: BTreeMap<u32, AudioPort>,
+    // Only watched for filtered desktop capture. Routes are the real links,
+    // not target.object hints (a session manager can move a running stream).
+    sinks: BTreeMap<u32, String>,
+    default_sink: Option<String>,
+    routes: BTreeMap<u32, AppLink>,
 }
 
 impl Applications {
@@ -612,20 +620,7 @@ impl Applications {
         policy: &mut AppLinkPolicy,
         started: bool,
     ) -> Result<BTreeSet<AppLink>> {
-        policy.generations.retain(|id, generation| {
-            self.nodes
-                .get(id)
-                .is_some_and(|node| node.generation == *generation)
-        });
-        policy
-            .skipped
-            .retain(|id| policy.generations.contains_key(id));
-        policy
-            .failures
-            .retain(|id, _| policy.generations.contains_key(id));
-        policy
-            .generations
-            .extend(self.nodes.iter().map(|(&id, node)| (id, node.generation)));
+        policy.track_nodes(&self.nodes);
         let mut desired = BTreeSet::new();
         if capture == u32::MAX {
             return Ok(desired);
@@ -701,6 +696,92 @@ impl Applications {
         }
         Ok(desired)
     }
+
+    fn desktop_links(
+        &self,
+        capture: u32,
+        policy: &mut AppLinkPolicy,
+        started: bool,
+    ) -> Result<(BTreeSet<AppLink>, bool)> {
+        policy.track_nodes(&self.nodes);
+        let mut desired = BTreeSet::new();
+        let Some((&sink, name)) = self
+            .sinks
+            .iter()
+            .find(|(_, name)| Some(*name) == self.default_sink.as_ref())
+        else {
+            policy.unsupported_sink = None;
+            return Ok((desired, false));
+        };
+        // Check the sink's ports, not just today's routes: an idle 5.1 sink
+        // (or a stereo player on its front channels) isn't a stereo sink.
+        let mut channels = self
+            .ports
+            .values()
+            .filter(|p| p.node == sink && p.input)
+            .peekable();
+        if channels.peek().is_none() {
+            return Ok((desired, false));
+        }
+        if let Some(port) = channels.find(|p| !matches!(p.channel.as_str(), "MONO" | "FL" | "FR")) {
+            if !started || policy.unsupported_sink != Some(sink) {
+                let message = format!(
+                    "system_audio: default output {name:?} has channel {:?}; monitor exclusion supports mono or FL/FR stereo only. Select a mono/stereo default output",
+                    port.channel
+                );
+                ensure!(started, "{message}");
+                isocast_diagnostics::output::deferred(
+                    "warn",
+                    module_path!(),
+                    format!("{message}; desktop capture will be silent until then"),
+                );
+                policy.unsupported_sink = Some(sink);
+            }
+            // Drop old taps, keep the graph-clocked stream running and watch
+            // for a supported default (including a layout change on this id).
+            return Ok((desired, false));
+        }
+        policy.unsupported_sink = None;
+        let inputs: Vec<_> = self
+            .ports
+            .iter()
+            .filter(|(_, p)| p.node == capture && p.input)
+            .collect();
+        for route in self.routes.values().filter(|r| r.input_node == sink) {
+            let Some(node) = self.nodes.get(&route.output_node) else {
+                continue;
+            };
+            // Desktop capture needs no application name or stable selector.
+            // Wait for the client's full properties before deciding ownership.
+            let client = node.client.and_then(|id| self.clients.get(&id));
+            if !node.informed || (node.client.is_some() && !client.is_some_and(|c| c.informed)) {
+                continue;
+            }
+            let pid = node
+                .props
+                .pid
+                .as_ref()
+                .or_else(|| client.and_then(|c| c.props.pid.as_ref()));
+            if pid.and_then(|p| p.parse().ok()) == Some(std::process::id()) {
+                continue;
+            }
+            let Some(port) = self.ports.get(&route.input_port) else {
+                continue;
+            };
+            // Mirror the sink's actual channel wiring, including a mono stream
+            // routed into both sides.
+            for &(id, input) in &inputs {
+                if port.channel == "MONO" || port.channel == input.channel {
+                    desired.insert(AppLink {
+                        input_node: capture,
+                        input_port: *id,
+                        ..*route
+                    });
+                }
+            }
+        }
+        Ok((desired, inputs.len() == 2))
+    }
 }
 
 // Separate from hardware/default metadata: the same watcher serves enumeration
@@ -715,6 +796,7 @@ impl ApplicationWatch {
     fn new(
         core: &pw::core::CoreRc,
         include_ports: bool,
+        desktop: bool,
         proxy_ids: Rc<RefCell<BTreeSet<u32>>>,
     ) -> Result<Self> {
         // Do not classify this registry as an owned application proxy: its
@@ -728,6 +810,8 @@ impl ApplicationWatch {
         let removed = state.clone();
         let keep_nodes = nodes.clone();
         let keep_clients = clients.clone();
+        let metadata = Rc::new(RefCell::new(BTreeMap::new()));
+        let keep_metadata = metadata.clone();
         // A local incarnation counter also works when object.serial is absent.
         // Removal and ID reuse can arrive during the same loop iteration.
         let generation = Cell::new(0_u64);
@@ -803,6 +887,64 @@ impl ApplicationWatch {
                         entry.update(props);
                     }
                     added.borrow_mut().ports.insert(id, entry);
+                } else if desktop && let Some(p) = global.props {
+                    match global.type_ {
+                        pw::types::ObjectType::Node
+                            if p.get("media.class") == Some("Audio/Sink") =>
+                        {
+                            if let Some(name) = p.get("node.name") {
+                                added.borrow_mut().sinks.insert(id, name.to_owned());
+                            }
+                        }
+                        pw::types::ObjectType::Link => {
+                            let field = |key| p.get(key).and_then(|v| v.parse().ok());
+                            if let (
+                                Some(output_node),
+                                Some(output_port),
+                                Some(input_node),
+                                Some(input_port),
+                            ) = (
+                                field("link.output.node"),
+                                field("link.output.port"),
+                                field("link.input.node"),
+                                field("link.input.port"),
+                            ) {
+                                added.borrow_mut().routes.insert(
+                                    id,
+                                    AppLink {
+                                        output_node,
+                                        output_port,
+                                        input_node,
+                                        input_port,
+                                    },
+                                );
+                            }
+                        }
+                        pw::types::ObjectType::Metadata
+                            if p.get("metadata.name") == Some("default") =>
+                        {
+                            let Ok(object) = registry.bind::<pw::metadata::Metadata, _>(global)
+                            else {
+                                return;
+                            };
+                            proxy_ids.borrow_mut().insert(object.upcast_ref().id());
+                            let state = added.clone();
+                            let listener = object
+                                .add_listener_local()
+                                .property(move |subject, key, _, value| {
+                                    if subject == 0
+                                        && (key.is_none() || key == Some("default.audio.sink"))
+                                    {
+                                        state.borrow_mut().default_sink =
+                                            value.and_then(default_name);
+                                    }
+                                    0
+                                })
+                                .register();
+                            keep_metadata.borrow_mut().insert(id, (listener, object));
+                        }
+                        _ => {}
+                    }
                 }
             })
             .global_remove(move |id| {
@@ -810,6 +952,11 @@ impl ApplicationWatch {
                 state.nodes.remove(&id);
                 state.clients.remove(&id);
                 state.ports.remove(&id);
+                state.sinks.remove(&id);
+                state.routes.remove(&id);
+                if metadata.borrow_mut().remove(&id).is_some() {
+                    state.default_sink = None;
+                }
                 nodes.borrow_mut().remove(&id);
                 clients.borrow_mut().remove(&id);
             })
@@ -895,6 +1042,7 @@ impl OwnedAppLink {
 
 #[derive(Default)]
 struct AppLinkPolicy {
+    unsupported_sink: Option<u32>,
     // At most one entry per live playback node; pruned by desired_links.
     generations: BTreeMap<u32, u64>,
     skipped: BTreeSet<u32>,
@@ -909,6 +1057,19 @@ struct AppLinkPolicy {
 }
 
 impl AppLinkPolicy {
+    fn track_nodes(&mut self, nodes: &BTreeMap<u32, AppNode>) {
+        self.generations.retain(|id, generation| {
+            nodes
+                .get(id)
+                .is_some_and(|node| node.generation == *generation)
+        });
+        self.skipped.retain(|id| self.generations.contains_key(id));
+        self.failures
+            .retain(|id, _| self.generations.contains_key(id));
+        self.generations
+            .extend(nodes.iter().map(|(&id, node)| (id, node.generation)));
+    }
+
     fn reject(&mut self, node: u32, started: bool, message: String) -> Result<()> {
         ensure!(started, "{message}");
         if self.skipped.insert(node) {
@@ -1206,7 +1367,8 @@ fn capture_worker(
         Target::Application(app) => Some(inventory.apps.resolve(app)?),
         _ => None,
     };
-    let is_application = application.is_some();
+    let filtered_desktop = matches!(requested, Target::Desktop { exclude_own: true });
+    let passive = application.is_some() || filtered_desktop;
     let target = if let Target::Microphone(device) = requested {
         let device = device.as_str();
         let id = if matches!(device, "default" | "main") {
@@ -1244,7 +1406,7 @@ fn capture_worker(
         props.insert("node.dont-reconnect", "true");
         // Capture native channels in their original order, not a stereo remix.
         props.insert("stream.dont-remix", "true");
-    } else if is_application {
+    } else if passive {
         // Let the session manager configure DSP ports, but never choose a
         // hardware/default source. Competing adapter.auto-port-config races
         // WirePlumber's PortConfig activation. We own only the extra links;
@@ -1272,7 +1434,7 @@ fn capture_worker(
         .error(move |id, _, result, message| {
             // App-link errors/removals are handled by their owned proxies;
             // racing removal of a playback node must not end the recording.
-            if fatal_capture_error(is_application, id, result, &proxy_ids.borrow()) {
+            if fatal_capture_error(passive, id, result, &proxy_ids.borrow()) {
                 errors.borrow_mut().error = Some(message.to_owned());
             }
         })
@@ -1316,7 +1478,7 @@ fn capture_worker(
     let clock_offset = clock_offset()?;
     // Share only the Send sink, never a PipeWire object.
     let data = StreamData {
-        application_clock: is_application.then(ApplicationClock::default),
+        application_clock: passive.then(ApplicationClock::default),
         sink: sink.clone(),
         status: status.clone(),
         channels: 0,
@@ -1326,7 +1488,7 @@ fn capture_worker(
         corrupted_chunks: 0,
         bridged_frames: 0,
         clock_offset,
-        sink_monitor: matches!(requested, Target::Desktop),
+        sink_monitor: matches!(requested, Target::Desktop { exclude_own: false }),
         links,
         position: std::ptr::null(),
     };
@@ -1344,7 +1506,7 @@ fn capture_worker(
         .state_changed(move |_, data, _, state| match state {
             StreamState::Error(error) => data.status.borrow_mut().error = Some(error),
             StreamState::Unconnected => data.status.borrow_mut().error = Some("audio stream disconnected".into()),
-            StreamState::Paused | StreamState::Streaming if is_application => {
+            StreamState::Paused | StreamState::Streaming if passive => {
                 // A known app may be paused or have lost its last stream while
                 // we connected. Start bounded; stay armed for future streams.
                 data.status.borrow_mut().ready = Some(count);
@@ -1397,7 +1559,7 @@ fn capture_worker(
     .0
     .into_inner();
     let pod = Pod::from_bytes(&bytes).context("invalid serialized PipeWire audio format")?;
-    let buffers = capture_buffers()?;
+    let buffers = capture_buffers(NORMAL_BUFFERS)?;
     let buffers = Pod::from_bytes(&buffers).context("invalid serialized PipeWire audio buffers")?;
     // Until the first buffer, not while the webcam's own camera sets up (usb_setup).
     let mut setup = Some(usb_setup::begin(
@@ -1410,21 +1572,28 @@ fn capture_worker(
     stream.connect(
         spa::utils::Direction::Input,
         None,
-        if is_application {
+        if passive {
             pw::stream::StreamFlags::MAP_BUFFERS
         } else {
             pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS
         },
         &mut [pod, buffers],
     )?;
+    let capture_loop = CaptureLoop::register();
+    // connect selects the actual data loop. Choose the queue before the first
+    // server format negotiation, not midway through a take (an active link can
+    // keep its allocated buffers after update_params). RTKit grants on a
+    // separate helper loop; don't reconfigure a stream with a grant in flight.
+    let configured = capture_loop.configure(&context, &stream, cancel, true)?;
     // Declared after the stream: own link proxies/listeners drop before it and
     // before the core, including on early errors/cancellation.
     // Create the stream and registry before the watch can allocate owned proxy
     // ids. Keep these non-owned proxies alive until capture has ended.
-    let app_watch = if is_application {
+    let app_watch = if passive {
         Some(ApplicationWatch::new(
             &core,
             true,
+            filtered_desktop,
             link_policy.proxy_ids.clone(),
         )?)
     } else {
@@ -1432,34 +1601,29 @@ fn capture_worker(
     };
     let mut app_links = BTreeMap::new();
     let mut check_realtime = None;
-    let capture_loop = CaptureLoop::register();
     while !cancel.load(Ordering::Acquire) {
         iterate(&mainloop)?;
         if check_realtime.is_some_and(|at: Instant| at.elapsed() >= Duration::from_secs(1)) {
             // RTKit grants asynchronously and can silently deny a request.
             // Observe the actual data thread, never mistake a request for a grant.
             check_realtime = None;
-            if !capture_loop.observe(&context, &stream) {
-                static WARN_NOT_REALTIME: std::sync::Once = std::sync::Once::new();
-                WARN_NOT_REALTIME.call_once(|| {
-                    isocast_diagnostics::output::deferred(
-                        "warn",
-                        module_path!(),
-                        "PipeWire audio data loop is not realtime; short graph cycles may be lost under load. Allow RTKit realtime scheduling for this session or configure RLIMIT_RTPRIO for isocastd. Recording will continue.".into(),
-                    );
-                });
-            }
+            capture_loop.configure(&context, &stream, cancel, false)?;
         }
         let mut graph_ready = true;
-        if let (Some(identity), Some(watch)) = (&application, &app_watch) {
-            let desired = watch.state.borrow().desired_links(
-                identity,
-                stream.node_id(),
-                &mut link_policy,
-                *started,
-            )?;
+        if let Some(watch) = &app_watch {
+            let apps = watch.state.borrow();
+            let id = stream.node_id();
+            let (desired, ready) = if let Some(identity) = &application {
+                (
+                    apps.desired_links(identity, id, &mut link_policy, *started)?,
+                    apps.ready(identity, id),
+                )
+            } else {
+                apps.desktop_links(id, &mut link_policy, *started)?
+            };
+            drop(apps);
             reconcile_links(&core, &desired, &mut app_links, &mut link_policy, *started)?;
-            graph_ready = watch.state.borrow().ready(identity, stream.node_id())
+            graph_ready = ready
                 && desired.iter().all(|pair| {
                     app_links.get(pair).is_some_and(|link| {
                         link.negotiated.get() && link.failure.borrow().is_none()
@@ -1477,7 +1641,9 @@ fn capture_worker(
                     .context("PipeWire startup caller disconnected")?;
                 *started = true;
                 drop(setup.take());
-                check_realtime = Some(Instant::now());
+                if !configured {
+                    check_realtime = Some(Instant::now());
+                }
             } else {
                 ensure!(
                     Instant::now() < deadline,
@@ -1622,7 +1788,7 @@ fn capture_context(
     Ok(pw::context::ContextRc::new(mainloop.main_loop(), props)?)
 }
 
-fn capture_buffers() -> Result<Vec<u8>> {
+fn capture_buffers(count: i32) -> Result<Vec<u8>> {
     // Non-RT callbacks need a queue while their worker is descheduled. The
     // converter otherwise fixates to two buffers (one plus the async reserve).
     // Fix the count: a range's default is ignored when intersecting the
@@ -1632,7 +1798,7 @@ fn capture_buffers() -> Result<Vec<u8>> {
         id: spa::sys::SPA_PARAM_Buffers,
         properties: vec![spa::pod::Property::new(
             spa::sys::SPA_PARAM_BUFFERS_buffers,
-            spa::pod::Value::Int(16),
+            spa::pod::Value::Int(count),
         )],
     };
     Ok(spa::pod::serialize::PodSerializer::serialize(
@@ -1721,6 +1887,7 @@ pub(crate) fn scheduling_checks() -> [protocol::api::Check; 2] {
         policies: &[Option<i32>],
         absent: &str,
         retry: &str,
+        non_rt_fix: &str,
     ) -> protocol::api::Check {
         use protocol::api::{Check, CheckStatus};
         let rt = policies
@@ -1732,8 +1899,10 @@ pub(crate) fn scheduling_checks() -> [protocol::api::Check; 2] {
         let (detail, fix) = if policies.is_empty() {
             (absent.into(), Some(retry.into()))
         } else if ordinary > 0 {
-            (format!("{rt} of {} data loops run realtime. RTKit/polkit may have denied realtime because there is no local login session.", policies.len()),
-             Some("Log in at the computer itself. On a headless or remote machine, an administrator can allow RTKit realtime scheduling for your user.".into()))
+            (
+                format!("{rt} of {} data loops run realtime.", policies.len()),
+                Some(non_rt_fix.into()),
+            )
         } else {
             (
                 format!("{rt} of {} data loops confirmed realtime", policies.len()),
@@ -1765,12 +1934,14 @@ pub(crate) fn scheduling_checks() -> [protocol::api::Check; 2] {
             &server,
             "Could not identify the PipeWire server data loop.",
             "Check that PipeWire is running and its threads are visible to Isocast.",
+            "Log in at the computer itself. On a headless or remote machine, an administrator can allow RTKit realtime scheduling for your user.",
         ),
         check(
             "Isocast audio capture realtime",
             &capture,
             "No active audio capture data loop measured.",
             "Start desktop or microphone capture and run doctor again after one second.",
+            "Log in locally so RTKit can grant real-time priority. On a headless or remote machine, ask an administrator to allow RTKit for your user or configure rtprio for isocastd to reduce dropouts.",
         ),
     ]
 }
@@ -1778,6 +1949,18 @@ pub(crate) fn scheduling_checks() -> [protocol::api::Check; 2] {
 // Only audio capture workers register here; screen, enumeration and playback
 // threads can have identical names. Unregister before tearing down the stream.
 static CAPTURE_TIDS: Mutex<Vec<(thread::ThreadId, Option<i32>)>> = Mutex::new(Vec::new());
+
+pub fn audio_scheduling_warning() -> Option<&'static str> {
+    CAPTURE_TIDS
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, tid)| {
+            tid.and_then(thread_policy)
+                .is_some_and(|p| !realtime_policy(p))
+        })
+        .then_some(NON_RT_WARNING)
+}
 
 struct CaptureLoop(thread::ThreadId);
 
@@ -1790,7 +1973,9 @@ impl Drop for CaptureLoop {
 fn thread_policy(tid: i32) -> Option<i32> {
     // SAFETY: reads the kernel policy (including RTKit's out-of-process grants).
     let policy = unsafe { libc::sched_getscheduler(tid) };
-    (policy >= 0).then_some(policy)
+    // module-rt sets RESET_ON_FORK before asking RTKit: a denied thread
+    // commonly reports 0x40000000, not plain zero, for SCHED_OTHER.
+    (policy >= 0).then_some(policy & !libc::SCHED_RESET_ON_FORK)
 }
 
 impl CaptureLoop {
@@ -1800,18 +1985,84 @@ impl CaptureLoop {
         Self(id)
     }
 
-    fn observe(&self, context: &pw::context::Context, stream: &pw::stream::Stream) -> bool {
-        let tid = capture_loop_tid(context, stream);
+    fn configure(
+        &self,
+        context: &pw::context::Context,
+        stream: &pw::stream::Stream,
+        cancel: &AtomicBool,
+        allow_grace: bool,
+    ) -> Result<bool> {
+        let Some(tid) = capture_loop_tid(context, stream) else {
+            return Ok(false);
+        };
+        if allow_grace {
+            let until = Instant::now() + Duration::from_secs(1);
+            while thread_policy(tid) == Some(libc::SCHED_OTHER)
+                && Instant::now() < until
+                && !cancel.load(Ordering::Acquire)
+            {
+                thread::sleep(POLL);
+            }
+        }
+        if thread_policy(tid) == Some(libc::SCHED_OTHER) {
+            try_direct_realtime(tid);
+        }
+        if thread_policy(tid) == Some(libc::SCHED_OTHER) {
+            request_non_rt_buffers(stream)?;
+            static WARN: std::sync::Once = std::sync::Once::new();
+            WARN.call_once(|| {
+                isocast_diagnostics::output::deferred("warn", module_path!(), NON_RT_WARNING.into())
+            });
+        }
         if let Some(entry) = CAPTURE_TIDS
             .lock()
             .unwrap()
             .iter_mut()
             .find(|(id, _)| *id == self.0)
         {
-            entry.1 = tid;
+            entry.1 = Some(tid);
         }
-        tid.and_then(thread_policy).is_some_and(realtime_policy)
+        Ok(true)
     }
+}
+
+fn try_direct_realtime(tid: i32) {
+    // Only our connected stream's data thread, never the server, engine or
+    // main loop. Respect the administrator's soft limit; don't raise it.
+    // SAFETY: getrlimit initializes limit on success; tid belongs to the
+    // live context and stream whose sole owner is this worker.
+    unsafe {
+        let mut limit = std::mem::MaybeUninit::uninit();
+        if libc::getrlimit(libc::RLIMIT_RTPRIO, limit.as_mut_ptr()) == 0 {
+            let priority = limit.assume_init().rlim_cur.min(20) as i32;
+            // PipeWire 1.0.5's RTKit helper can clamp RLIMIT_RTTIME to
+            // zero when the service is masked. Don't make the recorder
+            // eligible for SIGXCPU/SIGKILL on its first RT timeslice.
+            if priority > 0
+                && libc::getrlimit(libc::RLIMIT_RTTIME, limit.as_mut_ptr()) == 0
+                && limit.assume_init().rlim_cur > 0
+                && thread_policy(tid) == Some(libc::SCHED_OTHER)
+            {
+                libc::sched_setscheduler(
+                    tid,
+                    libc::SCHED_RR | libc::SCHED_RESET_ON_FORK,
+                    &libc::sched_param {
+                        sched_priority: priority,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn request_non_rt_buffers(stream: &pw::stream::Stream) -> Result<()> {
+    // Widen only our queue. Asking for a longer graph quantum can push a
+    // WHEP monitor block past its mix deadline before capture delivers it.
+    let buffers = capture_buffers(NON_RT_BUFFERS)?;
+    stream.update_params(&mut [
+        Pod::from_bytes(&buffers).context("invalid non-RT buffer request")?
+    ])?;
+    Ok(())
 }
 
 fn capture_loop_tid(context: &pw::context::Context, stream: &pw::stream::Stream) -> Option<i32> {
@@ -2013,7 +2264,7 @@ mod tests {
 
     #[test]
     fn capture_buffer_pod_requests_a_fixed_queue() {
-        let bytes = capture_buffers().unwrap();
+        let bytes = capture_buffers(NORMAL_BUFFERS).unwrap();
         let (remaining, value) =
             spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes).unwrap();
         assert!(remaining.is_empty());
@@ -2115,7 +2366,7 @@ mod tests {
         .unwrap()
         .0
         .into_inner();
-        let buffer_bytes = capture_buffers().unwrap();
+        let buffer_bytes = capture_buffers(NORMAL_BUFFERS).unwrap();
         stream
             .connect(
                 spa::utils::Direction::Input,
@@ -2127,13 +2378,28 @@ mod tests {
                 ],
             )
             .unwrap();
+        let capture_loop = CaptureLoop::register();
+        assert!(
+            capture_loop
+                .configure(&context, &stream, &AtomicBool::new(false), true)
+                .unwrap()
+        );
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             iterate(&worker).unwrap();
         }
-        assert_eq!(buffers.get(), 16);
+        let realtime = capture_loop_tid(&context, &stream)
+            .and_then(thread_policy)
+            .is_some_and(realtime_policy);
+        assert_eq!(
+            buffers.get(),
+            if realtime {
+                NORMAL_BUFFERS
+            } else {
+                NON_RT_BUFFERS
+            }
+        );
         assert!(processed.get() > 10, "capture did not process audio");
-        let realtime = CaptureLoop::register().observe(&context, &stream);
         eprintln!(
             "capture buffers: {}, data loop realtime: {realtime}",
             buffers.get()
@@ -2166,6 +2432,58 @@ mod tests {
             channel: channel.into(),
             monitor: false,
         }
+    }
+
+    #[test]
+    fn desktop_taps_only_external_routes_to_a_supported_default() {
+        let mut apps = Applications::default();
+        let mut policy = AppLinkPolicy::default();
+        apps.sinks.extend([(10, "A".into()), (20, "B".into())]);
+        apps.ports.extend([
+            (11, audio_port(10, true, "MONO")),
+            (21, audio_port(20, true, "FL")),
+            (91, audio_port(90, true, "FL")),
+            (92, audio_port(90, true, "FR")),
+        ]);
+        for (node, pid, target, port) in [
+            (30, 0, 10, 11),
+            (40, std::process::id(), 10, 11),
+            (50, 0, 20, 21),
+        ] {
+            apps.nodes.insert(node, app_node(None, "Player", None, pid));
+            apps.routes.insert(
+                node,
+                AppLink {
+                    output_node: node,
+                    output_port: node + 1,
+                    input_node: target,
+                    input_port: port,
+                },
+            );
+        }
+        let active = |apps: &Applications, policy: &mut AppLinkPolicy| {
+            apps.desktop_links(90, policy, true).unwrap().0
+        };
+        assert!(active(&apps, &mut policy).is_empty());
+        apps.default_sink = Some("A".into());
+        let stereo = active(&apps, &mut policy);
+        assert_eq!(
+            stereo
+                .iter()
+                .map(|p| (p.output_port, p.input_port))
+                .collect::<Vec<_>>(),
+            [(31, 91), (31, 92)]
+        );
+        apps.ports.insert(12, audio_port(10, true, "FC")); // No playback route on this channel.
+        assert!(
+            apps.desktop_links(90, &mut policy, false)
+                .unwrap_err()
+                .to_string()
+                .contains("mono or FL/FR stereo")
+        );
+        assert!(active(&apps, &mut policy).is_empty());
+        apps.ports.remove(&12);
+        assert_eq!(active(&apps, &mut policy), stereo);
     }
 
     #[test]

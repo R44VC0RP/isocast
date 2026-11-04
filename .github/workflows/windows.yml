@@ -380,12 +380,13 @@ jobs:
         timeout-minutes: 20
         run: |
           . "$FIXTURE/session.env"
-          python3 scripts/e2e.py --hosted --only linux_capture --only linux_media --only linux_browser --only browser_audio_gap --linux-profile 360p30 --codec h264 \
+          python3 scripts/e2e.py --hosted --only linux_capture --only linux_audio_exclude --only linux_media --only linux_browser --only browser_audio_gap --linux-profile 360p30 --codec h264 \
             --work "$RUNNER_TEMP/linux-capture" --keep-failures --report linux-capture.json
-          # A skipped scenario would pass silently: all four must have run.
+          # A skipped scenario would pass silently: all five must have run.
           python3 - <<'PY'
           import json
           r = {s["name"]: s for s in json.load(open("linux-capture.json"))["scenarios"]}
+          assert r["linux_audio_exclude"]["status"] == "PASS", r["linux_audio_exclude"].get("reason")
           m = r.get("linux_media")
           assert m and m["status"] == "PASS", f"linux_media did not pass: {m and (m['status'], m.get('reason'))}"
           b = r.get("linux_browser")
