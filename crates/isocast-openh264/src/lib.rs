@@ -273,10 +273,17 @@ fn supplied(path: &Path, provider: &str) -> Result<(OpenH264API, String), String
         .map_err(ToString::to_string)?;
     let (loaded, soname) = loaded_elf::identify(*version as usize)
         .ok_or("cannot identify the loaded OpenH264 library")?;
+    // dlopen can reuse an object first loaded by cisco(), whose fd is now
+    // closed. Report the requested name instead of that transient alias.
+    let reported = if loaded.starts_with("/proc/self/fd") {
+        path
+    } else {
+        &loaded
+    };
     if soname.as_deref() != Some(SONAME) {
         return Err(format!(
             "{} has soname {}; need {SONAME}",
-            loaded.display(),
+            reported.display(),
             soname.as_deref().unwrap_or("(none)")
         ));
     }
@@ -314,7 +321,7 @@ fn supplied(path: &Path, provider: &str) -> Result<(OpenH264API, String), String
     unsafe { destroy(encoder) };
     Ok((
         api,
-        format!("{provider} OpenH264 {version} ({})", loaded.display()),
+        format!("{provider} OpenH264 {version} ({})", reported.display()),
     ))
 }
 
@@ -367,6 +374,22 @@ mod tests {
         let version = symbols.WelsGetCodecVersion.as_ref().unwrap();
         let (_, soname) = loaded_elf::identify(*version as usize).unwrap();
         assert_eq!(soname.as_deref(), Some("libopenh264.so.8"));
+    }
+
+    #[test]
+    #[ignore = "requires the per-user Cisco download; run by both Linux app CI architectures"]
+    fn supplied_reports_requested_path_after_fd_load() {
+        let build = build().unwrap();
+        let installed = install_dir(&home().unwrap()).join(build.file);
+        // A separate inode keeps a concurrent path-first test from choosing
+        // the loader name for this copy. Keep the fd load mapped across both calls.
+        let dir = scratch("fd-first");
+        let path = dir.join(build.file);
+        std::fs::copy(installed, &path).unwrap();
+        let _first = cisco(&path, build, "FIX").unwrap();
+        let (_, status) = supplied(&path, "test").unwrap();
+        assert_eq!(status, format!("test OpenH264 2.6.0 ({})", path.display()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(target_env = "gnu")]
