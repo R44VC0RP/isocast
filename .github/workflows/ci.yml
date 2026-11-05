@@ -188,7 +188,9 @@ jobs:
     needs: gate
     if: needs.gate.outputs.motion != 'skip'
     runs-on: macos-15
-    timeout-minutes: 60
+    # A cold release build alone exceeded 60 minutes on run 41849337186.
+    # Leave room for both suites to run on the same machine as the build.
+    timeout-minutes: 90
     env:
       MODE: ${{ needs.gate.outputs.motion }}
     steps:
