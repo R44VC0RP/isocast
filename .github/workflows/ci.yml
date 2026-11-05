@@ -184,12 +184,12 @@ jobs:
     # of known issues exactly (scripts/motion/suite.toml). The gate runs it
     # when the interface, the compositor or render paths, or the harness
     # change.
-    name: build motion binaries (macOS arm64)
+    name: motion suite (headless, macOS arm64)
     needs: gate
     if: needs.gate.outputs.motion != 'skip'
     runs-on: macos-15
     # A cold release build alone exceeded 60 minutes on run 41849337186.
-    # Compile once for both suites, with margin independent of test time.
+    # Leave room for both suites to run on the same machine as the build.
     timeout-minutes: 90
     env:
       MODE: ${{ needs.gate.outputs.motion }}
@@ -222,56 +222,19 @@ jobs:
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --locked --release -p isocast-ui -p isocast-daemon -p isocast-cli
 
-      - name: Pack motion binaries (preserve executable permissions)
-        if: env.MODE == 'full'
-        run: tar -C target/release -cf "$RUNNER_TEMP/motion-binaries.tar" isocast isocastd isocast-ui
-
-      - name: Share binaries with both suites
-        if: env.MODE == 'full'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: motion-binaries
-          path: ${{ runner.temp }}/motion-binaries.tar
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 14
-
-  motion-tests:
-    name: motion suite (${{ matrix.suite }}, headless, macOS arm64)
-    needs: [gate, motion]
-    if: needs.gate.outputs.motion == 'full'
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [controls, standard]
-    runs-on: macos-15
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: motion-binaries
-          path: ${{ runner.temp }}
-
-      - run: tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/motion-binaries.tar"
-
       - name: Harness controls
-        if: matrix.suite == 'controls'
-        run: scripts/motion.sh --bin "$RUNNER_TEMP" --suite scripts/motion/controls.toml --no-timing --out "$RUNNER_TEMP/motion/controls"
+        if: env.MODE == 'full'
+        run: scripts/motion.sh --suite scripts/motion/controls.toml --no-timing --out "$RUNNER_TEMP/motion/controls"
 
       - name: Standard suite (lockstep)
-        if: matrix.suite == 'standard'
-        run: scripts/motion.sh --bin "$RUNNER_TEMP" --clock lockstep --no-timing --out "$RUNNER_TEMP/motion/suite"
+        if: env.MODE == 'full'
+        run: scripts/motion.sh --clock lockstep --no-timing --out "$RUNNER_TEMP/motion/suite"
 
       - name: Upload results
-        if: always()
+        if: always() && env.MODE == 'full'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: motion-results-${{ matrix.suite }}
+          name: motion-results
           path: ${{ runner.temp }}/motion
           if-no-files-found: ignore
-          overwrite: true
           retention-days: 14
