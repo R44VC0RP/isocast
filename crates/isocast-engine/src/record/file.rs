@@ -1136,6 +1136,7 @@ mod tests {
     fn plan(kind: &'static str, epoch: Time) -> Arc<FilePlan> {
         use std::sync::atomic::AtomicBool;
         Arc::new(FilePlan {
+            parts: Default::default(),
             recording: 1,
             take: 1,
             epoch: AtomicI64::new(epoch.as_nanos()),

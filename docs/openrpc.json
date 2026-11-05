@@ -11221,6 +11221,16 @@
             "description": "The source's kind, like `camera` or `display`.",
             "type": "string"
           },
+          "part": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MoviePart"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "path": {
             "description": "File name, in the manifest's folder.",
             "type": "string"
@@ -11973,6 +11983,29 @@
         },
         "required": [
           "easing"
+        ],
+        "type": "object"
+      },
+      "MoviePart": {
+        "properties": {
+          "number": {
+            "description": "One-based physical part in this output (same `source` and take).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "video_duration_seconds": {
+            "description": "Picture extent; the old part may carry real audio beyond its last picture.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "number",
+          "video_duration_seconds"
         ],
         "type": "object"
       },
@@ -15681,6 +15714,26 @@
           "token"
         ],
         "type": "object"
+      },
+      "RolloverState": {
+        "oneOf": [
+          {
+            "enum": [
+              "unknown"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "pending",
+            "description": "Path and origin reserved; not evidence of a playable picture.",
+            "type": "string"
+          },
+          {
+            "const": "committed",
+            "description": "The first closed IDR reached a complete fragment.",
+            "type": "string"
+          }
+        ]
       },
       "ScaleFilter": {
         "description": "How a picture is resampled to a new size.",
@@ -22083,6 +22136,17 @@
           "reason": {
             "type": "string"
           },
+          "rollover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoRollover"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present only for a change of physical file within this logical output."
+          },
           "scope": {
             "$ref": "#/components/schemas/VideoRecoveryScope"
           },
@@ -22158,6 +22222,33 @@
             "type": "string"
           }
         ]
+      },
+      "VideoRollover": {
+        "properties": {
+          "part": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RolloverState"
+          },
+          "take_offset_ns": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "state",
+          "part",
+          "path",
+          "take_offset_ns"
+        ],
+        "type": "object"
       },
       "VirtualCameraRemoval": {
         "description": "What `virtual_camera_remove` did.",

@@ -6423,6 +6423,7 @@ mod tests {
         recovery.incident_count = 1;
         recovery.incidents.push(VideoIncident {
             incident_id: 256,
+            rollover: None,
             scope: VideoRecoveryScope::Output,
             owner_id: "program".into(),
             state: VideoRecoveryState::EndedEarly,

@@ -49,7 +49,7 @@ pub(super) struct Recovery {
     pub recipe: Option<RecordingReopen>,
     pub context: Option<OutputRecovery>,
     pub incident: Option<u64>,
-    attempt: Option<Attempt>,
+    pub(super) attempt: Option<Attempt>,
     opening: Option<Receiver<Result<WindowsVideoEncoder>>>,
     retired: Option<WindowsVideoEncoder>,
     permit: Option<Arc<Permit>>,
@@ -85,14 +85,6 @@ impl LossCounts {
         self.abandoned += originals.max(native).saturating_sub(self.reported_native);
         self.reported_native = 0;
     }
-}
-
-fn compatible(frozen: &[u8], candidate: &[u8]) -> Result<()> {
-    anyhow::ensure!(
-        frozen == candidate,
-        "replacement decoder configuration differs from the fixed movie sample entry; ended early (a new file is required)"
-    );
-    Ok(())
 }
 
 /// Verify the actual first AU, even if the driver or transport marked it
@@ -131,6 +123,8 @@ fn closed_idr(codec: VideoCodec, mut au: &[u8]) -> bool {
 impl VideoWriter {
     pub(crate) fn allow_reopen(&mut self, recipe: RecordingReopen) {
         #[cfg(debug_assertions)]
+        let mut recipe = recipe;
+        #[cfg(debug_assertions)]
         if std::env::var_os("ISOCAST_SOCKET").is_some()
             && let Ok(value) = std::env::var("ISOCAST_TEST_ENCODER_FAILURE")
             && let Some(setup) = std::env::var_os("ISOCAST_SETUP")
@@ -141,7 +135,7 @@ impl VideoWriter {
             let fields: Vec<_> = value.split(':').collect();
             if let [
                 owner,
-                operation @ ("input" | "output" | "busy_input"),
+                operation @ ("input" | "output" | "busy_input" | "rollover"),
                 count,
             ] = fields.as_slice()
                 && *owner == recipe.output
@@ -149,6 +143,7 @@ impl VideoWriter {
             {
                 self.recovery.inject = Some((*operation == "output", count));
                 self.recovery.hold_admission = *operation == "busy_input";
+                recipe.changed_profile = *operation == "rollover";
             }
         }
         self.recovery.recipe = Some(recipe);
@@ -225,6 +220,8 @@ impl VideoWriter {
             context.failed_attempt(ticket, crate::now());
         }
         self.recovery.last_error = format!("{error:#}");
+        self.parts.changed = None;
+        self.flush_staged()?;
         self.abandon_pending();
         self.recovery.retired = self.encoder.take();
         // Includes the last held, validated picture, not abandoned inputs.
@@ -261,19 +258,15 @@ impl VideoWriter {
                 Ok(encoder) => {
                     self.encoder = Some(encoder);
                     let encoder = self.encoder.as_mut().expect("installed candidate");
-                    let candidate = encoder.decoder_config().and_then(|description| {
-                        compatible(
-                            self.decoder_config
-                                .as_deref()
-                                .context("no frozen description")?,
-                            &description,
-                        )
-                    });
-                    if let Err(error) = candidate {
-                        // Not a usable generation. Retire it (and its budget)
-                        // off-thread now, not when the take eventually stops.
-                        self.retire_without_reopen();
-                        return Err(error);
+                    let description = match encoder.decoder_config() {
+                        Ok(d) => d,
+                        Err(e) => {
+                            self.retire_without_reopen();
+                            return Err(e);
+                        }
+                    };
+                    if self.decoder_config.as_deref() != Some(description.as_slice()) {
+                        self.parts.changed = Some(description);
                     }
                     if let Some(canvas) = self.recovery.priority {
                         encoder.prioritize_video(canvas);
@@ -392,10 +385,12 @@ impl VideoWriter {
         if let Some(id) = self.recovery.incident {
             let context = self.recovery.context.as_ref().expect("configured");
             let why = format!("{error:#}");
-            if self
-                .mux
-                .as_ref()
-                .is_some_and(|m| m.progress().committed.is_none())
+            if error.is::<isocast_engine::record::recovery::PartMetadataWrite>()
+                || error.is::<super::rollover::PartStorage>()
+                || self
+                    .mux
+                    .as_ref()
+                    .is_some_and(|m| m.progress().committed.is_none())
             {
                 context.storage_failed(id, crate::now(), &why);
             } else {
@@ -432,11 +427,6 @@ mod tests {
         losses.abandon(4, 2); // two native losses, one already reported, within four originals
         assert_eq!(losses.take(0), (3, 0));
         assert_eq!(losses.take(1), (0, 1)); // new generation's first loss
-    }
-    #[test]
-    fn a_single_changed_parameter_set_requires_a_new_file() {
-        assert!(compatible(&[1, 100, 0, 41], &[1, 100, 0, 41]).is_ok());
-        assert!(compatible(&[1, 100, 0, 41], &[1, 100, 0, 42]).is_err());
     }
 
     #[test]

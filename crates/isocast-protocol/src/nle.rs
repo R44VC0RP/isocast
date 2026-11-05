@@ -181,7 +181,15 @@ pub fn take_length(manifest: &SessionManifest) -> Option<(u64, u32)> {
         .filter(finished)
         .find(|file| file.source == crate::PROGRAM)
         .or_else(|| manifest.files.iter().find(finished))?;
-    let seconds = file.duration_seconds?;
+    let seconds = if manifest.files.iter().any(|f| f.part.is_some()) {
+        manifest
+            .files
+            .iter()
+            .filter_map(|f| Some(f.start_offset_seconds? + f.duration_seconds?))
+            .reduce(f64::max)?
+    } else {
+        file.duration_seconds?
+    };
     Some((
         (seconds * f64::from(file.fps)).round().max(0.0) as u64,
         file.fps,

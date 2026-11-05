@@ -344,7 +344,7 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
             // keeps its stored frames, when known.
             let from_duration = (seconds * file_rate.fps()).round().max(0.0) as u64;
             let file_frames = match (file.dropped_frames, file.frames) {
-                (None, Some(frames)) => frames,
+                (None, Some(frames)) if file.part.is_none() => frames,
                 _ => from_duration,
             };
             let media_index = match media.iter().position(|m| m.path == path) {
@@ -407,7 +407,16 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
                 enabled: file.source == on,
             };
             if let Some(track) = video.iter_mut().find(|t| t.source == file.source) {
-                track.items.push(item.clone());
+                let mut picture = item.clone();
+                if let Some(seconds) = file.part.as_ref().and_then(|p| p.video_duration_seconds) {
+                    picture.length = picture.length.min(file_rate.convert(
+                        ((seconds * file_rate.fps()).round() as u64).saturating_sub(source_in),
+                        rate,
+                    ));
+                }
+                if picture.length > 0 {
+                    track.items.push(picture);
+                }
             }
             for (number, stream) in file.audio.iter().enumerate() {
                 let Some(t) = audio.iter().position(|t| {
@@ -1507,6 +1516,38 @@ mod tests {
         assert!(xmeml_fit(half, NleApp::Resolve).is_none());
         assert!(xmeml_fit(fit((1920, 1080), (1920, 1080)), NleApp::Premiere).is_none());
         assert_eq!(url_path(Path::new("/a b/é.mov")), "/a%20b/%C3%A9.mov");
+    }
+
+    #[test]
+    fn two_parts_share_one_angle_with_a_picture_gap_and_a_continuous_audio_cut() {
+        let row = |path, number, offset, seconds, video, frames| json!({"path":path,"source":"program","kind":"program","width":320,"height":180,"fps":30,"audio":[{"source":"tone","channels":2}],"part":{"number":number,"video_duration_seconds":video},"start_offset_seconds":offset,"duration_seconds":seconds,"frames":frames});
+        let manifest:SessionManifest=serde_json::from_value(json!({"version":1,"setup":"roll","status":"interrupted","started_at":"2026-11-04T12:00:00Z","host_time_ns":0,"errors":[],"files":[row("one.mov",1,0.,3.,2.,60),row("two.mov",2,3.,2.,2.,60)]})).unwrap();
+        let (frames, fps) = take_length(&manifest).unwrap();
+        let model = build(
+            "roll",
+            &[TakeClip {
+                id: "t".into(),
+                folder: PathBuf::from("/take"),
+                manifest,
+                frames,
+                fps,
+            }],
+        )
+        .unwrap();
+        assert_eq!(model.duration, 150);
+        let spans = |track: &Track| {
+            track
+                .items
+                .iter()
+                .map(|i| (i.start, i.length))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spans(&model.video[0]), [(0, 60), (90, 60)]);
+        assert_eq!(spans(&model.audio[0]), [(0, 90), (90, 60)]);
+        let xml = render(&model, NleFormat::Fcpxml, NleApp::FinalCut);
+        assert!(xml.contains("ref=\"a2\" lane=\"1\" offset=\"3s\""));
+        let premiere = render(&model, NleFormat::Xmeml, NleApp::Premiere);
+        assert!(premiere.contains("<start>90</start>"));
     }
 
     #[test]

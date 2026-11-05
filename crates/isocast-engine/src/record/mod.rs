@@ -932,6 +932,7 @@ pub type OnStart<'a> = &'a (dyn Fn(&[PathBuf], &Path, &[String]) + Sync);
 pub type OnTake<'a> = &'a (dyn Fn(u32, &Path, &SessionManifest) + Sync);
 
 struct FilePlan {
+    parts: Mutex<Vec<recovery::PhysicalPart>>,
     /// The recording this file belongs to (see `next_recording`).
     recording: u64,
     /// The take this file belongs to, from 1.
@@ -1256,6 +1257,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
         .map(
             |((_, source, kind, (width, height, fps), encoder, audio), path)| {
                 Arc::new(FilePlan {
+                    parts: Default::default(),
                     recording: formats.recording,
                     take: number,
                     epoch: AtomicI64::new(i64::MIN),
@@ -1686,7 +1688,7 @@ fn take_manifest<P: Platform>(
     let (markers, scenes) = control.map_or_else(Default::default, |control| {
         control.timeline(take.epoch, take.end.unwrap_or(Time::MAX))
     });
-    SessionManifest {
+    let mut manifest = SessionManifest {
         version: MANIFEST_VERSION,
         video_recovery: control.and_then(|control| {
             let state = control.state.lock();
@@ -1757,9 +1759,10 @@ fn take_manifest<P: Platform>(
                 plan.start.load(Ordering::SeqCst) != i64::MIN
                     || !matches!(&take.results[*index], Some(Err(_)))
             })
-            .map(|(_, (plan, result))| {
+            .flat_map(|(_, (plan, result))| {
                 let start = plan.start.load(Ordering::SeqCst);
-                ManifestFile {
+                let file = ManifestFile {
+                    part: None,
                     path: plan
                         .spec
                         .path
@@ -1792,7 +1795,73 @@ fn take_manifest<P: Platform>(
                     audio_dropouts: result.as_ref().map(|r| r.audio_dropouts),
                     audio_stops: file_audio_stops(setup, take, plan, stops, mapped),
                     encoder: plan.encoder.lock().clone(),
+                };
+                let parts = plan.parts.lock();
+                if parts.is_empty() {
+                    return vec![file];
                 }
+                parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let f = p.facts.as_ref();
+                        let loss_end = parts
+                            .get(i + 1)
+                            .map(|next| next.audio_loss_base)
+                            .or(file.audio_dropouts);
+                        let until = parts
+                            .get(i + 1)
+                            .map(|next| next.offset)
+                            .or_else(|| f.map(|f| p.offset + f.duration.as_secs_f64()))
+                            .unwrap_or(f64::INFINITY);
+                        let audio_stops = file
+                            .audio_stops
+                            .iter()
+                            .filter(|s| {
+                                s.time_seconds < until
+                                    && s.resumed_seconds.is_none_or(|r| r > p.offset)
+                            })
+                            .map(|s| AudioStop {
+                                time_seconds: s.time_seconds.max(p.offset),
+                                resumed_seconds: s.resumed_seconds.filter(|t| *t < until),
+                                ..s.clone()
+                            })
+                            .collect();
+                        ManifestFile {
+                            audio_stops,
+                            encoder: if i == 0 {
+                                file.encoder.clone()
+                            } else {
+                                p.encoder.clone()
+                            },
+                            path: p.path.clone(),
+                            part: Some(isocast_protocol::manifest::MoviePart {
+                                number: i as u32 + 1,
+                                video_duration_seconds: f.map(|v| v.video.as_secs_f64()),
+                            }),
+                            start_offset_seconds: Some(p.offset),
+                            duration_seconds: f.map(|v| v.duration.as_secs_f64()),
+                            frames: f.map(|v| v.frames),
+                            repeated_frames: f.map(|v| v.repeated),
+                            dropped_frames: f.map(|v| {
+                                v.dropped
+                                    + if i == 0 {
+                                        head_dropped(
+                                            plan,
+                                            mapped(take.epoch),
+                                            Time::from_nanos(start),
+                                        )
+                                    } else {
+                                        0
+                                    }
+                            }),
+                            audio_dropouts: f.and_then(|_| {
+                                loss_end.map(|n| n.saturating_sub(p.audio_loss_base))
+                            }),
+                            ..file.clone()
+                        }
+                    })
+                    .collect()
             })
             .collect(),
         errors: errors.to_vec(),
@@ -1805,7 +1874,15 @@ fn take_manifest<P: Platform>(
                 .map(|(id, read)| (id.clone(), read()))
                 .collect(),
         },
+    };
+    if finished && manifest.files.iter().any(|f| f.part.is_some()) {
+        manifest.duration_seconds = manifest
+            .files
+            .iter()
+            .filter_map(|f| Some(f.start_offset_seconds? + f.duration_seconds?))
+            .reduce(f64::max);
     }
+    manifest
 }
 
 /// An audio source that stopped while recording (a microphone unplugged, a

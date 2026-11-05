@@ -516,7 +516,7 @@ impl WindowsVideoEncoder {
         spec: &VideoTrackSpec,
         input: PixelFormat,
     ) -> Result<Self> {
-        Self::recording_policy(device, spec, input, None, None)
+        Self::recording_policy(device, spec, input, None, None, H264Profile::High)
     }
 
     /// Open an output from an aggregate NVENC budget plan. Unlike the default
@@ -528,7 +528,7 @@ impl WindowsVideoEncoder {
         input: PixelFormat,
         preset: u32,
     ) -> Result<Self> {
-        Self::recording_policy(device, spec, input, Some(preset), None)
+        Self::recording_policy(device, spec, input, Some(preset), None, H264Profile::High)
     }
 
     pub(crate) fn preflight(
@@ -538,6 +538,24 @@ impl WindowsVideoEncoder {
         preset: Option<u32>,
         allow_mf_hardware: bool,
     ) -> Result<Self> {
+        Self::preflight_profile(
+            device,
+            spec,
+            input,
+            preset,
+            allow_mf_hardware,
+            H264Profile::High,
+        )
+    }
+
+    pub(crate) fn preflight_profile(
+        device: &GraphicsDevice,
+        spec: &VideoTrackSpec,
+        input: PixelFormat,
+        preset: Option<u32>,
+        allow_mf_hardware: bool,
+        profile: H264Profile,
+    ) -> Result<Self> {
         let frame =
             crate::TexturePool::new(device.clone()).probe_frame(spec.width, spec.height, input)?;
         Self::recording_policy(
@@ -546,6 +564,7 @@ impl WindowsVideoEncoder {
             input,
             preset,
             Some((&frame, allow_mf_hardware)),
+            profile,
         )
     }
 
@@ -555,6 +574,7 @@ impl WindowsVideoEncoder {
         input: PixelFormat,
         preset: Option<u32>,
         probe: Option<(&Frame, bool)>,
+        profile: H264Profile,
     ) -> Result<Self> {
         let depth = spec.encoder.effective_bit_depth();
         let encoding = match (spec.encoder.codec, depth) {
@@ -568,7 +588,7 @@ impl WindowsVideoEncoder {
         encoding.validate(input)?;
         let quality = RecordingQuality::new(spec.encoder.quality)?;
         let settings = LiveVideoSpec {
-            profile: H264Profile::High,
+            profile,
             width: spec.width,
             height: spec.height,
             fps: spec.fps,

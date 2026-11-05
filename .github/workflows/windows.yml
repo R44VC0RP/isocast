@@ -1419,6 +1419,22 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Roll a changed encoder description and recover both movie parts
+        run: |
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_output_rollover --engine-env ISOCAST_TEST_RECOVERY_SUITE=1 --codec h264 --timeout 180 --work "$RUNNER_TEMP/output-rollover" --keep-failures --report output-rollover.json
+          python -c 'import json; r, = json.load(open("output-rollover.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
+
+      - name: Keep output rollover evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-output-rollover
+          path: |
+            output-rollover.json
+            ${{ runner.temp }}/output-rollover
+          if-no-files-found: warn
+          retention-days: 14
+
   win-wording:
     # The app's Windows wording, drawn offscreen against an isolated engine.
     name: Windows wording snapshots (windows-latest)
