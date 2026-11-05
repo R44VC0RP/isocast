@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Set when the repository is public. Generating a report never uploads it.
-pub const ISSUE_REPOSITORY_URL: Option<&str> = None;
+/// Where bug reports become issues: the manual new-issue link and the
+/// report service (services/report-worker `GITHUB_REPO`) both use this
+/// repository. Generating a report never uploads it.
+pub const ISSUE_REPOSITORY_URL: Option<&str> = Some("https://github.com/anomalyco/isocast");
 
 /// The report service (services/report-worker, deployed on Ryan's
 /// Cloudflare account) that `bug_report` with `submit` posts to.

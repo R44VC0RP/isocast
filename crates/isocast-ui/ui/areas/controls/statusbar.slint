@@ -12,7 +12,7 @@
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import { Ui, ConnectionState } from "../../state.slint";
-import { Badge, BadgeTone, Button, Popover, PopoverPlacement, Rule, Tag, TextField, Tip, Toasts } from "../../kit.slint";
+import { Badge, BadgeTone, Button, IconButton, Popover, PopoverPlacement, Rule, Tag, TextField, Tip, Toasts } from "../../kit.slint";
 import { ControlsArea } from "state.slint";
 import { RemoteArea } from "../remote/state.slint";
 import { EnginePicker } from "../remote/picker.slint";
@@ -350,6 +350,45 @@ export component StatusBar inherits Rectangle {
                 text: Ui.has-setup ? "READY" : "IDLE";
                 dot: true;
                 status: true;
+            }
+        }
+        // No H.264 codec (Linux): says so until closed for this run; a
+        // click downloads it or copies the command.
+        if ControlsArea.codec-off: HorizontalLayout {
+            horizontal-stretch: 0;
+            spacing: 2px;
+            codec-item := StatusItem {
+                label: "H.264 is off" + (ControlsArea.codec-action != "" ? ": " + ControlsArea.codec-action : "");
+                clickable: ControlsArea.codec-action != "";
+                tooltip: ControlsArea.codec-tooltip;
+                clicked => { ControlsArea.codec-act(); }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    padding-right: Theme.space-1;
+                    VerticalLayout {
+                        alignment: center;
+                        Badge {
+                            text: "H.264 OFF";
+                            tone: BadgeTone.warning;
+                            dot: true;
+                            status: true;
+                        }
+                    }
+                    if ControlsArea.codec-action != "": Meta {
+                        text: ControlsArea.codec-action;
+                        color: codec-item.hovered ? Theme.text : Theme.warning;
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: Icons.x;
+                    label: "Hide until Isocast restarts";
+                    compact: true;
+                    icon-size: Theme.icon-xs;
+                    clicked => { ControlsArea.codec-dismiss(); }
+                }
             }
         }
         Meta {

@@ -2,18 +2,20 @@
 //! report as `bug_report` previews it (its ISSUE.md and every file with
 //! its size) before anything is written; Create Report writes the zip
 //! (`bug_report` without `preview`); Open GitHub Issue opens a new issue
-//! on R44VC0RP/isocast with the bug-report template's fields filled in
-//! (the redacted description, triage instructions, version and system) and
-//! reveals the zip. Send Report instead has the engine file
-//! the issue (`bug_report` with `submit` and the preview's id, so exactly
-//! the text shown becomes public; the zip goes privately to the
-//! maintainers). Nothing is sent before Send Report.
+//! on anomalyco/isocast with the bug-report template's fields filled in
+//! (the redacted description, triage instructions, version and system),
+//! text only: the zip is private and never offered for a public issue.
+//! Send Report instead has the engine file the issue (`bug_report` with
+//! `submit` and the preview's id, so exactly the text shown becomes
+//! public; the zip goes privately to the maintainers). If that fails,
+//! Retry Send sends the same preview again. Nothing is sent before Send
+//! Report.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use isocast_protocol::api::Method;
-use isocast_protocol::diagnostics::{BugReport, BugReportParams};
+use isocast_protocol::diagnostics::{BugReport, BugReportParams, ISSUE_REPOSITORY_URL};
 use serde_json::Value;
 use slint::{ComponentHandle, SharedString};
 
@@ -21,9 +23,12 @@ use crate::app::App;
 use crate::kit::model;
 use crate::{ReportFileRow, SettingsArea};
 
-/// Where issues go when the protocol names no repository yet
-/// (`ISSUE_REPOSITORY_URL` is None until the repository is public).
-const REPOSITORY: &str = "https://github.com/R44VC0RP/isocast";
+/// The button that opens the sheet from a failure (toasts, the
+/// engine-down screen).
+pub const REPORT_LABEL: &str = "Report a Bug…";
+
+/// The longest "What happened" a failure fills in (the engine takes 8000).
+const PREFILL_LIMIT: usize = 2000;
 
 /// The new-issue link stays under this many characters: GitHub answers
 /// longer ones (Safari cuts the address at 4096) with an error page, so the
@@ -70,18 +75,26 @@ impl Report {
                 app.settings.report.reveal(&app);
             }
         });
+        let weak = Rc::downgrade(app);
+        area.on_report_open(move |title, detail| {
+            if let Some(app) = weak.upgrade() {
+                app.open_dialog("bug-report", &prefill(&title, &detail));
+            }
+        });
     }
 
-    /// The sheet opened: start afresh and preview.
-    pub fn opened(&self, app: &Rc<App>) {
+    /// The sheet opened: start afresh, with `describe` (what a failure
+    /// said, or nothing) in "What happened", and preview.
+    pub fn opened(&self, app: &Rc<App>, describe: &str) {
         *self.shown.borrow_mut() = None;
         if let Some(window) = app.window() {
             let area = window.global::<SettingsArea>();
-            area.set_report_describe(SharedString::new());
+            area.set_report_describe(describe.into());
             area.set_report_archive(SharedString::new());
             area.set_report_copied(false);
             area.set_report_error(SharedString::new());
             area.set_report_sending(false);
+            area.set_report_send_failed(false);
             area.set_report_issue_url(SharedString::new());
             area.set_report_issue("Collecting what the report holds…".into());
             area.set_report_issue_lines(1);
@@ -178,40 +191,58 @@ impl Report {
         };
         let params = BugReportParams {
             submit: true,
-            preview_id: Some(preview_id),
+            preview_id: Some(preview_id.clone()),
             ..BugReportParams::default()
         };
         Self::busy(app, true);
+        let mut retry = false;
         if let Some(window) = app.window() {
-            window.global::<SettingsArea>().set_report_sending(true);
+            let area = window.global::<SettingsArea>();
+            area.set_report_sending(true);
+            retry = area.get_report_send_failed();
         }
-        app.call_as::<BugReport>(Method::BugReport(params), |app, result| {
+        app.call_as::<BugReport>(Method::BugReport(params), move |app, result| {
             Self::busy(app, false);
             if let Some(window) = app.window() {
                 window.global::<SettingsArea>().set_report_sending(false);
             }
             let report = &app.settings.report;
             match result {
-                Ok(written) => {
+                Ok(mut written) => {
                     let archive = written.archive.clone();
                     let url = written.submitted.as_ref().map(|s| s.issue_url.clone());
                     let failed = written.submit_error.clone();
+                    // Not sent: keep the preview's id so Retry Send sends
+                    // exactly what was shown again.
+                    if failed.is_some() {
+                        written.preview_id = Some(preview_id.clone());
+                    }
                     report.show(app, written, archive.as_deref());
                     if let Some(window) = app.window() {
                         let area = window.global::<SettingsArea>();
                         if let Some(url) = url {
                             area.set_report_issue_url(url.into());
                         }
-                        // Not sent: the zip is saved, and the manual path
-                        // (Open GitHub Issue, Show in Finder) is offered.
                         if let Some(why) = failed {
-                            area.set_report_error(
-                                format!(
-                                    "Couldn’t send the report: {why}. Open GitHub Issue and attach the zip instead."
-                                )
-                                .into(),
-                            );
+                            area.set_report_send_failed(true);
+                            area.set_report_error(format!("Couldn’t send the report: {why}.").into());
                         }
+                    }
+                }
+                // A retry after the preview's five idle minutes: collect it
+                // again (the description is kept) and say to check it.
+                Err(error) if retry && error.message.contains("params.preview_id") => {
+                    if let Some(window) = app.window() {
+                        let area = window.global::<SettingsArea>();
+                        area.set_report_send_failed(false);
+                        area.set_report_archive(SharedString::new());
+                    }
+                    report.preview(app);
+                    if let Some(window) = app.window() {
+                        window.global::<SettingsArea>().set_report_error(
+                            "The preview had expired, so it was collected again. Check it, then Send Report."
+                                .into(),
+                        );
                     }
                 }
                 Err(error) => report.error(app, &error.message),
@@ -231,6 +262,7 @@ impl Report {
         if let Some(window) = app.window() {
             let area = window.global::<SettingsArea>();
             area.set_report_error(SharedString::new());
+            area.set_report_send_failed(false);
             area.set_report_issue_text(report.issue_body.as_str().into());
             let (text, lines) = wrap(&report.issue_body, 84);
             area.set_report_issue(text.into());
@@ -279,7 +311,8 @@ impl Report {
     }
 
     /// The new-issue page with the template's fields filled in, in the
-    /// browser (to post by hand), and the zip in the Finder (to attach).
+    /// browser (to post by hand). Text only: the zip stays private, so it
+    /// isn't revealed for attaching.
     fn open_issue(&self, app: &Rc<App>) {
         let Some(report) = self.shown.borrow().clone() else {
             return;
@@ -292,13 +325,15 @@ impl Report {
         // (the zip's ISSUE.md has it too).
         let copied = triage(&report.issue_body).is_some_and(crate::platform::try_copy_text);
         let url = issue_url(
-            report.repository_url.as_deref().unwrap_or(REPOSITORY),
+            report
+                .repository_url
+                .as_deref()
+                .or(ISSUE_REPOSITORY_URL)
+                .unwrap_or_default(),
             &report.issue_body,
             copied,
-            report.archive.as_deref(),
         );
         crate::platform::open_url(&url);
-        self.reveal(app);
         // The sheet's line says to paste it (a toast would sit behind the
         // sheet, or be gone by the time the browser is back).
         if let Some(window) = app.window() {
@@ -312,6 +347,30 @@ impl Report {
             }
         }
     }
+}
+
+/// "What happened" for a report opened from a failure: the failure's
+/// title and what it said, on one line (the field is one line), cut to
+/// `PREFILL_LIMIT` characters.
+pub fn prefill(title: &str, detail: &str) -> String {
+    let detail = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = title.trim();
+    let text = match (title.is_empty(), detail.is_empty()) {
+        (_, true) => title.to_string(),
+        (true, false) => detail,
+        (false, false) => format!("{title}: {detail}"),
+    };
+    if text.chars().count() <= PREFILL_LIMIT {
+        return text;
+    }
+    text.chars().take(PREFILL_LIMIT - 1).collect::<String>() + "…"
+}
+
+/// A failure toast's Report a Bug… action: the sheet, with what the toast
+/// said in "What happened".
+pub fn opener(title: &str, detail: &str) -> impl Fn(&Rc<App>) + 'static {
+    let text = prefill(title, detail);
+    move |app| app.open_dialog("bug-report", &text)
 }
 
 /// `text` hard-wrapped at `columns` characters (a monospaced well), and
@@ -350,12 +409,7 @@ fn triage(issue: &str) -> Option<&str> {
     Some(rest[..end].trim())
 }
 
-fn issue_url(
-    repository: &str,
-    issue: &str,
-    copied: bool,
-    archive: Option<&std::path::Path>,
-) -> String {
+fn issue_url(repository: &str, issue: &str, copied: bool) -> String {
     let triage = triage(issue).unwrap_or_default();
     let fields = serde_json::from_str::<Value>(triage).ok();
     let machine = fields
@@ -390,14 +444,8 @@ fn issue_url(
         .chars()
         .take(80)
         .collect::<String>();
-    let zip = archive
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let attach = format!(
-        "Attach {zip} here (Isocast showed it in the {}).",
-        isocast_protocol::platform_text::FILE_MANAGER
-    );
+    // Never the zip: files attached to an issue are public.
+    let attach = "Not attached: the report zip has private logs and settings. Isocast's Send Report shares it with the maintainers only.".to_string();
     let mut fields = vec![
         ("template", "bug_report.yml".to_string()),
         ("labels", "bug".to_string()),
@@ -459,9 +507,28 @@ fn encode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn failure_prefill_is_the_toast_on_one_bounded_line() {
+        assert_eq!(
+            super::prefill(
+                "Couldn’t start recording",
+                "No OpenH264 found.\ncould not load libopenh264.so.8\n"
+            ),
+            "Couldn’t start recording: No OpenH264 found. could not load libopenh264.so.8"
+        );
+        assert_eq!(
+            super::prefill("The recording stopped", "  "),
+            "The recording stopped"
+        );
+        assert_eq!(super::prefill("", "disk full"), "disk full");
+        let long = super::prefill("The recording had errors", &"x".repeat(5000));
+        assert_eq!(long.chars().count(), super::PREFILL_LIMIT);
+        assert!(long.starts_with("The recording had errors: xxx") && long.ends_with('…'));
+    }
+
+    #[test]
     fn manual_form_uses_reviewed_text_and_actual_clipboard_outcome() {
         let issue = "## Report\n## Description\n\n> Audio & video [redacted]\n\n## Agent triage\n\n```json\n{\"versions\":{\"version\":\"1.2\",\"commit\":\"abc\"},\"machine_summary\":\"Windows 11\"}\n```";
-        let url = |copied| super::issue_url("https://example.invalid", issue, copied, None);
+        let url = |copied| super::issue_url("https://example.invalid", issue, copied);
         let manual = url(false);
         for field in [
             "summary=Audio%20%26%20video%20%5Bredacted%5D",
@@ -472,6 +539,9 @@ mod tests {
             assert!(manual.contains(field), "missing {field}");
         }
         assert!(!manual.contains("clipboard"));
+        // The zip is private: the public form never asks for it.
+        assert!(manual.contains("attachments=Not%20attached"));
+        assert!(!manual.contains("Attach%20"));
         assert!(url(true).contains("clipboard"));
     }
 }

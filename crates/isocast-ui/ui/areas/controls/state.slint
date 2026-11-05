@@ -136,6 +136,15 @@ export global ControlsArea {
     // ("0 dropped", "6.1 Mb/s", "212 GB free"; "" leaves one out).
     in property <string> status-line;
     in property <bool> status-warn;
+    // H.264 can't be used (a Linux engine or app without OpenH264,
+    // src/codec.rs): the bar's H.264 OFF until closed for this run, why
+    // and what to do, and its action ("Download OpenH264", "Copy
+    // Command", or "" for none).
+    in property <bool> codec-off;
+    in property <string> codec-tooltip;
+    in property <string> codec-action;
+    callback codec-act();
+    callback codec-dismiss();
     in property <string> readout-dropped: "0 dropped";
     in property <bool> readout-dropped-bad;
     in property <string> readout-rate: "0.0 Mb/s";

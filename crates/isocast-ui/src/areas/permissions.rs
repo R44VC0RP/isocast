@@ -844,8 +844,8 @@ fn row_linux(kind: PermissionKind, state: Permission, needed: bool) -> Permissio
     let (icon, title, purpose) = match kind {
         PermissionKind::ScreenRecording => (
             "display",
-            "Screen Recording",
-            "Screens and windows on this computer.",
+            "Screens and Windows",
+            "What you choose to record on this computer.",
         ),
         PermissionKind::Camera => ("camera", "Camera", "Cameras and capture cards."),
         _ => ("mic", "Microphone", "Microphones and audio interfaces."),

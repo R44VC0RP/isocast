@@ -29,7 +29,7 @@ pub const STATES: &[&str] = &["developer-overlay", "developer-overlay-sample"];
 /// The feed released apps read (scripts/release.sh `feed_url`), shown when
 /// this build has none in its Info.plist (a development build).
 const RELEASE_FEED: &str =
-    "https://github.com/R44VC0RP/isocast/releases/latest/download/appcast.xml";
+    "https://github.com/anomalyco/isocast/releases/latest/download/appcast.xml";
 
 #[derive(Default)]
 pub struct Developer {

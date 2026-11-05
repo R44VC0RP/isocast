@@ -285,16 +285,12 @@ fn watcher(deliver: impl Fn(Update)) {
             let (live, events) = client.watch()?;
             let notice = if let Some(update) = pending {
                 let next = if update.automatic_in_app {
-                    format!(
-                        "Isocast restarts it {} to use the new build ({}).",
-                        update.when(),
-                        update.target
-                    )
+                    format!("Isocast updates it to {} {}.", update.target, update.when())
                 } else {
                     let mut next = format!(
-                        "Restart it {} to use the new build ({}): quit and reopen Isocast.",
+                        "To update it to {} {}, quit and reopen Isocast.",
+                        update.target,
                         update.when(),
-                        update.target
                     );
                     if live
                         .setup
@@ -308,7 +304,7 @@ fn watcher(deliver: impl Fn(Update)) {
                 Some((
                     "Engine update waiting",
                     format!(
-                        "The running engine ({}) is still {}. {next}",
+                        "Isocast’s engine ({}) is still {}. {next}",
                         update.running, update.activity
                     ),
                 ))

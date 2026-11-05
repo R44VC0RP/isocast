@@ -7,8 +7,8 @@
 #   ./install.sh                     install (and download OpenH264)
 #   ./install.sh --no-openh264       install without downloading OpenH264
 #   ./install.sh --openh264          (re)install only Cisco's OpenH264
-#   ./install.sh --remove-openh264   remove only Cisco's OpenH264 (H.264
-#                                    off until --openh264)
+#   ./install.sh --remove-openh264   remove only Cisco's OpenH264 (the
+#                                    system's OpenH264 is used, if any)
 #   ./install.sh --uninstall         remove Isocast and OpenH264
 #                                    (recordings and settings stay)
 #
@@ -17,7 +17,8 @@
 # /usr/bin), it manages only this user's OpenH264:
 #
 #   isocast-openh264-install            download Cisco's OpenH264 for this user
-#   isocast-openh264-install --remove   remove it (H.264 off until run again)
+#   isocast-openh264-install --remove   remove it (the system's OpenH264 is
+#                                       used, if any)
 set -eu
 here=$(cd "$(dirname "$0")" && pwd -P)
 prefix=${XDG_DATA_HOME:-$HOME/.local/share}
@@ -89,11 +90,29 @@ license_text() {
   fi
 }
 
+# The distro's OpenH264 (libopenh264.so.8), which Isocast uses when
+# Cisco's copy isn't installed: its path, or nothing. Isocast checks it
+# is version 2.6 or later when it loads it.
+system_openh264() {
+  cache=$({ command -v ldconfig >/dev/null 2>&1 && ldconfig -p || /sbin/ldconfig -p; } 2>/dev/null) || cache=
+  printf '%s\n' "$cache" | awk '$1 == "libopenh264.so.8" { print $NF; exit }'
+}
+
+# What H.264 does without Cisco's copy, after $1 (a sentence's start).
+without_cisco() {
+  system=$(system_openh264)
+  if [ -n "$system" ]; then
+    echo "$1, so Isocast uses your system's OpenH264 ($system) for H.264, if it is version 2.6 or later."
+  else
+    echo "$1, and there is no system OpenH264, so H.264 recording, streaming and previews are off. Install your distro's OpenH264 2.6 or later (libopenh264.so.8) to turn them on."
+  fi
+}
+
 # Download Cisco's OpenH264 into $lib, check it, and say what happened.
 # Returns 2 where Cisco has no build, 1 when it couldn't be installed.
 install_openh264() {
   if [ -z "$openh264_file" ]; then
-    echo "Cisco doesn't build OpenH264 for $(uname -m), so H.264 recording, streaming and previews are off on this computer." >&2
+    without_cisco "Cisco doesn't build OpenH264 for $(uname -m)" >&2
     return 2
   fi
   dest=$lib/$openh264_file
@@ -146,7 +165,8 @@ install_openh264() {
 
 remove_openh264() {
   rm -f "$lib"/libopenh264-*.so
-  echo "Cisco's OpenH264 removed: H.264 recording, streaming and previews are off until $on_cmd."
+  without_cisco "Cisco's OpenH264 removed"
+  echo "To download Cisco's again: $on_cmd"
   echo "$attribution"
 }
 
@@ -214,9 +234,8 @@ mkdir -p "$lib" "$bin" "$apps"
 # The installed copy, run again, has nothing to copy (and copying a file
 # onto itself fails): it refreshes the links and OpenH264.
 if [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
-  # The engine is found beside the app and the CLI, and the browser helper
-  # beside the engine, so all four stay together; this installer and
-  # Cisco's licence too, for later.
+  # Only the sibling browser helper uses the newer Ubuntu runtime. Copy it
+  # without invoking it; an unavailable browser must not block installation.
   for name in isocast isocast-ui isocastd isocast-browser install.sh "$license"; do
     install -m 755 "$here/$name" "$lib/$name"
   done
@@ -243,12 +262,14 @@ ln -sf "$lib/isocast-ui" "$bin/isocast-ui"
 echo "Isocast installed: Isocast in your app menu, or isocast-ui and isocast in $bin."
 case ":$PATH:" in *":$bin:"*) ;; *) echo "($bin isn't on your PATH yet; add it to use the commands.)" ;; esac
 if [ "${1:-}" = --no-openh264 ]; then
-  echo "OpenH264 not downloaded: H.264 recording, streaming and previews stay off until you run: $lib/install.sh --openh264"
+  without_cisco "Cisco's OpenH264 not downloaded"
+  echo "To download it: $lib/install.sh --openh264"
   echo "$attribution"
 else
   status=0
   install_openh264 || status=$?
   if [ "$status" = 1 ]; then
-    echo "Isocast is installed, but H.264 recording, streaming and previews stay off until OpenH264 is: $lib/install.sh --openh264"
+    without_cisco "Isocast is installed, but Cisco's OpenH264 isn't"
+    echo "To download it: $lib/install.sh --openh264"
   fi
 fi

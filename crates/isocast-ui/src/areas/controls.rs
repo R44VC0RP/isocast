@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use isocast_protocol::api::{Capacity, EngineState, Event, LiveFile, Method, Overload};
 use isocast_protocol::hello::EngineOs;
+use isocast_protocol::manifest::VideoRecovery;
 use isocast_protocol::platform_text as wording;
 use isocast_protocol::replay::{ReplaySaved, ReplayState, ReplayStatus};
 use isocast_protocol::stream::{StreamService, StreamState, StreamStatus};
@@ -50,6 +51,7 @@ pub const STATES: &[&str] = &[
     "pause",
     "resume",
     "toast-saved (the toast a stopped recording shows)",
+    "codec-missing[:FIX] (a start refused without OpenH264, and the status bar's notice)",
 ];
 
 /// The transition kinds, in the web app's order and words.
@@ -170,6 +172,8 @@ pub struct Controls {
     /// Why the vertical canvas stopped, once told (#96): its notice shows
     /// once per failure.
     vertical_stopped: RefCell<Option<String>>,
+    /// Recovered takes and outputs that ended early, once told.
+    recovery: super::recovery::Recovery,
 }
 
 impl Area for Controls {
@@ -308,6 +312,9 @@ impl Area for Controls {
         if changed.any(Changed::STATUS) {
             self.vertical_came_or_went(app);
         }
+        if changed.any(Changed::STATUS | Changed::SETUP) {
+            self.recovery.status_changed(app);
+        }
         if changed.any(Changed::STREAM | Changed::BUSY) {
             self.show_stream(app, &area);
         }
@@ -383,7 +390,9 @@ impl Area for Controls {
                     self.show_pauses(&window.global::<ControlsArea>());
                 }
             }
-            Event::Status { live } => self.note_drops(app, Some(&live.files), None),
+            Event::Status { live } => {
+                self.note_drops(app, Some((&live.files, live.video_recovery.as_ref())), None)
+            }
             // The main canvas's stream only: the vertical canvas's has
             // its own status (#86).
             Event::Stream { stream, .. } if stream.canvas.is_main() => {
@@ -416,6 +425,15 @@ impl Area for Controls {
         // Drops are counted from `status` (see note_drops); the stream's
         // total comes in its warning.
         if is_file_drop(message) {
+            return true;
+        }
+        // The recovered-take notice says it from the status.
+        if super::recovery::is_recovery_warning(message) {
+            app.refresh_status(true);
+            return true;
+        }
+        if let Some(launch) = super::recovery::abnormal_launch(message) {
+            self.recovery.abnormal(app, launch);
             return true;
         }
         if let Some(total) = stream_drops(message) {
@@ -659,6 +677,24 @@ impl Area for Controls {
                 );
                 app.show_toast(
                     Toast::new(ToastKind::Info, "Removed “Intro Clip”", "").action("Undo", |_| {}),
+                );
+            }
+            "codec-missing" => {
+                let fix = if arg.is_empty() {
+                    "/home/me/.local/lib/isocast/install.sh --openh264"
+                } else {
+                    arg
+                };
+                let refusal = format!(
+                    "program: No OpenH264 found.\ncould not load libopenh264.so.8: \
+                     libopenh264.so.8: cannot open shared object file: No such file or \
+                     directory (system libopenh264.so.8; no per-user Cisco download); fix: {fix}"
+                );
+                app.codec.refused(
+                    app,
+                    "Couldn’t start recording",
+                    &refusal,
+                    format!("rec-error:{refusal}"),
                 );
             }
             "toast-drops" => {
@@ -1444,12 +1480,20 @@ impl Controls {
 
     /// Counts from a recording's status (`files`) or the stream's total so
     /// far: the drops toast shows (or updates) when any of them went up.
-    fn note_drops(&self, app: &Rc<App>, files: Option<&[LiveFile]>, stream_total: Option<u64>) {
+    fn note_drops(
+        &self,
+        app: &Rc<App>,
+        files: Option<(&[LiveFile], Option<&VideoRecovery>)>,
+        stream_total: Option<u64>,
+    ) {
+        let (files, recovery) = files.unwrap_or_default();
         let rows = {
             let mut drops = self.drops.borrow_mut();
             let mut grew = false;
-            for f in files.unwrap_or_default() {
-                let now = (f.dropped_frames, f.audio_dropouts);
+            for f in files {
+                // A file that ended early has its own notice for its tail.
+                let ended = recovery.map_or(0, |r| r.ended_early_slots(&f.source));
+                let now = (f.dropped_frames.saturating_sub(ended), f.audio_dropouts);
                 match drops
                     .files
                     .iter_mut()
@@ -1737,7 +1781,7 @@ fn open_details(app: &Rc<App>, which: &str) {
 
 /// A file's name in the details and the drops toast: "Program", or its
 /// source's name.
-fn file_label(setup: Option<&isocast_protocol::Setup>, source: &str) -> String {
+pub(super) fn file_label(setup: Option<&isocast_protocol::Setup>, source: &str) -> String {
     if source == "program" {
         return "Program".into();
     }
@@ -2278,13 +2322,25 @@ fn toggle_recording(app: &Rc<App>) {
             if let Err(error) = result {
                 // Keyed as the engine's `stopped` toast with the same
                 // words, so a refused start shows one toast, not two.
+                let key = format!("rec-error:{}", error.message);
+                if app
+                    .codec
+                    .refused(app, "Couldn’t start recording", &error.message, key)
+                {
+                    done(app);
+                    return;
+                }
                 app.show_toast(
                     Toast::new(
                         ToastKind::Error,
                         "Couldn’t start recording",
                         error.message.clone(),
                     )
-                    .key(format!("rec-error:{}", error.message)),
+                    .key(format!("rec-error:{}", error.message))
+                    .action(
+                        crate::areas::report::REPORT_LABEL,
+                        crate::areas::report::opener("Couldn’t start recording", &error.message),
+                    ),
                 );
             }
             done(app);
@@ -3160,9 +3216,16 @@ fn toggle_stream(app: &Rc<App>) {
                     app.toast(
                         ToastKind::Info,
                         "Streaming isn’t in this engine yet",
-                        "Go live arrives with the streaming update to isocastd.",
+                        "Update the engine to go live.",
                     );
-                } else {
+                } else if on
+                    || !app.codec.refused(
+                        app,
+                        "Couldn’t go live",
+                        &error.message,
+                        format!("stream-error:{}", error.message),
+                    )
+                {
                     app.failed(
                         if on {
                             "Couldn’t stop the stream"
@@ -3419,7 +3482,11 @@ fn saved_toast(app: &Rc<App>, report: &isocast_protocol::api::Report) {
             .key("recording-saved")
             .action(crate::areas::remote::reveal_label(app), move |app| {
                 show_file(app, &shown)
-            }),
+            })
+            .action2(
+                crate::areas::report::REPORT_LABEL,
+                crate::areas::report::opener("The recording had errors", &report.errors.join("; ")),
+            ),
         );
         return;
     }

@@ -73,12 +73,14 @@
 pub mod canvas;
 pub mod controls;
 pub mod developer;
+pub mod diagnostics;
 pub mod hotkeys;
 pub mod library;
 pub mod menubar;
 pub mod mixer;
 pub mod permissions;
 pub mod projectors;
+pub mod recovery;
 pub mod remote;
 pub mod report;
 pub mod settings;

@@ -27,7 +27,7 @@ use crate::app::App;
 use crate::{ToastKind, daemon};
 
 const FEED: &str =
-    "https://github.com/R44VC0RP/isocast/releases/latest/download/appcast-windows.xml";
+    "https://github.com/anomalyco/isocast/releases/latest/download/appcast-windows.xml";
 const RELEASE_KEY: &str = include_str!("../../../scripts/sparkle/public-ed-key.txt");
 static API: OnceLock<Api> = OnceLock::new();
 static INITIALIZED: AtomicBool = AtomicBool::new(false);

@@ -1399,6 +1399,39 @@ fn main() -> ExitCode {
     }
 }
 
+/// What a report made without the engine leaves out
+/// (`isocast_diagnostics::bundle::disconnected`).
+const OFFLINE_REPORT_MISSING: &str = "the engine's logs and crash files, its live status, settings, devices, permissions and doctor checks, and recent recording manifests";
+
+/// `isocast report` when the local engine can't be reached or started:
+/// the reduced report the app makes in the same case (the description,
+/// app version, OS and recent launch markers), and a line saying what it
+/// leaves out. A remote engine, or a preview the engine made, can't be
+/// reported from here: `error` stands.
+fn offline_report(
+    params: &isocast_protocol::diagnostics::BugReportParams,
+    engine: &isocast_client::Engine,
+    error: anyhow::Error,
+) -> Result<(isocast_protocol::diagnostics::BugReport, String)> {
+    if !engine.is_local() || params.preview_id.is_some() {
+        return Err(error);
+    }
+    let mut report =
+        isocast_diagnostics::bundle::disconnected(params).map_err(anyhow::Error::msg)?;
+    // Its preview lives only in this process, so no later command could
+    // send it.
+    let preview = report.preview_id.take().is_some();
+    let note = format!(
+        "isocast: couldn't reach the engine ({error:#}), so this report was made on this computer alone: the description, app version, OS and recent launch markers. Missing: {OFFLINE_REPORT_MISSING}. {}Start the engine (`isocast engine start`) and run `isocast report` again for a full report.",
+        if preview {
+            "This preview can't be sent later; use `isocast report --submit` to send in one step. "
+        } else {
+            ""
+        }
+    );
+    Ok((report, note))
+}
+
 fn api_spec(json: bool) -> Result<ExitCode> {
     let doc = isocast_protocol::openrpc::document();
     if json {
@@ -1504,8 +1537,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 submit,
                 preview_id,
             };
-            let report: isocast_protocol::diagnostics::BugReport =
-                Client::connect_or_launch()?.call(Method::BugReport(params))?;
+            let report: isocast_protocol::diagnostics::BugReport = match Client::connect_or_launch()
+            {
+                Ok(mut client) => client.call(Method::BugReport(params))?,
+                Err(error) => {
+                    let engine = isocast_client::Engine::selected()?;
+                    let (report, note) = offline_report(&params, &engine, error)?;
+                    eprintln!("{note}");
+                    report
+                }
+            };
             if json || preview {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else if let Some(path) = &report.archive {
@@ -1525,7 +1566,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             if let Some(why) = &report.submit_error {
                 eprintln!(
-                    "isocast: report not sent: {why}. The zip is kept at {}; attach it to a new GitHub issue by hand.",
+                    "isocast: report not sent: {why}. The zip is kept at {}. It holds private logs, settings, device names and file paths: run `isocast report --submit` again to send it to the maintainers only, rather than attaching it to a public GitHub issue.",
                     report
                         .archive
                         .as_deref()
@@ -5123,4 +5164,55 @@ fn parse_h264_profile(value: &str) -> Result<isocast_protocol::api::H264Profile,
 /// permissions are the ones that count.
 fn list_devices() -> Result<Devices> {
     Client::connect_or_launch()?.call(Method::Devices)
+}
+
+#[cfg(test)]
+mod offline_report_tests {
+    use super::offline_report;
+    use isocast_client::Engine;
+    use isocast_protocol::diagnostics::BugReportParams;
+
+    #[test]
+    fn engine_down_still_reports_what_it_can_and_says_what_is_missing() {
+        let params = BugReportParams {
+            describe: Some("The engine won't start".into()),
+            preview: true,
+            ..BugReportParams::default()
+        };
+        let (report, note) = offline_report(
+            &params,
+            &Engine::Local,
+            anyhow::anyhow!("isocastd didn't start"),
+        )
+        .unwrap();
+        assert!(report.issue_body.contains("The engine won't start"));
+        assert!(report.files.iter().any(|f| f == "build.json"));
+        assert!(report.archive.is_none());
+        // Made in this process: no later `--preview-id` could find it.
+        assert!(report.preview_id.is_none());
+        assert!(note.contains("isocastd didn't start"));
+        assert!(note.contains("Missing: the engine's logs"));
+        assert!(note.contains("isocast report --submit"));
+    }
+
+    #[test]
+    fn remote_engines_and_engine_previews_keep_the_connection_error() {
+        let remote = Engine::Remote {
+            target: "studio".into(),
+        };
+        let error = offline_report(
+            &BugReportParams::default(),
+            &remote,
+            anyhow::anyhow!("studio didn't answer"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "studio didn't answer");
+        let sent = BugReportParams {
+            submit: true,
+            preview_id: Some("p1".into()),
+            ..BugReportParams::default()
+        };
+        let error = offline_report(&sent, &Engine::Local, anyhow::anyhow!("down")).unwrap_err();
+        assert_eq!(error.to_string(), "down");
+    }
 }

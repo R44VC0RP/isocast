@@ -4,6 +4,22 @@ Isocast for Linux (preview)
 Isocast records your scenes, and every source as its own file (ISO), with
 a desktop app laid out like OBS Studio. This is an early Linux build.
 
+Choose a download
+-----------------
+- Ubuntu 24.04: use its .deb for browser sources (WebKitGTK helper included).
+- Debian 12: use the Debian 12 .deb for a system install; for screen and
+  audio capture install PipeWire >= 1.0.5 from bookworm-backports.
+- Arch and other glibc distributions, or a per-user install: use this
+  Debian 12-built tarball for glibc 2.36 or newer. Match `uname -m`
+  (x86_64 or aarch64) and install the runtime libraries listed below.
+  Don't install the tarball over a .deb.
+- Browser sources in the tarball are optional: the included helper needs
+  glibc 2.39 or newer, WebKitGTK 6 and GTK 4's gtk4-broadwayd. Install
+  webkitgtk-6.0 and gtk4 on Arch, webkitgtk6.0 and gtk4 on Fedora, or
+  libwebkitgtk-6.0-4 and libgtk-4-bin on Ubuntu 24.04. On older glibc or
+  without WebKitGTK, only browser sources are unavailable; `isocast doctor`
+  reports the reason. The Debian 12 .deb does not include the helper.
+
 Run it
 ------
     tar xzf isocast-linux-<arch>.tar.gz
@@ -62,14 +78,6 @@ What it needs (install with your package manager)
 - Screen, microphone, desktop audio and camera capture (as it arrives):
   PipeWire, and xdg-desktop-portal with your desktop's backend
   (xdg-desktop-portal-gnome, -kde or -wlr) for choosing a screen.
-- Browser sources: WebKitGTK 6 and GTK 4's Broadway display daemon. Pages
-  render in a helper process (isocast-browser), on a private display that
-  never shows on your screen; without these, only browser sources fail.
-    Debian/Ubuntu: libwebkitgtk-6.0-4 libgtk-4-bin
-    Fedora:        webkitgtk6.0 gtk4
-    Arch:          webkitgtk-6.0 gtk4
-
-Built for glibc 2.39 (Ubuntu 24.04) or newer, x86_64 and arm64.
 
 Where things go
 ---------------

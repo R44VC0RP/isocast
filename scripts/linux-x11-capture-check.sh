@@ -58,7 +58,7 @@ wait_for_picker() {
 }
 TMPDIR="$work" "$bin/isocast" record "$work/fixture.toml" --seconds 2 --json > "$work/report.json" & rec=$!
 trap 'kill "$rec" 2>/dev/null || true' EXIT
-w=$(wait_for_picker "$rec" 'Isocast.*Choose a screen to share')
+w=$(wait_for_picker "$rec" 'Isocast.*Choose a screen to record')
 if [[ -n ${ISOCAST_X11_PICKER_SHOT:-} ]]; then
     ffmpeg -nostdin -v error -f x11grab -window_id "$w" -i "$DISPLAY" -vframes 1 -y "$ISOCAST_X11_PICKER_SHOT"
 fi
@@ -108,7 +108,7 @@ trap '"$cli" stop --wait >/dev/null 2>&1 || true; "$cli" engine shutdown >/dev/n
 printf '%s\n' '{"window:window":{"token":"fixture-prior-grant","width":320,"height":240}}' > "$work/setup.linux-capture.json"
 "$cli" engine start >/dev/null
 "$cli" screen pick window >/dev/null & pick=$!
-w=$(wait_for_picker "$pick" 'Isocast.*Choose a window to share')
+w=$(wait_for_picker "$pick" 'Isocast.*Choose a window to record')
 xdotool mousemove --window "$w" 365 118 click 1
 wait "$pick"
 "$cli" start --folder "$work/window-take" --json > "$work/started.json"

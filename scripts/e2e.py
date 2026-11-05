@@ -148,6 +148,7 @@ if sys.platform == "win32":
     SCENARIOS += (
         "win_media",
         "win_encoder_preflight",
+        "win_encoder_recovery",
         "win_output_scale",
         "win_metadata",
         "win_vcam_publisher",
@@ -4578,6 +4579,171 @@ def scenario_win_record(e, cfg, evidence):
     require(len(manifest["files"]) == 5, f"files: {[f['source'] for f in manifest['files']]}, expected program, "
                                          f"bars, bars2, vertical-program and square")
     evidence["t0"] = check_pattern_take(e, path, manifest, cfg, layout, evidence, vertical=vertical)
+
+
+def scenario_win_encoder_recovery(e, cfg, evidence):
+    """Debug daemon only. Two real raw ISO writers: no desktop or GPU required."""
+    if e.env.get("ISOCAST_TEST_RECOVERY_SUITE") != "1":
+        raise Skip("requires debug binary and --engine-env ISOCAST_TEST_RECOVERY_SUITE=1")
+    fps = 12
+    def packets(path, stream):
+        return json.loads(command(["ffprobe", "-v", "error", "-select_streams", stream, "-show_packets",
+                        "-show_entries", "packet=pts,dts,pts_time,dts_time,pos,size,duration,flags", "-of", "json", path]).stdout)["packets"]
+    def fresh_decode(path, video):
+        desc = json.loads(command(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams",
+            "-show_entries", "stream=extradata", "-show_data", "-of", "json", path]).stdout)["streams"][0]["extradata"]
+        avcc = bytes.fromhex("".join(line.split(":")[1].lstrip().split("  ")[0] for line in desc.splitlines() if line.strip()))
+        require(avcc[0] == 1 and avcc[4] & 3 == 3, "not four-byte avcC")
+        start = b"\x00\x00\x00\x01"
+        stream = bytearray()
+        at = 5
+        for mask in (31, 255):  # SPS then PPS from the movie's *unchanged* sample entry
+            count = avcc[at] & mask
+            at += 1
+            for _ in range(count):
+                size = int.from_bytes(avcc[at:at+2], "big"); at += 2
+                stream.extend(start + avcc[at:at+size]); at += size
+        with open_shared(path) as f:
+            for i, p in enumerate(video):
+                f.seek(int(p["pos"])); au = f.read(int(p["size"])); at = 0; slices = []
+                while at < len(au):
+                    size = int.from_bytes(au[at:at+4], "big"); at += 4
+                    require(0 < size <= len(au) - at, "invalid length in recovery AU")
+                    kind = au[at] & 31
+                    if 1 <= kind <= 5: slices.append(kind)
+                    stream.extend(start + au[at:at+size]); at += size
+                if not i: require(slices and set(slices) == {5}, f"first resumed AU is not IDR: {slices}")
+        # No seek/preroll: the decoder never sees a single pre-gap picture.
+        ffmpeg("-xerror", "-f", "h264", "-i", "pipe:0", "-f", "null", "-", data=stream)
+
+    def live():
+        return e.rpc("status").get("live") or {}
+    def both_committed():
+        files = live().get("files", [])
+        return files if len(files) == 2 and all((f.get("committed_seconds") or 0) >= 2 for f in files) else None
+    def observed(outcome):
+        incidents = (live().get("video_recovery") or {}).get("incidents") or []
+        return incidents[0] if len(incidents) == 1 and incidents[0]["state"] == outcome else None
+
+    for op, count in (("output", 1), ("input", 3), ("input", 4)):
+        e.stop()
+        e.env["ISOCAST_TEST_ENCODER_FAILURE"] = f"iso/bars:{op}:{count}"
+        e.start()
+        cfg = setup(e.root, "h264", iso=True, width=160, height=90, fps=fps)
+        cfg["recording"]["program"]["enabled"] = False
+        cfg["recording"]["folder"] = str(e.root / f"fault-{count}")
+        e.apply(cfg)
+        # Fixed grid end: a scheduler-dependent interactive Stop tail repeat
+        # must not obscure the sibling's strict zero-drop assertion.
+        path = Path(e.rpc("start", {"seconds": 20})["manifest"])
+        files = until(both_committed, description="two committed ISO prefixes")
+        backend = next(f["encoder"]["backend"] for f in files if f["source"] == "bars")
+        # Finalization rewrites the 16-byte preamble after ftyp, not the
+        # committed fragments. Hash only through a complete commit trailer.
+        row = next(f for f in read_json(path)["files"] if f["source"] == "bars")
+        original_path = path.parent / row["path"]
+        with open_shared(original_path) as f: prefix = f.read()
+        first_byte = int.from_bytes(prefix[:4], "big") + 16
+        at = committed_end = first_byte
+        while at + 8 <= len(prefix):
+            size = int.from_bytes(prefix[at:at+4], "big")
+            if size == 1: size = int.from_bytes(prefix[at+8:at+16], "big")
+            if size < 8 or at + size > len(prefix): break
+            kind = prefix[at+4:at+8]; at += size
+            if kind == b"icmt": committed_end = at
+        require(committed_end > first_byte, "no complete pre-fault fragment")
+        prefix_hash = hashlib.sha256(prefix[first_byte:committed_end]).hexdigest()
+        e.rpc("debug_set", {"enabled": True})  # never race injection against encoder startup
+        outcome = "resumed" if count <= 3 else "ended_early"
+        reported = until(lambda: observed(outcome), 25, f"{outcome} after {op} fault ({backend})")
+        require(reported["scope"] == "output" and reported["owner_id"] == "bars" and
+                reported["attempts_started"] == min(count, 3) and reported["fault_kind"] == "encoder_failed"
+                and "injected" in reported["reason"], f"wrong failure attribution: {reported}")
+        m = until(lambda: finished(path), 35, description="recovered movie finalization")
+        require(m["status"] == ("complete" if count <= 3 else "failed"), f"bad final status: {m}")
+        inc, = m["video_recovery"]["incidents"]
+        require(inc["state"] == outcome and inc["incident_id"] == reported["incident_id"], f"lost incident: {inc}")
+        require(len(m["files"]) == 2, f"unexpected output/rollover: {m['files']}")
+        rows = {f["source"]: f for f in m["files"]}; target, sibling = rows['bars'], rows['bars2']
+        require(path.parent / target['path'] == original_path, "recovery changed media path")
+        with open_shared(original_path) as f:
+            f.seek(first_byte)
+            require(hashlib.sha256(f.read(committed_end-first_byte)).hexdigest() == prefix_hash, "pre-fault committed bytes changed")
+        missing = set(range(inc["first_lost_slot"], inc["end_slot_exclusive"]))
+        require(bool(missing) and inc["lost_slots"] == len(missing), f"wrong interval: {inc}")
+        audio = {}
+        for row in (target, sibling):
+            movie = path.parent / row['path']; video = packets(movie, "v:0")
+            ffmpeg("-xerror", "-i", movie, "-map", "0", "-f", "null", "-")
+            require(int(next(s for s in probe(movie)["streams"] if s["codec_type"] == "video")["nb_read_frames"]) == row["frames"], f"wrong count: {row}")
+            pts = [(float(p["pts_time"]) + row["start_offset_seconds"]) * fps for p in video]
+            slots = [round(t) for t in pts]
+            require(all(p["pts"] == p["dts"] for p in video) and all(abs(t - i) < 0.001 for t, i in zip(pts, slots))
+                    and all(b > a for a,b in zip(slots, slots[1:])), "invalid take-clock DTS/PTS")
+            holes = set(range(slots[0], slots[-1]+1)) - set(slots)
+            if row is sibling:
+                require(not holes and row["dropped_frames"] == 0, f"healthy sibling lost slots: {row}")
+            elif count <= 3:
+                require(holes == missing and row['dropped_frames'] == len(missing), f"ledger {inc} vs movie holes {sorted(holes)}: {row}")
+                fresh_decode(movie, video[slots.index(inc['end_slot_exclusive']):])
+            else:
+                require(not holes and slots[-1]+1 == inc['first_lost_slot'], f"last good prefix vs {inc}: {slots[-1]}")
+            ap = packets(movie, "a:0")
+            require(row['audio_dropouts'] == 0 and len(ap) > 4 and all(a['pts']+a['duration'] == b['pts'] for a,b in zip(ap, ap[1:])), "AAC packets discontinuous")
+            audio[row['source']] = pcm(movie)
+        # Independent AAC streams of the same routed PCM. Compare on the take
+        # clock, including the recovery interval, not just container durations.
+        a, b = audio['bars'], audio['bars2']
+        delta = round((target['start_offset_seconds']-sibling['start_offset_seconds'])*RATE)
+        lo, hi = max(0,-delta)+RATE//8, min(len(a), len(b)-delta)-RATE//8
+        require(hi > lo+RATE and any(abs(x)>0.1 for x in a[lo:hi]), "no shared tone to verify")
+        for j in range(lo,hi-RATE//50,RATE//50):
+            rms = math.sqrt(sum((a[k]-b[k+delta])**2 for k in range(j,j+RATE//50))/(RATE//50))
+            require(rms < 0.01, f"decoded audio shifted or missing at sample {j}: RMS difference {rms}")
+        evidence.setdefault('cases', []).append(dict(operation=op, faults=count, backend=backend, incident=inc,
+                sibling_drops=sibling['dropped_frames'], committed_prefix_sha256=prefix_hash, compared_audio_samples=hi-lo))
+
+    # A live admission holder is a wait, not a failed attempt. Its explicit
+    # debug gate lets the test ask for a split *during* recovery without
+    # racing the once-a-second status checkpoint against a fast MFT reopen.
+    e.stop()
+    e.env["ISOCAST_TEST_ENCODER_FAILURE"] = "iso/bars:busy_input:1"
+    e.start()
+    cfg["recording"]["folder"] = str(e.root / "fault-split")
+    e.apply(cfg)
+    first = Path(e.rpc("start", {})["manifest"])
+    until(both_committed, description="committed prefixes before contended reopen")
+    e.rpc("debug_set", {"enabled": True})
+    def waiting():
+        incidents = (live().get("video_recovery") or {}).get("incidents", [])
+        return next((i for i in incidents if i["lost_slots"] >= fps*2), None)
+    held = until(waiting, 10, "unavailable output during admission contention")
+    require((held['owner_id'],held['state'],held['attempts_started']) == ('bars','interrupted',0),
+            f"admission contention consumed an encoder attempt: {held}")
+    try:
+        e.rpc("split")
+    except RpcError as err:
+        require("encoder is recovering" in err.error['message'], f"wrong split refusal: {err}")
+    else:
+        raise Failure("split was accepted in the middle of encoder recovery")
+    e.rpc("debug_set", {"enabled": False})
+    resumed = until(lambda: observed('resumed'), 10, "first admitted attempt after contention")
+    require(resumed['incident_id'] == held['incident_id'] and resumed['attempts_started'] == 1,
+            f"resume used the wrong incident or ticket: {resumed}")
+    second = Path(e.rpc("split")["manifest"])
+    old = until(lambda: finished(first), description="first handoff completed")
+    require(old['video_recovery']['incidents'] == [resumed], "first take lost the incident")
+    until(lambda: not live().get('handover') and both_committed(), description="second take committed")
+    third = Path(e.rpc("split")["manifest"])
+    until(lambda: finished(second), description="second handoff completed")
+    until(both_committed, description="third take committed")
+    e.rpc("stop")
+    for path in (second, third):
+        manifest = until(lambda: finished(path), description="post-recovery split finalization")
+        require(manifest['status'] == 'complete' and manifest['video_recovery']['incident_count'] == 0,
+                f"old incident contaminated a later take: {manifest}")
+    evidence['split_during_recovery'] = dict(busy_attempts=held['attempts_started'],
+            successful_attempts=resumed['attempts_started'], later_splits=2)
 
 
 def scenario_win_encoder_preflight(e, cfg, evidence):

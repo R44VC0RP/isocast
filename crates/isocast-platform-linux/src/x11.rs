@@ -61,15 +61,22 @@ fn candidates(c: &RustConnection, root: Window, window: bool) -> Result<Vec<(Tar
         return monitors(c, root)?
             .into_iter()
             .map(|m| {
-                let atom = c.get_atom_name(m.name)?.reply()?;
+                // The connector people know ("HDMI-1"): the monitor's
+                // first RandR output, else the monitor's own name.
+                let output = m.outputs.first().and_then(|&output| {
+                    let info = c.randr_get_output_info(output, x11rb::CURRENT_TIME).ok()?;
+                    let name = info.reply().ok()?.name;
+                    (!name.is_empty()).then(|| String::from_utf8_lossy(&name).into_owned())
+                });
+                let name = match output {
+                    Some(name) => name,
+                    None => String::from_utf8_lossy(&c.get_atom_name(m.name)?.reply()?.name)
+                        .into_owned(),
+                };
+                let primary = if m.primary { " · primary" } else { "" };
                 Ok((
                     Target::Monitor(m.name),
-                    format!(
-                        "{} ({} × {})",
-                        String::from_utf8_lossy(&atom.name),
-                        m.width,
-                        m.height
-                    ),
+                    format!("{name} · {}×{}{primary}", m.width, m.height),
                 ))
             })
             .collect();
@@ -251,9 +258,9 @@ impl Share {
         let choices = candidates(&conn, root, window)?;
         let target = choose(
             if window {
-                "Choose a window to share"
+                "Choose a window to record"
             } else {
-                "Choose a screen to share"
+                "Choose a screen to record"
             },
             &choices,
         )?;
