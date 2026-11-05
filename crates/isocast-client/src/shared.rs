@@ -39,6 +39,8 @@ use anyhow::{Context, Result, bail};
 use isocast_protocol::api::shared::{Control, Event};
 use isocast_protocol::api::{Method, SharedFrameStream, SharedFramesParams};
 use isocast_surfaces::Token;
+#[cfg(all(windows, feature = "wgpu"))]
+pub use isocast_surfaces::dx12_instance;
 pub use isocast_surfaces::{Surface, host_now};
 
 use crate::Client;

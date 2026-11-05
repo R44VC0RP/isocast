@@ -447,6 +447,39 @@ pub fn debug_message(component: &str, message: String) {
     emit_developer("debug", component, &message, Value::Null);
 }
 
+/// Opt-in cold-start measurements, on a single monotonic timeline across
+/// the device and shader workers. No clock reads or records in normal runs.
+#[cfg(windows)]
+pub fn gpu_startup_span(phase: &'static str) -> impl Drop {
+    static CLOCK: OnceLock<Option<Instant>> = OnceLock::new();
+    struct Span(&'static str, Option<(Instant, Instant)>);
+    impl Drop for Span {
+        fn drop(&mut self) {
+            if let Some((epoch, start)) = self.1 {
+                let us = start.elapsed().as_micros() as u64;
+                emit(
+                    "info",
+                    "gpu.startup",
+                    self.0,
+                    serde_json::json!({
+                        "start_us": start.duration_since(epoch).as_micros() as u64, "elapsed_us": us
+                    }),
+                );
+            }
+        }
+    }
+    Span(
+        phase,
+        CLOCK
+            .get_or_init(|| {
+                (std::env::var_os("ISOCAST_GPU_STARTUP_TIMINGS").as_deref()
+                    == Some(std::ffi::OsStr::new("1")))
+                .then(Instant::now)
+            })
+            .map(|epoch| (epoch, Instant::now())),
+    )
+}
+
 /// Debug-level messages: nothing is formatted unless developer mode is on.
 #[macro_export]
 macro_rules! debug {

@@ -22,12 +22,11 @@ impl Gpu {
     pub fn new() -> Result<Self> {
         // The platform's own API only: Metal on macOS, DX12 on Windows,
         // Vulkan elsewhere (never GL).
+        #[cfg(windows)]
+        let instance = isocast_client::shared::dx12_instance()?;
+        #[cfg(not(windows))]
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: if cfg!(windows) {
-                wgpu::Backends::DX12
-            } else {
-                wgpu::Backends::PRIMARY
-            },
+            backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         // A remote engine's adapter is on another machine: this one's own

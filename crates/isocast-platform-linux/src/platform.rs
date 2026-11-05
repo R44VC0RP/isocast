@@ -165,6 +165,9 @@ impl Platform for LinuxPlatform {
         })
     }
     fn source_open_timeout(&self, source: &SourceKind) -> std::time::Duration {
+        if matches!(source, SourceKind::Media(_)) {
+            return crate::media::REGISTRY_INIT + std::time::Duration::from_secs(8);
+        }
         std::time::Duration::from_secs(match source {
             SourceKind::Display(_) | SourceKind::Window(_) => 120,
             // PipeWire allows 5s enumeration then 5s for the first samples.

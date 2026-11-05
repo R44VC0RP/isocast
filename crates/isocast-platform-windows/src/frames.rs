@@ -54,17 +54,13 @@ struct Submit {
 
 impl GraphicsDevice {
     pub fn new() -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = isocast_surfaces::dx12_adapter(&instance, None)?;
-        Self::on_adapter(isocast_surfaces::dx12_adapter_luid(&adapter)?)
+        Self::on_adapter(isocast_surfaces::capture_adapter_luid()?)
     }
 
     /// Open the exact adapter selected by the parent, never reselect by index
     /// or power preference in the capture helper process.
     pub(crate) fn on_adapter(luid: (u32, i32)) -> Result<Self> {
+        let _span = isocast_diagnostics::gpu_startup_span("capture.device");
         unsafe {
             let factory: IDXGIFactory4 = CreateDXGIFactory1()?;
             let adapter: IDXGIAdapter1 = factory

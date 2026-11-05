@@ -66,6 +66,7 @@ PATH_RULES = [
     (r"crates/isocast-vp8/.*", {"mac"}, "macOS VP8"),
     (r"camera-extension/.*", {"mac"}, "macOS camera extension"),
     (r"crates/isocast-platform-windows/.*", {"windows"}, "Windows platform"),
+    (r"crates/isocast-media(-protocol)?/.*", {"linux"}, "Linux media helper"),
     (r"crates/isocast-platform-linux/.*", {"linux"}, "Linux platform"),
     # main.rs is the stub every platform compiles; win.rs is the Windows
     # helper; the rest is Linux-only. The protocol crate is both helpers'.

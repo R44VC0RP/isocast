@@ -37,7 +37,7 @@ mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/doc/isocast" \
 # package only, with its AppArmor profile and the maintainer scripts that
 # load and unload it. It needs GTK 4.10 or newer and Debian 12 has 4.8:
 # there isocastd says browser sources need GTK 4.10+ (doctor).
-exes="isocast isocastd isocast-ui"
+exes="isocast isocastd isocast-ui isocast-media"
 helper=
 case $distro in
 ubuntu24.04)
@@ -132,16 +132,16 @@ case $shlibs in
 *"libpipewire-0.3-0 (>= 1.0.5)"* | *"libpipewire-0.3-0t64 (>= 1.0.5)"*) ;;
 *) echo "package-deb: libpipewire's minimum wasn't raised to 1.0.5: $shlibs" >&2; exit 1 ;;
 esac
-# Media files and images decode with the system's GStreamer once the engine
-# links it (agent/linux-media): then Depends must name it, and the plugins
-# it loads at run time are recommended.
-needed=$(for exe in $exes; do readelf -d "$root/usr/bin/$exe"; done)
-if printf '%s\n' "$needed" | grep -q 'libgstreamer-1\.0\.so'; then
-  case $shlibs in
-  *libgstreamer1.0-0*) ;;
-  *) echo "package-deb: the binaries link GStreamer but Depends lacks it: $shlibs" >&2; exit 1 ;;
+# Only the media helper links GStreamer. dpkg-shlibdeps includes its libraries
+# in this full desktop package; decoder plugins remain recommendations.
+for exe in isocastd isocast-media; do
+  needed=$(readelf -d "$root/usr/bin/$exe")
+  case "$exe:$needed" in
+    isocastd:*libgst*) echo 'isocastd still links GStreamer' >&2; exit 1 ;;
+    isocast-media:*libgstreamer-1.0.so*) ;;
+    isocast-media:*) echo 'media helper missing GStreamer dependency' >&2; exit 1 ;;
   esac
-fi
+done
 runtime="libvulkan1, mesa-vulkan-drivers | vulkan-icd, libwayland-client0, libwayland-cursor0, libwayland-egl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxrandr2, libxi6, curl, bzip2, ca-certificates"
 if [ -n "$helper" ]; then
   # gtk4-broadwayd, the helper's private display server.

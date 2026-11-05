@@ -17,7 +17,7 @@ name=isocast-linux-$arch
 out=dist/$name
 rm -rf "$out" "dist/$name.tar.gz"
 mkdir -p "$out"
-for exe in isocast isocastd isocast-ui isocast-browser; do
+for exe in isocast isocastd isocast-ui isocast-media isocast-browser; do
   src=$bin/$exe
   if [ "$exe" = isocast-browser ]; then src=$helper; fi
   test -x "$src" || { echo "package-linux: no $src" >&2; exit 1; }

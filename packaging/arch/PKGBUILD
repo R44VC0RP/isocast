@@ -37,12 +37,12 @@ prepare() {
 
 build() {
   cd isocast
-  cargo build --frozen --release -p isocast-cli -p isocast-daemon -p isocast-ui -p isocast-browser
+  cargo build --frozen --release -p isocast-media -p isocast-cli -p isocast-daemon -p isocast-ui -p isocast-browser
 }
 
 package() {
   cd isocast
-  install -Dm755 -t "$pkgdir/usr/bin" "${CARGO_TARGET_DIR:-target}"/release/isocast{,d,-ui,-browser}
+  install -Dm755 -t "$pkgdir/usr/bin" "${CARGO_TARGET_DIR:-target}"/release/isocast{,d,-ui,-browser,-media}
   install -Dm644 -t "$pkgdir/usr/share/applications" packaging/linux/dev.isocast.Isocast.desktop
   mkdir -p "$pkgdir/usr/share/icons"
   cp -r packaging/linux/icons/hicolor "$pkgdir/usr/share/icons/"

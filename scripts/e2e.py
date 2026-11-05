@@ -54,6 +54,11 @@ Foundation beside the test pattern (program and media ISO, frame oracle and
 markers): strict at --windows-profile 180p30 for 18 s in hosted CI, 60 s from
 720p up (1080p30 on a GPU machine).
 
+Windows compiler CI: win_program_cut checks a five-second program recording
+with a hard cut at 180p30: exact source and frame IDs, zero drops or repeats.
+The full five-output win_record and cut/fade/slide win_scenes remain separate
+qualification runs on aws-win and exon-desk, not hosted WARP capacity claims.
+
 Linux capture: --only linux_capture records the real capture paths (the
 ScreenCast portal over PipeWire, PipeWire desktop audio, a microphone and a
 V4L2 camera) on the headless desktop of scripts/linux-capture-fixture.sh
@@ -146,6 +151,7 @@ SCENARIOS = (
 )
 if sys.platform == "win32":
     SCENARIOS += (
+        "win_program_cut",
         "win_media",
         "win_encoder_preflight",
         "win_encoder_recovery",
@@ -159,6 +165,7 @@ elif sys.platform.startswith("linux"):
         "linux_recovery",
         "linux_handoff",
         "linux_media",
+        "linux_media_faults",
         "linux_capture",
         "linux_audio_exclude",
         "linux_browser",
@@ -4558,6 +4565,37 @@ def check_pattern_take(e, path, manifest, cfg, layout, evidence, t0=None, label=
     return t0
 
 
+def scenario_win_program_cut(e, cfg, evidence):
+    """Hosted shader check: one program writer, a hard cut, every source and frame ID.
+    No ISO writers, extra canvases or fade/slide passes; win_record and win_scenes
+    remain the full strict Windows qualification scenarios."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    cfg["scenes"] = [{"id": s, "name": s, "items": [item(s, (0, 0, 1, 1), (w, h))]} for s in ("bars", "bars2")]
+    cfg["recording"]["iso"].update(enabled=False, sources=[])
+    e.apply(cfg)
+    seconds = 5
+    path = Path(e.rpc("start", {"seconds": seconds})["manifest"])
+    time.sleep(2)
+    cut = e.rpc("switch_scene", {"scene": "bars2", "transition": {"kind": "cut"}})
+    manifest = until(lambda: finished(path), seconds + 35, "program cut finalization")
+    # No hosted loss policy for this check, even when included in a mixed suite.
+    evidence["files"] = check_take(path, manifest, seconds, sync=True, expected_sources=["program"])
+    program, _ = manifest_file(path, manifest, "program")
+    rows = pattern_rows(program, pattern_specs([("picture", (0, 0, 1, 1))], w, h), (w, h), fps)
+    require(len(rows) == seconds * fps and all(slot == i for i, (slot, _, _) in enumerate(rows)),
+            f"{program.name}: expected every one of {seconds * fps} program slots in order")
+    first = math.ceil(cut["time_seconds"] * fps - 1e-6)
+    require(0 < first < len(rows), f"cut at slot {first} did not exercise both sources")
+    period = pattern_period(fps)
+    t0 = pattern_fit(rows[:first], "picture", period)
+    oracle = Oracle("program cut", program, e.root, evidence, hold_ok=False)
+    for slot, t, row in rows:
+        scene = "bars" if slot < first else "bars2"
+        oracle.expect(slot, t, "picture", ("id", PATTERN_TAGS[scene], (t0 + slot) % period), row["picture"])
+    oracle.verdict()
+    evidence.update(t0=t0, cut_slot=first)
+
+
 def scenario_win_record(e, cfg, evidence):
     """The test pattern recorded into the program (bars, bars2 in a corner),
     both ISOs, the vertical canvas's own arrangement and a square canvas's
@@ -4935,6 +4973,72 @@ def scenario_linux_media(e, cfg, evidence):
             f"files: {[f['source'] for f in manifest['files']]}")
     evidence["clip"] = {"frames": count, "loops": round(seconds / clip_seconds, 2)}
     evidence["t0"] = check_record_take(e, path, manifest, cfg, layout, count, evidence, isos=("a",))
+    require(any(b'isocast-media: decoded sample stdout probe' in log.read_bytes()
+                for log in e.sock.with_suffix('.logs').glob('*-native-*.jsonl')),
+            'did not observe GStreamer stdout on the diagnostic stream during decoding')
+
+
+def scenario_linux_media_faults(e, cfg, evidence):
+    """Kill or freeze the owned video decoder, not a probe; the take and other ISO survive."""
+    w, h, fps = (cfg['canvas'][k] for k in ('width', 'height', 'fps'))
+    clip = oracle_fixture(e.root.parent / 'fixtures', ORACLE_TAGS['a'], fps, 4, mp4=True)
+    cfg['sources'] = [s for s in cfg['sources'] if s['id'] in ('bars', 'tone')]
+    cfg['sources'].append({'id': 'clip', 'kind': 'media', 'files': [str(clip)], 'loop': True})
+    cfg['scenes'] = [{'id': 'main', 'items': [item('bars', (0, 0, 1, 1), (w, h)),
+                                             item('clip', (0, 0, .25, .25), (w, h))]}]
+    cfg['recording']['program']['audio'] = ['tone']
+    cfg['recording']['iso'].update(enabled=True, sources=['bars', 'clip'], audio=['tone'])
+    # As in video_recovery: do not count the deliberately killed ISO's missing
+    # slots as a suite throughput regression. Still check every unaffected file.
+    cfg['recording']['folder'] = str(e.root / 'fault-recordings')
+    for sig in (signal.SIGKILL, signal.SIGSTOP):
+        e.apply(cfg)
+        started = e.rpc('start', {})
+        def inject():
+            # Only children of threads of this private test daemon. pidfd prevents
+            # signalling a reused PID if the 4-second clip wraps while inspecting.
+            for children in Path(f'/proc/{e.process.pid}/task').glob('*/children'):
+                try:
+                    pids = children.read_text().split()
+                except FileNotFoundError:
+                    continue
+                for pid in pids:
+                    fd = None
+                    try:
+                        fd = os.pidfd_open(int(pid))
+                        argv = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+                        if argv[1:] == [b'media-v2', b'video', b'']:
+                            signal.pidfd_send_signal(fd, sig)
+                            return pid
+                    except (FileNotFoundError, ProcessLookupError):
+                        pass
+                    finally:
+                        if fd is not None:
+                            os.close(fd)
+        pid = until(inject, description='active video decoder')
+        def failure():
+            return next((s.get('error') for s in e.rpc('status')['engine']['sources']
+                         if s['source'] == 'clip' and s['state'] == 'failed'), None)
+        why = until(failure, 18, f'clip failure after {sig.name}')
+        require(('timed out' if sig == signal.SIGSTOP else 'isocast-media') in why, why)
+        checks = e.rpc('doctor', {})['checks']
+        require(any(c['name'] == 'live media source: clip' and c['detail'] == why for c in checks), checks)
+        time.sleep(2)  # Require unaffected output beyond the observed failure.
+        e.rpc('stop')
+        m = until(lambda: finished(started['manifest']), 15, 'unrelated outputs finalized')
+        losses = drop_metrics(m)
+        evidence[sig.name] = {'pid': pid, 'reason': why, 'losses': losses}
+        for src in ('program', 'bars'):
+            f, = [f for f in m['files'] if f['source'] == src]
+            loss, = [row for row in losses if row['output'] == Path(f['path']).name]
+            check_loss(loss, loss_limit(evidence))
+            file = Path(started['manifest']).parent / f['path']
+            require(float(command(['ffprobe','-v','error','-show_entries','format=duration','-of',
+                                   'default=nw=1:nk=1',file]).stdout) >= 2, file)
+            pixel = ffmpeg('-sseof','-1','-i',file,'-an','-frames:v','1','-vf','scale=1:1',
+                           '-pix_fmt','rgb24','-f','rawvideo','-').stdout
+            require(len(pixel) == 3, f'{file}: no picture near end of finalized file')
+        e.rpc('engine', {'running': False})
 
 
 def scenario_linux_shared_frames(e, cfg, evidence):
@@ -6968,6 +7072,9 @@ def worker(args):
         for kv in args.engine_env:
             key, _, value = kv.partition("=")
             ENGINE_ENV[key] = value
+        if args.worker == 'linux_media':
+            # Print from native stdout while the parent is expecting video bytes.
+            ENGINE_ENV['ISOCAST_TEST_MEDIA_STDOUT'] = '1'
         engine = Engine(root, args.daemon)
         codec = evidence["capabilities"]["record_codec"]
         cfg = setup(root, codec, **evidence["capabilities"].get("profile", {}))

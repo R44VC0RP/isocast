@@ -217,7 +217,7 @@ esac
 # The tarball doesn't have a package manager to resolve dependencies. Check
 # linked libraries (including the browser helper), then those the graphics
 # backend opens on demand. Warn rather than blocking a headless installation.
-for exe in isocast isocastd isocast-ui isocast-browser; do
+for exe in isocast-media isocast isocastd isocast-ui isocast-browser; do
   missing=$(LC_ALL=C ldd "$here/$exe" 2>/dev/null | awk '/=> not found/{print $1}')
   [ -z "$missing" ] || printf 'install.sh: %s needs these system libraries:\n%s\n' "$exe" "$missing" >&2
 done
@@ -236,7 +236,7 @@ mkdir -p "$lib" "$bin" "$apps"
 if [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
   # Only the sibling browser helper uses the newer Ubuntu runtime. Copy it
   # without invoking it; an unavailable browser must not block installation.
-  for name in isocast isocast-ui isocastd isocast-browser install.sh "$license"; do
+  for name in isocast isocast-ui isocastd isocast-media isocast-browser install.sh "$license"; do
     install -m 755 "$here/$name" "$lib/$name"
   done
   chmod 644 "$lib/$license"

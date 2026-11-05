@@ -62,6 +62,8 @@ pub struct ToYCbCr {
 
 impl ToYCbCr {
     pub fn new(gpu: &Gpu) -> Self {
+        #[cfg(windows)]
+        let _build = gpu.pipeline_build_guard();
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("to ycbcr"),

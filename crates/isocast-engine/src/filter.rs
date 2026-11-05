@@ -439,6 +439,10 @@ impl Filters {
     /// after another (the program), so render delays hold pictures back;
     /// otherwise (snapshots) they are skipped.
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat, over_time: bool) -> Self {
+        #[cfg(windows)]
+        let _build = gpu.pipeline_build_guard();
+        #[cfg(windows)]
+        let _span = isocast_diagnostics::gpu_startup_span("pipelines.filters");
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("filters"),
@@ -516,37 +520,51 @@ impl Filters {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let pipelines = PASSES
-            .iter()
-            .map(|&entry| {
-                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: Default::default(),
-                    depth_stencil: None,
-                    multisample: Default::default(),
-                    multiview_mask: None,
-                    cache: None,
-                });
-                (entry, pipeline)
+        let make = |&entry: &&'static str| {
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            (entry, pipeline)
+        };
+        #[cfg(windows)]
+        let pipelines = if gpu.parallel_warmup() {
+            std::thread::scope(|scope| {
+                let (a, rest) = PASSES.split_at(PASSES.len() / 3);
+                let (b, c) = rest.split_at(rest.len() / 2);
+                let a = scope.spawn(move || a.iter().map(make).collect::<Vec<_>>());
+                let b = scope.spawn(move || b.iter().map(make).collect::<Vec<_>>());
+                let mut out: HashMap<_, _> = c.iter().map(make).collect();
+                out.extend(a.join().unwrap_or_else(|p| std::panic::resume_unwind(p)));
+                out.extend(b.join().unwrap_or_else(|p| std::panic::resume_unwind(p)));
+                out
             })
-            .collect();
+        } else {
+            PASSES.iter().map(make).collect()
+        };
+        #[cfg(not(windows))]
+        let pipelines = PASSES.iter().map(make).collect();
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("filter"),
             mag_filter: wgpu::FilterMode::Linear,
