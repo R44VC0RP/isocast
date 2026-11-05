@@ -5276,6 +5276,32 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 let changes = inner.audio_stop_changes.load(Ordering::SeqCst);
                 let video_changes = recovery.revision();
                 if changes != audio_stops_seen || video_changes != video_changes_seen {
+                    let commits = std::mem::take(&mut *recovery.part_commits.lock());
+                    for (number, reply) in commits {
+                        let result = takes
+                            .get(number as usize - 1)
+                            .filter(|take| !take.finalized)
+                            .ok_or_else(|| anyhow::anyhow!("rollover take no longer exists"))
+                            .and_then(|take| {
+                                write_manifest_durable(
+                                    &take.manifest_path,
+                                    &take_manifest(
+                                        platform,
+                                        setup,
+                                        take,
+                                        SessionStatus::Recording,
+                                        &[],
+                                        &stops(),
+                                        Some(control),
+                                        canvas_controls,
+                                        &formats.cameras,
+                                    ),
+                                )
+                            });
+                        let _ = reply.send(result.map_err(|error| {
+                            format!("could not publish rollover intent: {error:#}")
+                        }));
+                    }
                     audio_stops_seen = changes;
                     video_changes_seen = video_changes;
                     let _ = write(current, SessionStatus::Recording, &[]);
@@ -5689,6 +5715,44 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         let reports: Vec<_> = take.results.iter_mut().map(|r| r.take()?.ok()).collect();
         let mapped = |at| control.recording_time(at);
         for (plan, report) in take.plans.iter().zip(reports) {
+            if !plan.parts.lock().is_empty() {
+                if let Some(m) = &take.manifest {
+                    for f in m
+                        .files
+                        .iter()
+                        .filter(|f| f.source == plan.source && f.part.is_some())
+                    {
+                        if let (
+                            Some(offset),
+                            Some(duration),
+                            Some(frames),
+                            Some(repeated),
+                            Some(dropped),
+                        ) = (
+                            f.start_offset_seconds,
+                            f.duration_seconds,
+                            f.frames,
+                            f.repeated_frames,
+                            f.dropped_frames,
+                        ) {
+                            files.push(super::FileReport {
+                                path: folder.join(&f.path),
+                                take: plan.take,
+                                source: f.source.clone(),
+                                audio: plan.audio.clone(),
+                                start_offset_seconds: offset,
+                                duration_seconds: duration,
+                                frames,
+                                repeated_frames: repeated,
+                                dropped_frames: dropped,
+                                audio_dropouts: f.audio_dropouts.unwrap_or_default(),
+                                audio_stops: f.audio_stops.clone(),
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
             if let Some(mut report) = report {
                 report.audio_stops = file_audio_stops(setup, take, plan, &stops, mapped);
                 files.push(report);

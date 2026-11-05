@@ -155,6 +155,7 @@ if sys.platform == "win32":
         "win_media",
         "win_encoder_preflight",
         "win_encoder_recovery",
+        "win_output_rollover",
         "win_output_scale",
         "win_metadata",
         "win_vcam_publisher",
@@ -4782,6 +4783,102 @@ def scenario_win_encoder_recovery(e, cfg, evidence):
                 f"old incident contaminated a later take: {manifest}")
     evidence['split_during_recovery'] = dict(busy_attempts=held['attempts_started'],
             successful_attempts=resumed['attempts_started'], later_splits=2)
+
+
+def scenario_win_output_rollover(e, cfg, evidence):
+    """Real replacement SPS/PPS (High -> Constrained Baseline), not mutated bytes."""
+    if e.env.get("ISOCAST_TEST_RECOVERY_SUITE") != "1":
+        raise Skip("requires debug recording encoder fault injection")
+    fps = 12
+    for crash in (False, True):
+        e.stop()
+        e.env['ISOCAST_TEST_ENCODER_FAILURE'] = 'iso/bars:rollover:1'
+        if crash: e.env['ISOCAST_TEST_PART_COMMIT_HOLD'] = '1'
+        e.start()
+        cfg = setup(e.root, 'h264', iso=True, width=160, height=90, fps=fps)
+        cfg['recording']['program']['enabled'] = False
+        # Only one take per output folder; a rollover is not another public split.
+        cfg['recording']['folder'] = str(e.root / ('crash-roll' if crash else 'clean-roll'))
+        e.apply(cfg)
+        path = Path(e.rpc('start', {'seconds': 12})['manifest'])
+        def prefix_ready():
+            files = (e.rpc('status').get('live') or {}).get('files', [])
+            return files if len(files)==2 and all((f.get('committed_seconds') or 0)>=2 for f in files) else None
+        prefix = until(prefix_ready, description='both committed movie prefixes')
+        backend = next(f['encoder']['backend'] for f in prefix if f['source']=='bars')
+        if not crash:
+            original = path.parent / next(f['path'] for f in read_json(path)['files'] if f['source']=='bars')
+            occupied = original.with_name(original.stem + '.part002' + original.suffix)
+            with occupied.open('xb') as private: private.write(b'unrelated occupied name')
+        e.rpc('debug_set', {'enabled': True})
+        if crash:
+            def committed_pending():
+                m = read_json(path)
+                for i in (m.get('video_recovery') or {}).get('incidents', []):
+                    r = i.get('rollover') or {}
+                    if r.get('state') == 'pending':
+                        with open_shared(path.parent / r['path']) as f: data = f.read()
+                        if len(data)>=64 and data[-64:-56]==b'\x00\x00\x00\x40icmt': return m
+                return None
+            pending = until(committed_pending, 20, 'committed IDR before its active checkpoint')
+            e.process.kill(); e.process.wait(timeout=10)
+            require(e.process.returncode != 0, 'engine exited normally in crash case')
+            e.start()
+            m = until(lambda: (m if m['status']=='interrupted' and all(f.get('frames') for f in m['files']) else None)
+                      if (m:=read_json(path)) else None, description='both physical parts repaired')
+            require([(f['path'],f['start_offset_seconds']) for f in pending['files']] ==
+                    [(f['path'],f['start_offset_seconds']) for f in m['files']], 'restart changed part identity or offset')
+        else:
+            m = until(lambda: finished(path), 30, 'finalization of native rollover')
+            require(m['status']=='complete', f'rollover ended take early: {m}')
+        require(len(m['files'])==3, f'expected two parts and one sibling: {m}')
+        a,b = [f for f in m['files'] if f['source']=='bars']
+        sibling, = [f for f in m['files'] if f['source']=='bars2']
+        incident, = m['video_recovery']['incidents']; roll = incident['rollover']
+        require([f['part']['number'] for f in (a,b)]==[1,2] and not sibling.get('part')
+                and roll['state']=='committed' and roll['path']==b['path'] and roll['part']==2
+                and incident['state']=='resumed', f'wrong physical/incident identity: {m}')
+        cut = b['start_offset_seconds']; require(abs(cut-roll['take_offset_ns']/1e9)<1e-8 and
+            round(cut*fps)==incident['end_slot_exclusive'], 'IDR offset does not end the take-clock gap')
+        profiles = []
+        for f in (a,b,sibling):
+            movie=path.parent/f['path']; info=probe(movie); video=next(s for s in info['streams'] if s['codec_type']=='video')
+            ffmpeg('-xerror','-i',movie,'-map','0','-f','null','-')
+            require(int(video['nb_read_frames'])==f['frames']>0 and abs(float(video['start_time']))<.0001,
+                    f'movie has wrong local zero or decoded count: {video}')
+            if f.get('part'):
+                profiles.append(video['profile'])
+                require(abs(float(video['duration'])-f['part']['video_duration_seconds'])<.001,'wrong video extent')
+        require(profiles[0] != profiles[1] and 'Baseline' in profiles[1], f'configuration did not actually change: {profiles}')
+        if not crash:
+            require(occupied.read_bytes()==b'unrelated occupied name' and occupied.name!=b['path'], 'rollover reused an occupied path')
+            last = until(lambda: (s.get('last') if s['state']=='idle' else None) if (s:=e.rpc('status')) else None,
+                         description='multipart Stop report')
+            require({Path(f['path']).name:f['start_offset_seconds'] for f in last['files']} ==
+                    {f['path']:f['start_offset_seconds'] for f in m['files']}, 'Stop report lost a physical part or offset')
+            require(sibling['dropped_frames']==0 and all(f['audio_dropouts']==0 for f in m['files']), 'unexpected sibling/PCM loss')
+            require(abs(a['start_offset_seconds']+a['duration_seconds']-cut)<.0001,'old audio does not reach the cut')
+            require(round((a['start_offset_seconds']+a['part']['video_duration_seconds'])*fps)==incident['first_lost_slot'], 'old video extends over the gap')
+            oracle = pcm(path.parent/sibling['path'])
+            for f in (a,b):
+                sound=pcm(path.parent/f['path']); delta=round((f['start_offset_seconds']-sibling['start_offset_seconds'])*RATE)
+                n=min(len(sound),round(f['duration_seconds']*RATE),len(oracle)-delta)
+                require(n>RATE and any(abs(x)>0.1 for x in sound[:n]),'no audible markers in movie part')
+                for j in range(max(0,-delta)+2048,n-2048-RATE//50,RATE//50):
+                    rms=math.sqrt(sum((sound[k]-oracle[k+delta])**2 for k in range(j,j+RATE//50))/(RATE//50))
+                    require(rms<.012, f'part audio misplaced at {j}: {rms}')
+        exported=e.rpc('take_export_nle',{'take':str(path),'format':'otio','folder':str(e.root/'nle')})
+        tracks,rate,_=nle_tracks('otio',Path(exported['path']))
+        angle=next(t for t in tracks if len(t)==2)
+        for clip,f in zip(angle,(a,b)):
+            require(Path(clip[2]).name==f['path'] and clip[0]==round(f['start_offset_seconds']*rate) and clip[3]==0,
+                    f'wrong OTIO part placement: {angle}')
+        if crash:
+            hashes = {f['path']:hashlib.sha256((path.parent/f['path']).read_bytes()).digest() for f in m['files']}
+            e.stop(); e.start()
+            require(read_json(path)==m and all(hashlib.sha256((path.parent/n).read_bytes()).digest()==d for n,d in hashes.items()),'recovery not idempotent')
+        evidence.setdefault('cases',[]).append(dict(crash=crash,profiles=profiles,backend=backend,offset=cut,incident=incident,
+                frames=[f['frames'] for f in (a,b)],sibling_drops=sibling.get('dropped_frames'),nle_starts=[x[0] for x in angle]))
 
 
 def scenario_win_encoder_preflight(e, cfg, evidence):

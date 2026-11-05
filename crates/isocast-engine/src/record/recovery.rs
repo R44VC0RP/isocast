@@ -1,6 +1,7 @@
 //! Recording-scoped transitions and retry limits. This ledger never opens a
 //! device. Native owners keep their resources; only evidence crosses here.
 
+use isocast_protocol::manifest::{RolloverState, VideoRollover};
 use isocast_protocol::manifest::{
     VideoFaultKind, VideoIncident, VideoRecovery, VideoRecoveryScope as Scope,
     VideoRecoveryState as State,
@@ -23,6 +24,94 @@ pub struct OutputRecovery {
 }
 
 impl OutputRecovery {
+    /// Publish the reserved name/offset durably before allowing the mux to
+    /// write media. The coordinator is the sole manifest writer, including
+    /// during user splits. A dead/blocked coordinator cannot strand Stop.
+    pub fn reserve_part(
+        &self,
+        ticket: Attempt,
+        path: String,
+        saved: Time,
+        now: Time,
+        backend: String,
+        preset: Option<u32>,
+    ) -> anyhow::Result<u32> {
+        anyhow::ensure!(
+            self.can_resume(ticket, saved, now),
+            "stale rollover generation"
+        );
+        let epoch = self
+            .clock
+            .state
+            .read()
+            .map(Time::from_nanos(self.plan.epoch.load(Ordering::Acquire)));
+        let offset = saved.saturating_since(epoch);
+        let first_name = self
+            .plan
+            .spec
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("part one needs a UTF-8 file name"))?;
+        let mut row = PhysicalPart::new(path.clone(), offset.as_secs_f64());
+        row.audio_loss_base = self.plan.audio_dropouts.load(Ordering::Acquire);
+        row.encoder = self.plan.encoder.lock().clone().map(|mut e| {
+            e.backend = backend;
+            e.applied_preset = preset;
+            e.planned_preset = preset;
+            e.admission = "replanned".into();
+            e.calibrated = false;
+            e.estimated_load = None;
+            e.reason = Some("replacement selected by mid-take recording preflight".into());
+            e
+        });
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let ledger = &self.clock.recovery;
+        let mut requests = ledger.part_commits.lock();
+        let mut parts = self.plan.parts.lock();
+        let number = parts.len().max(1) as u32 + 1;
+        let changed = ledger.update(ticket.incident, now, |e| {
+            if e.attempts.last() != Some(&ticket) || e.rollover.is_some() {
+                return false;
+            }
+            e.rollover = Some(VideoRollover {
+                state: RolloverState::Pending,
+                part: number,
+                path,
+                take_offset_ns: offset.as_nanos() as u64,
+            });
+            true
+        });
+        anyhow::ensure!(
+            changed,
+            "cannot publish a part for a closed recovery incident"
+        );
+        if parts.is_empty() {
+            let start = Time::from_nanos(self.plan.start.load(Ordering::Acquire));
+            parts.push(PhysicalPart::new(
+                first_name.into(),
+                start.saturating_since(epoch).as_secs_f64(),
+            ));
+        }
+        parts.push(row);
+        drop(parts);
+        requests.push((self.plan.take, tx));
+        drop(requests);
+        ledger.revision.fetch_add(1, Ordering::Release);
+        rx.recv_timeout(Duration::from_secs(3).min(ticket.deadline.saturating_since(now)))
+            .map_err(|_| anyhow::anyhow!("rollover intent was not durably acknowledged"))?
+            .map_err(|msg| anyhow::Error::msg(msg).context(PartMetadataWrite))?;
+        Ok(number)
+    }
+
+    pub fn finish_part(&self, number: u32, facts: PartFacts) {
+        if let Some(index) = number.checked_sub(1)
+            && let Some(row) = self.plan.parts.lock().get_mut(index as usize)
+        {
+            row.facts = Some(facts);
+        }
+        self.clock.recovery.revision.fetch_add(1, Ordering::Release);
+    }
     pub fn interrupted(&self, first_missing: Time, now: Time, reason: &str) -> Option<u64> {
         let from = self.clock.state.read().host_time(first_missing);
         self.plan.output_active.store(0, Ordering::Release);
@@ -99,7 +188,12 @@ impl OutputRecovery {
                     return false;
                 }
                 e.resumed = Some(picture);
-                e.reason.push_str("; resumed in the same file with ");
+                if let Some(roll) = e.rollover.as_mut() {
+                    roll.state = RolloverState::Committed;
+                    e.reason.push_str("; resumed in a new output part with ");
+                } else {
+                    e.reason.push_str("; resumed in the same file with ");
+                }
                 e.reason.extend(backend.chars().take(512));
                 true
             });
@@ -124,7 +218,43 @@ impl OutputRecovery {
     }
 }
 
+pub struct PartFacts {
+    pub frames: u64,
+    pub repeated: u64,
+    pub dropped: u64,
+    pub duration: Duration,
+    pub video: Duration,
+}
+
+#[derive(Debug)]
+pub struct PartMetadataWrite;
+impl std::fmt::Display for PartMetadataWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("writing durable output-part metadata")
+    }
+}
+
+pub(super) struct PhysicalPart {
+    pub encoder: Option<isocast_protocol::manifest::ManifestEncoder>,
+    pub audio_loss_base: u64,
+    pub path: String,
+    pub offset: f64,
+    pub facts: Option<PartFacts>,
+}
+impl PhysicalPart {
+    fn new(path: String, offset: f64) -> Self {
+        Self {
+            path,
+            encoder: None,
+            audio_loss_base: 0,
+            offset,
+            facts: None,
+        }
+    }
+}
+
 struct Incident {
+    rollover: Option<VideoRollover>,
     scope: Scope,
     owner: String,
     reason: String,
@@ -163,15 +293,19 @@ pub enum RetryRefused {
 /// belongs to one incident in this ledger; stale callbacks cannot close a
 /// later one. All event times are uncut host times, never since a retry.
 pub struct VideoRecoveryLedger {
+    pub(super) part_commits: Mutex<Vec<PartCheckpoint>>,
     entries: Mutex<Vec<Incident>>,
     revision: AtomicU64,
     stop: AtomicI64,
     limited_from: AtomicI64,
 }
 
+type PartCheckpoint = (u32, std::sync::mpsc::SyncSender<Result<(), String>>);
+
 impl Default for VideoRecoveryLedger {
     fn default() -> Self {
         Self {
+            part_commits: Default::default(),
             entries: Default::default(),
             revision: Default::default(),
             stop: AtomicI64::new(i64::MAX),
@@ -224,6 +358,7 @@ impl VideoRecoveryLedger {
             return None;
         }
         entries.push(Incident {
+            rollover: None,
             scope,
             owner: owner.into(),
             fps,
@@ -454,6 +589,7 @@ impl VideoRecoveryLedger {
                 let end_slot_exclusive = slot(media_end.unwrap_or(until).min(until));
                 let by_cut = |at: Option<Time>| at.is_some_and(|at| at <= until);
                 Some(VideoIncident {
+                    rollover: e.rollover.clone(),
                     incident_id: i as u64 + 1,
                     scope: e.scope,
                     owner_id: e.owner.clone(),

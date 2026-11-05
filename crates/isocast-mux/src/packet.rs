@@ -127,6 +127,16 @@ pub struct Writer {
 }
 
 impl Writer {
+    /// Reserve a new movie without re-resolving the recording folder or
+    /// opening an existing path. It gets its own tracks and fragment index.
+    #[cfg(windows)]
+    pub fn reserve_sibling(&self, name: &std::ffi::OsStr) -> Result<mp4::Writer> {
+        self.healthy()?;
+        self.mux
+            .as_ref()
+            .context("movie is finished")?
+            .reserve_sibling(name)
+    }
     pub fn create(
         path: &Path,
         container: Container,

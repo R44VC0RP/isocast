@@ -230,6 +230,10 @@ pub struct MediaFile {
 }
 
 impl MediaFile {
+    #[cfg(windows)]
+    pub(crate) fn create_sibling(&self, name: &OsStr) -> Result<Self> {
+        self._directory.create(name)
+    }
     /// Cancel only a newly created movie matching its initial header. The caller
     /// must have accepted no samples and supply its own nonempty header (<=256
     /// bytes). Any refusal retains the file, never truncates it. The same folder

@@ -293,6 +293,53 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                     repaired |= changed;
                     file.frames = saved.pictures();
                     file.duration_seconds = saved.longest();
+                    if let Some(part) = file.part.as_mut() {
+                        part.video_duration_seconds = saved
+                            .tracks
+                            .iter()
+                            .find(|t| t.video && t.samples > 0)
+                            .map(|t| t.seconds);
+                        // Intent precedes media; only verified indexed video
+                        // can promote it. Never infer a resume from a name,
+                        // an empty reservation or an audio-only fragment.
+                        if part.video_duration_seconds.is_some()
+                            && let Some(ledger) = manifest.video_recovery.as_mut()
+                        {
+                            use isocast_protocol::manifest::{
+                                RolloverState, VideoFaultKind, VideoRecoveryScope,
+                                VideoRecoveryState,
+                            };
+                            for e in &mut ledger.incidents {
+                                if let Some(r) = &mut e.rollover
+                                    && r.state == RolloverState::Pending
+                                    && r.path == file.path
+                                    && r.part == part.number
+                                    && e.scope == VideoRecoveryScope::Output
+                                    && e.fault_kind == VideoFaultKind::EncoderFailed
+                                    && e.state == VideoRecoveryState::Recovering
+                                    && e.owner_id == file.source
+                                    && e.fps == file.fps
+                                    && (1..=240).contains(&e.fps)
+                                    && file.start_offset_seconds.is_some_and(|s| {
+                                        (s - r.take_offset_ns as f64 / 1e9).abs() < 1e-8
+                                    })
+                                {
+                                    // Same exclusive grid edge as engine file_end:
+                                    // floor(n * 1e9 / fps) + 1ns >= offset.
+                                    let slot = (u128::from(r.take_offset_ns.saturating_sub(1))
+                                        * u128::from(e.fps))
+                                    .div_ceil(1_000_000_000)
+                                        as u64;
+                                    if slot >= e.first_lost_slot {
+                                        r.state = RolloverState::Committed;
+                                        e.state = VideoRecoveryState::Resumed;
+                                        e.end_slot_exclusive = slot;
+                                        e.lost_slots = slot - e.first_lost_slot;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if changed && saved.rebuilt {
                         file.repeated_frames = None;
                         file.dropped_frames = None;
@@ -467,6 +514,25 @@ fn update_document(value: &mut Value, manifest: &SessionManifest) -> Result<()> 
         serde_json::to_value(manifest.duration_seconds)?,
     );
     object.insert("errors".into(), serde_json::to_value(&manifest.errors)?);
+    if let Some(known) = &manifest.video_recovery
+        && let Some(rows) = object
+            .get_mut("video_recovery")
+            .and_then(|v| v.get_mut("incidents"))
+            .and_then(Value::as_array_mut)
+    {
+        for (row, e) in rows.iter_mut().zip(&known.incidents) {
+            if e.rollover
+                .as_ref()
+                .is_some_and(|r| r.state == isocast_protocol::manifest::RolloverState::Committed)
+                && row["rollover"]["state"] == "pending"
+            {
+                row["rollover"]["state"] = "committed".into();
+                row["state"] = serde_json::to_value(e.state)?;
+                row["end_slot_exclusive"] = e.end_slot_exclusive.into();
+                row["lost_slots"] = e.lost_slots.into();
+            }
+        }
+    }
     let files = object
         .get_mut("files")
         .and_then(Value::as_array_mut)
@@ -475,6 +541,14 @@ fn update_document(value: &mut Value, manifest: &SessionManifest) -> Result<()> 
         let object = value
             .as_object_mut()
             .context("manifest file is not an object")?;
+        if let Some(part) = &file.part
+            && let Some(saved) = object.get_mut("part").and_then(Value::as_object_mut)
+        {
+            saved.insert(
+                "video_duration_seconds".into(),
+                serde_json::to_value(part.video_duration_seconds)?,
+            );
+        }
         object.insert("frames".into(), serde_json::to_value(file.frames)?);
         object.insert(
             "repeated_frames".into(),

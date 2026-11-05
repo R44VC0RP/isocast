@@ -299,6 +299,8 @@ fn budget_id(file: &WriterRequest<'_, Frame>) -> String {
 /// and cannot claim credit for handing over an earlier take's output.
 #[derive(Clone)]
 pub(crate) struct RecordingReopen {
+    #[cfg(debug_assertions)]
+    pub changed_profile: bool,
     platform: WindowsPlatform,
     device: GraphicsDevice,
     spec: WriterSpec,
@@ -367,12 +369,20 @@ impl RecordingReopen {
             }
         };
         let video = &self.spec.video;
-        let mut encoder = WindowsVideoEncoder::preflight(
+        let profile = isocast_protocol::api::H264Profile::High;
+        #[cfg(debug_assertions)]
+        let profile = if self.changed_profile && isocast_diagnostics::developer() {
+            isocast_protocol::api::H264Profile::ConstrainedBaseline
+        } else {
+            profile
+        };
+        let mut encoder = WindowsVideoEncoder::preflight_profile(
             &self.device,
             video,
             self.input,
             preset,
             allow_mf_hardware,
+            profile,
         )?;
         if encoder.nvenc_preset().is_none() {
             admission.settled()?;
@@ -1037,6 +1047,8 @@ impl Platform for WindowsPlatform {
             match VideoWriter::from_encoder(file.spec, encoder) {
                 Ok(mut writer) => {
                     writer.allow_reopen(RecordingReopen {
+                        #[cfg(debug_assertions)]
+                        changed_profile: false,
                         platform: self.clone(),
                         device: device.clone(),
                         spec: file.spec.clone(),

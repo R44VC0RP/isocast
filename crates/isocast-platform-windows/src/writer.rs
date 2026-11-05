@@ -3,6 +3,7 @@
 
 mod audio;
 mod recovery;
+mod rollover;
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -40,6 +41,7 @@ struct Pending {
 }
 
 pub struct VideoWriter {
+    parts: rollover::Parts,
     spec: WriterSpec,
     encoder: Option<WindowsVideoEncoder>,
     recovery: Recovery,
@@ -101,15 +103,7 @@ impl VideoWriter {
                 spec.path.display()
             );
         }
-        let audio = spec
-            .audio
-            .iter()
-            .enumerate()
-            .map(|(index, track)| {
-                AudioTrack::new(track.channels, spec.container)
-                    .with_context(|| format!("audio[{index}]"))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let audio = Self::audio_tracks(spec)?;
         // MF may not have decoder configuration until its first picture. Own
         // the path now, rather than discovering a collision after start.
         let reserved =
@@ -119,9 +113,43 @@ impl VideoWriter {
                     spec.path.display()
                 )
             })?;
-        let mut writer = Self {
+        let mut writer = Self::part(spec, codec, timescale, reserved, audio);
+        writer.encoder = Some(encoder);
+        // MF may expose the description only after its first picture.
+        if !writer.audio.is_empty()
+            && let Ok(config) = writer
+                .encoder
+                .as_ref()
+                .expect("just opened")
+                .decoder_config()
+        {
+            writer.configure(config)?;
+        }
+        Ok(writer)
+    }
+
+    fn audio_tracks(spec: &WriterSpec) -> Result<Vec<AudioTrack>> {
+        spec.audio
+            .iter()
+            .enumerate()
+            .map(|(i, track)| {
+                AudioTrack::new(track.channels, spec.container)
+                    .with_context(|| format!("audio[{i}]"))
+            })
+            .collect()
+    }
+
+    fn part(
+        spec: &WriterSpec,
+        codec: VideoCodec,
+        timescale: u32,
+        reserved: mp4::Writer,
+        audio: Vec<AudioTrack>,
+    ) -> Self {
+        Self {
+            parts: Default::default(),
             spec: spec.clone(),
-            encoder: Some(encoder),
+            encoder: None,
             recovery: Recovery::default(),
             reserved: Some(reserved),
             mux: None,
@@ -145,20 +173,7 @@ impl VideoWriter {
             failed: None,
             output_failed: false,
             closed: false,
-        };
-        // NVENC already exposes its real description. Let audio publish now,
-        // even if the first picture has not completed. MF may expose it later.
-        // Keep the established video-only reservation/first-picture path.
-        if !writer.audio.is_empty()
-            && let Ok(config) = writer
-                .encoder
-                .as_ref()
-                .expect("just opened")
-                .decoder_config()
-        {
-            writer.configure(config)?;
         }
-        Ok(writer)
     }
 
     fn validate(spec: &WriterSpec) -> Result<(VideoCodec, VideoEncoding, u32)> {
@@ -490,6 +505,16 @@ impl VideoWriter {
         if !self.poll_reopen()? {
             return Ok(false);
         }
+        // Never choose a cut earlier than PCM already given to the old AAC
+        // encoders. Subsequent PCM is staged until the first AU proves IDR.
+        if self.parts.changed.is_some()
+            && self
+                .audio
+                .iter()
+                .any(|t| self.audio_ticks(pts).is_ok_and(|at| at < t.input_frames))
+        {
+            return Ok(false);
+        }
         #[cfg(debug_assertions)]
         if !repeated {
             self.inject_fault()?;
@@ -652,6 +677,17 @@ impl VideoWriter {
                 "video.decoder_config: packet parameter sets disagree with the encoder configuration"
             );
         }
+        let mut boundary = self.check_boundary(&packet)?;
+        #[cfg(debug_assertions)]
+        let rollover = self.parts.changed.is_some();
+        if let Some(expected) = &self.parts.changed {
+            anyhow::ensure!(
+                *expected == config && boundary.is_some(),
+                "rollover requires the preflight description and a verified closed IDR"
+            );
+            self.rotate(packet.pts, config.clone())?;
+            boundary = self.check_boundary(&packet)?;
+        }
         if let Some(frozen) = &self.decoder_config {
             if *frozen != config {
                 bail!(
@@ -661,7 +697,6 @@ impl VideoWriter {
         } else {
             self.configure(config)?;
         }
-        let boundary = self.check_boundary(&packet)?;
         let pts = self.ticks(packet.pts)?;
         self.mux
             .as_mut()
@@ -679,7 +714,23 @@ impl VideoWriter {
             // The packet mux normally holds the newest picture. Announce the
             // resumed generation only once its independently decodable IDR is on disk.
             self.commit_packets()?;
+            #[cfg(debug_assertions)]
+            if rollover
+                && self
+                    .recovery
+                    .recipe
+                    .as_ref()
+                    .is_some_and(|r| r.changed_profile)
+                && isocast_diagnostics::developer()
+                && std::env::var_os("ISOCAST_TEST_PART_COMMIT_HOLD").is_some()
+            {
+                // A killable interval after the IDR's real commit and before
+                // the live ledger advances. This is only a scheduling hook.
+                std::thread::sleep(Duration::from_secs(3));
+            }
             self.publish_resume(ticket, packet.pts, checked_at);
+            self.flush_staged()?;
+            self.finish_prior(false)?;
         }
         self.publish_first_video_packet();
         self.repeated += u64::from(repeated);
@@ -869,6 +920,10 @@ impl VideoWriter {
         // Drop must not attempt a second adapter drain after an error.
         self.closed = true;
         let mut failure = self.failed.take().map(anyhow::Error::msg);
+        self.parts.changed = None;
+        if let Err(e) = self.flush_staged().and_then(|_| self.finish_prior(true)) {
+            note_error(&mut failure, e);
+        }
         if self.recovery.incident.is_some() {
             self.abandon_pending();
             // Never manufacture an IDR/last-frame repeat after Stop.
@@ -891,14 +946,17 @@ impl VideoWriter {
             },
             _ => None,
         };
-        let end = match self.end_ticks(end) {
+        let close_at = end;
+        let prefix = self.prefix_end();
+        let end = match prefix.map_or_else(|| self.end_ticks(end), |at| self.ticks(at)) {
             Ok(end) => Some(end),
             Err(error) => {
                 note_error(&mut failure, error);
                 None
             }
         };
-        if failure.is_none()
+        if prefix.is_none()
+            && failure.is_none()
             && let Some(end) = end
             && let Err(error) = self.repeat_tail(end)
         {
@@ -946,6 +1004,7 @@ impl VideoWriter {
             );
         }
         if let Some(end) = end
+            && prefix.is_none()
             && self
                 .last_written
                 .and_then(|time| time.checked_add(u64::from(FRAME_DURATION)))
@@ -1065,6 +1124,7 @@ impl VideoWriter {
             );
         }
         if let Some(progress) = &progress {
+            self.part_facts(progress, close_at);
             for (index, track) in self.audio.iter().enumerate() {
                 if progress.audio_packets.get(index) != Some(&track.written_packets)
                     || progress.accepted_audio_packets.get(index) != Some(&track.written_packets)
@@ -1300,7 +1360,7 @@ impl FileWriter for VideoWriter {
     }
 
     fn completed_video_frames(&self) -> Option<u64> {
-        Some(self.completed)
+        Some(self.parts.earlier_pictures + self.completed)
     }
 
     fn on_first_video_packet(&mut self, notify: Box<dyn FnOnce() + Send>) -> bool {
@@ -1312,7 +1372,7 @@ impl FileWriter for VideoWriter {
     fn append_audio(&mut self, track: usize, samples: &[f32], pts: Time) -> Result<bool> {
         let result = self
             .healthy()
-            .and_then(|()| self.append_samples(track, samples, pts));
+            .and_then(|()| self.route_audio(track, samples, pts));
         self.keep_error(result)
     }
 
@@ -1351,11 +1411,19 @@ impl FileWriter for VideoWriter {
     }
 
     fn commit(&mut self) -> Result<Option<Duration>> {
-        let result = self.commit_now();
+        let result = self
+            .commit_now()
+            .map(|confirmed| confirmed.map(|local| self.parts.commitment_limit.unwrap_or(local)));
         self.keep_error(result)
     }
 
     fn committed(&self) -> Option<Duration> {
+        if let Some(limit) = self.parts.commitment_limit {
+            return self
+                .mux
+                .as_ref()
+                .and_then(|m| m.progress().committed.map(|_| limit));
+        }
         match &self.mux {
             Some(mux) => mux.progress().committed,
             None if self.reserved.is_some() => Some(Duration::ZERO),

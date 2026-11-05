@@ -103,7 +103,19 @@ pub struct Writer {
 
 impl Writer {
     pub fn create(path: &Path, container: Container, created: SystemTime) -> Result<Self> {
-        let mut file = crate::file::create(path)?;
+        Self::from_file(crate::file::create(path)?, container, movie_time(created))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn reserve_sibling(&self, name: &OsStr) -> Result<Self> {
+        Self::from_file(
+            self.file.create_sibling(name)?,
+            self.container,
+            self.created,
+        )
+    }
+
+    fn from_file(mut file: MediaFile, container: Container, created: u64) -> Result<Self> {
         let mut head = ftyp(container);
         head.extend_from_slice(&placeholder());
         file.write_all(&head)?;
@@ -116,7 +128,7 @@ impl Writer {
             sequence: 0,
             moov_written: false,
             failed: false,
-            created: movie_time(created),
+            created,
         })
     }
 

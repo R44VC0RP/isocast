@@ -95,6 +95,36 @@ pub struct VideoIncident {
     /// For an output that ended early, these slots overlap the tail counted in
     /// that file's `dropped_frames`. Do not add the two counts.
     pub lost_slots: u64,
+    /// Present only for a change of physical file within this logical output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollover: Option<VideoRollover>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloverState {
+    /// Path and origin reserved; not evidence of a playable picture.
+    Pending,
+    /// The first closed IDR reached a complete fragment.
+    Committed,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VideoRollover {
+    pub state: RolloverState,
+    pub part: u32,
+    pub path: String,
+    pub take_offset_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MoviePart {
+    /// One-based physical part in this output (same `source` and take).
+    pub number: u32,
+    /// Picture extent; the old part may carry real audio beyond its last picture.
+    pub video_duration_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -255,6 +285,8 @@ pub struct InterruptedRecording {
 pub struct ManifestFile {
     /// File name, in the manifest's folder.
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<MoviePart>,
     /// The id of the video source recorded in the file.
     pub source: String,
     /// The source's kind, like `camera` or `display`.
@@ -357,7 +389,8 @@ mod tests {
             "video_recovery": {"incident_count": 1, "history_limited": false, "incidents": [{
                 "incident_id": 1, "scope": "adapter", "owner_id": "screen", "state": "sealing_prefix",
                 "fault_kind": "driver_reset", "attempts_started": 0, "reason": "lost device",
-                "fps": 30, "first_lost_slot": 30, "end_slot_exclusive": 60, "lost_slots": 30
+                "fps": 30, "first_lost_slot": 30, "end_slot_exclusive": 60, "lost_slots": 30,
+                "rollover":{"state":"future_boundary","part":2,"path":"screen.part002.mov","take_offset_ns":2000000000u64}
             }]}
         })).unwrap();
         let recovery = manifest.video_recovery.unwrap();
@@ -365,6 +398,10 @@ mod tests {
         assert_eq!(incident.scope, VideoRecoveryScope::Unknown);
         assert_eq!(incident.state, VideoRecoveryState::Unknown);
         assert_eq!(incident.fault_kind, VideoFaultKind::Unknown);
+        assert_eq!(
+            incident.rollover.as_ref().unwrap().state,
+            RolloverState::Unknown
+        );
         assert_eq!(
             (incident.owner_id.as_str(), incident.lost_slots),
             ("screen", 30)
