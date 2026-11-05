@@ -426,6 +426,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          fetch-depth: 2
 
       - name: Build and fixture dependencies
         timeout-minutes: 45
@@ -437,7 +438,12 @@ jobs:
           # GStreamer builds and runs media sources; WebKitGTK 6 and GTK 4
           # build the browser helper (libgtk-4-bin has gtk4-broadwayd, its
           # private display).
+          # Exercise fallback on both real runner images when the helper changes.
+          if ! git diff --quiet HEAD^ HEAD -- .github/scripts/apt-install.sh; then
+            export APT_FORCE_FIRST_DOWNLOAD_FAILURE=1
+          fi
           .github/scripts/apt-install.sh build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev dbus libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav libwebkitgtk-6.0-dev libgtk-4-dev libgtk-4-bin
+          unset APT_FORCE_FIRST_DOWNLOAD_FAILURE
           scripts/linux-capture-fixture.sh deps
           rustup toolchain install stable --profile minimal
           rustup default stable
