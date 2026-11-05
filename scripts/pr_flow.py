@@ -722,7 +722,8 @@ def accepted_flake(snapshot, runs, prs, own=False):
                 continue
             jobs = gh_json("api", f"repos/{REPO}/actions/runs/{r['databaseId']}/jobs?per_page=100")["jobs"]
             failed = [j["name"] for j in jobs if j["conclusion"] not in ("success", "skipped", None)]
-            if not failed or any(not f.startswith(prefix) for f in failed):
+            # One exact failure line may excuse one shard, not a second red shard.
+            if len(failed) != 1 or not failed[0].startswith(prefix):
                 continue
             logs = run(["gh", "run", "view", str(r["databaseId"]), "--repo", REPO, "--log-failed"], check=False)
             if line not in logs:
