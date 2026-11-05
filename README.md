@@ -272,8 +272,10 @@ checksum verifies the download; the packages aren't signed.
 sha256sum --ignore-missing -c SHA256SUMS && sudo apt install ./isocast-*-ubuntu24.04-$(dpkg --print-architecture).deb
 ```
 
-**Debian 12 (bookworm):** screen and audio capture need PipeWire 1.0.5 or
-later from bookworm-backports. If it isn't enabled yet, add it first:
+**Debian 12 (bookworm):** install the `.deb` on stock bookworm for synthetic
+recording. If [Settings → Diagnostics reports that PipeWire is unavailable](docs/images/pipewire-unavailable.png),
+only PipeWire capture and playback are affected. For capture, use 1.0.5 or
+later from bookworm-backports:
 
 ```sh
 echo 'deb https://deb.debian.org/debian bookworm-backports main' | sudo tee /etc/apt/sources.list.d/bookworm-backports.list

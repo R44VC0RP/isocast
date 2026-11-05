@@ -131,6 +131,7 @@ fn run(
     started: Arc<AtomicBool>,
     ready: mpsc::SyncSender<Result<CaptureFormat>>,
 ) -> Result<End> {
+    pw::sys::require_supported().map_err(anyhow::Error::msg)?;
     pw::init();
     let mainloop = WorkerLoop::new()?;
     let context = pw::context::ContextRc::new(mainloop.main_loop(), None)?;

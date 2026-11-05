@@ -1,0 +1,62 @@
+# Based on pipewire-sys 0.10.1; maintained locally for runtime loading.
+
+[package]
+edition = "2021"
+rust-version = "1.80"
+name = "pipewire-sys"
+version = "0.10.1"
+authors = [
+    "Tom Wagner <tom.a.wagner@protonmail.com>",
+    "Guillaume Desmottes <guillaume.desmottes@collabora.com>",
+]
+build = "build.rs"
+links = "pipewire-0.3"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Rust FFI bindings for PipeWire"
+homepage = "https://pipewire.org"
+documentation = "https://pipewire.pages.freedesktop.org/pipewire-rs/pipewire_sys/"
+readme = "README.md"
+keywords = [
+    "ffi",
+    "pipewire",
+    "multimedia",
+    "audio",
+    "video",
+]
+categories = [
+    "api-bindings",
+    "multimedia",
+]
+license = "MIT"
+repository = "https://gitlab.freedesktop.org/pipewire/pipewire-rs"
+
+[dependencies.libloading]
+version = "0.8.9"
+
+[lib]
+name = "pipewire_sys"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies.spa_sys]
+version = "0.10"
+package = "libspa-sys"
+
+[build-dependencies.bindgen]
+version = "0.72.0"
+features = ["runtime"]
+default-features = false
+
+[build-dependencies.pkg-config]
+version = "0.3"
+
+[build-dependencies.syn]
+version = "2"
+features = ["full"]
+
+[build-dependencies.quote]
+version = "1"

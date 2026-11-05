@@ -31,6 +31,8 @@ repository = "https://github.com/anomalyco/isocast"
 # in vendor/i-slint-renderer-skia/ISocast.md; other platforms are unchanged.
 [patch.crates-io]
 i-slint-renderer-skia = { path = "vendor/i-slint-renderer-skia" }
+# Same pipewire-rs API and system headers; resolve the C functions at runtime.
+pipewire-sys = { path = "vendor/pipewire-sys" }
 # xaac-rs 0.2.0 assumes signed c_char; Linux arm64 uses unsigned c_char.
 xaac-rs = { path = "vendor/xaac-rs" }
 

@@ -890,6 +890,7 @@ mod platform {
         ready: &mpsc::SyncSender<Result<()>>,
         started: &mut bool,
     ) -> Result<()> {
+        pw::sys::require_supported().map_err(anyhow::Error::msg)?;
         pw::init();
         let props = properties! {
             "media.type" => "Audio",

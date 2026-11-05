@@ -166,6 +166,7 @@ fn playback_worker(
     ready: &mpsc::SyncSender<Result<()>>,
     started: &mut bool,
 ) -> Result<()> {
+    pw::sys::require_supported().map_err(anyhow::Error::msg)?;
     pw::init();
     let mut props = properties! {
         "media.type" => "Audio",
