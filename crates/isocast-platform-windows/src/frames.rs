@@ -44,6 +44,7 @@ struct Device {
     fence: ID3D11Fence,
     shared_fence: SharedHandle,
     name: String,
+    warp: bool,
     luid: (u32, i32),
 }
 
@@ -112,6 +113,7 @@ impl GraphicsDevice {
                 fence,
                 shared_fence,
                 name,
+                warp: (desc.VendorId, desc.DeviceId) == (0x1414, 0x008c),
                 luid: (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart),
             })))
         }
@@ -119,6 +121,10 @@ impl GraphicsDevice {
 
     pub fn name(&self) -> &str {
         &self.0.name
+    }
+
+    pub(crate) fn is_warp(&self) -> bool {
+        self.0.warp
     }
 
     pub fn adapter_luid(&self) -> (u32, i32) {

@@ -206,7 +206,11 @@ pub fn doctor_writing<P: Platform>(
             "no setup given, so only this machine was checked".into(),
             Some("pass a setup file, or apply one to the live setup"),
         ));
-        return Doctor { machine, checks };
+        return Doctor {
+            machine,
+            checks,
+            windows_gpu: platform.windows_gpu_route(true),
+        };
     };
 
     let issues = setup.validate();
@@ -519,7 +523,11 @@ pub fn doctor_writing<P: Platform>(
         ));
     }
 
-    Doctor { machine, checks }
+    Doctor {
+        machine,
+        checks,
+        windows_gpu: platform.windows_gpu_route(true),
+    }
 }
 
 /// The setup's files (images, media, slide shows, text, pages, masks,

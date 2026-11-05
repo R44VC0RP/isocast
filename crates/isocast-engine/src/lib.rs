@@ -129,6 +129,13 @@ pub trait Platform: Clone + Send + Sync + 'static {
         Ok(None)
     }
 
+    fn windows_gpu_route(
+        &self,
+        _inventory: bool,
+    ) -> Option<isocast_protocol::api::WindowsGpuRoute> {
+        None
+    }
+
     /// A camera that takes disposable monitor frames rather than making a protected output.
     const CAMERA_IS_MONITOR: bool = false;
 
