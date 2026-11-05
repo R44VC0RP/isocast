@@ -560,6 +560,14 @@ impl Platform for WindowsPlatform {
         Ok(Some(self.graphics()?.adapter_luid()))
     }
 
+    fn windows_gpu_route(&self, inventory: bool) -> Option<isocast_protocol::api::WindowsGpuRoute> {
+        let graphics = self
+            .device
+            .try_lock()
+            .and_then(|guard| guard.as_ref().map(crate::route::adapter));
+        Some(crate::route::snapshot(graphics, inventory))
+    }
+
     fn devices(&self) -> Result<Devices> {
         crate::devices::devices()
     }
@@ -1100,10 +1108,22 @@ impl Platform for WindowsPlatform {
                  Windows screen capture supports 8-bit only; valid option: 8"
             );
         }
-        let target = crate::devices::screen_target(target)?;
+        let source = match target {
+            ScreenTarget::Display { source, .. } | ScreenTarget::Window { source, .. } => source,
+            ScreenTarget::Application { app, .. } => app,
+        };
+        let (target, owner) = crate::devices::screen_target(target)?;
         let helper = std::env::current_exe()?.with_file_name("isocast-capture.exe");
-        isolated_capture_screen(&self.graphics()?, &helper, target, fps, cursor, sink)
-            .map(|(capture, format)| (Capture::Screen(capture), format))
+        let device = self.graphics()?;
+        let (mut capture, format) =
+            isolated_capture_screen(&device, &helper, target, fps, cursor, sink)?;
+        capture.route = Some(crate::route::capture(
+            source,
+            owner,
+            &device,
+            capture.first_picture_observer(),
+        ));
+        Ok((Capture::Screen(capture), format))
     }
 
     fn capture_camera(

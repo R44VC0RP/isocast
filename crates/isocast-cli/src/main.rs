@@ -2944,6 +2944,7 @@ fn status(json: bool, explicit_engine: bool) -> Result<ExitCode> {
         }
         None => Status {
             state: EngineState::Idle,
+            windows_gpu: None,
             finalizing: false,
             governor: None,
             machine_profile: None,
@@ -2983,6 +2984,9 @@ fn status(json: bool, explicit_engine: bool) -> Result<ExitCode> {
     }
     if let Some(warning) = &status.load_warning {
         eprintln!("warning: {}", warning.message);
+    }
+    if let Some(route) = &status.windows_gpu {
+        print_windows_gpu_route(route);
     }
     if let Some(warning) = status
         .diagnostics
@@ -3326,6 +3330,69 @@ fn switched(method: Method, json: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn print_windows_gpu_route(route: &isocast_protocol::api::WindowsGpuRoute) {
+    use isocast_protocol::api::{WindowsAdapter, WindowsDisplayOwner};
+    let label = |a: &WindowsAdapter| {
+        format!(
+            "{}{} (LUID {}, {})",
+            a.name,
+            if a.warp { " / WARP" } else { "" },
+            a.luid.0,
+            a.luid.1
+        )
+    };
+    println!(
+        "Windows GPU: {:?} session; D3D11: {}; renderer: {}",
+        route.session_type,
+        route
+            .graphics_adapter
+            .as_ref()
+            .map_or_else(|| "not observed".into(), label),
+        route
+            .render_adapter
+            .as_ref()
+            .map_or_else(|| "not observed".into(), label)
+    );
+    if let Some(devices) = &route.display_devices {
+        println!("  Display devices: {}", devices.join(", "));
+    }
+    if let Some(compiler) = &route.shader_compiler {
+        println!("  DX12 shader compiler: {compiler}");
+    }
+    for c in &route.captures {
+        let owner = match &c.display_owner {
+            None => "window".into(),
+            Some(WindowsDisplayOwner::Unknown) => "display owner unknown".into(),
+            Some(WindowsDisplayOwner::Known { adapter }) => {
+                format!("display on {}", label(adapter))
+            }
+        };
+        println!(
+            "  {}: {owner}; WGC on {}; first frame {}",
+            c.source,
+            label(&c.capture_adapter),
+            if c.first_frame_received {
+                "received"
+            } else {
+                "pending"
+            }
+        );
+    }
+    for e in &route.encoders {
+        println!(
+            "  {}: {} on {}",
+            e.output,
+            e.provider,
+            e.encoder_adapter
+                .as_ref()
+                .map_or_else(|| "CPU".into(), label)
+        );
+        for reason in &e.fallback_reasons {
+            println!("    {reason}");
+        }
+    }
+}
+
 fn doctor(setup: Option<&Path>, folder: Option<PathBuf>, json: bool) -> Result<ExitCode> {
     let setup = setup
         .map(|path| load(path).with_context(|| format!("{} is not a valid setup", path.display())))
@@ -3351,6 +3418,9 @@ fn doctor(setup: Option<&Path>, folder: Option<PathBuf>, json: bool) -> Result<E
         return Ok(code);
     }
     let m = &report.machine;
+    if let Some(route) = &report.windows_gpu {
+        print_windows_gpu_route(route);
+    }
     println!(
         "{} · {:.0} GB · {} cores · {}",
         m.chip, m.memory_gb, m.cores, m.os

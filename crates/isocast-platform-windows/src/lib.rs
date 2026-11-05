@@ -31,6 +31,7 @@ mod p010;
 mod permissions;
 mod platform;
 mod playback;
+mod route;
 mod system;
 mod virtual_camera;
 mod writer;

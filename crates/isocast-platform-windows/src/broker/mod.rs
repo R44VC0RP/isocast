@@ -96,6 +96,7 @@ impl Drop for RemoteLease {
 /// neither WGC nor COM teardown can block the parent. Sink callbacks must, as
 /// with other captures, return before a stop on another thread can complete.
 pub struct IsolatedCapture {
+    pub(crate) route: Option<Arc<crate::route::CaptureObservation>>,
     control: Arc<Control>,
     releases: Arc<Releases>,
     sender: Option<JoinHandle<()>>,
@@ -103,6 +104,15 @@ pub struct IsolatedCapture {
 }
 
 impl IsolatedCapture {
+    pub(crate) fn first_picture_observer(&self) -> impl Fn() -> bool + Send + Sync + use<> {
+        let control = Arc::downgrade(&self.control);
+        move || {
+            control
+                .upgrade()
+                .is_some_and(|c| c.stats.lock().delivered != 0)
+        }
+    }
+
     pub fn stats(&self) -> IsolatedCaptureStats {
         *self.control.stats.lock()
     }
@@ -163,6 +173,7 @@ pub fn isolated_capture_screen(
     });
     // Construct the guard BEFORE any fallible thread creation or pipe I/O.
     let mut capture = IsolatedCapture {
+        route: None,
         control: control.clone(),
         releases: releases.clone(),
         sender: None,

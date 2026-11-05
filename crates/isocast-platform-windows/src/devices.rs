@@ -13,6 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use isocast_engine::{CaptureFormat, Probe, ScreenTarget};
+use isocast_protocol::api::{WindowsAdapter, WindowsDisplayOwner};
 use isocast_protocol::devices::{
     AudioOutput, Camera, CameraKind, Devices, Display, FrameRateRange, Microphone, VideoFormat,
     Window,
@@ -53,6 +54,7 @@ const MAX_CHOICES: usize = 40;
 
 struct DisplayInfo {
     display: Display,
+    physical_adapter: Option<windows::Win32::Foundation::LUID>,
     /// HMONITOR: valid only for this desktop configuration, never an id.
     monitor: usize,
 }
@@ -348,22 +350,112 @@ pub(crate) fn camera_probe(query: &str) -> Result<Probe> {
 }
 
 /// Resolve a setup's screen target to a native handle, right before capture.
-pub(crate) fn screen_target(target: ScreenTarget<'_>) -> Result<CaptureTarget> {
+pub(crate) fn screen_target(
+    target: ScreenTarget<'_>,
+) -> Result<(CaptureTarget, Option<WindowsDisplayOwner>)> {
     match target {
-        // Resolved by MonitorFromPoint, even if discovery left it out.
+        // Resolve once so the observation and WGC refer to the same monitor.
+        // Inventory failure must not disable the existing primary alias.
         ScreenTarget::Display { display: name, .. } if name.eq_ignore_ascii_case("main") => {
-            Ok(CaptureTarget::PrimaryDisplay)
+            use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
+            let monitor = unsafe { MonitorFromPoint(Default::default(), MONITOR_DEFAULTTOPRIMARY) }
+                .0 as usize;
+            if monitor == 0 {
+                return Ok((
+                    CaptureTarget::PrimaryDisplay,
+                    Some(WindowsDisplayOwner::Unknown),
+                ));
+            }
+            let displays = displays(&mut Vec::new()).unwrap_or_default();
+            Ok((
+                CaptureTarget::Monitor(monitor),
+                Some(owner(displays.iter().find(|d| d.monitor == monitor))),
+            ))
         }
         ScreenTarget::Display { display: name, .. } => {
             let displays = displays(&mut Vec::new())?;
-            select_display(&displays, name).map(|info| CaptureTarget::Monitor(info.monitor))
+            let info = select_display(&displays, name)?;
+            Ok((
+                CaptureTarget::Monitor(info.monitor),
+                Some(owner(Some(info))),
+            ))
         }
         ScreenTarget::Window { app, title, .. } => {
             let windows = windows(&mut Vec::new())?;
-            find_window(&windows, app, title).map(|window| CaptureTarget::Window(window.hwnd))
+            find_window(&windows, app, title)
+                .map(|window| (CaptureTarget::Window(window.hwnd), None))
         }
         ScreenTarget::Application { .. } => application_unsupported(),
     }
+}
+
+fn owner(info: Option<&DisplayInfo>) -> WindowsDisplayOwner {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory4};
+    let lookup = || {
+        let info = info?;
+        let luid = info.physical_adapter?;
+        // The CCD source/target and this process's DXGI output must agree.
+        // An IDD may be presented on an adapter that doesn't own its swapchain.
+        let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory1() }.ok()?;
+        let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapterByLuid(luid) }.ok()?;
+        let desc = unsafe { adapter.GetDesc1() }.ok()?;
+        for i in 0..64 {
+            let output = unsafe { adapter.EnumOutputs(i) }.ok()?;
+            if unsafe { output.GetDesc() }.ok()?.Monitor.0 as usize == info.monitor {
+                return Some(WindowsAdapter {
+                    name: wide(&desc.Description),
+                    luid: (luid.LowPart, luid.HighPart),
+                    warp: (desc.VendorId, desc.DeviceId) == (0x1414, 0x008c),
+                });
+            }
+        }
+        None
+    };
+    lookup().map_or(WindowsDisplayOwner::Unknown, |adapter| {
+        WindowsDisplayOwner::Known { adapter }
+    })
+}
+
+fn physical_adapter(path: &DISPLAYCONFIG_PATH_INFO) -> Option<windows::Win32::Foundation::LUID> {
+    use windows::Win32::Devices::Display::*;
+    let source = path.sourceInfo.adapterId;
+    let target = path.targetInfo.adapterId;
+    // Positive attribution only. Indirect, wireless, unknown and future
+    // technologies, and paths split over adapters, cannot identify the owner.
+    let physical = matches!(
+        path.targetInfo.outputTechnology,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DVI
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HD15
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EXTERNAL
+    );
+    (source == target && physical).then_some(target)
+}
+
+#[cfg(test)]
+#[test]
+fn indirect_or_split_paths_never_inherit_a_physical_owner() {
+    use windows::Win32::Devices::Display::*;
+    let mut path = DISPLAYCONFIG_PATH_INFO::default();
+    path.sourceInfo.adapterId.LowPart = 12;
+    path.targetInfo.adapterId = path.sourceInfo.adapterId;
+    for tech in [
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_OTHER,
+    ] {
+        path.targetInfo.outputTechnology = tech;
+        assert!(physical_adapter(&path).is_none());
+    }
+    path.targetInfo.outputTechnology = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED;
+    assert_eq!(physical_adapter(&path), Some(path.targetInfo.adapterId));
+    path.targetInfo.adapterId.LowPart += 1;
+    assert!(physical_adapter(&path).is_none());
 }
 
 /// What a screen target would deliver, by the same selection as
@@ -572,6 +664,7 @@ fn displays(notes: &mut Vec<String>) -> Result<Vec<DisplayInfo>> {
         let rate = path.targetInfo.refreshRate;
         let name = wide(&target.monitorFriendlyDeviceName);
         displays.push(DisplayInfo {
+            physical_adapter: physical_adapter(path),
             display: Display {
                 id,
                 name: if name.is_empty() { gdi } else { name },

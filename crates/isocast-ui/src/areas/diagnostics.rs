@@ -903,6 +903,7 @@ mod tests {
 
     fn doctor(checks: Vec<Check>, hardware: &[&str]) -> Doctor {
         Doctor {
+            windows_gpu: None,
             machine: Machine {
                 chip: "test".into(),
                 memory_gb: 8.0,

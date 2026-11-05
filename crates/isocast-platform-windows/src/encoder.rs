@@ -3,6 +3,7 @@
 
 use std::{
     borrow::Cow,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -374,6 +375,7 @@ pub struct WindowsVideoEncoder {
     /// session closing before `encoder` closes it, so admission waits
     /// rather than reading a half-closed count.
     budget_closing: Option<NvencClosing>,
+    route: Option<Arc<isocast_protocol::api::WindowsEncoderRoute>>,
     encoder: Encoder,
     backend: EncoderBackend,
     fallback_reasons: Vec<String>,
@@ -448,6 +450,7 @@ impl WindowsVideoEncoder {
             Ok(encoder) => {
                 return Ok(Self {
                     budget_closing: None,
+                    route: None,
                     encoder: Encoder::Nvenc(encoder),
                     backend: EncoderBackend::Nvenc,
                     fallback_reasons: reasons,
@@ -483,6 +486,7 @@ impl WindowsVideoEncoder {
                     };
                     return Ok(Self {
                         budget_closing: None,
+                        route: None,
                         encoder: Encoder::Mf(encoder),
                         backend,
                         fallback_reasons: reasons,
@@ -664,6 +668,7 @@ impl WindowsVideoEncoder {
         };
         Ok(Self {
             budget_closing: None,
+            route: None,
             encoder,
             backend,
             fallback_reasons: reasons,
@@ -711,6 +716,12 @@ impl WindowsVideoEncoder {
         device: &GraphicsDevice,
         owner: NvencOwner,
     ) {
+        self.route = Some(crate::route::encoder(
+            &owner,
+            device,
+            &self.backend,
+            &self.fallback_reasons,
+        ));
         let (native, preset) = match (&self.encoder, &self.backend) {
             (Encoder::Nvenc(encoder), _) => (true, Some(encoder.preset())),
             (Encoder::Mf(_), EncoderBackend::MediaFoundationHardware(_)) => (false, None),
