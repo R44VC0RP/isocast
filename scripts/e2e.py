@@ -5105,9 +5105,26 @@ def scenario_linux_media_faults(e, cfg, evidence):
     # As in video_recovery: do not count the deliberately killed ISO's missing
     # slots as a suite throughput regression. Still check every unaffected file.
     cfg['recording']['folder'] = str(e.root / 'fault-recordings')
+    def frames():
+        live = e.rpc('status').get('live') or {}
+        return {f['source']: f['frames'] for f in live.get('files', [])}
+
+    def wait_written(sig, phase, targets):
+        last = {}
+        def ready():
+            nonlocal last
+            last = frames()
+            return all(last.get(src, -1) >= n for src, n in targets.items())
+        try:
+            until(ready, 15, f'{sig.name} {phase}')
+        except Failure as exc:
+            raise Failure(f'{sig.name} {phase}: wanted written frames {targets}, observed {last}') from exc
+
     for sig in (signal.SIGKILL, signal.SIGSTOP):
         e.apply(cfg)
         started = e.rpc('start', {})
+        # Start acknowledges file creation, not a frame on the take clock.
+        wait_written(sig, 'before injection', {'program': 3, 'bars': 3, 'clip': 3})
         def inject():
             # Only children of threads of this private test daemon. pidfd prevents
             # signalling a reused PID if the 4-second clip wraps while inspecting.
@@ -5137,18 +5154,25 @@ def scenario_linux_media_faults(e, cfg, evidence):
         require(('timed out' if sig == signal.SIGSTOP else 'isocast-media') in why, why)
         checks = e.rpc('doctor', {})['checks']
         require(any(c['name'] == 'live media source: clip' and c['detail'] == why for c in checks), checks)
-        time.sleep(2)  # Require unaffected output beyond the observed failure.
+        baseline = frames()
+        survivors = ('program', 'bars')
+        require(all(s in baseline for s in survivors), f'{sig.name}: missing live writers after fault: {baseline}')
+        targets = {s: baseline[s] + 2 * fps for s in survivors}
+        wait_written(sig, 'after decoder failure', targets)
         e.rpc('stop')
         m = until(lambda: finished(started['manifest']), 15, 'unrelated outputs finalized')
         losses = drop_metrics(m)
-        evidence[sig.name] = {'pid': pid, 'reason': why, 'losses': losses}
-        for src in ('program', 'bars'):
+        evidence[sig.name] = {'pid': pid, 'reason': why, 'losses': losses, 'frames_at_failure': baseline}
+        for src in survivors:
             f, = [f for f in m['files'] if f['source'] == src]
             loss, = [row for row in losses if row['output'] == Path(f['path']).name]
             check_loss(loss, loss_limit(evidence))
             file = Path(started['manifest']).parent / f['path']
-            require(float(command(['ffprobe','-v','error','-show_entries','format=duration','-of',
-                                   'default=nw=1:nk=1',file]).stdout) >= 2, file)
+            duration = float(command(['ffprobe','-v','error','-show_entries','format=duration','-of',
+                                      'default=nw=1:nk=1',file]).stdout)
+            require(duration >= 2 and f['frames'] >= targets[src],
+                    f'{sig.name} {src}: finalized {duration:.6f} s / {f["frames"]} frames; '
+                    f'expected >=2 s and >={targets[src]} frames ({baseline[src]} at fault, {fps} fps): {file}')
             pixel = ffmpeg('-sseof','-1','-i',file,'-an','-frames:v','1','-vf','scale=1:1',
                            '-pix_fmt','rgb24','-f','rawvideo','-').stdout
             require(len(pixel) == 3, f'{file}: no picture near end of finalized file')
@@ -5769,17 +5793,9 @@ setInterval(() => {
     cfg["recording"]["program"]["audio"] = ["web"]
     cfg["recording"]["iso"].update(enabled=True, sources=["web"], audio=["web"])
     e.apply(cfg)
-    if WINDOWS:
-        # A cold WebView2 can take longer than recording's first-picture
-        # timeout. Start measuring audio only once the page has a picture.
-        e.rpc("engine", {"running": True}, timeout=60)
-        def has_picture():
-            try:
-                return e.rpc("snapshot", {"source": "web"})["png_base64"]
-            except RpcError:
-                return False
-        until(has_picture, 60, "the WebView2 gap fixture's first picture", interval=0.25)
-    started = e.rpc("start", {})
+    # Start straight from cold: the engine, not a client-side snapshot loop,
+    # waits for the first Windows web source to paint before arming the ISO.
+    started = e.rpc("start", {}, timeout=60 if WINDOWS else 30)
     time.sleep(1)
     render(480)
     e.rpc("refresh_browser", {"source": "web"})

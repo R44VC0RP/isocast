@@ -513,16 +513,19 @@ impl Platform for WindowsPlatform {
         }
     }
 
-    fn begin_source_open(&self, source: &SourceKind) -> (Duration, Option<&'static str>) {
+    fn begin_source_open(&self, source: &SourceKind) -> isocast_engine::SourceOpenBudget {
         if matches!(source, SourceKind::Browser(_))
             && !self.browser_open_attempted.swap(true, Ordering::Relaxed)
         {
-            (
-                self.source_open_timeout(source),
-                Some("starting the web engine"),
-            )
+            isocast_engine::SourceOpenBudget {
+                timeout: self.source_open_timeout(source),
+                wait_for_picture: Some("starting the web engine"),
+            }
         } else {
-            (Duration::from_secs(8), None)
+            isocast_engine::SourceOpenBudget {
+                timeout: Duration::from_secs(8),
+                wait_for_picture: None,
+            }
         }
     }
 
@@ -1270,14 +1273,20 @@ mod tests {
             shutdown_when_hidden: false,
             refresh_when_shown: false,
         });
-        let strict = (Duration::from_secs(8), None);
+        let strict = isocast_engine::SourceOpenBudget {
+            timeout: Duration::from_secs(8),
+            wait_for_picture: None,
+        };
         let audio = SourceKind::SystemAudio(SystemAudioSource { exclude: vec![] });
         assert_eq!(platform.begin_source_open(&audio), strict);
         let wait = platform.source_open_timeout(&web);
         assert_eq!(wait, Duration::from_secs(35));
         assert_eq!(
             platform.clone().begin_source_open(&web),
-            (wait, Some("starting the web engine"))
+            isocast_engine::SourceOpenBudget {
+                timeout: wait,
+                wait_for_picture: Some("starting the web engine")
+            }
         );
         assert_eq!(platform.begin_source_open(&web), strict);
     }

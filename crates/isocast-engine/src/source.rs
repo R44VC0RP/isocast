@@ -29,7 +29,7 @@ use crate::text;
 use crate::{
     AudioSink, BrowserControl, BrowserPage, CameraMetadataReader, CameraRequest, CaptureFormat,
     FramePool, MediaInfo, MediaPart, MediaReader, PageLocation, Platform, SAMPLE_RATE,
-    ScreenTarget, Time, VideoSink,
+    ScreenTarget, SourceOpenBudget, Time, VideoSink,
 };
 
 /// Audio is delivered in 10 ms chunks by generators, like a capture device.
@@ -690,14 +690,14 @@ fn bounded_open<T: Send + 'static>(
 }
 
 /// Reserve an actual open before publishing its pending status.
-pub(crate) fn begin_open<P: Platform>(
-    platform: &P,
-    setup: &Setup,
-    id: &str,
-) -> (Duration, Option<&'static str>) {
-    setup.source(id).map_or((OPEN_TIMEOUT, None), |s| {
-        platform.begin_source_open(&s.kind)
-    })
+pub(crate) fn begin_open<P: Platform>(platform: &P, setup: &Setup, id: &str) -> SourceOpenBudget {
+    setup.source(id).map_or(
+        SourceOpenBudget {
+            timeout: OPEN_TIMEOUT,
+            wait_for_picture: None,
+        },
+        |s| platform.begin_source_open(&s.kind),
+    )
 }
 
 /// Open the setup's source `id`, on the timeline that starts at `timeline`;
@@ -708,7 +708,7 @@ pub(crate) fn open<P: Platform>(
     id: &str,
     timeline: &Arc<Timeline>,
     data: &Arc<DataStore>,
-    (timeout, notice): (Duration, Option<&'static str>),
+    budget: SourceOpenBudget,
 ) -> Result<Opened<P>> {
     let kind = setup.source(id).map(|s| &s.kind);
     let permission = kind.and_then(|kind| platform.source_permission(kind));
@@ -744,11 +744,21 @@ pub(crate) fn open<P: Platform>(
         data.clone(),
     );
     let (key, began) = (format!("source {id:?}"), std::time::Instant::now());
-    if let Some(notice) = notice {
+    let timeout = budget.timeout;
+    if let Some(notice) = budget.wait_for_picture {
         isocast_diagnostics::diagnostic!("info"; "{key}: {notice} (up to {} s)", timeout.as_secs());
     }
     let opened = bounded_open(slot, help, timeout, move || {
         open_native(&platform, &setup, &id, &timeline, &data)
+    })
+    .and_then(|opened| {
+        if let Some(detail) = budget.wait_for_picture {
+            let opened_at = Instant::now();
+            let video = opened.video.as_ref().context("expected a video source")?;
+            await_open_picture(&video.slot, began, timeout, detail)?;
+            isocast_diagnostics::diagnostic!("info"; "{key}: first picture {} ms after native open", opened_at.elapsed().as_millis());
+        }
+        Ok(opened)
     });
     isocast_diagnostics::debug!(
         "capture: {key} {} after {:?}",
@@ -756,6 +766,47 @@ pub(crate) fn open<P: Platform>(
         began.elapsed()
     );
     opened
+}
+
+/// Use the rest of the original open budget, not another full timeout after
+/// the helper says ready. The ISO preflight keeps its 3 s limit for running sources.
+fn await_open_picture<F: Clone>(
+    slot: &FrameSlot<F>,
+    began: Instant,
+    timeout: Duration,
+    detail: &str,
+) -> Result<()> {
+    let deadline = began + timeout;
+    loop {
+        if let Some(reason) = slot.stopped() {
+            bail!("stopped before its first picture: {reason}");
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if slot.wait_any(left.min(Duration::from_millis(50))).is_some() {
+            return Ok(());
+        }
+        if left.is_zero() {
+            bail!(
+                "no first picture within {} s of {detail}",
+                timeout.as_secs()
+            );
+        }
+    }
+}
+
+#[test]
+fn an_open_without_a_picture_does_not_restart_its_deadline() {
+    let slot = FrameSlot::new(Arc::new(Timeline::default()));
+    let budget = Duration::from_secs(35);
+    let began = Instant::now() - budget;
+    let detail = "starting the web engine";
+    let err = await_open_picture(&slot, began, budget, detail).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "no first picture within 35 s of starting the web engine"
+    );
+    slot.push((), Time::from_nanos(1));
+    assert!(await_open_picture(&slot, began, budget, detail).is_ok());
 }
 
 fn open_native<P: Platform>(

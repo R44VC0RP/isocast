@@ -2418,7 +2418,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
             .and_then(|s| inner.platform.source_permission(&s.kind));
         let mut pending = Live::failed(definition.clone(), String::new());
         let budget = source::begin_open(&inner.platform, &setup, &id);
-        pending.detail = budget.1;
+        pending.detail = budget.wait_for_picture;
         pending.run = if permission.is_some() {
             SourceRun::WaitingForPermission
         } else {
