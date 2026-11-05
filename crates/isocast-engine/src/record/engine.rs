@@ -3831,6 +3831,33 @@ fn observe_layer<P: Platform>(
     now: Time,
 ) {
     let Some(video) = &live.video else { return };
+    if let Some(edge) = video.slot.screen_edge.get() {
+        let edge = edge.lock();
+        if let Some(first) = edge.first {
+            // Close an observed on-air outage. Don't retroactively charge
+            // an off-air source brought into a recorded canvas *after* repair.
+            clock.recovery.observe_reopened_source(id, first);
+            return;
+        }
+        if timeline.on_recorded_canvas(id, &clock.recorded_canvases)
+            && let Some(incident) = clock.recovery.interrupted(
+                (VideoRecoveryScope::Source, id),
+                video.fps,
+                now,
+                now,
+                VideoFaultKind::CaptureStopped,
+                &edge.reason,
+            )
+        {
+            clock
+                .recovery
+                .observe_source_retry(incident, edge.retry_at, now);
+            if edge.ended {
+                clock.recovery.end_source(incident, now, &edge.reason);
+            }
+        }
+        return;
+    }
     if let Some(reason) = stopped {
         if !timeline.on_recorded_canvas(id, &clock.recorded_canvases) {
             return;
@@ -3887,6 +3914,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
             } else {
                 None
             };
+            let state = &mut *state;
             for (id, live) in state.sources.iter_mut() {
                 if let Some(audio) = &live.audio {
                     let (peak_db, rms_db) = audio.meter.take();
@@ -3927,6 +3955,18 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                 }
                 if let Some(reason) = stopped {
                     if let Some(video) = &live.video {
+                        // ISO owners are already pinned. Don't substitute a
+                        // same-title layer in a recorded program either. Stop
+                        // releases these pins; neither failure needs a picker.
+                        if let Some(clock) = &clock
+                            && video.slot.screen_edge.get().is_some_and(|e| e.lock().ended)
+                            && !state.pins.contains(id)
+                            && inner
+                                .timeline
+                                .on_recorded_canvas(id, &clock.recorded_canvases)
+                        {
+                            state.pins.push(id.clone());
+                        }
                         video.slot.stop(reason.clone());
                     }
                     if let Some(audio) = &live.audio {
@@ -4136,6 +4176,7 @@ fn run_iso<P: Platform>(
     let mut last_gpu: Option<Completion> = None;
     let governor_pin = crate::governor::iso_pin(&runner.id);
     let mut retry_gpu = std::time::Instant::now();
+    let mut missing_screen = None;
     for n in 0.. {
         let tick = epoch.add_ticks(n, fps);
         // Frames up to half a frame after the tick are nearest to it; wait
@@ -4174,7 +4215,10 @@ fn run_iso<P: Platform>(
                 VideoFaultKind::CaptureStopped,
                 &reason,
             ) {
-                recovery.ended_early(incident, tick);
+                if let Some(edge) = runner.slot.screen_edge.get() {
+                    recovery.observe_source_retry(incident, edge.lock().retry_at, platform.now());
+                }
+                recovery.end_source(incident, tick, &reason);
             }
             bail!(
                 "{}: the capture stopped, so its file ends early: {reason}",
@@ -4187,15 +4231,36 @@ fn run_iso<P: Platform>(
         } else {
             now > tick + 3 * frame
         };
+        let Some(image) = runner.slot.newest_until(tick + frame / 2) else {
+            if missing_screen.is_none()
+                && let Some(edge) = runner.slot.screen_edge.get()
+            {
+                let edge = edge.lock();
+                if edge.first.is_none_or(|first| first > tick + frame / 2) {
+                    missing_screen = recovery.interrupted(
+                        (VideoRecoveryScope::Source, &runner.id),
+                        fps,
+                        tick,
+                        tick,
+                        VideoFaultKind::CaptureStopped,
+                        &edge.reason,
+                    );
+                    if let Some(id) = missing_screen {
+                        recovery.observe_source_retry(id, edge.retry_at, now);
+                    }
+                }
+            }
+            continue;
+        };
         if obsolete {
             continue;
         }
-        let Some(image) = runner.slot.newest_until(tick + frame / 2) else {
-            continue;
-        };
         let Some(image) = P::retain_frame(&image, crate::FrameUse::Recording) else {
             continue;
         };
+        if missing_screen.take().is_some() {
+            recovery.observe_reopened_source(&runner.id, tick);
+        }
         // Encoder admission first, so a refused tick is never drawn.
         let mut admitted = false;
         for output in &mut runner.outputs {

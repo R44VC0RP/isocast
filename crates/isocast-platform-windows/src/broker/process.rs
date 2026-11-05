@@ -113,7 +113,7 @@ impl Process {
         let mut owned = HANDLE::default();
         // Spawn supplies the PROCESS_DUP_HANDLE right. Borrowed handles are
         // never closed here; only successfully duplicated parent handles are.
-        unsafe {
+        let copied = unsafe {
             DuplicateHandle(
                 self.handle(),
                 HANDLE(borrowed as usize as *mut _),
@@ -123,8 +123,13 @@ impl Process {
                 false,
                 DUPLICATE_SAME_ACCESS,
             )
+        };
+        if let Err(error) = copied {
+            if unsafe { WaitForSingleObject(self.handle(), 0) } == WAIT_OBJECT_0 {
+                return Err(error).context(super::TransportLost);
+            }
+            return Err(error).context("capture helper shared resource was unavailable");
         }
-        .context("capture helper exited or its shared resource was unavailable")?;
         unsafe { SharedHandle::new(owned) }
     }
 

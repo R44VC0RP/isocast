@@ -24,6 +24,20 @@ pub struct OutputRecovery {
 }
 
 impl OutputRecovery {
+    /// Called only across an actual gap in a writer's accepted picture PTS.
+    /// Map both sides through the same pause cuts as the emitted packets.
+    pub fn source_resumed_between(&self, previous: Time, next: Time) -> bool {
+        let cuts = self.clock.state.read();
+        self.clock.recovery.entries.lock().iter().rev().any(|e| {
+            e.scope == Scope::Source
+                && e.owner == self.plan.source
+                && e.resumed.is_some_and(|r| {
+                    let at = cuts.map(r);
+                    previous < at && at <= next
+                })
+        })
+    }
+
     /// Publish the reserved name/offset durably before allowing the mux to
     /// write media. The coordinator is the sole manifest writer, including
     /// during user splits. A dead/blocked coordinator cannot strand Stop.
@@ -263,6 +277,9 @@ struct Incident {
     detected: Time,
     kind: VideoFaultKind,
     attempts: Vec<Attempt>,
+    /// A platform source exists before its recording ledger. It admits its
+    /// one verified-target reopen locally; report it, don't issue it twice.
+    source_retry: Option<Time>,
     resumed: Option<Time>,
     ended: Option<Time>,
     /// Media boundary, distinct from observing failure/teardown (which can
@@ -367,6 +384,7 @@ impl VideoRecoveryLedger {
             detected,
             kind,
             attempts: Vec::new(),
+            source_retry: None,
             resumed: None,
             ended: None,
             split_end: None,
@@ -501,6 +519,29 @@ impl VideoRecoveryLedger {
         });
     }
 
+    pub(super) fn end_source(&self, id: u64, at: Time, reason: &str) {
+        self.update(id, at, |e| {
+            if e.reason != reason {
+                e.reason.push_str("; ");
+                e.reason.extend(reason.chars().take(512));
+            }
+            e.ended = Some(at);
+            true
+        });
+    }
+
+    pub(super) fn observe_source_retry(&self, id: u64, started: Option<Time>, now: Time) {
+        if started.is_some() {
+            self.update(id, now, |e| {
+                if e.source_retry.is_some() {
+                    return false;
+                }
+                e.source_retry = started;
+                true
+            });
+        }
+    }
+
     /// A write/sync failure while sealing or resuming the prefix supersedes
     /// the codec retry, without creating a second overlapping interval.
     pub fn storage_failed(&self, id: u64, at: Time, why: &str) {
@@ -596,7 +637,8 @@ impl VideoRecoveryLedger {
                     reason: e.reason.clone(),
                     fault_kind: e.kind,
                     attempts_started: e.attempts.iter().filter(|a| a.started <= until).count()
-                        as u8,
+                        as u8
+                        + u8::from(by_cut(e.source_retry)),
                     fps: e.fps,
                     state: if by_cut(e.resumed) {
                         State::Resumed
@@ -604,7 +646,9 @@ impl VideoRecoveryLedger {
                         State::EndedEarly
                     } else if until == stop {
                         State::Stopped
-                    } else if e.attempts.first().is_some_and(|a| a.started <= until) {
+                    } else if by_cut(e.source_retry)
+                        || e.attempts.first().is_some_and(|a| a.started <= until)
+                    {
                         State::Recovering
                     } else {
                         State::Interrupted
@@ -626,6 +670,63 @@ impl VideoRecoveryLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_restart_counts_once_and_ends_on_the_first_eligible_iso_tick() {
+        let zero = Time::from_nanos(0);
+        let clock = super::super::pause::RecordingClock::new(zero, [30].into_iter());
+        let ledger = &clock.recovery;
+        let at = |n| zero.add_ticks(n, 30);
+        let id = ledger
+            .interrupted(
+                (Scope::Source, "window"),
+                30,
+                at(4),
+                at(4),
+                VideoFaultKind::CaptureStopped,
+                "helper exited",
+            )
+            .unwrap();
+        for tick in 5..9 {
+            ledger.observe_source_retry(id, Some(at(4)), at(tick));
+        }
+        let report = |tick| {
+            ledger
+                .snapshot(&clock.state.read(), zero, at(tick))
+                .incidents
+                .remove(0)
+        };
+        assert_eq!(report(7).state, State::Recovering);
+        ledger.observe_reopened_source("window", at(10));
+        let e = report(12);
+        assert_eq!(
+            (
+                e.state,
+                e.attempts_started,
+                e.first_lost_slot,
+                e.end_slot_exclusive
+            ),
+            (State::Resumed, 1, 4, 10)
+        );
+        let id = ledger
+            .interrupted(
+                (Scope::Source, "window"),
+                30,
+                at(15),
+                at(15),
+                VideoFaultKind::CaptureStopped,
+                "helper exited",
+            )
+            .unwrap();
+        ledger.end_source(id, at(16), "original window closed");
+        ledger.observe_reopened_source("window", at(17));
+        let e = ledger
+            .snapshot(&clock.state.read(), zero, at(19))
+            .incidents
+            .remove(1);
+        assert_eq!((e.state, e.lost_slots), (State::EndedEarly, 4));
+        assert!(e.reason.contains("original window closed"));
+    }
 
     #[test]
     fn admission_contention_waits_within_incident_time_without_spending_tickets() {

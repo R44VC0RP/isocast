@@ -39,7 +39,7 @@ const PIXEL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormali
 
 /// Native targets resolved by the platform's device/window discovery. These
 /// handles are local to the interactive desktop, not persisted source ids.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureTarget {
     PrimaryDisplay,
     Monitor(usize),
@@ -122,6 +122,44 @@ pub fn capture_screen(
                         let _apartment = Apartment::new()?;
                         if let Err(error) = crate::native::video_thread() {
                             eprintln!("Windows screen capture scheduling: {error:#}");
+                        }
+                        // Hosted workers can have HWNDs but no WGC desktop. Only
+                        // substitute the producer; the child, target pin, D3D11
+                        // upload/fence, leases, pipes and recording are real.
+                        #[cfg(debug_assertions)]
+                        if crate::broker::recovery::fixture_mode().as_deref() == Some("fixture")
+                            && crate::broker::recovery::fixture_pixel(target).is_some()
+                        {
+                            let format = CaptureFormat {
+                                width: 160,
+                                height: 90,
+                                fps,
+                            };
+                            if started.send(Ok(format)).is_err() {
+                                return Ok(());
+                            }
+                            running = true;
+                            let mut pool = TexturePool::new(device.clone());
+                            loop {
+                                let level = crate::broker::recovery::fixture_pixel(target)
+                                    .context("the fixture window closed")?;
+                                let mut pixels = vec![level; 160 * 90 * 4];
+                                for px in pixels.as_chunks_mut::<4>().0 {
+                                    px[3] = 255;
+                                }
+                                if let Some(frame) = pool.upload_bgra(160, 90, &pixels, 160 * 4)? {
+                                    (sink.frame)(frame, crate::now());
+                                }
+                                if unsafe {
+                                    windows::Win32::System::Threading::WaitForSingleObject(
+                                        stop.handle(),
+                                        1000 / fps,
+                                    )
+                                } == WAIT_OBJECT_0
+                                {
+                                    return Ok(());
+                                }
+                            }
                         }
                         let mut capture = Session::new(&device, target, cursor)?;
                         let size = capture.size;

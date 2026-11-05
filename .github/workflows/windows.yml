@@ -1236,6 +1236,10 @@ jobs:
         if: env.MODE == 'full'
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib playback::tests
 
+      - name: Check capture target lifetime and helper restart limits
+        if: env.MODE == 'full'
+        run: cargo test --locked -j 1 -p isocast-platform-windows --lib broker::recovery::tests
+
       - name: Check hotkey mapping and native registration status
         if: env.MODE == 'full'
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib hotkeys::tests
@@ -1414,7 +1418,30 @@ jobs:
           python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_encoder_recovery --engine-env ISOCAST_TEST_RECOVERY_SUITE=1 --codec h264 --timeout 360 --work "$RUNNER_TEMP/encoder-recovery" --keep-failures --report encoder-recovery.json
           python -c 'import json; r, = json.load(open("encoder-recovery.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
 
-      - name: Keep recording recovery evidence
+      - name: Recover only the original pinned window after helper death
+        shell: pwsh
+        run: |
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_capture_recovery --engine-env ISOCAST_TEST_WGC_HELPER=fixture --codec h264 --timeout 180 --work "$RUNNER_TEMP/capture-recovery" --keep-failures --report capture-recovery.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -c 'import json; r, = json.load(open("capture-recovery.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
+
+      - name: Exercise native WGC too when the runner has an unlocked user desktop
+        shell: pwsh
+        run: |
+          $session = (Get-Process -Id $PID).SessionId
+          $skip = if ($session -eq 0) { 'Service session; native WGC requires a user desktop' } else {
+            Add-Type -Path scripts/windows/gui-native.cs
+            try { [GuiNative]::Unlocked() } catch { "No accessible input desktop: $_" }
+          }
+          if ($skip) {
+            @{version=1; scenarios=@(@{name='win_capture_recovery'; status='SKIP'; reason=$skip; evidence=@{producer='native'; session=$session}})} | ConvertTo-Json -Depth 5 | Set-Content capture-native.json
+            Write-Host $skip; exit 0
+          }
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_capture_recovery --engine-env ISOCAST_TEST_WGC_HELPER=native --codec h264 --timeout 180 --work "$RUNNER_TEMP/capture-native" --report capture-native.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -c 'import json; r, = json.load(open("capture-native.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
+
+      - name: Upload recording recovery evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -1422,6 +1449,9 @@ jobs:
           path: |
             windows-recovery.json
             encoder-recovery.json
+            capture-recovery.json
+            capture-native.json
+            ${{ runner.temp }}/capture-recovery
             ${{ runner.temp }}/encoder-recovery
             ${{ runner.temp }}/windows-recovery
           if-no-files-found: warn

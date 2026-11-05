@@ -497,6 +497,12 @@ pub(super) fn write_files<W: FileWriter>(
             });
         }
         file.lost_packets += missed_audio.swap(0, Ordering::Relaxed);
+        if let Some(edge) = source.as_ref().and_then(|slot| slot.screen_edge.get()) {
+            let edge = edge.lock();
+            if edge.detected < shared.end() && edge.first.is_none_or(|at| at >= shared.end()) {
+                file.writer.end_at_last_picture();
+            }
+        }
         finish(file, shared.end(), take, failure);
     });
 }

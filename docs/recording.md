@@ -288,6 +288,19 @@ typical file size. Constant-quality rates depend strongly on motion, noise,
 fine detail, codec, depth and the Mac's encoder. Measure a representative
 take before budgeting a long recording.
 
+## If a Windows window capture stops
+
+If the capture helper exits, Isocast retries the original window, not another
+window with the same title. The replacement helper has five seconds to deliver
+a fresh picture. A minimized window may not deliver one: restore it before
+that deadline or its capture ends for this take. After Stop, the setup can
+attach to a matching window again without restarting the engine.
+
+The first ISO picture after a gap must be independently decodable (a closed
+IDR). Media Foundation hardware encoders that ignore a forced keyframe are
+not qualified for this recovery: Isocast ends that ISO with its verified
+prefix rather than writing a dependent picture. Other files keep recording.
+
 ## Windows desktop audio exclusions
 
 With monitoring off and `exclude = []`, `kind = "system_audio"` records the

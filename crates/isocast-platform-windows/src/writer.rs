@@ -36,6 +36,7 @@ const DRAIN_WAIT: Duration = Duration::from_secs(5);
 
 struct Pending {
     pts: Time,
+    source_boundary: bool,
     repeated: bool,
     submitted: Instant,
 }
@@ -68,6 +69,7 @@ pub struct VideoWriter {
     first_video_packet: Option<Box<dyn FnOnce() + Send>>,
     failed: Option<String>,
     output_failed: bool,
+    unavailable_tail: bool,
     closed: bool,
 }
 
@@ -172,6 +174,7 @@ impl VideoWriter {
             first_video_packet: None,
             failed: None,
             output_failed: false,
+            unavailable_tail: false,
             closed: false,
         }
     }
@@ -565,6 +568,15 @@ impl VideoWriter {
             }
         }
         self.check_budget(self.accepted + 1, None, !repeated)?;
+        let source_boundary = !repeated
+            && self.last_video.as_ref().is_some_and(|(_, previous)| {
+                pts.ticks_since(*previous, self.spec.video.fps) > 1
+                    && self
+                        .recovery
+                        .context
+                        .as_ref()
+                        .is_some_and(|c| c.source_resumed_between(*previous, pts))
+            });
         let now = Instant::now();
         // Audio arrives in 10 ms chunks per track. Files with many tracks
         // leave less room in the bounded route for a stalled video append.
@@ -586,7 +598,7 @@ impl VideoWriter {
                     .encoder
                     .as_mut()
                     .expect("ready encoder")
-                    .try_encode(&frame, pts, self.accepted == 0)
+                    .try_encode(&frame, pts, self.accepted == 0 || source_boundary)
                     .context(CodecFault)?
             {
                 break;
@@ -620,6 +632,7 @@ impl VideoWriter {
         }
         self.pending.push_back(Pending {
             pts,
+            source_boundary,
             repeated,
             submitted: Instant::now(),
         });
@@ -655,6 +668,11 @@ impl VideoWriter {
             );
         }
         let repeated = pending.repeated;
+        anyhow::ensure!(
+            !pending.source_boundary
+                || packet.keyframe && recovery::closed_idr(self.codec, &packet.data),
+            "first picture after capture recovery is not a closed IDR; retained verified prefix"
+        );
         if self.output_failed {
             bail!(
                 "video: cannot append dependent pictures after an invalid encoded packet; valid prefix retained"
@@ -955,9 +973,17 @@ impl VideoWriter {
                 None
             }
         };
+        // The audio endpoint below is unchanged. A stopped source must not
+        // acquire an extra picture just because its PCM extends further.
+        let video_end = if self.unavailable_tail {
+            self.end_ticks(None).ok()
+        } else {
+            end
+        };
         if prefix.is_none()
             && failure.is_none()
-            && let Some(end) = end
+            && !self.unavailable_tail
+            && let Some(end) = video_end
             && let Err(error) = self.repeat_tail(end)
         {
             note_error(&mut failure, error);
@@ -1003,7 +1029,7 @@ impl VideoWriter {
                 ),
             );
         }
-        if let Some(end) = end
+        if let Some(end) = video_end
             && prefix.is_none()
             && self
                 .last_written
@@ -1287,6 +1313,10 @@ impl VideoWriter {
 }
 
 impl FileWriter for VideoWriter {
+    fn end_at_last_picture(&mut self) {
+        self.unavailable_tail = true;
+    }
+
     type Frame = Frame;
 
     fn intentional_video_drops(&self) -> u64 {

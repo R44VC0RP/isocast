@@ -46,6 +46,7 @@ pub struct WindowsPlatform {
 /// Dropping any native guard stops and joins its capture worker.
 pub enum Capture {
     Screen(IsolatedCapture),
+    PinnedScreen(crate::broker::recovery::PinnedCapture),
     Audio(AudioCapture),
     /// Owns only this process's reader. A shared Frame Server attachment
     /// never stops or reconfigures the app that controls the camera.
@@ -1126,6 +1127,33 @@ impl Platform for WindowsPlatform {
         Ok((Capture::Screen(capture), format))
     }
 
+    fn capture_pinned_screen(
+        &self,
+        target: ScreenTarget<'_>,
+        fps: u32,
+        ten_bit: bool,
+        cursor: bool,
+        sink: isocast_engine::ScreenSink<Frame>,
+    ) -> Result<(Capture, CaptureFormat)> {
+        anyhow::ensure!(
+            !ten_bit,
+            "Windows screen capture supports 8-bit only; valid option: 8"
+        );
+        let source = match target {
+            ScreenTarget::Display { source, .. } | ScreenTarget::Window { source, .. } => source,
+            ScreenTarget::Application { app, .. } => app,
+        };
+        crate::broker::recovery::open(
+            self.graphics()?,
+            source.to_owned(),
+            crate::devices::screen_target(target)?,
+            fps,
+            cursor,
+            sink,
+        )
+        .map(|(capture, format)| (Capture::PinnedScreen(capture), format))
+    }
+
     fn capture_camera(
         &self,
         device: &str,
@@ -1147,7 +1175,10 @@ impl Platform for WindowsPlatform {
     fn camera_metadata(&self, capture: &Capture) -> Option<CameraMetadataReader> {
         match capture {
             Capture::Camera(camera) => Some(camera.metadata_reader()),
-            Capture::Screen(_) | Capture::Audio(_) | Capture::Browser(_) => None,
+            Capture::Screen(_)
+            | Capture::PinnedScreen(_)
+            | Capture::Audio(_)
+            | Capture::Browser(_) => None,
         }
     }
 
