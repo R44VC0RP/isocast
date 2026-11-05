@@ -30,12 +30,20 @@ mod mac;
 #[cfg(target_os = "macos")]
 pub use mac::{Exporter, Surface, fetch, host_now, retained_surfaces};
 
+#[cfg(all(windows, feature = "wgpu"))]
+mod shader_compiler;
 #[cfg(windows)]
 mod windows;
+#[cfg(all(windows, feature = "wgpu"))]
+pub use shader_compiler::{
+    ShaderCompilerFailure, dx12_instance, fail_dxc_retry, retry_with_dxc, shader_compiler,
+};
 #[cfg(windows)]
 pub use windows::{Exporter, Surface, fetch, host_now};
 #[cfg(all(windows, feature = "wgpu"))]
-pub use windows::{check_render_queue, dx12_adapter, dx12_adapter_luid};
+pub use windows::{
+    capture_adapter_luid, check_render_queue, dx12_adapter, dx12_adapter_luid, engine_adapter,
+};
 #[cfg(all(windows, feature = "wgpu"))]
 pub use windows::{retire, retirement_failed};
 

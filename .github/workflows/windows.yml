@@ -1298,6 +1298,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/bins/first" | Out-Null
           foreach ($exe in @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe', 'isocast-browser.exe')) { Copy-Item "target/debug/$exe" "$env:RUNNER_TEMP/bins/first/" }
+          ./scripts/windows/stage-dxc.ps1 -Destination "$env:RUNNER_TEMP/bins/first" -ToolsDir "$env:RUNNER_TEMP/dxc-tools"
 
       # A distinct compiled build, with the same qualification key, lets the
       # clean VM prove update and authenticated rollback without release keys.
@@ -1319,6 +1320,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/bins/next" | Out-Null
           foreach ($exe in @('isocast.exe', 'isocastd.exe', 'isocast-ui.exe', 'isocast-capture.exe', 'isocast-browser.exe')) { Copy-Item "target/debug/$exe" "$env:RUNNER_TEMP/bins/next/" }
+          ./scripts/windows/stage-dxc.ps1 -Destination "$env:RUNNER_TEMP/bins/next" -ToolsDir "$env:RUNNER_TEMP/dxc-tools"
 
       - name: Hand the builds to the qualification jobs
         # After the UI build, even if a check above failed: its binaries stay available.
@@ -1366,7 +1368,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force target/debug | Out-Null
-          Copy-Item "$env:RUNNER_TEMP/bins/first/*.exe" target/debug/
+          Copy-Item "$env:RUNNER_TEMP/bins/first/*" target/debug/
 
       - name: Install recording recovery decoder
         timeout-minutes: 10
@@ -1455,7 +1457,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force target/debug | Out-Null
-          Copy-Item "$env:RUNNER_TEMP/bins/first/*.exe" target/debug/
+          Copy-Item "$env:RUNNER_TEMP/bins/first/*" target/debug/
 
       - name: Windows wording snapshots (isolated, offscreen)
         timeout-minutes: 8
@@ -1566,7 +1568,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force target/debug | Out-Null
-          Copy-Item "$env:RUNNER_TEMP/bins/first/*.exe" target/debug/
+          Copy-Item "$env:RUNNER_TEMP/bins/first/*" target/debug/
 
       # W.7a: unsigned qualification only. No signing secrets or release writes.
       - name: Package per-user installer
@@ -1590,6 +1592,11 @@ jobs:
           $install = "$env:LOCALAPPDATA\Programs\Isocast"
           $process = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Install failed: $($process.ExitCode)" }
+          foreach ($dll in 'dxcompiler.dll', 'dxil.dll') {
+            if (-not (Test-Path -LiteralPath (Join-Path $install $dll) -PathType Leaf)) {
+              throw "Installer did not place $dll beside isocastd.exe"
+            }
+          }
           & "$install\isocast.exe" --help
           if ($LASTEXITCODE -ne 0) { throw 'Installed CLI did not load' }
           $env:ISOCAST_CALIBRATION = 'off'
@@ -1645,7 +1652,7 @@ jobs:
         run: |
           $folder = "$env:RUNNER_TEMP/windows-build-diagnostics"
           New-Item -ItemType Directory -Force $folder | Out-Null
-          Copy-Item "$env:RUNNER_TEMP/bins/next/*.exe" $folder
+          Copy-Item "$env:RUNNER_TEMP/bins/next/*" $folder
           if ($env:ISOCAST_WINDOWS_CRT) { Copy-Item "$env:ISOCAST_WINDOWS_CRT\*.dll" $folder }
           Get-ChildItem $folder -File | ForEach-Object { Get-FileHash $_.FullName -Algorithm SHA256 } | ConvertTo-Json | Set-Content "$folder/hashes.json"
 
@@ -1733,6 +1740,34 @@ jobs:
           }
           ffmpeg -version
           ffprobe -version
+
+      # Hosted WARP checks compiler selection and exact program pictures, not
+      # five-output capacity. Keep win_record and win_scenes strict for hardware.
+      - name: Verify the packaged FXC path records an exact program cut
+        if: env.MODE == 'full'
+        shell: pwsh
+        run: |
+          ./scripts/windows/stage-dxc.ps1 -Destination target/release -ToolsDir "$env:RUNNER_TEMP/dxc-tools"
+          python scripts/e2e.py --daemon target/release/isocastd.exe --cli target/release/isocast.exe --only win_program_cut --codec h264 --windows-profile 180p30 --work "$env:RUNNER_TEMP/windows-dxc" --keep --report windows-dxc.json
+          $code = $LASTEXITCODE
+          $report = Get-Content -Raw windows-dxc.json | ConvertFrom-Json
+          $log = @(Get-ChildItem -Path "$($report.work)/win_program_cut/d.logs/*.jsonl" | Select-String -SimpleMatch 'DX12 shader compiler:')
+          $log | ForEach-Object { Write-Host $_.Line }
+          if ($log.Count -ne 1 -or $log[0].Line -notlike '*DX12 shader compiler: FXC (default)*') { throw 'win_program_cut did not stay on FXC during warm-up' }
+          if ($code -ne 0 -or $report.totals.PASS -ne 1) { throw 'Strict program cut failed; see scenario result above' }
+          $proof = $report.scenarios[0].evidence
+          $writer = $proof.drops.psobject.Properties.Value
+          Write-Host "Verified $($proof.oracle[0].checks)/$($writer.slots) exact picture IDs; cut to bars2 at slot $($proof.cut_slot); drops=$($writer.dropped), repeats=$($writer.repeated), audio dropouts=$($writer.audio_dropouts)."
+
+      - name: Keep compiler oracle evidence
+        if: ${{ failure() && env.MODE == 'full' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-compiler-oracle
+          path: |
+            windows-dxc.json
+            ${{ runner.temp }}/windows-dxc/run-*/*/sheets/*.png
+          retention-days: 7
 
       - name: Qualify headless profiles and protect recording by pausing previews
         if: env.MODE == 'full'
@@ -1827,6 +1862,9 @@ jobs:
           path: |
             target/release/isocastd.exe
             target/release/isocast.exe
+            target/release/dxcompiler.dll
+            target/release/dxil.dll
+            target/release/DXC-LICENSE-LLVM.txt
             target/release/examples/monitor-loopback.exe
           retention-days: 7
 

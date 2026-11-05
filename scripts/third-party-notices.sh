@@ -155,6 +155,18 @@ notice = header.read_text().split("*/", 1)[0].splitlines()[1:]
 print("\n".join(line.removeprefix(" *").removeprefix(" ") for line in notice).strip())
 
 print("\nLinux X11 capture uses x11rb and x11rb-protocol (MIT OR Apache-2.0,\nhttps://github.com/psychon/x11rb) for RandR, Composite, MIT-SHM and XFixes.")
+
+section("Windows DirectX Shader Compiler and validator")
+print("""Windows x64 packages contain bin/x64/dxcompiler.dll and bin/x64/dxil.dll
+from Microsoft's DirectX Shader Compiler v1.8.2502 redistributable:
+https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.8.2502
+Its ReleaseNotes.md assigns LICENSE-MIT.txt to d3d12shader.h (not shipped)
+and LICENSE-LLVM.txt to “all other files”, including both DLLs. The validator
+hash was open-sourced in this release; the earlier Microsoft validator terms
+do not apply to this pair. The release's LICENSE-LLVM.txt follows.
+""")
+print((root / "packaging/windows/DXC-LICENSE-LLVM.txt").read_text().rstrip())
+
 section("System libraries")
 print("""The Linux build links dynamically to libraries of the system it runs on;
 they are not distributed with Isocast:

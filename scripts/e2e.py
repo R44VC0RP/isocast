@@ -54,6 +54,11 @@ Foundation beside the test pattern (program and media ISO, frame oracle and
 markers): strict at --windows-profile 180p30 for 18 s in hosted CI, 60 s from
 720p up (1080p30 on a GPU machine).
 
+Windows compiler CI: win_program_cut checks a five-second program recording
+with a hard cut at 180p30: exact source and frame IDs, zero drops or repeats.
+The full five-output win_record and cut/fade/slide win_scenes remain separate
+qualification runs on aws-win and exon-desk, not hosted WARP capacity claims.
+
 Linux capture: --only linux_capture records the real capture paths (the
 ScreenCast portal over PipeWire, PipeWire desktop audio, a microphone and a
 V4L2 camera) on the headless desktop of scripts/linux-capture-fixture.sh
@@ -146,6 +151,7 @@ SCENARIOS = (
 )
 if sys.platform == "win32":
     SCENARIOS += (
+        "win_program_cut",
         "win_media",
         "win_encoder_preflight",
         "win_encoder_recovery",
@@ -4556,6 +4562,37 @@ def check_pattern_take(e, path, manifest, cfg, layout, evidence, t0=None, label=
             lost = {round(h["time"] * fps) for h in checked.get("held", [])} if loss_limit(evidence) else None
             evidence.setdefault("sync", []).append(dict(sync_check(file, fps, lost=lost), output=file.name))
     return t0
+
+
+def scenario_win_program_cut(e, cfg, evidence):
+    """Hosted shader check: one program writer, a hard cut, every source and frame ID.
+    No ISO writers, extra canvases or fade/slide passes; win_record and win_scenes
+    remain the full strict Windows qualification scenarios."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    cfg["scenes"] = [{"id": s, "name": s, "items": [item(s, (0, 0, 1, 1), (w, h))]} for s in ("bars", "bars2")]
+    cfg["recording"]["iso"].update(enabled=False, sources=[])
+    e.apply(cfg)
+    seconds = 5
+    path = Path(e.rpc("start", {"seconds": seconds})["manifest"])
+    time.sleep(2)
+    cut = e.rpc("switch_scene", {"scene": "bars2", "transition": {"kind": "cut"}})
+    manifest = until(lambda: finished(path), seconds + 35, "program cut finalization")
+    # No hosted loss policy for this check, even when included in a mixed suite.
+    evidence["files"] = check_take(path, manifest, seconds, sync=True, expected_sources=["program"])
+    program, _ = manifest_file(path, manifest, "program")
+    rows = pattern_rows(program, pattern_specs([("picture", (0, 0, 1, 1))], w, h), (w, h), fps)
+    require(len(rows) == seconds * fps and all(slot == i for i, (slot, _, _) in enumerate(rows)),
+            f"{program.name}: expected every one of {seconds * fps} program slots in order")
+    first = math.ceil(cut["time_seconds"] * fps - 1e-6)
+    require(0 < first < len(rows), f"cut at slot {first} did not exercise both sources")
+    period = pattern_period(fps)
+    t0 = pattern_fit(rows[:first], "picture", period)
+    oracle = Oracle("program cut", program, e.root, evidence, hold_ok=False)
+    for slot, t, row in rows:
+        scene = "bars" if slot < first else "bars2"
+        oracle.expect(slot, t, "picture", ("id", PATTERN_TAGS[scene], (t0 + slot) % period), row["picture"])
+    oracle.verdict()
+    evidence.update(t0=t0, cut_slot=first)
 
 
 def scenario_win_record(e, cfg, evidence):

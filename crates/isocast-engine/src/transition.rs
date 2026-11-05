@@ -197,6 +197,10 @@ pub struct Transitions {
 
 impl Transitions {
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> Self {
+        #[cfg(windows)]
+        let _build = gpu.pipeline_build_guard();
+        #[cfg(windows)]
+        let _span = isocast_diagnostics::gpu_startup_span("pipelines.transitions");
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("transitions"),

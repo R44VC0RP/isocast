@@ -585,6 +585,24 @@ impl Platform for WindowsPlatform {
         Dx12Importer::new(gpu)
     }
 
+    fn doctor_checks(&self) -> Vec<isocast_protocol::api::Check> {
+        use isocast_protocol::api::{Check, CheckStatus};
+        let (status, detail, fix) = match isocast_surfaces::shader_compiler() {
+            Ok(detail) => (CheckStatus::Ok, detail, None),
+            Err(error) => (
+                CheckStatus::Problem,
+                error.to_string(),
+                Some(error.fix().into()),
+            ),
+        };
+        vec![Check {
+            name: "DX12 shader compiler".into(),
+            status,
+            detail,
+            fix,
+        }]
+    }
+
     fn machine(&self) -> Machine {
         system::machine()
     }

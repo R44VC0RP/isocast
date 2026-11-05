@@ -58,6 +58,7 @@ if (-not (Test-Path "$compilerDir\ISCC.exe")) {
 foreach ($name in $executables) { Copy-Item "$BinDir\$name" $payload }
 # App-local CRT avoids the machine-wide redistributable's admin prompt.
 Copy-Item "$CrtDir\*.dll" $payload
+& "$PSScriptRoot\stage-dxc.ps1" -Destination $payload -ToolsDir $ToolsDir
 . "$PSScriptRoot\winsparkle.ps1"
 $sparkle = Get-WinSparkle $ToolsDir
 Copy-Item "$sparkle\x64\Release\WinSparkle.dll", "$sparkle\bin\winsparkle-tool.exe" $payload
@@ -104,6 +105,8 @@ $metadata = [ordered]@{
     files=$files
 }
 $metadata | ConvertTo-Json -Depth 4 | Set-Content "$payload\package.json" -Encoding UTF8
+# Ship the exact same signed-or-unsigned payload loose and in the installer.
+Compress-Archive -Path "$payload\*" -DestinationPath "$OutputDir\Isocast-$Version-windows-x64-portable.zip"
 $arguments = @("/DAppVersion=$Version", "/DPayloadDir=$payload", "/DOutputDir=$OutputDir", "/DIconFile=$repo\crates\isocast-ui\windows\isocast.ico")
 if ($sign) {
     # Inno's $q/$f placeholders quote both executable and signing input. It

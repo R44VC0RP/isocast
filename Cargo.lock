@@ -4413,12 +4413,14 @@ name = "isocast-surfaces"
 version = "0.0.10"
 dependencies = [
  "anyhow",
+ "isocast-diagnostics",
  "isocast-ipc",
  "libc",
  "mach2",
  "objc2-core-foundation",
  "objc2-io-surface",
  "objc2-metal 0.3.2",
+ "sha2",
  "wgpu",
  "windows",
  "windows-core",

@@ -12,6 +12,36 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::render::{TexelKind, Texels};
 
+#[cfg(windows)]
+fn needs_serial_builds(adapter: wgpu::DeviceType, compiler: &wgpu::Dx12Compiler) -> bool {
+    adapter == wgpu::DeviceType::Cpu || !matches!(compiler, wgpu::Dx12Compiler::Fxc)
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn only_non_cpu_fxc_allows_concurrent_pipeline_builds() {
+    use wgpu::{DeviceType, Dx12Compiler};
+    assert!(!needs_serial_builds(
+        DeviceType::DiscreteGpu,
+        &Dx12Compiler::Fxc
+    ));
+    assert!(!needs_serial_builds(
+        DeviceType::IntegratedGpu,
+        &Dx12Compiler::Fxc
+    ));
+    assert!(needs_serial_builds(DeviceType::Cpu, &Dx12Compiler::Fxc));
+    let dxc = Dx12Compiler::DynamicDxc {
+        dxc_path: String::new(),
+    };
+    for adapter in [
+        DeviceType::DiscreteGpu,
+        DeviceType::IntegratedGpu,
+        DeviceType::Cpu,
+    ] {
+        assert!(needs_serial_builds(adapter, &dxc));
+    }
+}
+
 /// The GPU device frames are imported into and drawn with. Clones share
 /// the device and its queue.
 #[derive(Clone)]
@@ -21,11 +51,26 @@ pub struct Gpu {
     poll: mpsc::SyncSender<()>,
     lost: Arc<AtomicBool>,
     fault: Option<Arc<Fault>>,
+    // A successful first picture already built the BGRA pipelines. Every
+    // canvas on this device reuses those immutable objects, not its draw state.
+    #[cfg(windows)]
+    pub(crate) warmed_bgra: Arc<std::sync::OnceLock<crate::render::Renderer>>,
+    #[cfg(windows)]
+    pub(crate) first_canvas: Arc<Mutex<Option<crate::record::CanvasPasses>>>,
+    // wgpu-hal 30 shares one IDxcCompiler3 within an instance. Serialize
+    // actual builds across clones too (e.g. independent scene viewers).
+    // On CPU adapters, competing compiler workers also starve WARP's queue.
+    #[cfg(windows)]
+    serial_builds: Option<Arc<Mutex<()>>>,
+    // Only split the initial FXC library build on hardware with spare CPU
+    // threads. WARP needs the same cores for rendering; never fan out there.
+    #[cfg(windows)]
+    hardware_build_threads: bool,
 }
 
 impl Gpu {
     pub fn new() -> Result<Self> {
-        Self::with_thread(|| {})
+        Self::with_thread(|| {}, false)
     }
 
     /// Completion now hands frames to protected outputs, just as their
@@ -33,10 +78,16 @@ impl Gpu {
     /// instead of inheriting the control thread that happened to open the GPU.
     pub(crate) fn for_platform<P: crate::Platform>(platform: &P) -> Result<Self> {
         let platform = platform.clone();
-        Self::with_thread(move || platform.real_time_thread())
+        Self::with_thread(move || platform.real_time_thread(), false)
     }
 
-    fn with_thread(start: impl FnOnce() + Send + 'static) -> Result<Self> {
+    #[cfg(windows)]
+    pub(crate) fn for_compositor<P: crate::Platform>(platform: &P) -> Result<Self> {
+        let platform = platform.clone();
+        Self::with_thread(move || platform.real_time_thread(), true)
+    }
+
+    fn with_thread(start: impl FnOnce() + Send + 'static, program: bool) -> Result<Self> {
         // All canvases, ISO stages and viewers in this process import into
         // the same device. Keep it through stop/start cycles, not one driver
         // connection (and shader cache) per output. A lost device is not
@@ -50,23 +101,17 @@ impl Gpu {
             return Ok(gpu.clone());
         }
         *shared = None;
-        let gpu = Self::open(start)?;
+        let gpu = Self::open(start, program)?;
         *shared = Some(gpu.clone());
         Ok(gpu)
     }
 
+    #[cfg(not(windows))]
     fn adapter() -> Result<wgpu::Adapter> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: if cfg!(windows) {
-                wgpu::Backends::DX12
-            } else {
-                wgpu::Backends::PRIMARY
-            },
+            backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        #[cfg(windows)]
-        let adapter = isocast_surfaces::dx12_adapter(&instance, None)?;
-        #[cfg(not(windows))]
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
@@ -77,10 +122,28 @@ impl Gpu {
 
     /// Report the rendering adapter without creating a device or starting a renderer.
     pub fn adapter_info() -> Result<wgpu::AdapterInfo> {
-        Ok(Self::adapter()?.get_info())
+        #[cfg(windows)]
+        let (adapter, _) = isocast_surfaces::engine_adapter()?;
+        #[cfg(not(windows))]
+        let adapter = Self::adapter()?;
+        Ok(adapter.get_info())
     }
 
-    fn open(start: impl FnOnce() + Send + 'static) -> Result<Self> {
+    fn open(start: impl FnOnce() + Send + 'static, _program: bool) -> Result<Self> {
+        let candidate = Self::open_device()?;
+        #[cfg(windows)]
+        let candidate = Self::warm_windows(candidate, _program)?;
+        let (gpu, submissions) = candidate;
+        gpu.start_completion(submissions, start)?;
+        Ok(gpu)
+    }
+
+    fn open_device() -> Result<(Self, mpsc::Receiver<()>)> {
+        #[cfg(windows)]
+        let _span = isocast_diagnostics::gpu_startup_span("renderer.device");
+        #[cfg(windows)]
+        let (adapter, compiler) = isocast_surfaces::engine_adapter()?;
+        #[cfg(not(windows))]
         let adapter = Self::adapter()?;
         let info = adapter.get_info();
         crate::governor::software_renderer(info.device_type == wgpu::DeviceType::Cpu);
@@ -99,10 +162,161 @@ impl Gpu {
         let failed = lost.clone();
         device.set_device_lost_callback(move |_, _| failed.store(true, Ordering::Release));
         let fault = Fault::configured().map(Arc::new);
-        let poll_fault = fault.clone();
         let (poll, submissions) = mpsc::sync_channel(1);
-        let polling = device.clone();
-        let poll_lost = lost.clone();
+        Ok((
+            Self {
+                device,
+                queue,
+                poll,
+                lost,
+                fault,
+                #[cfg(windows)]
+                warmed_bgra: Arc::default(),
+                #[cfg(windows)]
+                first_canvas: Arc::default(),
+                #[cfg(windows)]
+                serial_builds: needs_serial_builds(info.device_type, &compiler).then(Arc::default),
+                #[cfg(windows)]
+                hardware_build_threads: matches!(
+                    info.device_type,
+                    wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+                ) && std::thread::available_parallelism()
+                    .is_ok_and(|n| n.get() >= 8),
+            },
+            submissions,
+        ))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn concurrent_pipeline_builds(&self) -> bool {
+        self.serial_builds.is_none()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn pipeline_build_guard(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
+        self.serial_builds.as_ref().map(|lock| lock.lock())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn parallel_warmup(&self) -> bool {
+        self.concurrent_pipeline_builds()
+            && self.hardware_build_threads
+            && self.warmed_bgra.get().is_none()
+    }
+
+    #[cfg(windows)]
+    fn warm_windows(
+        mut candidate: (Self, mpsc::Receiver<()>),
+        program: bool,
+    ) -> Result<(Self, mpsc::Receiver<()>)> {
+        // with_thread holds the process-wide GPU lock. No compositor, completion
+        // thread or importer may retain the failed DX12 singleton across retry.
+        static QUALIFIED: AtomicBool = AtomicBool::new(false);
+        if QUALIFIED.load(Ordering::Relaxed) {
+            // An ordinary device recreation is not initial startup. Nothing
+            // will fill its warm-up cache, so keep the original build width.
+            candidate.0.hardware_build_threads = false;
+            return Ok(candidate);
+        }
+        let result = if let Some(loss) = candidate.0.picture_warmup(program)? {
+            drop(candidate);
+            isocast_surfaces::retry_with_dxc(&loss)?;
+            let retry = (|| {
+                let fresh = Self::open_device().context("reopening the original DX12 adapter")?;
+                if let Some(loss) = fresh.0.picture_warmup(program)? {
+                    anyhow::bail!("device lost again: {loss}");
+                }
+                Ok(fresh)
+            })();
+            if let Err(error) = &retry {
+                isocast_surfaces::fail_dxc_retry(error);
+            }
+            retry?
+        } else {
+            candidate
+        };
+        QUALIFIED.store(true, Ordering::Relaxed);
+        Ok(result)
+    }
+
+    #[cfg(windows)]
+    fn picture_warmup(&self, program: bool) -> Result<Option<String>> {
+        // Keep a native reference only for the reason query. An empty submission
+        // or clear does not exercise WARP's failure executing fs_picture.
+        let raw = unsafe { self.device.as_hal::<wgpu::hal::api::Dx12>() }
+            .context("not a DX12 device")?
+            .raw_device()
+            .clone();
+        let picture = || {
+            let _span = isocast_diagnostics::gpu_startup_span("warmup.total");
+            let format = wgpu::TextureFormat::Bgra8Unorm;
+            let renderer = crate::render::Renderer::new(self, format);
+            let size = (32, 32);
+            let source = GpuFrame {
+                width: 32,
+                height: 32,
+                pixels: GpuPixels::Rgb(crate::scene::canvas_texture(self, format, size)),
+            };
+            let target = crate::scene::canvas_texture(self, format, size);
+            let submit = isocast_diagnostics::gpu_startup_span("warmup.submit");
+            let submission = renderer.render(
+                self,
+                &target,
+                &[crate::render::Layer::full(&source, 32, 32)],
+                size,
+            );
+            drop(submit);
+            let _wait = isocast_diagnostics::gpu_startup_span("warmup.wait");
+            self.device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(Duration::from_secs(3)),
+                })
+                .map(|_| renderer)
+        };
+        let draw = isocast_diagnostics::contain("DX12 picture warm-up", || {
+            if program && self.concurrent_pipeline_builds() {
+                let (draw, passes) = crate::record::CanvasPasses::alongside(self, picture);
+                draw.map(|r| (r, Some(passes)))
+            } else {
+                // Qualify the picture first. In serial mode, don't start
+                // other families until the canvas has a known-good device.
+                picture().map(|r| (r, None))
+            }
+        });
+        // A poll timeout or validation panic alone is NOT a device loss.
+        let native = unsafe { raw.GetDeviceRemovedReason() }
+            .err()
+            .map(|e| e.code().0 as u32);
+        // DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_HUNG, DXGI_ERROR_DEVICE_RESET.
+        if native.is_some_and(|hr| matches!(hr, 0x887a0005..=0x887a0007)) || self.is_lost() {
+            return Ok(Some(native.map_or_else(
+                || "wgpu device-lost callback".into(),
+                |hr| format!("HRESULT 0x{hr:08X}"),
+            )));
+        }
+        if let Some(hr) = native {
+            anyhow::bail!("DX12 picture warm-up failed: HRESULT 0x{hr:08X}");
+        }
+        let (renderer, passes) = draw
+            .map_err(anyhow::Error::msg)?
+            .context("waiting for the warm-up picture")?;
+        self.warmed_bgra
+            .get_or_init(|| renderer.with_fresh_draw_state());
+        *self.first_canvas.lock() = passes;
+        Ok(None)
+    }
+
+    fn start_completion(
+        &self,
+        submissions: mpsc::Receiver<()>,
+        start: impl FnOnce() + Send + 'static,
+    ) -> Result<()> {
+        #[cfg(windows)]
+        let _span = isocast_diagnostics::gpu_startup_span("completion.spawn");
+        let poll_fault = self.fault.clone();
+        let polling = self.device.clone();
+        let poll_lost = self.lost.clone();
         std::thread::Builder::new()
             .name("GPU completion".into())
             .spawn(move || {
@@ -147,13 +361,7 @@ impl Gpu {
             })
             .context("could not start GPU completion thread")?;
         isocast_diagnostics::diagnostic!("debug"; "opened shared GPU");
-        Ok(Self {
-            device,
-            queue,
-            poll,
-            lost,
-            fault,
-        })
+        Ok(())
     }
 
     /// Wake the completion thread to poll again: a `map_async` asked for

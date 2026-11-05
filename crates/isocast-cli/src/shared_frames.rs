@@ -68,10 +68,7 @@ pub fn run(options: Options) -> Result<ExitCode> {
     let client = {
         let mut client = client;
         if options.check {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::DX12,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
+            let instance = isocast_surfaces::dx12_instance()?;
             // Pin the process-wide selection before Gpu::new (or its cache)
             // is used. Query on this connection before it becomes a stream.
             isocast_client::shared::adapter(&mut client, &instance)?;
