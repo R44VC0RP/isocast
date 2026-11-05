@@ -99,6 +99,14 @@ pub enum FrameUse {
     Composition = 3,
 }
 
+/// One deadline for this open. A cold renderer isn't ready until a picture
+/// reaches its capture slot; its progress detail remains visible until then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceOpenBudget {
+    pub timeout: std::time::Duration,
+    pub wait_for_picture: Option<&'static str>,
+}
+
 /// What the engine needs from the operating system.
 /// Platforms are cheap handles (macOS: a unit struct), cloned into the
 /// threads that generate synthetic sources.
@@ -194,11 +202,11 @@ pub trait Platform: Clone + Send + Sync + 'static {
 
     /// Claim the deadline for an actual open. Merely estimating how long a
     /// recording should wait must not consume a platform's first-open allowance.
-    fn begin_source_open(
-        &self,
-        source: &SourceKind,
-    ) -> (std::time::Duration, Option<&'static str>) {
-        (self.source_open_timeout(source), None)
+    fn begin_source_open(&self, source: &SourceKind) -> SourceOpenBudget {
+        SourceOpenBudget {
+            timeout: self.source_open_timeout(source),
+            wait_for_picture: None,
+        }
     }
 
     /// Ask the desktop which screen or window `target` shows, where apps

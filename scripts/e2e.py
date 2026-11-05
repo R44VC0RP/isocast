@@ -5655,17 +5655,9 @@ setInterval(() => {
     cfg["recording"]["program"]["audio"] = ["web"]
     cfg["recording"]["iso"].update(enabled=True, sources=["web"], audio=["web"])
     e.apply(cfg)
-    if WINDOWS:
-        # A cold WebView2 can take longer than recording's first-picture
-        # timeout. Start measuring audio only once the page has a picture.
-        e.rpc("engine", {"running": True}, timeout=60)
-        def has_picture():
-            try:
-                return e.rpc("snapshot", {"source": "web"})["png_base64"]
-            except RpcError:
-                return False
-        until(has_picture, 60, "the WebView2 gap fixture's first picture", interval=0.25)
-    started = e.rpc("start", {})
+    # Start straight from cold: the engine, not a client-side snapshot loop,
+    # waits for the first Windows web source to paint before arming the ISO.
+    started = e.rpc("start", {}, timeout=60 if WINDOWS else 30)
     time.sleep(1)
     render(480)
     e.rpc("refresh_browser", {"source": "web"})
