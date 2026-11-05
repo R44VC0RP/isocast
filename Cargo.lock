@@ -4213,6 +4213,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "isocast-media"
+version = "0.0.10"
+dependencies = [
+ "anyhow",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-pbutils",
+ "gstreamer-video",
+ "isocast-engine",
+ "isocast-media-protocol",
+ "isocast-protocol",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
+name = "isocast-media-protocol"
+version = "0.0.10"
+
+[[package]]
 name = "isocast-mux"
 version = "0.0.10"
 dependencies = [
@@ -4281,13 +4301,10 @@ dependencies = [
  "ashpd",
  "cc",
  "futures-util",
- "gstreamer",
- "gstreamer-app",
- "gstreamer-pbutils",
- "gstreamer-video",
  "image",
  "isocast-diagnostics",
  "isocast-engine",
+ "isocast-media-protocol",
  "isocast-mux",
  "isocast-openh264",
  "isocast-platform-credentials",

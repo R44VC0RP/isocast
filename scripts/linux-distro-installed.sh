@@ -13,7 +13,7 @@ fedora)
 esac
 
 # Check the installed payload before adding the smoke harness's tools.
-for exe in /usr/bin/isocast{,d,-ui,-browser}; do
+for exe in /usr/bin/isocast{,d,-ui,-browser,-media}; do
   test -x "$exe"
   libs=$(ldd "$exe")
   if grep -F 'not found' <<< "$libs"; then exit 1; fi

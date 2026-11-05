@@ -32,10 +32,10 @@ from fedora-cisco-openh264; Fedora's noopenh264 stub cannot encode.
 # and full type debug info exhaust hosted builders; keep line tables and
 # leave the rest of Fedora's hardening and package-note flags intact.
 export RUSTFLAGS="${RUSTFLAGS:-} -Ccodegen-units=16 -Cdebuginfo=line-tables-only"
-cargo build --locked --release -p isocast-cli -p isocast-daemon -p isocast-ui -p isocast-browser
+cargo build --locked --release -p isocast-media -p isocast-cli -p isocast-daemon -p isocast-ui -p isocast-browser
 
 %install
-install -Dm755 -t %{buildroot}%{_bindir} "${CARGO_TARGET_DIR:-target}"/release/isocast{,d,-ui,-browser}
+install -Dm755 -t %{buildroot}%{_bindir} "${CARGO_TARGET_DIR:-target}"/release/isocast{,d,-ui,-browser,-media}
 install -Dm644 -t %{buildroot}%{_datadir}/applications packaging/linux/dev.isocast.Isocast.desktop
 mkdir -p %{buildroot}%{_datadir}/icons
 cp -r packaging/linux/icons/hicolor %{buildroot}%{_datadir}/icons/
@@ -47,5 +47,6 @@ cp -r packaging/linux/icons/hicolor %{buildroot}%{_datadir}/icons/
 %{_bindir}/isocastd
 %{_bindir}/isocast-ui
 %{_bindir}/isocast-browser
+%{_bindir}/isocast-media
 %{_datadir}/applications/dev.isocast.Isocast.desktop
 %{_datadir}/icons/hicolor/*/apps/dev.isocast.Isocast.*

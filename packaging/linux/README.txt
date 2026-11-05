@@ -65,8 +65,9 @@ What it needs (install with your package manager)
     Arch:          vulkan-icd-loader vulkan-radeon / vulkan-intel / nvidia-utils
 - Fonts and keyboard: fontconfig, freetype, libxkbcommon and its X11 library
   (libxkbcommon-x11-0 on Debian/Ubuntu; libxkbcommon-x11 on Arch/Fedora).
-- GStreamer 1.x (libgstreamer1.0-0, gstreamer1.0-plugins-base), present on
-  any desktop: the engine needs it to start. Media file sources play what
+- Only the isocast-media helper needs GStreamer 1.x (libgstreamer1.0-0,
+  gstreamer1.0-plugins-base). Without it the engine still starts and records
+  other sources; doctor reports media files unavailable. Media sources play what
   your distribution's GStreamer plugins decode (VA-API hardware decoders
   when present); for H.264/AAC MP4 add the libav plugin, for VP8/VP9 the
   good plugins. These plugins (gstreamer1.0-libav among them) are loaded by

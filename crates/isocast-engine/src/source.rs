@@ -1828,12 +1828,14 @@ pub(crate) fn stinger<P: Platform>(
     file: &str,
     timeline: &Arc<Timeline>,
 ) -> Result<(Opened<P>, Duration)> {
-    let permission = platform.source_permission(&SourceKind::Media(MediaSource {
+    let kind = SourceKind::Media(MediaSource {
         files: vec![file.to_string()],
         repeat: false,
         speed: 1.0,
         restart_on_activate: true,
-    }));
+    });
+    let permission = platform.source_permission(&kind);
+    let timeout = platform.source_open_timeout(&kind);
     let (platform, setup, id, file, timeline) = (
         platform.clone(),
         setup.clone(),
@@ -1849,7 +1851,7 @@ pub(crate) fn stinger<P: Platform>(
     bounded_open(
         format!("stinger {id:?} {file:?}"),
         help,
-        OPEN_TIMEOUT,
+        timeout,
         move || stinger_native(&platform, &setup, &id, &file, &timeline),
     )
 }

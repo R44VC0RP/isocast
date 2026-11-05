@@ -186,7 +186,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' && (matrix.distro == 'archlinux' || steps.codecs.outcome == 'success') }}
         run: |
           df -h .
-          cargo test --release --locked -p isocast-platform-linux --lib
+          cargo test --release --locked -p isocast-platform-linux -p isocast-media
       - name: Final runner disk space
         if: always()
         run: df -h .
@@ -355,7 +355,7 @@ jobs:
             cp target/release/isocastd "$RUNNER_TEMP/isocastd-old"
             cp target/release/isocast "$RUNNER_TEMP/isocast-old"
           fi
-          cargo build --release --locked -p isocast-daemon -p isocast-cli
+          cargo build --release --locked -p isocast-daemon -p isocast-cli -p isocast-media
 
       - name: Daemon queries do not start an engine
         if: env.MODE == 'full'
@@ -399,12 +399,12 @@ jobs:
       - name: Linux platform checks
         if: env.MODE == 'full'
         run: |
-          cargo clippy --release --locked --all-targets -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials -p isocast-daemon -- -D warnings
-          cargo test --release --locked -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials
+          cargo clippy --release --locked --all-targets -p isocast-media -p isocast-media-protocol -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials -p isocast-daemon -- -D warnings
+          cargo test --release --locked -p isocast-media -p isocast-media-protocol -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials
           # The client's own tests on Linux too (the daemon's local and remote transports).
           cargo test --release --locked -p isocast-client
           cargo test --release --locked -p isocast-discovery
-          GST_PLUGIN_FEATURE_RANK=avdec_h264:NONE,openh264dec:NONE,v4l2h264dec:NONE,vah264dec:NONE cargo test --release --locked -p isocast-platform-linux missing_h264_decoder -- --ignored
+          GST_PLUGIN_FEATURE_RANK=avdec_h264:NONE,openh264dec:NONE,v4l2h264dec:NONE,vah264dec:NONE cargo test --release --locked -p isocast-media missing_h264_decoder -- --ignored
           cargo test --release --locked -p isocast-discovery avahi_advertise_browse_collision_and_withdraw -- --ignored --test-threads=1
 
       # Four hosted vCPUs saturate on three 720p software encodes plus
@@ -412,7 +412,7 @@ jobs:
       # the six-vCPU arm64 VM separately qualifies strict 720p30 zero drops.
       - name: Synthetic program, ISOs, a media file and a stream (hosted 360p30)
         if: env.MODE == 'full'
-        run: ISOCAST_E2E_OLD_DAEMON="$RUNNER_TEMP/isocastd-old" python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only linux_handoff --only linux_media --only linux_shared_frames --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
+        run: ISOCAST_E2E_OLD_DAEMON="$RUNNER_TEMP/isocastd-old" python3 scripts/e2e.py --hosted --only linux_record --only linux_recovery --only linux_handoff --only linux_media_faults --only linux_media --only linux_shared_frames --only stream --linux-profile 360p30 --codec h264 --work "$RUNNER_TEMP/linux-e2e" --keep-failures --report linux-e2e.json
 
       - name: E2E summary
         if: (always()) && (env.MODE == 'full')
@@ -510,7 +510,7 @@ jobs:
       - name: Build daemon, CLI and browser helper
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         timeout-minutes: 30
-        run: cargo build --release --locked -p isocast-daemon -p isocast-cli -p isocast-browser
+        run: cargo build --release --locked -p isocast-daemon -p isocast-cli -p isocast-browser -p isocast-media
 
       # Cisco's OpenH264 (the recordings encode H.264 with it).
       - name: Cache Cisco's OpenH264
@@ -670,7 +670,7 @@ jobs:
 
       - name: Build app, engine, CLI and browser helper
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser
+        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser -p isocast-media
 
       - name: App checks
         if: env.MODE == 'full'
@@ -685,6 +685,12 @@ jobs:
           # alone does not install it. The shipped .deb already depends on it.
           .github/scripts/apt-install.sh xvfb xauth xdotool ffmpeg libxkbcommon-x11-0
           bash scripts/linux-x11-capture-check.sh
+
+      - name: Synthetic take without GStreamer
+        if: env.MODE == 'full'
+        run: |
+          codec=("$HOME"/.local/lib/isocast/libopenh264-*.so)
+          ISOCAST_OPENH264="${codec[0]}" bash scripts/linux-media-minimal.sh
 
       - name: Offscreen snapshot against a local engine
         if: env.MODE == 'full'
@@ -729,7 +735,7 @@ jobs:
 
       - name: Stage Ubuntu binaries for dpkg-shlibdeps and pre-strip codec checks
         if: env.MODE == 'full'
-        run: tar -C target/release -cf ubuntu-binaries.tar isocast isocastd isocast-ui isocast-browser
+        run: tar -C target/release -cf ubuntu-binaries.tar isocast isocastd isocast-ui isocast-media isocast-browser
 
       - name: Upload Ubuntu package inputs
         if: env.MODE == 'full'
@@ -876,7 +882,7 @@ jobs:
       - name: Build app, engine and CLI
         # No browser helper: it needs GTK 4.10+ and bookworm has 4.8, so the
         # Debian 12 package ships without browser sources (package-deb.sh).
-        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
+        run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-media
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:

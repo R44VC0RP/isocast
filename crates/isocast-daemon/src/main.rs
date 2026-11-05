@@ -1884,6 +1884,8 @@ impl Daemon {
             Method::Optimize(params) => self.optimize(*params).and_then(to_json),
             Method::InitSetup(params) => self.init_setup(*params).and_then(to_json),
             Method::Doctor(params) => check_folder(params.folder.as_deref()).and_then(|()| {
+                #[cfg(target_os = "linux")]
+                let live = params.setup.is_none();
                 let setup = params.setup.or_else(|| self.state.lock().setup.clone());
                 // The disk test writes in the nearest folder that exists: for
                 // a network caller only inside the folder roots (decision 26).
@@ -1892,6 +1894,24 @@ impl Daemon {
                         .is_ok()
                 };
                 let mut report = doctor(setup.as_ref(), params.folder.as_deref(), &may_write);
+                // A fresh decoder probe may succeed after an active reader died.
+                // Report the actual source error, not just the codec inventory.
+                #[cfg(target_os = "linux")]
+                if live && let Some(engine) = self.state.read().engine.clone() {
+                    for s in engine.info().sources {
+                        if let Some(detail) = s.error
+                            && setup.as_ref().and_then(|v| v.source(&s.source))
+                                .is_some_and(|v| matches!(v.kind, SourceKind::Media(_)))
+                        {
+                            report.checks.push(isocast_protocol::api::Check {
+                                name: format!("live media source: {}", s.source),
+                                status: isocast_protocol::api::CheckStatus::Warning,
+                                detail,
+                                fix: Some("Check the file and media decoder, then reopen the source.".into()),
+                            });
+                        }
+                    }
+                }
                 if let Some(check) = self.state.read().video_recovery_check() {
                     report.checks.push(check);
                 }

@@ -32,7 +32,7 @@ esac
 
 step "installed files"
 dpkg -L isocast | grep -E '^/usr/(bin|share/(applications|icons|doc))/' | grep -v '/$' | sort
-for exe in isocast isocastd isocast-ui isocast-openh264-install; do
+for exe in isocast-media isocast isocastd isocast-ui isocast-openh264-install; do
   command -v "$exe" >/dev/null || { echo "missing $exe on PATH" >&2; exit 1; }
 done
 # Only the per-user command's name may mention it (Cisco's licence is

@@ -256,8 +256,7 @@ fn pictures(path: &Path) -> Vec<(u32, u32, Duration, [u8; 4])> {
     let mut reader = open_media(path, MediaPart::Video).unwrap();
     let mut out = Vec::new();
     while let Some((frame, at)) = reader.next_video().unwrap() {
-        let (w, h) = (frame.width(), frame.height());
-        let pixels = frame.read_bgra().unwrap();
+        let (w, h, pixels) = frame;
         let centre = ((h / 2 * w + w / 2) * 4) as usize;
         out.push((w, h, at, pixels[centre..centre + 4].try_into().unwrap()));
     }

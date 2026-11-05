@@ -13,6 +13,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+isocast-media-protocol = { path = "../crates/isocast-media-protocol" }
 isocast-protocol = { path = "../crates/isocast-protocol" }
 isocast-vcam-wire = { path = "../crates/isocast-vcam-wire" }
 
@@ -33,6 +34,13 @@ bench = false
 [[bin]]
 name = "vcam_header"
 path = "fuzz_targets/vcam_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_frame"
+path = "fuzz_targets/media_frame.rs"
 test = false
 doc = false
 bench = false
