@@ -1712,6 +1712,8 @@ pub struct LoadWarning {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
     pub state: EngineState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_gpu: Option<WindowsGpuRoute>,
     /// A stop has been requested for the running session (or its start
     /// cancelled) and it hasn't ended yet. This says the request was
     /// accepted, not where the files were cut or that they are on disk.
@@ -3237,6 +3239,72 @@ impl LiveStatus {
 pub struct Doctor {
     pub machine: Machine,
     pub checks: Vec<Check>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_gpu: Option<WindowsGpuRoute>,
+}
+
+/// Observed devices in this daemon, not inferred GPU preferences. LUIDs are
+/// (low, high), local to this machine and boot, as in `gpu_adapter`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowsGpuRoute {
+    pub session_type: WindowsSessionType,
+    /// Opened D3D11 device; not evidence a capture has started.
+    pub graphics_adapter: Option<WindowsAdapter>,
+    /// Published, non-lost DX12 renderer, if one has started.
+    pub render_adapter: Option<WindowsAdapter>,
+    /// Actual compiler (including #260's fallback detail) for the observed renderer.
+    pub shader_compiler: Option<String>,
+    /// PnP display-class device descriptions (doctor only, even in session 0).
+    pub display_devices: Option<Vec<String>>,
+    pub captures: Vec<WindowsCaptureRoute>,
+    pub encoders: Vec<WindowsEncoderRoute>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsSessionType {
+    Console,
+    Rdp,
+    Service,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowsAdapter {
+    pub luid: (u32, i32),
+    pub name: String,
+    pub warp: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WindowsDisplayOwner {
+    Known {
+        adapter: WindowsAdapter,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowsCaptureRoute {
+    pub source: String,
+    /// Display ownership at open. None for window captures (not a display).
+    pub display_owner: Option<WindowsDisplayOwner>,
+    pub capture_adapter: WindowsAdapter,
+    /// A completed picture was delivered to the parent sink, not just WGC Ready.
+    pub first_frame_received: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowsEncoderRoute {
+    pub output: String,
+    pub take: u32,
+    pub provider: String,
+    /// None for a CPU encoder; upstream GPU conversion is not GPU encoding.
+    pub encoder_adapter: Option<WindowsAdapter>,
+    pub fallback_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

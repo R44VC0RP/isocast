@@ -3433,6 +3433,7 @@ impl Daemon {
         // the end of the `Status` below would deadlock the next.
         let mut status = Status {
             state: engine,
+            windows_gpu: None,
             finalizing,
             governor: Some(isocast_engine::governor::status()),
             machine_profile: Some(self.machine_status(false)),
@@ -3483,6 +3484,7 @@ impl Daemon {
         };
         // Measured without the lock (a slow disk can't hold up the rest).
         drop(state);
+        status.windows_gpu = native().windows_gpu_route(false);
         if let Some(camera) = &mut status.virtual_camera {
             virtual_camera::availability(camera);
         }

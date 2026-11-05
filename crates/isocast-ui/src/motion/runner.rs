@@ -411,28 +411,8 @@ impl Runner {
                 continue;
             }
             let mut update = update;
-            if self.run.lockstep {
-                // The engine's live readouts (recording time, counters,
-                // CPU, disk) follow the wall clock: stilled, as snapshots
-                // still them, so two runs draw the same frames.
-                match &mut update {
-                    Update::Event(event) if matches!(**event, Event::Status { .. }) => continue,
-                    Update::Reply {
-                        result: Ok(value), ..
-                    } => {
-                        still(value);
-                        if let Some(object) = value.as_object_mut()
-                            && object.contains_key("state")
-                        {
-                            for key in ["live", "engine"] {
-                                if object.contains_key(key) {
-                                    object.insert(key.into(), serde_json::Value::Null);
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+            if self.run.lockstep && !still_lockstep_update(&mut update) {
+                continue;
             }
             self.hub.apply(update);
         }
@@ -1151,6 +1131,40 @@ fn fitted((width, height): (u32, u32), (max_w, max_h): (u32, u32)) -> (u32, u32)
     (scaled(width), scaled(height))
 }
 
+/// Lockstep: drop wall-clock load/counter events and still volatile status
+/// fields (recording counters, engine load, automatic-quality state) in
+/// replies so two runs draw the same frames regardless of runner speed.
+fn still_lockstep_update(update: &mut Update) -> bool {
+    match update {
+        Update::Event(event)
+            if matches!(
+                **event,
+                Event::Status { .. }
+                    | Event::GovernorChanged { .. }
+                    | Event::EncoderOverload { .. }
+            ) =>
+        {
+            false
+        }
+        Update::Reply {
+            result: Ok(value), ..
+        } => {
+            still(value);
+            if let Some(object) = value.as_object_mut()
+                && object.contains_key("state")
+            {
+                for key in ["live", "engine", "governor"] {
+                    if object.contains_key(key) {
+                        object.insert(key.into(), serde_json::Value::Null);
+                    }
+                }
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
 /// Lockstep: readings that follow the wall clock or the machine (the
 /// engine's CPU, the recording disk's free space, uptime), in any reply,
 /// left out, as snapshots leave the CPU out.
@@ -1231,4 +1245,99 @@ fn read_pixels(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Vec<u8>> {
     drop(mapped);
     buffer.unmap();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isocast_protocol::Setup;
+    use isocast_protocol::api::{LiveStatus, Overload};
+    use isocast_protocol::governor::GovernorStatus;
+    use serde_json::json;
+
+    #[test]
+    fn motion_setup_disables_governor_so_previews_stay_live_while_recording() {
+        let setup = Setup::from_toml(include_str!("../../../../scripts/motion/setup.toml"))
+            .expect("motion setup.toml parses");
+        let issues = setup.validate();
+        assert!(issues.is_empty(), "motion setup.toml issues: {issues:?}");
+        assert!(
+            !setup.governor.enabled,
+            "automatic quality must stay off in motion setup so runner stalls never pause previews"
+        );
+    }
+
+    #[test]
+    fn lockstep_stills_wall_clock_load_events_and_governor_status() {
+        let mut status_event = Update::Event(Box::new(Event::Status {
+            live: LiveStatus {
+                elapsed_seconds: 1.0,
+                video_recovery: None,
+                paused: false,
+                paused_seconds: 0.0,
+                handover: false,
+                files: Vec::new(),
+                levels: Vec::new(),
+                monitor: None,
+                disk: None,
+            },
+        }));
+        assert!(!still_lockstep_update(&mut status_event));
+
+        let mut governor_event = Update::Event(Box::new(Event::GovernorChanged {
+            governor: GovernorStatus {
+                previews_paused: true,
+                preview_fps: Some(0),
+                reason: "Automatic quality: the program missed frames; previews paused until the program keeps up".into(),
+                ..GovernorStatus::default()
+            },
+        }));
+        assert!(!still_lockstep_update(&mut governor_event));
+
+        let mut overload_event = Update::Event(Box::new(Event::EncoderOverload {
+            overload: Box::new(Overload {
+                take: 1,
+                elapsed_seconds: 2.0,
+                dropping: Vec::new(),
+                protected_dropping: false,
+                reason: "overload".into(),
+                estimate: None,
+                workload_key: String::new(),
+            }),
+        }));
+        assert!(!still_lockstep_update(&mut overload_event));
+
+        let mut setup_event = Update::Event(Box::new(Event::SetupChanged {
+            revision: 3,
+            by: None,
+        }));
+        assert!(still_lockstep_update(&mut setup_event));
+
+        let mut reply = Update::Reply {
+            id: 1,
+            result: Ok(json!({
+                "state": "recording",
+                "cpu_percent": 42.5,
+                "recording_free_bytes": 1024,
+                "uptime_seconds": 9.0,
+                "live": { "take": 1 },
+                "engine": { "fps": 60.0 },
+                "governor": { "previews_paused": true, "preview_fps": 0 },
+            })),
+        };
+        assert!(still_lockstep_update(&mut reply));
+        let Update::Reply {
+            result: Ok(body), ..
+        } = reply
+        else {
+            panic!("expected reply");
+        };
+        assert_eq!(body["state"], "recording");
+        assert!(body["cpu_percent"].is_null());
+        assert!(body["recording_free_bytes"].is_null());
+        assert!(body["uptime_seconds"].is_null());
+        assert!(body["live"].is_null());
+        assert!(body["engine"].is_null());
+        assert!(body["governor"].is_null());
+    }
 }

@@ -4894,6 +4894,13 @@ def scenario_win_encoder_preflight(e, cfg, evidence):
     actual = until(selected, description="live file's validated recording encoder")
     require("injected NVENC open failure" in actual["reason"] and "MediaFoundation" in actual["backend"],
             f"fallback not reported in status: {actual}")
+    route = e.rpc("status")["windows_gpu"]
+    selected_route, = [o for o in route["encoders"] if o["output"].startswith("program/")]
+    require(any("injected NVENC open failure" in r for r in selected_route["fallback_reasons"]),
+            f"active provider lost its rejection reason: {selected_route}")
+    expected_gpu = None if "Software" in actual["backend"] else route["graphics_adapter"]
+    require(selected_route["encoder_adapter"] == expected_gpu and route["render_adapter"] is not None and
+            route["render_adapter"]["luid"] == route["graphics_adapter"]["luid"], f"wrong live route: {route}")
     e.rpc("stop")
     path = Path(started["manifest"])
     manifest = until(lambda: finished(path), description="fallback take finalization")
@@ -4904,6 +4911,16 @@ def scenario_win_encoder_preflight(e, cfg, evidence):
             f"not a complete H.264 fallback take: {video}")
     ffmpeg("-xerror", "-i", path.parent / f["path"], "-f", "null", "-")
     evidence.update(encoder=actual, decoded_frames=f["frames"])
+    # Exercise the real CLI's typed round-trip, not only the daemon JSON.
+    cli = e.binary.parent / "isocast.exe"
+    report = json.loads(subprocess.run([str(cli), "doctor", "--json"], env=e.env,
+                                       capture_output=True, timeout=40).stdout)
+    diagnostic = report["windows_gpu"]
+    require(diagnostic["session_type"] in ("service", "rdp", "console") and
+            diagnostic["graphics_adapter"] == route["graphics_adapter"] and
+            isinstance(diagnostic["display_devices"], list) and diagnostic["captures"] == [] and
+            not diagnostic["encoders"], f"wrong idle doctor route: {diagnostic}")
+    evidence.update(windows_gpu_live=route, windows_gpu_doctor=diagnostic)
 
 
 def scenario_win_output_scale(e, cfg, evidence):

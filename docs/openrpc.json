@@ -4467,6 +4467,16 @@
           },
           "machine": {
             "$ref": "#/components/schemas/Machine"
+          },
+          "windows_gpu": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WindowsGpuRoute"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -19136,6 +19146,16 @@
               }
             ],
             "description": "Camera output state (installation is explicit, never automatic)."
+          },
+          "windows_gpu": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WindowsGpuRoute"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -22753,6 +22773,220 @@
           "cursor"
         ],
         "type": "object"
+      },
+      "WindowsAdapter": {
+        "properties": {
+          "luid": {
+            "items": [
+              {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "int32",
+                "type": "integer"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "warp": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "luid",
+          "name",
+          "warp"
+        ],
+        "type": "object"
+      },
+      "WindowsCaptureRoute": {
+        "properties": {
+          "capture_adapter": {
+            "$ref": "#/components/schemas/WindowsAdapter"
+          },
+          "display_owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WindowsDisplayOwner"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Display ownership at open. None for window captures (not a display)."
+          },
+          "first_frame_received": {
+            "description": "A completed picture was delivered to the parent sink, not just WGC Ready.",
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "display_owner",
+          "capture_adapter",
+          "first_frame_received"
+        ],
+        "type": "object"
+      },
+      "WindowsDisplayOwner": {
+        "oneOf": [
+          {
+            "properties": {
+              "adapter": {
+                "$ref": "#/components/schemas/WindowsAdapter"
+              },
+              "kind": {
+                "const": "known",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "adapter"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WindowsEncoderRoute": {
+        "properties": {
+          "encoder_adapter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WindowsAdapter"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "None for a CPU encoder; upstream GPU conversion is not GPU encoding."
+          },
+          "fallback_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "output": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "take": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "output",
+          "take",
+          "provider",
+          "encoder_adapter",
+          "fallback_reasons"
+        ],
+        "type": "object"
+      },
+      "WindowsGpuRoute": {
+        "description": "Observed devices in this daemon, not inferred GPU preferences. LUIDs are\n(low, high), local to this machine and boot, as in `gpu_adapter`.",
+        "properties": {
+          "captures": {
+            "items": {
+              "$ref": "#/components/schemas/WindowsCaptureRoute"
+            },
+            "type": "array"
+          },
+          "display_devices": {
+            "description": "PnP display-class device descriptions (doctor only, even in session 0).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "encoders": {
+            "items": {
+              "$ref": "#/components/schemas/WindowsEncoderRoute"
+            },
+            "type": "array"
+          },
+          "graphics_adapter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WindowsAdapter"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Opened D3D11 device; not evidence a capture has started."
+          },
+          "render_adapter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WindowsAdapter"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Published, non-lost DX12 renderer, if one has started."
+          },
+          "session_type": {
+            "$ref": "#/components/schemas/WindowsSessionType"
+          },
+          "shader_compiler": {
+            "description": "Actual compiler (including #260's fallback detail) for the observed renderer.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_type",
+          "graphics_adapter",
+          "render_adapter",
+          "shader_compiler",
+          "display_devices",
+          "captures",
+          "encoders"
+        ],
+        "type": "object"
+      },
+      "WindowsSessionType": {
+        "enum": [
+          "console",
+          "rdp",
+          "service",
+          "unknown"
+        ],
+        "type": "string"
       }
     }
   },

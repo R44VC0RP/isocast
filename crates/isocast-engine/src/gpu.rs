@@ -68,7 +68,24 @@ pub struct Gpu {
     hardware_build_threads: bool,
 }
 
+static GPU: Mutex<Option<Gpu>> = Mutex::new(None);
+
 impl Gpu {
+    /// Observe only the published renderer. Status must not race capture to
+    /// pin an adapter, initialize DX12, or block while the renderer warms up.
+    #[cfg(windows)]
+    pub fn opened_adapter() -> Option<isocast_protocol::api::WindowsAdapter> {
+        let shared = GPU.try_lock()?;
+        let gpu = shared.as_ref().filter(|gpu| !gpu.is_lost())?;
+        let hal = unsafe { gpu.device.as_hal::<wgpu::hal::api::Dx12>() }?;
+        let luid = unsafe { hal.raw_device().GetAdapterLuid() };
+        let info = gpu.device.adapter_info();
+        Some(isocast_protocol::api::WindowsAdapter {
+            luid: (luid.LowPart, luid.HighPart),
+            name: info.name,
+            warp: (info.vendor, info.device) == (0x1414, 0x008c),
+        })
+    }
     pub fn new() -> Result<Self> {
         Self::with_thread(|| {}, false)
     }
@@ -93,7 +110,6 @@ impl Gpu {
         // connection (and shader cache) per output. A lost device is not
         // reusable: its existing owners drain/fail independently, and new
         // outputs share a fresh device without restarting the process.
-        static GPU: Mutex<Option<Gpu>> = Mutex::new(None);
         let mut shared = GPU.lock();
         if let Some(gpu) = &*shared
             && !gpu.is_lost()
