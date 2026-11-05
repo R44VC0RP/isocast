@@ -19,6 +19,12 @@ folder = "recordings"
 program = { encoder = { codec = "hevc" }, audio = ["tone"] }
 iso = { enabled = true, sources = ["pattern", "block"], audio = ["tone"] }
 
+# Keep previews running on slow or virtualized CI runners: when a recorded
+# program misses ticks, automatic quality pauses monitors (#155), which
+# blanks the canvas and leaves lockstep with no preview frames to wait on.
+[governor]
+enabled = false
+
 [[sources]]
 id = "background"
 name = "Background"
