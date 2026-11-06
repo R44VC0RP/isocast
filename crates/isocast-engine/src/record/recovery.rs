@@ -119,6 +119,7 @@ impl OutputRecovery {
             number,
             saved,
             ack: rx,
+            refused: None,
             deadline: ticket.deadline.min(now + Duration::from_secs(3)),
             retain: false,
         })
@@ -271,18 +272,75 @@ pub struct PendingPart {
     number: u32,
     saved: Time,
     ack: std::sync::mpsc::Receiver<Result<(), String>>,
+    // Inclusive saved PTS. No video can be admitted between these refusals.
+    refused: Option<(Time, Time)>,
     deadline: Time,
     retain: bool,
 }
 
 impl PendingPart {
-    pub fn poll_ack(&self, expected: u32, now: Time) -> anyhow::Result<bool> {
+    pub fn refused_picture(&mut self, pts: Time) {
+        self.refused.get_or_insert((pts, pts)).1 = pts;
+    }
+
+    /// Publish the admission gap only after the retained IDR commits. On
+    /// cancellation the original incident already spans the whole outage.
+    pub fn committed(mut self) {
+        self.retain = true;
+        let Some((first, last)) = self.refused else {
+            return;
+        };
+        let owner = &self.owner;
+        let fps = owner.plan.spec.video.fps;
+        let cuts = owner.clock.state.read();
+        let from = cuts.host_time(first);
+        let end = cuts.host_time(last.add_ticks(1, fps));
+        let ledger = &owner.clock.recovery;
+        let mut entries = ledger.entries.lock();
+        let original = &entries[self.ticket.incident as usize - 1];
+        if original.resumed.is_none_or(|idr| idr >= from) {
+            return;
+        }
+        ledger.push(
+            &mut entries,
+            Incident {
+                scope: Scope::Output,
+                owner: owner.plan.source.clone(),
+                fps,
+                kind: VideoFaultKind::RolloverAckWait,
+                reason: format!(
+                    "pictures refused while waiting for part {} manifest acknowledgment",
+                    self.number
+                ),
+                from,
+                detected: from,
+                resumed: Some(end),
+                ended: None,
+                split_end: None,
+                attempts: Vec::new(),
+                source_retry: None,
+                rollover: None,
+            },
+        );
+    }
+
+    pub fn poll_ack(
+        &mut self,
+        expected: u32,
+        now: Time,
+        skipped: Option<Time>,
+    ) -> anyhow::Result<bool> {
         use std::sync::mpsc::TryRecvError;
         anyhow::ensure!(self.number == expected, "unexpected physical part ordinal");
         anyhow::ensure!(
             self.owner.can_resume(self.ticket, self.saved, now),
             "recovery expired before the first picture"
         );
+        // An upstream-skipped picture cannot be submitted even if this poll
+        // consumes the ack. Account for it before the handoff can commit.
+        if let Some(pts) = skipped {
+            self.refused_picture(pts);
+        }
         match self.ack.try_recv() {
             Ok(Ok(())) => Ok(true),
             Ok(Err(msg)) => Err(anyhow::Error::msg(msg).context(PartMetadataWrite)),
@@ -445,40 +503,43 @@ impl VideoRecoveryLedger {
         assert!(fps > 0, "an interruption needs a video slot rate");
         let mut entries = self.entries.lock();
         let mut from = from;
-        if let Some(i) = entries
-            .iter()
-            .rposition(|e| e.scope == scope && e.owner == owner)
-        {
+        if let Some(i) = entries.iter().rposition(|e| {
+            e.scope == scope && e.owner == owner && e.kind != VideoFaultKind::RolloverAckWait
+        }) {
             match entries[i].split_end.or(entries[i].resumed) {
                 Some(at) if detected >= at => from = from.max(at),
                 _ => return Some(i as u64 + 1),
             }
         }
+        self.push(
+            &mut entries,
+            Incident {
+                rollover: None,
+                scope,
+                owner: owner.into(),
+                fps,
+                from,
+                reason: reason.chars().take(512).collect(),
+                detected,
+                kind,
+                attempts: Vec::new(),
+                source_retry: None,
+                resumed: None,
+                ended: None,
+                split_end: None,
+            },
+        )
+    }
+
+    fn push(&self, entries: &mut Vec<Incident>, entry: Incident) -> Option<u64> {
         if entries.len() >= 256 {
-            if from.as_nanos()
-                < self
-                    .limited_from
-                    .fetch_min(from.as_nanos(), Ordering::AcqRel)
-            {
+            let from = entry.from.as_nanos();
+            if from < self.limited_from.fetch_min(from, Ordering::AcqRel) {
                 self.revision.fetch_add(1, Ordering::Release);
             }
             return None;
         }
-        entries.push(Incident {
-            rollover: None,
-            scope,
-            owner: owner.into(),
-            fps,
-            from,
-            reason: reason.chars().take(512).collect(),
-            detected,
-            kind,
-            attempts: Vec::new(),
-            source_retry: None,
-            resumed: None,
-            ended: None,
-            split_end: None,
-        });
+        entries.push(entry);
         self.revision.fetch_add(1, Ordering::Release);
         Some(entries.len() as u64)
     }
@@ -662,11 +723,11 @@ impl VideoRecoveryLedger {
     /// The async finalizer is too late: the same output may have failed again.
     pub(super) fn output_split(&self, owner: &str, cut: Time) {
         let mut entries = self.entries.lock();
-        if let Some(e) = entries
-            .iter_mut()
-            .rev()
-            .find(|e| e.scope == Scope::Output && e.owner == owner)
-            && e.resumed.is_none()
+        if let Some(e) = entries.iter_mut().rev().find(|e| {
+            e.scope == Scope::Output
+                && e.owner == owner
+                && e.kind != VideoFaultKind::RolloverAckWait
+        }) && e.resumed.is_none()
             && e.split_end.is_none()
         {
             e.split_end = Some(cut);

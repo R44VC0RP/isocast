@@ -136,18 +136,27 @@ impl VideoWriter {
         self.parts.waiting.is_some()
     }
 
+    pub(super) fn note_handoff_refusal(&mut self, pts: Time) {
+        if let Some(handoff) = &mut self.parts.waiting {
+            handoff.intent.refused_picture(pts);
+        }
+    }
+
     pub(super) fn cancel_handoff(&mut self) {
         self.parts.waiting.take();
     }
 
     /// Called on normal video/audio pump opportunities. While the coordinator
     /// checkpoints, retain just the verified first AU, not an unbounded GOP.
-    pub(super) fn poll_handoff(&mut self) -> Result<bool> {
-        let Some(h) = self.parts.waiting.as_ref() else {
+    pub(super) fn poll_handoff(&mut self, skipped: Option<Time>) -> Result<bool> {
+        let Some(h) = self.parts.waiting.as_mut() else {
             return Ok(true);
         };
         let checked_at = crate::now();
-        match h.intent.poll_ack(h.next.parts.index + 1, checked_at) {
+        match h
+            .intent
+            .poll_ack(h.next.parts.index + 1, checked_at, skipped)
+        {
             Ok(false) => return Ok(false),
             Err(e) => {
                 self.cancel_handoff();
@@ -189,7 +198,6 @@ impl VideoWriter {
             }
             return Err(e.context(PartStorage));
         }
-        drop(intent);
         next.closed = false;
         next.parts.earlier_pictures = self.parts.earlier_pictures + self.completed;
         // The original all-tracks prefix remains safe across a physical
@@ -226,6 +234,7 @@ impl VideoWriter {
             std::thread::sleep(Duration::from_secs(3));
         }
         self.publish_resume(ticket, cut, checked_at);
+        intent.committed();
         self.flush_staged()?;
         self.finish_prior(false)?;
         Ok(true)
@@ -277,6 +286,20 @@ impl VideoWriter {
         }
         Ok(())
     }
+    /// Take ownership before observing a failed acknowledgment. The finalizer
+    /// flushes staged PCM back to the prefix, including this triggering chunk.
+    pub(super) fn route_audio_and_poll(
+        &mut self,
+        i: usize,
+        samples: &[f32],
+        pts: Time,
+        poll: impl FnOnce(&mut Self) -> Result<bool>,
+    ) -> Result<bool> {
+        let accepted = self.route_audio(i, samples, pts)?;
+        poll(self)?;
+        Ok(accepted)
+    }
+
     pub(super) fn route_audio(&mut self, i: usize, samples: &[f32], pts: Time) -> Result<bool> {
         if self.parts.changed.is_some() {
             let ch = self
@@ -410,5 +433,65 @@ impl VideoWriter {
                 video,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isocast_engine::{AudioTrackSpec, VideoTrackSpec};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn audio_poll_timeout_keeps_the_triggering_chunk_in_order_for_the_prefix() {
+        let folder = std::env::temp_dir().join(format!(
+            "isocast-ack-pcm-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        let spec = WriterSpec {
+            path: folder.join("prefix.mov"),
+            container: Container::Mov,
+            created: UNIX_EPOCH,
+            video: VideoTrackSpec {
+                width: 160,
+                height: 90,
+                fps: 12,
+                encoder: Default::default(),
+            },
+            audio: vec![AudioTrackSpec { channels: 1 }],
+        };
+        let reserved = mp4::Writer::create(&spec.path, spec.container, spec.created).unwrap();
+        let mut writer = VideoWriter::part(
+            &spec,
+            VideoCodec::H264,
+            12 * FRAME_DURATION,
+            reserved,
+            VideoWriter::audio_tracks(&spec).unwrap(),
+        );
+        let zero = Time::from_nanos(0);
+        let at = zero.add_ticks(480, RATE);
+        writer.start(zero).unwrap();
+        writer.parts.changed = Some(vec![]);
+        assert!(
+            writer
+                .route_audio_and_poll(0, &[0.25; 480], zero, |_| Ok(false))
+                .unwrap()
+        );
+        let result = writer.route_audio_and_poll(0, &[-0.25; 480], at, |_| bail!("ack timed out"));
+        assert_eq!(result.unwrap_err().to_string(), "ack timed out");
+        assert_eq!(writer.parts.staged.len(), 2);
+        assert_eq!(writer.parts.staged[1], (0, vec![-0.25; 480], at));
+        // Same rollback as finish_at: neither chunk has entered the new mux.
+        writer.parts.changed = None;
+        writer.flush_staged().unwrap();
+        assert_eq!(writer.audio[0].input_frames, 960);
+        writer.closed = true;
+        drop(writer);
+        std::fs::remove_dir_all(folder).unwrap();
     }
 }

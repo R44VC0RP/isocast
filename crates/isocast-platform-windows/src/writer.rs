@@ -759,10 +759,14 @@ impl VideoWriter {
     }
 
     fn drain_ready(&mut self) -> Result<()> {
+        self.drain_ready_at(None)
+    }
+
+    fn drain_ready_at(&mut self, skipped: Option<Time>) -> Result<()> {
         // A correct provider returns no more than our eight pending pictures.
         // The extra poll also pumps MF's input-credit events when it is empty.
         for _ in 0..=MAX_PENDING {
-            if !self.poll_handoff()? {
+            if !self.poll_handoff(skipped)? {
                 return Ok(());
             }
             let Some(encoder) = self.encoder.as_mut() else {
@@ -1359,20 +1363,22 @@ impl FileWriter for VideoWriter {
         };
         if matches!(result, Ok(false)) && self.recovery.incident.is_some() {
             self.recovery.intentional_drops += 1;
+            self.note_handoff_refusal(pts);
         }
         self.keep_error(result)
     }
 
-    fn skip_video(&mut self) -> Result<()> {
+    fn skip_video(&mut self, pts: Time) -> Result<()> {
+        let recovering = self.recovery.incident.is_some();
         let result = self
             .healthy()
-            .and_then(|()| self.drain_ready())
+            .and_then(|()| self.drain_ready_at(Some(pts)))
             .and_then(|()| self.drain_audio());
         let result = match result {
             Err(e) if e.is::<CodecFault>() => self.handle_codec_fault(e),
             other => other,
         };
-        if result.is_ok() && self.recovery.incident.is_some() {
+        if result.is_ok() && (recovering || self.recovery.incident.is_some()) {
             self.recovery.intentional_drops += 1;
         }
         self.keep_error(result)
@@ -1393,10 +1399,9 @@ impl FileWriter for VideoWriter {
     }
 
     fn append_audio(&mut self, track: usize, samples: &[f32], pts: Time) -> Result<bool> {
-        let result = self
-            .healthy()
-            .and_then(|()| self.poll_handoff().map(|_| ()))
-            .and_then(|()| self.route_audio(track, samples, pts));
+        let result = self.healthy().and_then(|()| {
+            self.route_audio_and_poll(track, samples, pts, |w| w.poll_handoff(None))
+        });
         self.keep_error(result)
     }
 

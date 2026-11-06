@@ -1031,9 +1031,9 @@ pub trait FileWriter: Send {
     /// `false` if the encoder could not keep up and the frame was dropped.
     fn append_video(&mut self, frame: &Self::Frame, pts: Time) -> anyhow::Result<bool>;
 
-    /// Admission skipped a picture upstream. Make the same progress on
+    /// Admission skipped the picture at saved `pts` upstream. Make the same progress on
     /// previously accepted work as a refused append, without new pixels.
-    fn skip_video(&mut self) -> anyhow::Result<()> {
+    fn skip_video(&mut self, _pts: Time) -> anyhow::Result<()> {
         Ok(())
     }
 

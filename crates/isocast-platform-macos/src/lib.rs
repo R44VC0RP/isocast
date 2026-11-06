@@ -119,10 +119,10 @@ impl isocast_engine::FileWriter for MacWriter {
         }
     }
 
-    fn skip_video(&mut self) -> anyhow::Result<()> {
+    fn skip_video(&mut self, pts: Time) -> anyhow::Result<()> {
         match self {
-            Self::Asset(w) => w.skip_video(),
-            Self::CrashSafe(w) => w.skip_video(),
+            Self::Asset(w) => w.skip_video(pts),
+            Self::CrashSafe(w) => w.skip_video(pts),
         }
     }
 

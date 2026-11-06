@@ -1228,7 +1228,9 @@ jobs:
       - name: Check Media Foundation AAC transactions
         if: env.MODE == 'full'
         timeout-minutes: 30
-        run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
+        run: |
+          cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
+          cargo test --locked -j 1 -p isocast-platform-windows --lib writer::rollover::tests
 
       # Browser sources: the isocastd side against fake helpers (Python
       # scripts speaking the helper protocol: crash, hang, restart, sizes,

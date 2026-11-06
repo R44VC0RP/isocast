@@ -5028,7 +5028,8 @@ def scenario_win_output_rollover(e, cfg, evidence):
         require(len(m['files'])==3, f'expected two parts and one sibling: {m}')
         a,b = [f for f in m['files'] if f['source']=='bars']
         sibling, = [f for f in m['files'] if f['source']=='bars2']
-        incident, = m['video_recovery']['incidents']; roll = incident['rollover']
+        incidents = m['video_recovery']['incidents']
+        incident, = [i for i in incidents if i.get('rollover')]; roll = incident['rollover']
         require([f['part']['number'] for f in (a,b)]==[1,2] and not sibling.get('part')
                 and roll['state']=='committed' and roll['path']==b['path'] and roll['part']==2
                 and incident['state']=='resumed', f'wrong physical/incident identity: {m}')
@@ -5046,6 +5047,26 @@ def scenario_win_output_rollover(e, cfg, evidence):
         require(profiles[0] != profiles[1] and 'Baseline' in profiles[1], f'configuration did not actually change: {profiles}')
         if not crash:
             require(occupied.read_bytes()==b'unrelated occupied name' and occupied.name!=b['path'], 'rollover reused an occupied path')
+            wait, = [i for i in incidents if i['fault_kind']=='rollover_ack_wait']
+            def picture_slots(row):
+                out = command(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_packets',
+                               '-show_entries', 'packet=pts_time', '-of', 'json', path.parent/row['path']])
+                pts = [(float(p['pts_time']) + row['start_offset_seconds'])*fps for p in json.loads(out.stdout)['packets']]
+                slots = [round(t) for t in pts]
+                require(all(abs(t-s)<.001 for t,s in zip(pts,slots)) and len(set(slots))==len(slots), 'off-grid or duplicate picture')
+                return set(slots)
+            second = picture_slots(b)
+            saved = picture_slots(a) | second
+            holes = set(range(min(saved), max(saved)+1)) - saved
+            second_holes = set(range(min(second), max(second)+1)) - second
+            def interval(i):
+                return set(range(i['first_lost_slot'],i['end_slot_exclusive']))
+            require(wait['owner_id']==b['source'] and wait['state']=='resumed' and bool(second_holes)
+                    and second_holes==interval(wait) and len(second_holes)==wait['lost_slots']==b['dropped_frames'],
+                    f'part 2 movie holes {sorted(second_holes)} vs ack ledger {wait}')
+            require(holes==interval(incident)|interval(wait) and len(holes)==sum(i['lost_slots'] for i in incidents),
+                    f'physical take holes {sorted(holes)} vs ledger {incidents}')
+            evidence['ack_wait_holes'] = sorted(second_holes)
             last = until(lambda: (s.get('last') if s['state']=='idle' else None) if (s:=e.rpc('status')) else None,
                          description='multipart Stop report')
             require({Path(f['path']).name:f['start_offset_seconds'] for f in last['files']} ==

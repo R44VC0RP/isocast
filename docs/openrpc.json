@@ -22074,6 +22074,7 @@
           "writer_failed",
           "encoder_failed",
           "storage_failed",
+          "rollover_ack_wait",
           "device_lost",
           "unknown"
         ],
@@ -22156,7 +22157,7 @@
             "type": "integer"
           },
           "lost_slots": {
-            "description": "Slots of observed unavailability, not a count of missing native samples.\nFor an output that ended early, these slots overlap the tail counted in\nthat file's `dropped_frames`. Do not add the two counts.",
+            "description": "Slots of observed unavailability, not a count of missing native samples.\nFor an output, both resumed gaps (including rollover acknowledgment waits)\nand ended-early tails are included in the affected file's `dropped_frames`.\nDo not add the two counts.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
