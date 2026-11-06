@@ -5,6 +5,7 @@
 # Cisco. Nothing system-wide, no root.
 #
 #   ./install.sh                     install (and download OpenH264)
+#   ./install.sh --engine-only       install the CLI, daemon and source helpers; no desktop UI
 #   ./install.sh --no-openh264       install without downloading OpenH264
 #   ./install.sh --openh264          (re)install only Cisco's OpenH264
 #   ./install.sh --remove-openh264   remove only Cisco's OpenH264 (the
@@ -190,11 +191,19 @@ if [ -n "$packaged" ]; then
 fi
 
 case "${1:-}" in
+--uninstall|--openh264|--remove-openh264)
+  [ "$#" = 1 ] || { echo "install.sh: run $1 on its own" >&2; exit 2; } ;;
+esac
+case "${1:-}" in
 --uninstall)
-  rm -f "$bin/isocast" "$bin/isocast-ui" "$apps/dev.isocast.Isocast.desktop"
-  for size in $icon_sizes; do
-    rm -f "$icons/$size/apps/dev.isocast.Isocast.png" "$icons/$size/apps/dev.isocast.Isocast.svg"
-  done
+  if [ "$(readlink "$bin/isocastd" 2>/dev/null || true)" = "$lib/isocastd" ]; then rm -f "$bin/isocastd"; fi
+  rm -f "$bin/isocast"
+  if [ -e "$lib/isocast-ui" ]; then
+    rm -f "$bin/isocast-ui" "$apps/dev.isocast.Isocast.desktop"
+    for size in $icon_sizes; do
+      rm -f "$icons/$size/apps/dev.isocast.Isocast.png" "$icons/$size/apps/dev.isocast.Isocast.svg"
+    done
+  fi
   rm -rf "$lib"
   echo "Isocast and Cisco's OpenH264 removed. Recordings (~/Videos/Isocast unless you chose another folder) and settings ($prefix/isocast) are kept."
   exit 0
@@ -207,25 +216,46 @@ case "${1:-}" in
   remove_openh264
   exit 0
   ;;
-"" | --no-openh264) ;;
-*)
-  echo "install.sh: unknown option $1; valid options are --openh264, --remove-openh264, --no-openh264, --uninstall" >&2
-  exit 2
-  ;;
 esac
+
+engine_only=0
+download_codec=1
+for option in "$@"; do
+  case "$option" in
+    --engine-only) engine_only=1 ;;
+    --no-openh264) download_codec=0 ;;
+    *) echo "install.sh: unknown install option $option; use [--engine-only] [--no-openh264], or --openh264, --remove-openh264, --uninstall separately" >&2; exit 2 ;;
+  esac
+done
+# Refreshing the installed server copy must not create a dangling UI link.
+if [ -d "$lib" ] && [ "$here" = "$(cd "$lib" && pwd -P)" ] && [ ! -e "$lib/isocast-ui" ]; then engine_only=1; fi
+if [ "$engine_only" = 1 ] && [ -e "$lib/isocast-ui" ]; then
+  echo 'install.sh: desktop tarball already installed; finish any take, shut down the engine and uninstall that copy before switching to --engine-only.' >&2
+  exit 1
+fi
+if [ "$engine_only" = 1 ] && { [ -e "$bin/isocastd" ] || [ -L "$bin/isocastd" ]; } && [ "$(readlink "$bin/isocastd" || true)" != "$lib/isocastd" ]; then
+  echo "install.sh: $bin/isocastd already exists and isn't this installation's link" >&2
+  exit 1
+fi
 
 # The tarball doesn't have a package manager to resolve dependencies. Check
 # linked libraries (including the browser helper), then those the graphics
 # backend opens on demand. Warn rather than blocking a headless installation.
-for exe in isocast-media isocast isocastd isocast-ui isocast-browser; do
+exes='isocast isocastd isocast-media isocast-browser'
+checks='isocast isocastd'
+graphics='libvulkan.so.1 libpipewire-0.3.so.0'
+if [ "$engine_only" = 0 ]; then
+  exes="$exes isocast-ui"
+  checks=$exes
+  graphics="$graphics libxkbcommon-x11.so.0 libxkbcommon.so.0 libEGL.so.1 libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1 libX11.so.6 libX11-xcb.so.1 libXcursor.so.1 libXrandr.so.2 libXi.so.6"
+fi
+for exe in $checks; do
   missing=$(LC_ALL=C ldd "$here/$exe" 2>/dev/null | awk '/=> not found/{print $1}')
   [ -z "$missing" ] || printf 'install.sh: %s needs these system libraries:\n%s\n' "$exe" "$missing" >&2
 done
 ldconfig=$(command -v ldconfig || echo /sbin/ldconfig)
 if libs=$("$ldconfig" -p 2>/dev/null); then
-  for so in libxkbcommon-x11.so.0 libxkbcommon.so.0 libvulkan.so.1 libEGL.so.1 \
-    libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1 libX11.so.6 \
-    libX11-xcb.so.1 libXcursor.so.1 libXrandr.so.2 libXi.so.6 libpipewire-0.3.so.0; do
+  for so in $graphics; do
     case " $libs" in *"$so "*) continue ;; esac
     if [ "$so" = libpipewire-0.3.so.0 ]; then
       echo "install.sh: $so missing from the loader cache (optional: PipeWire capture and playback)" >&2
@@ -235,16 +265,19 @@ if libs=$("$ldconfig" -p 2>/dev/null); then
   done
 fi
 
-mkdir -p "$lib" "$bin" "$apps"
+mkdir -p "$lib" "$bin"
 # The installed copy, run again, has nothing to copy (and copying a file
 # onto itself fails): it refreshes the links and OpenH264.
 if [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
   # Only the sibling browser helper uses the newer Ubuntu runtime. Copy it
   # without invoking it; an unavailable browser must not block installation.
-  for name in isocast isocast-ui isocastd isocast-media isocast-browser install.sh "$license"; do
+  for name in $exes install.sh "$license"; do
     install -m 755 "$here/$name" "$lib/$name"
   done
   chmod 644 "$lib/$license"
+fi
+if [ "$engine_only" = 0 ] && [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
+  mkdir -p "$apps"
   for size in $icon_sizes; do
     for icon in "$here/icons/hicolor/$size/apps/dev.isocast.Isocast."*; do
       mkdir -p "$icons/$size/apps"
@@ -263,10 +296,16 @@ if [ "$here" != "$(cd "$lib" && pwd -P)" ]; then
   command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$icons" >/dev/null 2>&1 || true
 fi
 ln -sf "$lib/isocast" "$bin/isocast"
-ln -sf "$lib/isocast-ui" "$bin/isocast-ui"
-echo "Isocast installed: Isocast in your app menu, or isocast-ui and isocast in $bin."
+if [ "$engine_only" = 1 ]; then
+  ln -sf "$lib/isocastd" "$bin/isocastd"
+  echo "Isocast engine installed: isocast and isocastd in $bin (no desktop UI)."
+  echo 'Optional: GStreamer decodes media files; PipeWire enables desktop capture and sound playback; GTK 4 and WebKitGTK 6 enable browser sources on glibc 2.39+. Run isocast doctor for details.'
+else
+  ln -sf "$lib/isocast-ui" "$bin/isocast-ui"
+  echo "Isocast installed: Isocast in your app menu, or isocast-ui and isocast in $bin."
+fi
 case ":$PATH:" in *":$bin:"*) ;; *) echo "($bin isn't on your PATH yet; add it to use the commands.)" ;; esac
-if [ "${1:-}" = --no-openh264 ]; then
+if [ "$download_codec" = 0 ]; then
   without_cisco "Cisco's OpenH264 not downloaded"
   echo "To download it: $lib/install.sh --openh264"
   echo "$attribution"

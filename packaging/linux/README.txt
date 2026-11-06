@@ -32,6 +32,11 @@ Run it
 To run it from this folder without installing, get OpenH264 first:
 `./install.sh --openh264`, then `./isocast-ui`.
 
+Server without a desktop: run `./install.sh --engine-only` instead. It
+installs isocast, isocastd and the media/browser helpers, but no UI, menu
+entry or icons. Add ~/.local/bin to PATH. See "Run an engine on a server"
+in the project README for runtime packages, pairing and remote access.
+
 H.264 (OpenH264, from Cisco)
 ----------------------------
 Isocast records, streams and previews H.264 with OpenH264, which this

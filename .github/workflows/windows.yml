@@ -917,6 +917,30 @@ jobs:
           path: dist/isocast_*.deb
           retention-days: 30
 
+  engine-only-test:
+    name: Engine-only Debian slim (${{ matrix.arch }})
+    needs: deb-debian
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-24.04}
+          - {arch: aarch64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.linux_release_commit || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: isocast-linux-${{ matrix.arch }}
+      - name: Install, record and publish to the runner's RTMP receiver
+        run: |
+          .github/scripts/apt-install.sh ffmpeg
+          bash scripts/linux-engine-only.sh isocast-linux-${{ matrix.arch }}.tar.gz
+
   tarball-test:
     name: Portable tarball (${{ matrix.image }}, ${{ matrix.arch }})
     needs: deb-debian
