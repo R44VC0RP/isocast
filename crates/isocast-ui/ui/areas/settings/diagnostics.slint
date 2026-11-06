@@ -27,7 +27,8 @@ component CheckRow inherits Rectangle {
     border-top-right-radius: root.top-r;
     border-bottom-left-radius: root.bottom-r;
     border-bottom-right-radius: root.bottom-r;
-    accessible-role: text;
+    // A group, not a text: a screen reader reaches the row's Details.
+    accessible-role: groupbox;
     accessible-label: root.check.title + ": " + (root.check.status == "ok" ? "OK" : root.check.status == "warning" ? "warning" : "problem");
     accessible-description: root.check.summary + (root.check.fix != "" ? " " + root.check.fix : "");
 

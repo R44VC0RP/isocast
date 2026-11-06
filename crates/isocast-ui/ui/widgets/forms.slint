@@ -157,7 +157,9 @@ export component Callout inherits Rectangle {
     in property <string> details;
     property <bool> expanded;
     background: root.kind == CalloutKind.error ? Theme.danger-soft : Theme.accent-soft;
-    accessible-role: AccessibleRole.text;
+    // A group, not a text: a screen reader reaches the Details link and
+    // the action inside it.
+    accessible-role: AccessibleRole.groupbox;
     accessible-label: root.title;
     accessible-description: root.message;
 
@@ -185,6 +187,7 @@ export component Callout inherits Rectangle {
                 line-height-factor: Theme.leading-sm;
                 font-weight: Theme.weight-semibold;
                 wrap: word-wrap;
+                accessible-role: none;
             }
             if root.message != "": Text {
                 text: root.message;
@@ -193,6 +196,7 @@ export component Callout inherits Rectangle {
                 letter-spacing: Theme.tracking-sm;
                 line-height-factor: Theme.leading-sm;
                 wrap: word-wrap;
+                accessible-role: none;
             }
             if root.details != "": HorizontalLayout {
                 alignment: start;

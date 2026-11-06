@@ -408,8 +408,11 @@ impl Offscreen {
                 self.advance(Duration::from_millis(16));
             }
             // What a screen reader's press does: the accessible default
-            // action of the first element named `arg`.
+            // action of the first element named `arg`. Drawn first: a
+            // dialog's popup opens (and so joins the tree) only when drawn.
             "press" => {
+                self.render()?;
+                self.settle();
                 let found = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
                     &self.app, arg,
                 )
