@@ -5,7 +5,9 @@
 //! one shown; a value nothing matches stays as an option, "(not
 //! connected)", and is never replaced on its own.
 
-use isocast_protocol::devices::{AudioOutput, Camera, CameraKind, Devices, VideoFormat, Window};
+use isocast_protocol::devices::{
+    AudioOutput, Camera, CameraKind, Devices, Display, VideoFormat, Window,
+};
 
 /// A dropdown choice: value, label, detail.
 pub type Choice = (String, String, String);
@@ -291,12 +293,18 @@ pub fn display_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
             .find(|d| d.id == value || d.name == value)
             .or_else(|| displays.iter().find(|d| d.name.to_lowercase() == lower))
     };
-    let mut options = vec![choice(
-        "main",
-        "Main display",
-        main.map(|m| format!("{}, {}×{}", m.name, m.width, m.height))
-            .unwrap_or_default(),
-    )];
+    let size =
+        |d: &Display| (d.width > 0 && d.height > 0).then(|| format!("{}×{}", d.width, d.height));
+    // Linux's desktop-portal screen is named for its dialog ("Choose a
+    // screen"), and has no size until something is chosen.
+    let main_detail = main
+        .map(|m| match (picked_in_dialog(), size(m)) {
+            (true, size) => size.unwrap_or_default(),
+            (false, Some(size)) => format!("{}, {size}", m.name),
+            (false, None) => m.name.clone(),
+        })
+        .unwrap_or_default();
+    let mut options = vec![choice("main", "Main display", main_detail)];
     // A display whose id is "main" (Linux's desktop-portal screen) is the
     // row above already.
     options.extend(displays.iter().filter(|d| d.id != "main").map(|d| {
@@ -305,7 +313,7 @@ pub fn display_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
         } else {
             d.id.clone()
         };
-        choice(v, &d.name, format!("{}×{}", d.width, d.height))
+        choice(v, &d.name, size(d).unwrap_or_default())
     }));
     if can_pick() {
         options.push(pick_option("screen"));
@@ -339,7 +347,7 @@ fn pick_option(what: &str) -> Choice {
 /// (`picked_in_dialog`): the one it has, named by `app` (a label there),
 /// and the dialog where this app can open it (`can_pick`).
 pub fn picked_window_options(app: &str) -> Vec<Choice> {
-    let mut options = vec![choice(app, "Chosen in the desktop’s dialog", app)];
+    let mut options = vec![choice(app, "Chosen window", "")];
     if can_pick() {
         options.push(pick_option("window"));
     }

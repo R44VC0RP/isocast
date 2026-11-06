@@ -425,6 +425,7 @@ fn choice_control(
         }
         ("window", "app") if dev::picked_in_dialog() => {
             // The dialog chooses the window; `app` only names it.
+            row.label = "Window".into();
             row.options = dev::picked_window_options(&v);
             row.value = v.clone();
             row.extra = true;

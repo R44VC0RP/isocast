@@ -164,13 +164,13 @@ export component SourcesDock inherits Dock {
                 // A row without ISO (a box, text, a group's child): its name
                 // runs on into the empty ISO lane (and its gap, the lane
                 // being 0 wide in a narrow dock) before it elides.
-                label-room: !item.can-iso && item.state != "failed" && item.state != "waiting for permission" && item.state != "opening" && item.warning == "" ? (root.narrow ? 0px : Theme.lane) + Theme.space-2 : 0px;
+                label-room: !item.can-iso && item.state == "" && item.warning == "" ? (root.narrow ? 0px : Theme.lane) + Theme.space-2 : 0px;
                 icon: Icons.named(item.icon);
                 selected: parent.chosen || item.marked;
                 dim: !item.visible;
                 depth: item.depth;
                 indent: root.indent;
-                description: item.state == "failed" || item.state == "waiting for permission" ? item.error : item.visible ? "" : "Hidden";
+                description: item.state == "failed" || item.state == "waiting for permission" ? item.error : item.state == "waiting for pick" ? "Choose a screen or window" : item.visible ? "" : "Hidden";
                 index: i;
                 count: SourcesArea.items.length;
                 focus-shown: list.keyboard-focus && parent.chosen;
@@ -224,6 +224,28 @@ export component SourcesDock inherits Dock {
                     Tooltip {
                         Tip {
                             text: item.state == "waiting for permission" ? item.error + " Click to allow it." : item.error;
+                        }
+                    }
+                }
+                // Nothing chosen yet in the desktop's sharing dialog: a
+                // quiet wait, not a failure; a click opens the dialog.
+                if item.state == "waiting for pick": Rectangle {
+                    width: Theme.control-h-sm;
+                    accessible-role: text;
+                    accessible-label: "Waiting";
+                    accessible-description: "Choose a screen or window";
+                    Icon {
+                        path: Icons.clock;
+                        size: Theme.icon-sm;
+                        color: Theme.text-3;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { SourcesArea.choose-unchosen(item.source); }
+                    }
+                    Tooltip {
+                        Tip {
+                            text: "Choose a screen or window";
                         }
                     }
                 }

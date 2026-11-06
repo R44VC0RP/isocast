@@ -15,9 +15,9 @@ import { Theme } from "../../theme.slint";
 import { Icon, Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import {
-    Callout, CalloutKind, Capsule, CapsuleButton, CapsuleDivider, Dialog, DialogFooter, GroupHeading,
+    Button, Callout, CalloutKind, Capsule, CapsuleButton, CapsuleDivider, Dialog, DialogFooter, GroupHeading,
     GroupHint, IconButton, ListRow, Menus, ScrollArea, SettingsForm, SheetHeader, SheetSidebar,
-    SidebarHeading, TextField, Viewport,
+    ControlSize, SidebarHeading, TextField, Viewport,
 } from "../../kit.slint";
 import { SourcesArea, FilterRow } from "state.slint";
 import { SourcePreview } from "source-preview.slint";
@@ -65,6 +65,32 @@ export component PropertiesDialog inherits Dialog {
             kind: CalloutKind.error;
             title: "This source isn’t running";
             message: SourcesArea.props-problem;
+            details: SourcesArea.props-problem-details;
+        }
+    }
+    // Nothing chosen yet in the desktop's sharing dialog: a wait, with
+    // the button that opens it (where this app can).
+    if SourcesArea.props-pick != "": VerticalLayout {
+        padding-left: Theme.sheet-pad;
+        padding-right: Theme.sheet-pad;
+        padding-bottom: Theme.space-4;
+        Callout {
+            kind: CalloutKind.info;
+            title: "No " + SourcesArea.props-pick + " chosen yet";
+            message: SourcesArea.props-pick-id == ""
+                ? "Choose it in the sharing dialog on the computer Isocast records on."
+                : SourcesArea.props-pick-id == SourcesArea.unchosen-picking
+                ? "Choose it in the desktop’s sharing dialog."
+                : "This source shows nothing until you choose one.";
+            if SourcesArea.props-pick-id != "": VerticalLayout {
+                alignment: center;
+                Button {
+                    text: "Choose a " + SourcesArea.props-pick + "…";
+                    size: ControlSize.small;
+                    enabled: SourcesArea.unchosen-picking == "";
+                    clicked => { SourcesArea.choose-unchosen(SourcesArea.props-pick-id); }
+                }
+            }
         }
     }
     ScrollArea {

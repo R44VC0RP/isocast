@@ -205,7 +205,7 @@ impl Mixer {
                         monitored: audio.monitor != Monitoring::Off,
                         monitor_only: audio.monitor == Monitoring::MonitorOnly,
                         opening: run.is_some_and(|r| r.state == SourceRun::Opening),
-                        failed: run.is_some_and(|r| r.state == SourceRun::Failed),
+                        failed: strip_failed(run),
                         error: run.and_then(|r| r.error.clone()).unwrap_or_default().into(),
                     }
                 })
@@ -938,6 +938,12 @@ impl Area for Mixer {
         }
         Some(Ok(()))
     }
+}
+
+/// A strip's source failed to open: a wait for a pick in the desktop's
+/// sharing dialog (`needs_pick`) isn't a failure.
+pub(crate) fn strip_failed(run: Option<&isocast_protocol::api::SourceStatus>) -> bool {
+    run.is_some_and(|r| r.state == SourceRun::Failed && !r.needs_pick)
 }
 
 #[cfg(test)]

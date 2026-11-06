@@ -33,7 +33,9 @@ export struct ItemRow {
     depth: int,
     group: bool,
     expanded: bool,
-    // Its source in the live engine: "", "opening" or "failed" (and why).
+    // Its source in the live engine: "", "opening", "failed" (and why),
+    // "waiting for permission" or "waiting for pick" (nothing chosen yet
+    // in the desktop's sharing dialog).
     state: string,
     detail: string,
     error: string,
@@ -128,8 +130,15 @@ export global SourcesArea {
     in property <bool> props-video;
     // What still has to be set before OK can add a new source.
     in property <string> props-need;
-    // Why the engine couldn't start the source, if it couldn't.
+    // Why the engine couldn't start the source, if it couldn't, in plain
+    // words; the engine's own behind Details ("" for none).
     in property <string> props-problem;
+    in property <string> props-problem-details;
+    // What the desktop's sharing dialog still has to choose for it
+    // ("screen" or "window"; "" when nothing waits), and its id where this
+    // app can open that dialog.
+    in property <string> props-pick;
+    in property <string> props-pick-id;
     // It was added just now (Cancel keeps it).
     in property <bool> props-created;
 

@@ -50,6 +50,10 @@ export global ControlsArea {
     // has no camera yet; a Linux engine's v4l2loopback device is missing,
     // not writable or busy (the engine's own words).
     in property <string> vcam-unavailable;
+    // Linux without v4l2loopback: what to install, and the command that
+    // loads it ("" otherwise).
+    in property <string> vcam-setup;
+    in property <string> vcam-command;
     // The engine's other words about the camera, one per line ("" for
     // none): its Linux device is writable; Automatic Quality holds it or
     // reduces its frame rate.
