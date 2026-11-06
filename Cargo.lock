@@ -4184,6 +4184,7 @@ dependencies = [
  "cosmic-text",
  "image",
  "isocast-diagnostics",
+ "isocast-media-protocol",
  "isocast-mux",
  "isocast-protocol",
  "isocast-surfaces",
@@ -4221,7 +4222,6 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-pbutils",
  "gstreamer-video",
- "isocast-engine",
  "isocast-media-protocol",
  "isocast-protocol",
  "libc",
@@ -4231,6 +4231,9 @@ dependencies = [
 [[package]]
 name = "isocast-media-protocol"
 version = "0.0.10"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "isocast-mux"

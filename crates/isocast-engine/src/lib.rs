@@ -79,8 +79,7 @@ pub struct VideoEncoders {
     pub unavailable: Vec<String>,
 }
 
-/// Audio inside the engine is 48 kHz, 32-bit float, interleaved.
-pub const SAMPLE_RATE: u32 = 48_000;
+pub use isocast_media_protocol::{MediaInfo, MediaPart, MediaReader, SAMPLE_RATE};
 /// Recordings are written in movie fragments of this many seconds of media
 /// time. Passing a boundary with input samples allows the writer to close a
 /// fragment; accepting those samples does not acknowledge an on-disk commit.
@@ -852,22 +851,6 @@ pub enum ScreenTarget<'a> {
     Application { app: &'a str, display: &'a str },
 }
 
-/// Which part of a media file a reader decodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaPart {
-    Video,
-    Audio,
-}
-
-/// What a media file holds.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MediaInfo {
-    /// Width and height of its picture, if it has one.
-    pub video: Option<(u32, u32)>,
-    pub audio: bool,
-    pub duration: std::time::Duration,
-}
-
 /// The size of a source's picture when it comes from a file or its text
 /// (images, slide shows, text, media files), as the engine would draw it;
 /// `None` for other kinds, or when the file can't be read. Imports use it
@@ -903,19 +886,6 @@ pub fn content_size<P: Platform>(platform: &P, kind: &SourceKind) -> Option<(u32
         }
         _ => None,
     }
-}
-
-/// Decodes one part of a media file, from its start, as fast as asked.
-pub trait MediaReader: Send {
-    type Frame;
-
-    /// The next frame and its time from the start of the file; `None` at
-    /// the end.
-    fn next_video(&mut self) -> anyhow::Result<Option<(Self::Frame, std::time::Duration)>>;
-
-    /// The next audio, interleaved stereo at [`SAMPLE_RATE`], and the time
-    /// of its first sample from the start of the file; `None` at the end.
-    fn next_audio(&mut self) -> anyhow::Result<Option<(Vec<f32>, std::time::Duration)>>;
 }
 
 /// Receives interleaved samples and the capture time of the first.

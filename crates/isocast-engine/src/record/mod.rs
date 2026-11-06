@@ -1607,6 +1607,47 @@ fn live_status(
     }
 }
 
+/// Read the final movie header first. Only the native writer's fragment
+/// format can say what reached disk before finalization.
+fn recorded_duration(_platform: &impl Platform, path: &Path) -> Result<Duration> {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        mux_recorded_duration(path)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        anyhow::ensure!(file.metadata()?.is_file(), "not a regular recording file");
+        if let Some(duration) = isocast_protocol::mp4_edits::movie_duration(&mut file) {
+            return Ok(duration);
+        }
+        // AVFoundation reads the committed moofs of an unfinished Mac movie;
+        // its initial mvhd has zero duration even when those samples exist.
+        _platform.media_info(path).map(|info| info.duration)
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn mux_recorded_duration(path: &Path) -> Result<Duration> {
+    let mut file = isocast_mux::file::open_for_read(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+        path.file_name().context("missing recording file name")?,
+    )?;
+    if let Some(duration) = isocast_protocol::mp4_edits::movie_duration(&mut file) {
+        return Ok(duration);
+    }
+    if let Some(seconds) = isocast_mux::mp4::inspect(&file)?.and_then(|i| i.media.longest()) {
+        return Ok(Duration::try_from_secs_f64(seconds)?);
+    }
+    bail!("no finalized movie duration or verified media")
+}
+
 /// A take's manifest as it stands: files that haven't finished have no
 /// duration or counts yet.
 #[allow(clippy::too_many_arguments)]
@@ -1649,10 +1690,7 @@ fn take_manifest<P: Platform>(
         let end = take.end?;
         // A failed writer may have closed long before the take ended. Read
         // the finalized/durable media instead of inventing the missing tail.
-        let durable = platform
-            .media_info(&plan.spec.path)
-            .ok()
-            .map(|i| i.duration);
+        let durable = recorded_duration(platform, &plan.spec.path).ok();
         (start != i64::MIN).then(|| {
             let start = Time::from_nanos(start);
             let fps = plan.spec.video.fps;
@@ -2534,8 +2572,8 @@ pub fn recover_interrupted<P: Platform>(
                 }
             };
             if probe {
-                match platform.media_info(&full) {
-                    Ok(info) => file.duration_seconds = Some(info.duration.as_secs_f64()),
+                match recorded_duration(platform, &full) {
+                    Ok(duration) => file.duration_seconds = Some(duration.as_secs_f64()),
                     Err(err) => manifest.errors.push(format!(
                         "{}: durable media could not be probed: {err:#}",
                         file.path
@@ -2667,6 +2705,47 @@ mod tests {
     use super::*;
     use crate::source::Timeline;
     use std::time::Instant;
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn recorded_duration_counts_committed_media_before_and_after_finish() {
+        use isocast_mux::mp4::{FragmentTrack, Track, TrackKind, Writer, aac_sample_entry};
+        use std::time::SystemTime;
+        let root =
+            std::env::temp_dir().join(format!("isocast-mux-duration-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("take.mov");
+        let mut writer = Writer::create(&path, Container::Mov, SystemTime::now()).unwrap();
+        assert!(mux_recorded_duration(&path).is_err()); // reservation, not a zero-length take
+        writer
+            .set_tracks(vec![Track {
+                kind: TrackKind::Audio {
+                    channels: 2,
+                    sample_rate: SAMPLE_RATE,
+                },
+                timescale: SAMPLE_RATE,
+                skip: 0,
+                fragment_shift: 0,
+                sample_entry: aac_sample_entry(Container::Mov, 2, SAMPLE_RATE).unwrap(),
+            }])
+            .unwrap();
+        writer
+            .write_fragment(&[FragmentTrack {
+                samples: &[(1, 0, 24_000, true)],
+                data: &[0],
+            }])
+            .unwrap();
+        assert_eq!(
+            mux_recorded_duration(&path).unwrap(),
+            Duration::from_millis(500)
+        );
+        writer.finish().unwrap();
+        assert_eq!(
+            mux_recorded_duration(&path).unwrap(),
+            Duration::from_millis(500)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn slot() -> Arc<FrameSlot<u32>> {
         Arc::new(FrameSlot::new(Arc::new(Timeline::default())))

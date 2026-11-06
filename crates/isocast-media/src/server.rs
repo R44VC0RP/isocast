@@ -6,19 +6,13 @@ use std::{
 
 use crate::decoder;
 use anyhow::{Result, bail, ensure};
-use isocast_engine::{MediaPart, MediaReader};
-use isocast_media_protocol::{Header, VERSION, read_header, write_record};
+use isocast_media_protocol::{Header, MediaPart, MediaReader, read_header, write_record};
 
-pub(super) fn serve(out: &mut std::fs::File) -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    ensure!(
-        args.len() == 2 && args[0] == VERSION,
-        "expected {VERSION} and operation"
-    );
+pub(super) fn serve(out: &mut std::fs::File, operation: &str) -> Result<()> {
     let mut input = io::stdin().lock();
     decoder::init()?;
     write_record(out, b"INIT", &[])?;
-    if args[1] == "check" {
+    if operation == "check" {
         let json = serde_json::to_vec(&decoder::decoders_check())?;
         return Ok(write_record(out, b"CHCK", &[&json])?);
     }
@@ -28,7 +22,7 @@ pub(super) fn serve(out: &mut std::fs::File) -> Result<()> {
     let mut bytes = vec![0; len];
     input.read_exact(&mut bytes)?;
     let path = Path::new(std::ffi::OsStr::from_bytes(&bytes));
-    let part = match args[1].as_str() {
+    let part = match operation {
         "info" => {
             let info = decoder::media_info(path)?;
             let json = serde_json::to_vec(&(

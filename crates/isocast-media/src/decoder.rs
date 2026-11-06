@@ -13,7 +13,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 use gstreamer_video::prelude::*;
-use isocast_engine::{MediaInfo, MediaPart, SAMPLE_RATE};
+use isocast_media_protocol::{MediaInfo, MediaPart, MediaReader, SAMPLE_RATE};
 use isocast_protocol::api::{Check, CheckStatus};
 
 type Frame = (u32, u32, Vec<u8>);
@@ -730,7 +730,7 @@ impl Reader {
     }
 }
 
-impl isocast_engine::MediaReader for Reader {
+impl MediaReader for Reader {
     type Frame = Frame;
 
     fn next_video(&mut self) -> Result<Option<(Frame, Duration)>> {
