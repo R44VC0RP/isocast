@@ -4973,7 +4973,11 @@ def scenario_win_output_rollover(e, cfg, evidence):
     for crash in (False, True):
         e.stop()
         e.env['ISOCAST_TEST_ENCODER_FAILURE'] = 'iso/bars:rollover:1'
-        if crash: e.env['ISOCAST_TEST_PART_COMMIT_HOLD'] = '1'
+        if crash:
+            e.env.pop('ISOCAST_TEST_PART_ACK_DELAY', None)
+            e.env['ISOCAST_TEST_PART_COMMIT_HOLD'] = '1'
+        else:
+            e.env['ISOCAST_TEST_PART_ACK_DELAY'] = '1'
         e.start()
         cfg = setup(e.root, 'h264', iso=True, width=160, height=90, fps=fps)
         cfg['recording']['program']['enabled'] = False
@@ -5009,6 +5013,16 @@ def scenario_win_output_rollover(e, cfg, evidence):
             require([(f['path'],f['start_offset_seconds']) for f in pending['files']] ==
                     [(f['path'],f['start_offset_seconds']) for f in m['files']], 'restart changed part identity or offset')
         else:
+            # The actual coordinator reply is withheld for 2 s. Observe the
+            # live interval, then compare decoded PCM over it to the sibling.
+            def roll_state():
+                return next((r['rollover']['state'] for r in (read_json(path).get('video_recovery') or {})
+                             .get('incidents', []) if r.get('rollover')), None)
+            until(lambda: roll_state() == 'pending', description='outstanding delayed ack')
+            pending_at = time.monotonic()
+            until(lambda: roll_state() == 'committed', description='admission after delayed ack')
+            evidence['observed_pending_seconds'] = time.monotonic() - pending_at
+            require(evidence['observed_pending_seconds'] >= 1.5, 'ack delay was not exercised')
             m = until(lambda: finished(path), 30, 'finalization of native rollover')
             require(m['status']=='complete', f'rollover ended take early: {m}')
         require(len(m['files'])==3, f'expected two parts and one sibling: {m}')
@@ -5063,11 +5077,14 @@ def scenario_win_output_rollover(e, cfg, evidence):
     # Program only: no longer-lived sibling can accidentally mask a take
     # length computed from the first program file. Crash hooks exit without
     # draining or dropping the writers; examine the disk BEFORE any recovery.
-    for stage in ('orphan', 'acknowledged', 'complete'):
+    for stage in ('orphan', 'acknowledged', 'first_write_error', 'prior_finish_error', 'complete'):
         e.stop()
         e.env.pop('ISOCAST_TEST_PART_COMMIT_HOLD', None)
         e.env['ISOCAST_TEST_ENCODER_FAILURE'] = 'program/program:rollover:1'
         e.env['ISOCAST_TEST_PART_CRASH'] = stage
+        for case, flag in [('first_write_error','ISOCAST_TEST_PART_FIRST_WRITE'), ('prior_finish_error','ISOCAST_TEST_PRIOR_FINISH')]:
+            if stage == case: e.env[flag] = '1'
+            else: e.env.pop(flag, None)
         e.start()
         e.rpc('debug_set', {'enabled': False})
         cfg = setup(e.root, 'h264', iso=False, width=160, height=90, fps=fps)
@@ -5082,16 +5099,29 @@ def scenario_win_output_rollover(e, cfg, evidence):
         prefix = path.parent / first['path']
         part = prefix.with_name(prefix.stem + '.part002' + prefix.suffix)
         e.rpc('debug_set', {'enabled': True})
-        if stage == 'complete':
+        if stage == 'first_write_error':
+            m = until(lambda: finished(path), 30, 'final manifest after first write refusal')
+            kept, = m['files']
+            incident, = m['video_recovery']['incidents']
+            until(lambda: not part.exists(), description='owned placeholder removed after final publication')
+            require(m['status'] == 'failed' and not kept.get('part') and kept['path'] == first['path']
+                    and incident['rollover']['state'] == 'reserved_no_media' and not part.exists(),
+                    f'failed first write left a phantom part: {m}')
+            evidence[stage] = dict(prefix=kept['frames'], header_removed=True)
+            continue
+        if stage in ('complete', 'prior_finish_error'):
             def resumed():
                 live = e.rpc('status').get('live') or {}
                 return next((i for i in (live.get('video_recovery') or {}).get('incidents', [])
                              if (i.get('rollover') or {}).get('state') == 'committed'), None)
             incident = until(resumed, description='committed program rollover in live status')
+            if stage == 'prior_finish_error':
+                until(lambda: 'part 1 finalization failed' in (resumed() or {}).get('reason',''),
+                      description='prior failure while program is still recording')
             require('committed_seconds' in incident['reason'], 'live status did not explain the prefix limit')
             m = until(lambda: finished(path), 30, 'rolled program finalization')
             a, b = m['files']
-            require(m['status'] == 'complete' and [f['source'] for f in (a,b)] == ['program']*2
+            require(m['status'] == ('failed' if stage=='prior_finish_error' else 'complete') and [f['source'] for f in (a,b)] == ['program']*2
                     and [f['part']['number'] for f in (a,b)] == [1,2], f'wrong program parts: {m}')
             physical_end = 0
             profiles = []
@@ -5106,6 +5136,11 @@ def scenario_win_output_rollover(e, cfg, evidence):
             require(profiles[0] != profiles[1] and 'Baseline' in profiles[1], f'wrong program profiles: {profiles}')
             require(abs(m['duration_seconds'] - physical_end) < 1/fps and abs(physical_end - seconds) <= 1/fps
                     and m['duration_seconds'] > a['duration_seconds'] + 1, 'take length truncated at program rollover')
+            if stage == 'prior_finish_error':
+                require('injected prior movie finish failure' in a['part']['finish_error'] and not b['part'].get('finish_error')
+                        and b['duration_seconds'] > 2, 'prior failure was not confined to part one')
+                evidence[stage] = dict(first_error=a['part']['finish_error'], next_frames=b['frames'], end=physical_end)
+                continue
             exported = e.rpc('take_export_nle', {'take': str(path), 'format': 'otio', 'folder': str(e.root/'nle')})
             tracks, rate, _ = nle_tracks('otio', Path(exported['path']))
             angle, = tracks
@@ -5139,7 +5174,8 @@ def scenario_win_output_rollover(e, cfg, evidence):
                 'restart adopted or promoted an empty reservation')
         digest = hashlib.sha256(prefix.read_bytes()).digest()
         e.stop(); e.start()
-        require(read_json(path) == m and part.read_bytes() == header and hashlib.sha256(prefix.read_bytes()).digest() == digest,
+        require(read_json(path) == m and not kept.get('part') and
+                (part.read_bytes() == header if stage=='orphan' else not part.exists()) and hashlib.sha256(prefix.read_bytes()).digest() == digest,
                 f'second restart changed {stage} recovery')
         evidence[stage] = dict(header_bytes=len(header), prefix_frames=kept['frames'], rollovers=rolls)
 

@@ -11998,6 +11998,13 @@
       },
       "MoviePart": {
         "properties": {
+          "finish_error": {
+            "description": "Failure finishing this physical movie, independent of later parts.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "number": {
             "description": "One-based physical part in this output (same `source` and take).",
             "format": "uint32",
@@ -22257,6 +22264,13 @@
           },
           "path": {
             "type": "string"
+          },
+          "reservation_id": {
+            "description": "Identity of the exclusively created placeholder; older intents cannot authorize deletion.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "state": {
             "$ref": "#/components/schemas/RolloverState"

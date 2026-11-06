@@ -1245,7 +1245,9 @@ jobs:
       - name: Check final recording metadata publication
         if: env.MODE == 'full'
         timeout-minutes: 30
-        run: cargo test --locked -j 1 -p isocast-engine --lib metadata_finalization
+        run: |
+          cargo test --locked -j 1 -p isocast-engine --lib metadata_finalization
+          cargo test --locked -j 1 -p isocast-mux --lib recovery::tests
 
       - name: Check WASAPI clocks and application selectors without audio devices
         timeout-minutes: 15

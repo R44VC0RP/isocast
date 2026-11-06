@@ -5363,9 +5363,23 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                     ),
                                 )
                             });
-                        let _ = reply.send(result.map_err(|error| {
+                        let result = result.map_err(|error| {
                             format!("could not publish rollover intent: {error:#}")
-                        }));
+                        });
+                        #[cfg(all(windows, debug_assertions))]
+                        if isocast_diagnostics::developer()
+                            && std::env::var_os("ISOCAST_TEST_PART_ACK_DELAY").is_some()
+                            && std::env::var_os("ISOCAST_TEST_RECOVERY_SUITE").is_some()
+                        {
+                            // Delay only delivery of the actual checkpoint result, never
+                            // the coordinator (which clocks sibling outputs) or PCM worker.
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_secs(2));
+                                let _ = reply.send(result);
+                            });
+                            continue;
+                        }
+                        let _ = reply.send(result);
                     }
                     audio_stops_seen = changes;
                     video_changes_seen = video_changes;

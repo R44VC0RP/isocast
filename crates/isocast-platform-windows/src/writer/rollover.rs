@@ -1,7 +1,9 @@
 //! A physical movie owns its own zero, AAC encoders and sample entries.
 //! The logical file worker and all incoming timestamps remain unchanged.
 use super::*;
-use isocast_engine::record::recovery::{OutputRecovery, PartFacts};
+use isocast_engine::record::recovery::{
+    Attempt, OutputRecovery, PartFacts, PendingPart, ReservedMovie,
+};
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -14,6 +16,8 @@ impl std::fmt::Display for PartStorage {
 
 #[derive(Default)]
 pub(super) struct Parts {
+    waiting: Option<Handoff>,
+    from_ticket: Option<Attempt>,
     pub changed: Option<Vec<u8>>,
     staged: VecDeque<(usize, Vec<f32>, Time)>,
     previous: Option<Box<VideoWriter>>,
@@ -25,8 +29,15 @@ pub(super) struct Parts {
     pub earlier_pictures: u64,
 }
 
+struct Handoff {
+    next: Box<VideoWriter>,
+    intent: PendingPart,
+    first: EncodedVideo,
+}
+
 impl VideoWriter {
-    pub(super) fn rotate(&mut self, cut: Time, config: Vec<u8>) -> Result<Time> {
+    pub(super) fn begin_rollover(&mut self, first: EncodedVideo, config: Vec<u8>) -> Result<()> {
+        let cut = first.pts;
         let context = self
             .recovery
             .context
@@ -81,13 +92,17 @@ impl VideoWriter {
             ..self.spec.clone()
         };
         let mut next = Self::part(&spec, self.codec, self.timescale, reservation, audio);
+        let identity = next
+            .reserved
+            .as_ref()
+            .expect("new reservation")
+            .reservation_id()?;
         next.configure(config)?;
         next.start = Some(cut);
         #[cfg(debug_assertions)]
         self.crash_at_reservation("orphan");
         // Retain even an empty reservation on ambiguous publication failure.
         // No packet is written before the manifest writer acknowledges sync.
-        next.closed = true;
         self.parts.context = Some(context.clone()); // preserve original facts on publication failure
         let encoder = self
             .encoder
@@ -95,25 +110,91 @@ impl VideoWriter {
             .context("missing replacement encoder")?;
         let intent = context.reserve_part(
             ticket,
-            name,
+            ReservedMovie {
+                path: name,
+                identity,
+            },
             cut,
             crate::now(),
             format!("{:?}", encoder.backend()),
             encoder.nvenc_preset(),
         )?;
-        let checked_at = intent.admit(index + 1, crate::now(), || {
-            #[cfg(debug_assertions)]
-            self.crash_at_reservation("acknowledged");
-            crate::now()
-        })?;
-        next.closed = false;
+        next.closed = true;
         next.parts.index = index;
         next.parts.root = Some(root);
+        next.parts.from_ticket = Some(ticket);
+        next.parts.context = Some(context);
+        self.parts.waiting = Some(Handoff {
+            next: Box::new(next),
+            intent,
+            first,
+        });
+        Ok(())
+    }
+
+    pub(super) fn waiting(&self) -> bool {
+        self.parts.waiting.is_some()
+    }
+
+    pub(super) fn cancel_handoff(&mut self) {
+        self.parts.waiting.take();
+    }
+
+    /// Called on normal video/audio pump opportunities. While the coordinator
+    /// checkpoints, retain just the verified first AU, not an unbounded GOP.
+    pub(super) fn poll_handoff(&mut self) -> Result<bool> {
+        let Some(h) = self.parts.waiting.as_ref() else {
+            return Ok(true);
+        };
+        let checked_at = crate::now();
+        match h.intent.poll_ack(h.next.parts.index + 1, checked_at) {
+            Ok(false) => return Ok(false),
+            Err(e) => {
+                self.cancel_handoff();
+                return Err(e);
+            }
+            Ok(true) => {}
+        }
+        #[cfg(debug_assertions)]
+        self.crash_at_reservation("acknowledged");
+        let Handoff {
+            mut next,
+            mut intent,
+            first,
+        } = self.parts.waiting.take().expect("checked");
+        let cut = first.pts;
+        let ticket = next.parts.from_ticket.expect("pending handoff");
+        let mux = next.mux.as_mut().expect("configured part");
+        intent.writing();
+        let write = (|| -> Result<()> {
+            #[cfg(debug_assertions)]
+            if self.rollover_test("ISOCAST_TEST_PART_FIRST_WRITE") {
+                bail!("injected first part write failure");
+            }
+            mux.video(VideoPacket {
+                data: first.data,
+                pts: 0,
+                dts: 0,
+                sync: true,
+                framing: Framing::LengthPrefixed,
+            })?;
+            mux.commit()?;
+            Ok(())
+        })();
+        if let Err(e) = write {
+            // A failed sync can follow a complete write. Only retract when
+            // the same owned media handle proves not a byte reached the file.
+            if matches!(mux.only_reservation_header(), Ok(true)) {
+                intent.retract_empty();
+            }
+            return Err(e.context(PartStorage));
+        }
+        drop(intent);
+        next.closed = false;
         next.parts.earlier_pictures = self.parts.earlier_pictures + self.completed;
         // The original all-tracks prefix remains safe across a physical
         // picture gap; a later part's local watermark cannot replace it.
         next.parts.commitment_limit = self.committed();
-        next.parts.context = Some(context);
         self.parts.prefix_end = Some(cut);
         self.parts.changed = None;
         next.parts.staged = std::mem::take(&mut self.parts.staged);
@@ -121,14 +202,43 @@ impl VideoWriter {
         next.recovery = std::mem::take(&mut self.recovery);
         next.losses = std::mem::take(&mut self.losses);
         next.pending = std::mem::take(&mut self.pending);
+        // Metadata latency is not a native encoder stall.
+        for p in &mut next.pending {
+            p.submitted = Instant::now();
+        }
         next.accepted = next.pending.len() as u64;
         next.accepted_originals = next.pending.iter().filter(|p| !p.repeated).count() as u64;
         self.accepted -= next.accepted;
         self.accepted_originals -= next.accepted_originals;
         next.last_video = self.last_video.take();
-        let old = std::mem::replace(self, next);
+        let old = std::mem::replace(self, *next);
         self.parts.previous = Some(Box::new(old));
-        Ok(checked_at)
+        self.last_written = Some(0);
+        self.repeated += u64::from(
+            self.pending
+                .pop_front()
+                .expect("verified first AU")
+                .repeated,
+        );
+        self.completed += 1;
+        #[cfg(debug_assertions)]
+        if self.rollover_test("ISOCAST_TEST_PART_COMMIT_HOLD") {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        self.publish_resume(ticket, cut, checked_at);
+        self.flush_staged()?;
+        self.finish_prior(false)?;
+        Ok(true)
+    }
+
+    #[cfg(debug_assertions)]
+    fn rollover_test(&self, flag: &str) -> bool {
+        self.recovery
+            .recipe
+            .as_ref()
+            .is_some_and(|r| r.changed_profile)
+            && isocast_diagnostics::developer()
+            && std::env::var_os(flag).is_some()
     }
 
     #[cfg(debug_assertions)]
@@ -186,7 +296,13 @@ impl VideoWriter {
                 .filter(|(t, ..)| *t == i)
                 .map(|(_, s, _)| s.len() / ch)
                 .sum();
-            if held + samples.len() / ch > RATE as usize || self.parts.staged.len() >= 2048 {
+            // Up to one second finding the IDR plus the three-second intent
+            // budget; 16 tracks at 10ms each fit inside the chunk ceiling.
+            let seconds = if self.waiting() { 4 } else { 1 };
+            if held + samples.len() / ch > seconds * RATE as usize
+                || self.parts.staged.len() >= seconds * 2048
+            {
+                self.cancel_handoff();
                 self.parts.changed = None;
                 self.flush_staged()?;
                 self.route_required(i, samples, pts)?;
@@ -245,8 +361,21 @@ impl VideoWriter {
             return Ok(());
         }
         let mut old = self.parts.previous.take().expect("checked");
-        old.finish_at(Some(cut))
-            .context("finishing the pre-rollover movie")?;
+        #[cfg(debug_assertions)]
+        if self.rollover_test("ISOCAST_TEST_PRIOR_FINISH") {
+            old.failed = Some("injected prior movie finish failure".into());
+        }
+        if let Err(e) = old.finish_at(Some(cut)) {
+            self.parts
+                .context
+                .as_ref()
+                .expect("rolled part")
+                .prior_finish_failed(
+                    self.parts.from_ticket.expect("rollover ticket"),
+                    old.parts.index + 1,
+                    &format!("{e:#}"),
+                );
+        }
         Ok(())
     }
 

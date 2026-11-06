@@ -209,6 +209,12 @@ impl Directory {
             name: name.to_os_string(),
         })
     }
+
+    #[cfg(windows)]
+    pub(crate) fn remove_reserved(&self, name: &OsStr, id: &str, header: &[u8]) -> Result<()> {
+        validate_name(name)?;
+        platform::remove_reserved(&self.inner.directory, name, id, header)
+    }
 }
 
 /// A media descriptor together with the folder lease that authorized it.
@@ -230,6 +236,10 @@ pub struct MediaFile {
 }
 
 impl MediaFile {
+    #[cfg(windows)]
+    pub(crate) fn reservation_id(&self) -> Result<String> {
+        platform::reservation_id(&self.file)
+    }
     #[cfg(windows)]
     pub(crate) fn create_sibling(&self, name: &OsStr) -> Result<Self> {
         self._directory.create(name)

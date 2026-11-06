@@ -1183,10 +1183,11 @@ mod tests {
     #[test]
     fn reserve_part_after_a_closed_pause_uses_saved_pts_and_retracts_before_admission() {
         use isocast_protocol::manifest::RolloverState;
+        use std::time::Duration;
         // Use a nonzero epoch and a take that starts after an earlier pause;
         // raw host epoch, raw host cut, or mapping the saved PTS twice are all wrong.
         let at = |seconds: i64| Time::from_nanos(seconds * 1_000_000_000);
-        for outcome in ["admit", "timeout", "stop"] {
+        for outcome in ["commit", "first_write_error", "timeout", "stop"] {
             let clock = Arc::new(RecordingClock::new(at(10), [30].into_iter()));
             clock.change(true, at(11), None).unwrap();
             clock.change(false, at(13), None).unwrap();
@@ -1204,10 +1205,13 @@ mod tests {
             let id = context.interrupted(at(14), at(19), "codec failed").unwrap();
             let ticket = context.attempt(id, at(19)).unwrap();
             let cut = clock.state.read().map(at(20));
-            let pending = context
+            let mut pending = context
                 .reserve_part(
                     ticket,
-                    "program.part002.mov".into(),
+                    super::super::recovery::ReservedMovie {
+                        path: "program.part002.mov".into(),
+                        identity: "owned".into(),
+                    },
                     cut,
                     at(20),
                     "native".into(),
@@ -1216,27 +1220,61 @@ mod tests {
                 .unwrap();
             let (_, ack) = clock.recovery.part_commits.lock().pop().unwrap();
             assert_eq!(context.plan.parts.lock()[1].offset, 3.0);
+            // Two whole seconds of PCM callbacks can come and go while the
+            // coordinator still owns the sender. No callback waits for it.
+            for ms in (0..2000).step_by(10) {
+                assert!(
+                    !pending
+                        .poll_ack(2, at(20) + Duration::from_millis(ms))
+                        .unwrap()
+                );
+            }
             let now = if outcome == "timeout" {
                 ticket.deadline
             } else {
                 ack.send(Ok(())).unwrap();
-                at(21)
+                at(22)
             };
             if outcome == "stop" {
                 clock.recovery.stop_at(now);
             }
-            let result = pending.admit(2, now, || now);
+            let result = pending.poll_ack(2, now);
+            if outcome == "commit" {
+                assert!(result.as_ref().is_ok_and(|r| *r));
+                pending.writing();
+                drop(pending);
+                context.resumed(ticket, cut, now, "native", false);
+                context.prior_finish_failed(ticket, 1, "disk flush refused");
+            } else if outcome == "first_write_error" {
+                pending.writing();
+                pending.retract_empty();
+            } else {
+                drop(pending);
+            }
             let snapshot = clock.recovery.snapshot(&clock.state.read(), epoch, now);
             let r = snapshot.incidents[0].rollover.as_ref().unwrap();
             assert_eq!(r.take_offset_ns, 3_000_000_000);
-            if outcome == "admit" {
-                assert_eq!(result.unwrap(), now);
-                assert_eq!(r.state, RolloverState::Pending); // ack is not a saved picture
-                assert_eq!(context.plan.parts.lock().len(), 2);
+            if outcome == "commit" {
+                assert_eq!(r.state, RolloverState::Committed);
+                assert_eq!(context.plan.output_active.load(Ordering::Acquire), 1);
+                let parts = context.plan.parts.lock();
+                assert!(
+                    parts[0]
+                        .finish_error
+                        .as_ref()
+                        .unwrap()
+                        .contains("disk flush refused")
+                );
+                assert!(parts[1].finish_error.is_none());
+                assert!(
+                    snapshot.incidents[0]
+                        .reason
+                        .contains("part 1 finalization failed")
+                );
             } else {
-                assert!(result.is_err());
+                assert_eq!(result.is_ok(), outcome == "first_write_error");
                 assert_eq!(r.state, RolloverState::ReservedNoMedia);
-                assert_eq!(context.plan.parts.lock().len(), 1);
+                assert!(context.plan.parts.lock().is_empty()); // plain single-file manifest/Stop path
                 if outcome == "timeout" {
                     assert!(ack.send(Ok(())).is_err());
                 }
