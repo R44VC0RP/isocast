@@ -1324,14 +1324,7 @@ pub(crate) fn show_lists(app: &Rc<App>) {
                     .and_then(|id| setup_model::find_source(w.setup, id));
                 let has_video = found.is_some_and(|s| s.kind.has_video());
                 let run = w.running.get(&source);
-                let state = match run.map(|r| r.state) {
-                    Some(isocast_protocol::api::SourceRun::Opening) => "opening",
-                    Some(isocast_protocol::api::SourceRun::Failed) => "failed",
-                    Some(isocast_protocol::api::SourceRun::WaitingForPermission) => {
-                        "waiting for permission"
-                    }
-                    _ => "",
-                };
+                let state = row_state(run);
                 let group = !item.children.is_empty();
                 let expanded = !w.collapsed.contains(&path);
                 let missing = item.source.is_some() && found.is_none();
@@ -1342,9 +1335,7 @@ pub(crate) fn show_lists(app: &Rc<App>) {
                 if run.is_some_and(|r| r.state == isocast_protocol::api::SourceRun::Paused) {
                     name.push_str(" · paused");
                 }
-                if let Some(run) = run
-                    .filter(|r| r.state == isocast_protocol::api::SourceRun::WaitingForPermission)
-                {
+                if let Some(run) = run.filter(|_| state == "waiting for permission") {
                     name.push_str(" · ");
                     name.push_str(
                         run.error
@@ -1386,6 +1377,7 @@ pub(crate) fn show_lists(app: &Rc<App>) {
                         .unwrap_or_default()
                         .into(),
                     error: run
+                        .filter(|_| state != "waiting for pick")
                         .and_then(|r| r.error.clone())
                         .unwrap_or_else(|| {
                             if state == "failed" {
@@ -1772,5 +1764,66 @@ fn nudge(app: &Rc<App>, by: &str) {
             ..EditOptions::default()
         };
         app.edit(patch, options);
+    }
+}
+
+/// A Sources row's state: "opening", "failed", "waiting for permission",
+/// "waiting for pick" (nothing chosen yet in the desktop's sharing dialog:
+/// a wait, not a failure) or "".
+fn row_state(run: Option<&isocast_protocol::api::SourceStatus>) -> &'static str {
+    use isocast_protocol::api::SourceRun;
+    match run {
+        Some(r) if r.needs_pick => "waiting for pick",
+        Some(r) => match r.state {
+            SourceRun::Opening => "opening",
+            SourceRun::Failed => "failed",
+            SourceRun::WaitingForPermission => "waiting for permission",
+            _ => "",
+        },
+        None => "",
+    }
+}
+
+#[cfg(test)]
+mod row_state_tests {
+    use isocast_protocol::api::{SourceRun, SourceStatus};
+
+    use super::row_state;
+
+    fn status(state: SourceRun, needs_pick: bool) -> SourceStatus {
+        SourceStatus {
+            source: "display".into(),
+            state,
+            detail: None,
+            error: Some("source \"display\": no screen is chosen for it yet".into()),
+            needs_pick,
+            capture_mode: None,
+            warning: None,
+            width: None,
+            height: None,
+            fps: None,
+            received_fps: None,
+            channels: None,
+        }
+    }
+
+    /// A source waiting for a pick isn't marked as failed; real failures
+    /// and permission waits still are.
+    #[test]
+    fn a_source_waiting_for_a_pick_is_not_a_failure() {
+        let waiting = status(SourceRun::WaitingForPermission, true);
+        assert_eq!(row_state(Some(&waiting)), "waiting for pick");
+        assert_eq!(row_state(Some(&status(SourceRun::Failed, false))), "failed");
+        assert_eq!(
+            row_state(Some(&status(SourceRun::WaitingForPermission, false))),
+            "waiting for permission"
+        );
+        assert_eq!(row_state(Some(&status(SourceRun::Running, false))), "");
+        assert_eq!(row_state(None), "");
+        assert!(!super::super::mixer::strip_failed(Some(&waiting)));
+        assert!(super::super::mixer::strip_failed(Some(&status(
+            SourceRun::Failed,
+            false
+        ))));
     }
 }

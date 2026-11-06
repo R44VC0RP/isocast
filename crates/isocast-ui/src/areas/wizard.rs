@@ -245,6 +245,17 @@ impl Area for Wizard {
     }
 }
 
+/// The first run's line when the engine can't share screens, and the
+/// doctor's fix behind its Details.
+fn no_screen_sharing(fix: &str) -> (&'static str, String) {
+    let hint = if fix.contains("PipeWire") {
+        "Screen sharing needs the PipeWire client library."
+    } else {
+        "Screen sharing needs xdg-desktop-portal, and none answered."
+    };
+    (hint, fix.to_string())
+}
+
 impl Wizard {
     /// Use the engine's doctor report, including for a remote Linux engine.
     /// Remediation shown by another machine is text, never a command to execute.
@@ -275,14 +286,22 @@ impl Wizard {
                 }
                 if check.status == CheckStatus::Ok {
                     if check.name == "codec: OpenH264" {
-                        area.set_ob_codec_hint(format!("Using {}.", check.detail).into());
+                        // Diagnostics' line: which OpenH264, not its path.
+                        let line = crate::areas::diagnostics::plain_check(
+                            &check,
+                            &|_| None,
+                            isocast_protocol::hello::EngineOs::Linux,
+                        );
+                        area.set_ob_codec_hint(line.summary.into());
                         app.codec.set_engine(app, None);
                     }
                     continue;
                 }
                 match (check.name.as_str(), check.fix) {
                     ("ScreenCast portal", Some(fix)) => {
-                        area.set_ob_linux_hint(format!("No screen picker: {fix}").into())
+                        let (hint, details) = no_screen_sharing(&fix);
+                        area.set_ob_linux_hint(hint.into());
+                        area.set_ob_linux_details(details.into());
                     }
                     ("codec: OpenH264", Some(fix)) => {
                         let missing = crate::codec::Missing::from_check(&check.detail, &fix);

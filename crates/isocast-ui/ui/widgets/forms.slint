@@ -15,7 +15,7 @@ import { Theme, Motion } from "../theme.slint";
 import { Icon, Icons } from "../icons.slint";
 import { FocusRing, ShownState } from "focus.slint";
 import { Tip } from "tooltip.slint";
-import { IconButton } from "buttons.slint";
+import { IconButton, LinkButton } from "buttons.slint";
 
 // A form's body: 16px top and bottom, 20px sides, rows 8px apart.
 export component Form inherits VerticalLayout {
@@ -153,6 +153,9 @@ export component Callout inherits Rectangle {
     in property <CalloutKind> kind: CalloutKind.error;
     in property <string> title;
     in property <string> message;
+    // Words behind a Details link (an engine's own error), folded.
+    in property <string> details;
+    property <bool> expanded;
     background: root.kind == CalloutKind.error ? Theme.danger-soft : Theme.accent-soft;
     accessible-role: AccessibleRole.text;
     accessible-label: root.title;
@@ -191,7 +194,35 @@ export component Callout inherits Rectangle {
                 line-height-factor: Theme.leading-sm;
                 wrap: word-wrap;
             }
+            if root.details != "": HorizontalLayout {
+                alignment: start;
+                padding-top: 2px;
+                LinkButton {
+                    text: root.expanded ? "Hide Details" : "Details";
+                    clicked => { root.expanded = !root.expanded; }
+                }
+            }
+            // Wrapped to its width (a layout sizes a wrapped Text's
+            // height for one line otherwise).
+            if root.details != "" && root.expanded: Rectangle {
+                min-height: raw.preferred-height;
+                preferred-height: raw.preferred-height;
+                raw := Text {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    text: root.details;
+                    color: Theme.text-3;
+                    font-family: Theme.font-mono;
+                    font-weight: Theme.weight-light;
+                    font-size: Theme.fs-xs;
+                    letter-spacing: Theme.tracking-mono;
+                    wrap: word-wrap;
+                }
+            }
         }
+        // An action (a button), in the middle on the right.
+        @children
     }
 }
 

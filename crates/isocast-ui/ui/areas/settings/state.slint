@@ -428,6 +428,8 @@ export global SettingsArea {
     // on Windows only when a privacy switch blocks the camera or mic.
     in-out property <bool> ob-access: true;
     in-out property <string> ob-linux-hint;
+    // The doctor's own words behind the hint's Details ("" for none).
+    in-out property <string> ob-linux-details;
     in-out property <string> ob-codec-hint;
     // An X11 session: Isocast's own picker asks for the screen, not the
     // desktop's sharing dialog.

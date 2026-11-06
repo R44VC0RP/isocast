@@ -330,12 +330,18 @@ pub fn sentence(text: &str) -> String {
 }
 
 /// The engine's first sentence of `text` (up to its first full stop, new
-/// line or "; "), as a sentence.
+/// line or "; "), as a sentence. The stop in "e.g. " or "i.e. " doesn't
+/// end it.
 pub fn first_sentence(text: &str) -> String {
     let text = plain(text);
-    let end = [". ", "\n", "; "]
+    let full_stop = text.match_indices(". ").map(|(at, _)| at).find(|&at| {
+        let before = text[..at].to_ascii_lowercase();
+        !before.ends_with("e.g") && !before.ends_with("i.e")
+    });
+    let end = ["\n", "; "]
         .iter()
         .filter_map(|stop| text.find(stop))
+        .chain(full_stop)
         .min()
         .unwrap_or(text.len());
     sentence(&text[..end])
@@ -1231,6 +1237,24 @@ mod tests {
         );
         assert_eq!(portal.fix, "");
         assert!(portal.raw.contains("unix:path=/tmp/x/missing"));
+
+        // "e.g." doesn't end the fix's sentence.
+        let missing = words(&with_fix(
+            check(
+                "ScreenCast portal",
+                CheckStatus::Problem,
+                "ScreenCast unavailable",
+            ),
+            "Install xdg-desktop-portal and your desktop's screen-sharing backend (e.g. \
+             xdg-desktop-portal-gnome or xdg-desktop-portal-kde), then log in to the desktop \
+             again. Isocast checks again on Refresh.",
+        ));
+        assert_eq!(
+            missing.fix,
+            "Install xdg-desktop-portal and your desktop's screen-sharing backend (e.g. \
+             xdg-desktop-portal-gnome or xdg-desktop-portal-kde), then log in to the desktop \
+             again."
+        );
 
         let decoders = words(&check(
             "media decoders (GStreamer)",

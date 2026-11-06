@@ -7,7 +7,8 @@
 // the timers). A toast can carry an action ("Undo", "Details") and a small
 // table of rows (dropped frames per file). A notice has a second action
 // ("Don't show again"): both sit in a footer, the main one last, and it
-// stays until dismissed.
+// stays until dismissed. A single action sits beside the title, or in the
+// footer when there it would squeeze the message past two lines.
 
 import { Theme, Motion } from "../theme.slint";
 import { Icon, Icons } from "../icons.slint";
@@ -59,6 +60,9 @@ export component Toast inherits Rectangle {
     // A title alone sits in the middle of the 24px line of its buttons;
     // with a message or rows, everything hangs from the top.
     property <bool> one-line: root.toast.message == "" && root.toast.rows.length == 0;
+    // A single action goes down to the footer, as a notice's two do, when
+    // beside the title it would squeeze the message past two lines.
+    property <bool> footer: root.toast.action != "" && (root.toast.action2 != "" || squeezed.preferred-height > two-lines.preferred-height + 1px);
 
     width: Theme.toast-w;
     // The 1px edge, then 12px in (Paper's border-box).
@@ -75,6 +79,33 @@ export component Toast inherits Rectangle {
     accessible-role: AccessibleRole.text;
     accessible-label: root.toast.title;
     accessible-description: root.toast.message;
+
+    // Measures for `footer`: the action's label, and the message as wide
+    // as it is beside it (the toast less its padding, the icon, the action
+    // and the ✕, and the gaps between them).
+    action-label := Text {
+        visible: false;
+        text: root.toast.action;
+        font-size: Theme.fs-sm;
+        font-weight: Theme.weight-medium;
+    }
+    squeezed := Text {
+        visible: false;
+        width: Theme.toast-w - 2px - 2 * Theme.space-3 - Theme.icon - 3 * Theme.space-2
+            - (action-label.preferred-width + 2 * Theme.space-2) - Theme.icon-button-sm;
+        text: root.toast.message;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        line-height-factor: Theme.leading-sm;
+        wrap: word-wrap;
+    }
+    two-lines := Text {
+        visible: false;
+        text: "Two\nlines";
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        line-height-factor: Theme.leading-sm;
+    }
 
     // Over the toast (its buttons are inside): it stays while hovered.
     TouchArea {
@@ -167,7 +198,7 @@ export component Toast inherits Rectangle {
                             width: self.preferred-width;
                             height: Theme.icon-button-sm;
                             spacing: Theme.space-2;
-                            if root.toast.action != "" && root.toast.action2 == "": VerticalLayout {
+                            if root.toast.action != "" && !root.footer: VerticalLayout {
                                 alignment: center;
                                 Button {
                                     text: root.toast.action;
@@ -188,11 +219,12 @@ export component Toast inherits Rectangle {
                     }
                 }
             }
-            // A notice's two actions in a footer, the main one last.
-            if root.toast.action2 != "": HorizontalLayout {
+            // A notice's two actions in a footer, the main one last; or a
+            // long message's one.
+            if root.footer: HorizontalLayout {
                 spacing: Theme.space-2;
                 alignment: end;
-                Button {
+                if root.toast.action2 != "": Button {
                     text: root.toast.action2;
                     variant: ButtonVariant.quiet;
                     size: ControlSize.small;

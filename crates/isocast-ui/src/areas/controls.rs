@@ -2391,6 +2391,20 @@ fn vcam_missing(error: &str) -> bool {
     error.contains("not installed")
 }
 
+/// Linux's "no v4l2loopback device … then run: COMMAND" as a plain line
+/// and the command to copy.
+fn vcam_setup(unavailable: &str) -> Option<(&'static str, String)> {
+    if !unavailable.contains("v4l2loopback") {
+        return None;
+    }
+    let (_, command) = unavailable.split_once("then run: ")?;
+    Some((
+        "The virtual camera needs v4l2loopback. Install it for your kernel (on Debian or Ubuntu, \
+         v4l2loopback-dkms), then run this in a terminal:",
+        command.trim().to_string(),
+    ))
+}
+
 /// A release build's first start asked macOS to activate the camera
 /// extension, and macOS waits for the user's approval (isocast-daemon
 /// virtual_camera.rs); the engine starts the camera when it comes.
@@ -2433,9 +2447,22 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
     };
     let missing = mac && vcam_missing(&error);
     let approval = mac && vcam_approval(&error);
+    let setup = vcam_setup(&unavailable);
     area.set_vcam_missing(missing);
     area.set_vcam_approval(approval);
-    area.set_vcam_unavailable(unavailable.as_str().into());
+    // The button's tooltip says it in a few words; the popover says what
+    // to do.
+    area.set_vcam_unavailable(
+        if setup.is_some() {
+            "Needs v4l2loopback"
+        } else {
+            unavailable.as_str()
+        }
+        .into(),
+    );
+    let (setup, command) = setup.unwrap_or_default();
+    area.set_vcam_setup(setup.into());
+    area.set_vcam_command(command.into());
     area.set_vcam_error(
         if missing || approval || (!unavailable.is_empty() && error.contains(&unavailable)) {
             String::new()
@@ -3503,6 +3530,23 @@ fn saved_toast(app: &Rc<App>, report: &isocast_protocol::api::Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_virtual_camera_setup_is_a_plain_line_and_a_command_to_copy() {
+        let (line, command) = vcam_setup(
+            "No v4l2loopback camera device. Install v4l2loopback for your kernel (Debian/Ubuntu: \
+             v4l2loopback-dkms and matching kernel headers), then run: sudo modprobe v4l2loopback \
+             exclusive_caps=1 card_label=\"Isocast Camera\"",
+        )
+        .unwrap();
+        assert!(!line.contains("modprobe"));
+        assert_eq!(
+            command,
+            "sudo modprobe v4l2loopback exclusive_caps=1 card_label=\"Isocast Camera\""
+        );
+        // Other reasons (a device that can't be written) stay as they are.
+        assert!(vcam_setup("/dev/video10 can’t be opened for writing").is_none());
+    }
 
     #[test]
     fn drop_warnings_are_recognised() {

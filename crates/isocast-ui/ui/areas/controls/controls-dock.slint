@@ -52,7 +52,7 @@ component VirtualCameraDetails inherits VerticalLayout {
     padding: Theme.space-2;
     spacing: 0;
 
-    if ControlsArea.vcam-unavailable != "": GroupHint {
+    if ControlsArea.vcam-unavailable != "" && ControlsArea.vcam-command == "": GroupHint {
         text: ControlsArea.vcam-unavailable;
     }
 
@@ -87,7 +87,10 @@ component VirtualCameraDetails inherits VerticalLayout {
         }
     }
 
-    if ControlsArea.vcam-missing && !PlatformText.engine-windows: VerticalLayout {
+    // macOS's camera extension, or Linux's v4l2loopback: what it is, and
+    // the command to run, to copy.
+    if (ControlsArea.vcam-missing && !PlatformText.engine-windows) || ControlsArea.vcam-command != "": install := VerticalLayout {
+        property <string> command: ControlsArea.vcam-command != "" ? ControlsArea.vcam-command : "scripts/vcam-install.sh";
         spacing: 0;
         GroupHeading { title: "Not installed"; }
         // Wrapped to the popover's width (a layout sizes a wrapped Text's
@@ -99,7 +102,8 @@ component VirtualCameraDetails inherits VerticalLayout {
                 x: 0;
                 y: 0;
                 width: parent.width;
-                text: "Isocast Virtual Camera is a camera extension that macOS asks you to approve once. Isocast never installs it by itself: run this in Terminal, in the Isocast folder, then approve it in System Settings.";
+                text: ControlsArea.vcam-command != "" ? ControlsArea.vcam-setup
+                    : "Isocast Virtual Camera is a camera extension that macOS asks you to approve once. Isocast never installs it by itself: run this in Terminal, in the Isocast folder, then approve it in System Settings.";
                 color: Theme.text-2;
                 font-size: Theme.fs-sm;
                 letter-spacing: Theme.tracking-sm;
@@ -111,33 +115,38 @@ component VirtualCameraDetails inherits VerticalLayout {
             padding-top: Theme.space-2;
             padding-bottom: Theme.space-2;
             spacing: Theme.space-1;
+            // The command, wrapped when it is long, on the control fill.
             Rectangle {
                 horizontal-stretch: 1;
-                height: Theme.control-h-sm;
+                min-height: max(Theme.control-h-sm, code.preferred-height + 2 * Theme.space-1);
+                preferred-height: self.min-height;
                 border-radius: Theme.r-compact;
                 background: Theme.control;
-                Text {
+                code := Text {
                     x: Theme.space-2;
                     width: parent.width - 2 * Theme.space-2;
-                    text: "scripts/vcam-install.sh";
+                    text: install.command;
                     color: Theme.text;
                     font-family: Theme.font-mono;
                     font-weight: Theme.weight-light;
                     font-size: Theme.fs-xs;
                     letter-spacing: Theme.tracking-mono;
                     vertical-alignment: center;
-                    overflow: elide;
+                    wrap: word-wrap;
                     accessible-role: AccessibleRole.text;
                     accessible-label: "Install command: " + self.text;
                 }
             }
-            Button {
-                horizontal-stretch: 0;
-                size: ControlSize.small;
-                text: "Copy";
-                icon: Icons.copy;
-                accessible-name: "Copy the install command";
-                clicked => { ControlsArea.copy-text("scripts/vcam-install.sh"); }
+            VerticalLayout {
+                alignment: start;
+                Button {
+                    horizontal-stretch: 0;
+                    size: ControlSize.small;
+                    text: "Copy";
+                    icon: Icons.copy;
+                    accessible-name: "Copy the install command";
+                    clicked => { ControlsArea.copy-text(install.command); }
+                }
             }
         }
     }

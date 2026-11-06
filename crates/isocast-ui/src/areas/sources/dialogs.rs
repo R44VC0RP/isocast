@@ -945,13 +945,12 @@ impl Dialogs {
             groups.extend(iso_depth_group(&kind, ctx.setup, &value, lane));
         }
         area.set_preview_format(source_format(running).into());
+        // Nothing chosen yet in the desktop's sharing dialog is a wait,
+        // not a failure.
+        let waiting = running.is_some_and(|r| r.needs_pick);
         let failed = running
-            .filter(|r| r.state == isocast_protocol::api::SourceRun::Failed || r.needs_pick)
-            .map(|r| {
-                r.error
-                    .clone()
-                    .unwrap_or_else(|| "It couldn’t start.".into())
-            });
+            .filter(|r| r.state == SourceRun::Failed && !r.needs_pick)
+            .map(|r| problem_words(&kind, r.error.as_deref()));
         drop(s);
         self.props_form.show(groups);
         area.set_props_form(self.props_form.model());
@@ -965,11 +964,27 @@ impl Dialogs {
             }
             .into(),
         );
-        area.set_props_problem(failed.clone().unwrap_or_default().into());
+        let (problem, details) = failed.clone().unwrap_or_default();
+        area.set_props_problem(problem.into());
+        area.set_props_problem_details(details.into());
+        area.set_props_pick(if waiting { pick_what(&kind) } else { "" }.into());
+        area.set_props_pick_id(
+            if waiting && form::devices::can_pick() {
+                id.as_str()
+            } else {
+                ""
+            }
+            .into(),
+        );
         area.set_props_created(self.created.get());
         if video {
             if draft {
                 self.preview_note(window, "The preview shows once the source is added.");
+            } else if waiting {
+                self.preview_note(
+                    window,
+                    &format!("No picture until a {} is chosen.", pick_what(&kind)),
+                );
             } else if failed.is_some() {
                 self.preview_note(window, "No picture: the source isn’t running.");
             } else {
@@ -2339,6 +2354,61 @@ fn fresh_unchosen<'a>(
         .collect()
 }
 
+/// What the desktop's sharing dialog chooses for a source of `kind`.
+fn pick_what(kind: &str) -> &'static str {
+    if kind == "window" { "window" } else { "screen" }
+}
+
+/// Why a source of `kind` couldn't start, in plain words, and the engine's
+/// own words behind Details ("" when the plain line says it all).
+fn problem_words(kind: &str, error: Option<&str>) -> (String, String) {
+    let Some(raw) = error.map(str::trim).filter(|e| !e.is_empty()) else {
+        return ("It couldn’t start.".into(), String::new());
+    };
+    // `source "id": …`, then a field path (`microphone.device: …`).
+    let words = raw
+        .strip_prefix("source \"")
+        .and_then(|rest| rest.split_once("\": "))
+        .map_or(raw, |(_, rest)| rest);
+    let words = match words.split_once(": ") {
+        Some((path, rest))
+            if !path.is_empty()
+                && path
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '.' || c == '_') =>
+        {
+            rest
+        }
+        _ => words,
+    };
+    let device = match kind {
+        "camera" => Some("camera"),
+        "microphone" => Some("microphone"),
+        "display" => Some("screen"),
+        "window" => Some("window"),
+        _ => None,
+    };
+    let lower = words.to_ascii_lowercase();
+    let summary = match device {
+        Some(device) if lower.contains("not found") || lower.contains("no such device") => {
+            format!("The {device} isn’t available. Connect it, or choose another one below.")
+        }
+        Some(device) if lower.contains("in use by another") || lower.contains("busy") => {
+            format!("Another app is using the {device}. Close it, then try again.")
+        }
+        Some(device) if lower.contains("permission") || lower.contains("not allowed") => {
+            format!("Isocast isn’t allowed to use the {device}.")
+        }
+        _ => crate::areas::diagnostics::first_sentence(words),
+    };
+    let details = if summary == raw {
+        String::new()
+    } else {
+        raw.to_string()
+    };
+    (summary, details)
+}
+
 /// Show the desktop's sharing dialog for display or window source `id`
 /// (`screen_pick`). The engine keeps the choice and switches the source to
 /// it. The call runs on a connection of its own: the dialog waits for the
@@ -2443,7 +2513,7 @@ mod tests {
 
     use isocast_protocol::api::{SourceRun, SourceStatus};
 
-    use super::fresh_unchosen;
+    use super::{fresh_unchosen, problem_words};
 
     fn status(source: &str, state: SourceRun, needs_pick: bool) -> (String, SourceStatus) {
         (
@@ -2501,6 +2571,43 @@ mod tests {
         assert_eq!(
             fresh_unchosen(&mut announced, &waiting, both),
             ["terminal", "browser"]
+        );
+    }
+
+    /// A source's failure reads as one plain line, the engine's words
+    /// (field paths, CLI methods) behind Details.
+    #[test]
+    fn a_failed_source_says_why_in_plain_words() {
+        let (summary, details) = problem_words(
+            "microphone",
+            Some(r#"microphone.device: "auto_null" not found; use a node.name from devices"#),
+        );
+        assert_eq!(
+            summary,
+            "The microphone isn’t available. Connect it, or choose another one below."
+        );
+        assert!(details.contains("node.name"));
+
+        let (summary, details) = problem_words(
+            "camera",
+            Some("camera.device: in use by another application"),
+        );
+        assert_eq!(
+            summary,
+            "Another app is using the camera. Close it, then try again."
+        );
+        assert_eq!(details, "camera.device: in use by another application");
+
+        let (summary, details) = problem_words(
+            "image",
+            Some(r#"source "logo": could not read logo.png; check the path"#),
+        );
+        assert_eq!(summary, "Could not read logo.png.");
+        assert!(details.starts_with("source \"logo\""));
+
+        assert_eq!(
+            problem_words("camera", None),
+            ("It couldn’t start.".to_string(), String::new())
         );
     }
 }
