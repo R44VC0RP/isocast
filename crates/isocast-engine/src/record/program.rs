@@ -871,6 +871,16 @@ impl<P: Platform> Compositor<P> {
                 }
             }
             match newest {
+                None if inputs.slots[index]
+                    .as_ref()
+                    .is_some_and(|slot| slot.screen_edge.get().is_some()) =>
+                {
+                    if self.frames[index].take().is_some() {
+                        self.remade[index] = true;
+                        let key = MaskKey::Source(id.to_string());
+                        self.filters.retain_masks(|k| k != &key);
+                    }
+                }
                 Some((frame, at)) if self.frames[index].as_ref().is_none_or(|f| f.at != at) => {
                     // Masks use the same source-frame cache, so they carry
                     // this permit through the GPU completion fence too.

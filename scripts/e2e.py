@@ -155,6 +155,7 @@ if sys.platform == "win32":
         "win_media",
         "win_encoder_preflight",
         "win_encoder_recovery",
+        "win_capture_recovery",
         "win_output_rollover",
         "win_output_scale",
         "win_metadata",
@@ -4620,6 +4621,172 @@ def scenario_win_record(e, cfg, evidence):
     evidence["t0"] = check_pattern_take(e, path, manifest, cfg, layout, evidence, vertical=vertical)
 
 
+def scenario_win_capture_recovery(e, cfg, evidence):
+    """A real, owned HWND, process kill, D3D11 broker and two recording ISOs.
+    Hosted uses the HWND's pixel marker as input; 'native' uses actual WGC."""
+    mode = e.env.get("ISOCAST_TEST_WGC_HELPER")
+    if mode not in ("native", "fixture"):
+        raise Skip("requires isolated debug daemon and ISOCAST_TEST_WGC_HELPER=fixture or native")
+    import threading, ctypes, queue
+    from ctypes import wintypes as w
+    window = ctypes.WinDLL('user32', use_last_error=True)
+    window.CreateWindowExW.argtypes = [w.DWORD, w.LPCWSTR, w.LPCWSTR, w.DWORD, *([ctypes.c_int]*4),
+                                        w.HWND, w.HMENU, w.HINSTANCE, w.LPVOID]
+    window.CreateWindowExW.restype = w.HWND
+    window.SetPropW.argtypes = [w.HWND, w.LPCWSTR, w.HANDLE]
+    window.DestroyWindow.argtypes = [w.HWND]
+    title = f'Isocast pinned window {os.getpid()}'
+    commands, replies = queue.Queue(), queue.Queue()
+    def owner():
+        h = None
+        try:
+            while True:
+                msg = w.MSG()
+                while window.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                    window.TranslateMessage(ctypes.byref(msg)); window.DispatchMessageW(ctypes.byref(msg))
+                try: cmd = commands.get(timeout=.01)
+                except queue.Empty: continue
+                if cmd == 'stop': break
+                if cmd != 'bright':
+                    if h: require(window.DestroyWindow(h), 'fixture DestroyWindow failed')
+                    # Built-in dialog class, borderless visible top-level window.
+                    h = window.CreateWindowExW(0, '#32770', title, 0x90000000, 20, 20, 160, 90,
+                                               None, None, None, None)
+                    require(h, f'fixture CreateWindowExW failed: {ctypes.get_last_error()}')
+                    window.ShowWindow(w.HWND(h), 4)  # SW_SHOWNOACTIVATE; notably #32770 dialogs
+                require(window.SetPropW(h, 'Isocast.E2E.WindowPixel', 1 if cmd == 'new' else 2), 'fixture pixel')
+                window.InvalidateRect(w.HWND(h), None, True)
+                replies.put(h)
+        except Exception as ex:
+            replies.put(ex)
+        finally:
+            if h: window.DestroyWindow(h)
+    def change(cmd):
+        commands.put(cmd); value = replies.get(timeout=4)
+        if isinstance(value, Exception): raise value
+        return value
+    thread = threading.Thread(target=owner, daemon=True); thread.start()
+    try:
+        for case in ('resume', 'decoy', 'after-stop'):
+            replace = case != 'resume'
+            e.stop(); old = change('new'); e.start()
+            rect = w.RECT()
+            dwm = ctypes.windll.dwmapi.DwmGetWindowAttribute(w.HWND(old), 9, ctypes.byref(rect), ctypes.sizeof(rect))
+            require(window.IsWindow(w.HWND(old)) and thread.is_alive(), 'fixture window did not survive daemon startup')
+            evidence['window'] = dict(pid=os.getpid(), hwnd=old, visible=bool(window.IsWindowVisible(w.HWND(old))),
+                                      dwm_hresult=f'0x{dwm & 0xffffffff:08x}', width=rect.right-rect.left, height=rect.bottom-rect.top)
+            fps = 10
+            cfg = setup(e.root, 'h264', iso=True, width=160, height=90, fps=fps)
+            cfg['sources'][0] = dict(id='bars', kind='window', app=Path(sys.executable).name, title=title, cursor=False)
+            cfg['recording']['program']['enabled'] = False
+            cfg['recording']['folder'] = str(e.root / case)
+            e.apply(cfg)
+            if case == 'after-stop':
+                e.rpc('engine', {'running': True})  # Stop must not dispose of the failed source/engine
+            path = Path(e.rpc('start', {} if case == 'after-stop' else {'seconds': 11})['manifest'])
+            def live(): return e.rpc('status').get('live') or {}
+            def committed():
+                files = live().get('files') or []
+                return len(files) == 2 and all((f.get('committed_seconds') or 0) >= 2 for f in files)
+            until(committed, description='both recording prefixes')
+            def window_route():
+                route = e.rpc('status')['windows_gpu']
+                captures = [c for c in route['captures'] if c['source'] == 'bars']
+                if not captures: return None
+                c, = captures  # never register two generations of a source
+                require(c['display_owner'] is None and c['capture_adapter'] == route['graphics_adapter'],
+                        f'wrong window capture route: {c}')
+                return c if c['first_frame_received'] else None
+            initial_route = until(window_route, description='first helper route with a completed frame')
+            e.rpc('debug_set', {'enabled': True})  # parent kills only the owned helper job
+            until(lambda: any(i['owner_id'] == 'bars' and i['lost_slots'] >= 2 for i in
+                (live().get('video_recovery') or {}).get('incidents', [])), 7, 'pinned ISO actually missing ticks')
+            require(not any(c['source'] == 'bars' for c in e.rpc('status')['windows_gpu']['captures']),
+                    'retired helper is still reported during the outage')
+            current = change('replace' if replace else 'bright')  # same thread, process, class and title
+            if not replace: require(current == old, 'fixture changed its original HWND')
+            e.rpc('debug_set', {'enabled': False})
+            if not replace:
+                reopened = until(window_route, 5, 'replacement helper registered with its own first frame')
+                require(reopened == initial_route, f'replacement window route changed: {reopened}')
+                evidence['resumed_capture_route'] = reopened
+            if case == 'after-stop':
+                def state():
+                    return next((s['state'] for s in e.rpc('status')['engine']['sources'] if s['source'] == 'bars'), None)
+                until(lambda: state() == 'failed', description='old window ended during the pinned take')
+                e.rpc('stop')
+                until(lambda: state() == 'running', 12, 'same-definition window reattached after Stop')
+                again, manifest = take(e, 2)  # no apply, screen pick, or engine restart
+                captured, = [f for f in manifest['files'] if f['source'] == 'bars']
+                require(manifest['status'] == 'complete' and captured['frames'] == 2*fps and
+                        manifest['video_recovery']['incident_count'] == 0, f'next take: {manifest}')
+                pixels = ffmpeg('-xerror','-i',again.parent / captured['path'],'-map','0:v:0','-vf','scale=1:1',
+                                '-fps_mode','passthrough','-pix_fmt','gray','-f','rawvideo','-').stdout
+                require(len(pixels) == 2*fps and (mode != 'fixture' or min(pixels) > 160), 'next take did not capture the replacement')
+                evidence['reattached_after_stop'] = dict(producer=mode, decoded_frames=len(pixels))
+                continue
+            m = until(lambda: finished(path), 20, 'final manifest with both files')
+            inc, = m['video_recovery']['incidents']; rows = {r['source']: r for r in m['files']}
+            require(inc['scope'] == 'source' and inc['owner_id'] == 'bars' and inc['attempts_started'] == 1
+                    and set(rows) == {'bars','bars2'}, f'owners/attempts: {m}')
+            require(inc['state'] == ('ended_early' if replace else 'resumed') and
+                    m['status'] == ('failed' if replace else 'complete'), f'incident: {inc}, {m["status"]}')
+            for name, row in rows.items():
+                movie = path.parent / row['path']
+                packets = json.loads(command(['ffprobe','-v','error','-select_streams','v:0','-show_packets',
+                    '-show_entries','packet=pts_time,flags,pos,size','-of','json',movie]).stdout)['packets']
+                slots = [round((float(p['pts_time']) + row['start_offset_seconds'])*fps) for p in packets]
+                require(slots == sorted(set(slots)) and len(slots) == row['frames'], f'packet ordering/count: {row}')
+                pixels = ffmpeg('-xerror','-i',movie,'-map','0:v:0','-vf','scale=1:1','-fps_mode','passthrough',
+                                '-pix_fmt','gray','-f','rawvideo','-').stdout
+                holes = set(range(slots[0], slots[-1]+1)) - set(slots)
+                if name == 'bars2':
+                    require(not holes and row['dropped_frames'] == 0 and slots[-1] == 11*fps-1, f'sibling: {row}')
+                elif replace:
+                    require(not holes and slots[-1]+1 == inc['first_lost_slot'] and inc['end_slot_exclusive'] == 11*fps
+                            and 'original pinned window' in inc['reason'], f'decoy accepted or wrong terminal interval: {inc}')
+                    if mode == 'fixture': require(max(pixels) < 90, 'decoy pixel entered original ISO')
+                else:
+                    end = inc['end_slot_exclusive']
+                    require(holes == set(range(inc['first_lost_slot'], end)) and len(holes) == inc['lost_slots'] == row['dropped_frames'],
+                            f'movie slots {slots} vs ledger {inc}')
+                    at = slots.index(end)
+                    require('K' in packets[at]['flags'], 'first resumed packet is not random access')
+                    fresh_decode(movie, packets[at:])
+                    if mode == 'fixture': require(max(pixels[:at]) < 90 and min(pixels[at:]) > 160, 'wrong-generation pixels')
+            evidence.setdefault('cases', []).append(dict(producer=mode, replaced=replace, incident=inc, sibling_drops=0))
+    finally:
+        commands.put('stop'); thread.join(timeout=3)
+
+
+def fresh_decode(path, video):
+    desc = json.loads(command(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams",
+        "-show_entries", "stream=extradata", "-show_data", "-of", "json", path]).stdout)["streams"][0]["extradata"]
+    avcc = bytes.fromhex("".join(line.split(":")[1].lstrip().split("  ")[0] for line in desc.splitlines() if line.strip()))
+    require(avcc[0] == 1 and avcc[4] & 3 == 3, "not four-byte avcC")
+    start = b"\x00\x00\x00\x01"
+    stream = bytearray()
+    at = 5
+    for mask in (31, 255):  # SPS then PPS from the movie's *unchanged* sample entry
+        count = avcc[at] & mask
+        at += 1
+        for _ in range(count):
+            size = int.from_bytes(avcc[at:at+2], "big"); at += 2
+            stream.extend(start + avcc[at:at+size]); at += size
+    with open_shared(path) as f:
+        for i, p in enumerate(video):
+            f.seek(int(p["pos"])); au = f.read(int(p["size"])); at = 0; slices = []
+            while at < len(au):
+                size = int.from_bytes(au[at:at+4], "big"); at += 4
+                require(0 < size <= len(au) - at, "invalid length in recovery AU")
+                kind = au[at] & 31
+                if 1 <= kind <= 5: slices.append(kind)
+                stream.extend(start + au[at:at+size]); at += size
+            if not i: require(slices and set(slices) == {5}, f"first resumed AU is not IDR: {slices}")
+    # No seek/preroll: the decoder never sees a single pre-gap picture.
+    ffmpeg("-xerror", "-f", "h264", "-i", "pipe:0", "-f", "null", "-", data=stream)
+
+
 def scenario_win_encoder_recovery(e, cfg, evidence):
     """Debug daemon only. Two real raw ISO writers: no desktop or GPU required."""
     if e.env.get("ISOCAST_TEST_RECOVERY_SUITE") != "1":
@@ -4628,32 +4795,6 @@ def scenario_win_encoder_recovery(e, cfg, evidence):
     def packets(path, stream):
         return json.loads(command(["ffprobe", "-v", "error", "-select_streams", stream, "-show_packets",
                         "-show_entries", "packet=pts,dts,pts_time,dts_time,pos,size,duration,flags", "-of", "json", path]).stdout)["packets"]
-    def fresh_decode(path, video):
-        desc = json.loads(command(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams",
-            "-show_entries", "stream=extradata", "-show_data", "-of", "json", path]).stdout)["streams"][0]["extradata"]
-        avcc = bytes.fromhex("".join(line.split(":")[1].lstrip().split("  ")[0] for line in desc.splitlines() if line.strip()))
-        require(avcc[0] == 1 and avcc[4] & 3 == 3, "not four-byte avcC")
-        start = b"\x00\x00\x00\x01"
-        stream = bytearray()
-        at = 5
-        for mask in (31, 255):  # SPS then PPS from the movie's *unchanged* sample entry
-            count = avcc[at] & mask
-            at += 1
-            for _ in range(count):
-                size = int.from_bytes(avcc[at:at+2], "big"); at += 2
-                stream.extend(start + avcc[at:at+size]); at += size
-        with open_shared(path) as f:
-            for i, p in enumerate(video):
-                f.seek(int(p["pos"])); au = f.read(int(p["size"])); at = 0; slices = []
-                while at < len(au):
-                    size = int.from_bytes(au[at:at+4], "big"); at += 4
-                    require(0 < size <= len(au) - at, "invalid length in recovery AU")
-                    kind = au[at] & 31
-                    if 1 <= kind <= 5: slices.append(kind)
-                    stream.extend(start + au[at:at+size]); at += size
-                if not i: require(slices and set(slices) == {5}, f"first resumed AU is not IDR: {slices}")
-        # No seek/preroll: the decoder never sees a single pre-gap picture.
-        ffmpeg("-xerror", "-f", "h264", "-i", "pipe:0", "-f", "null", "-", data=stream)
 
     def live():
         return e.rpc("status").get("live") or {}

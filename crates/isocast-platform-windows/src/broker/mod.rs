@@ -4,6 +4,7 @@
 
 mod helper;
 mod process;
+pub(crate) mod recovery;
 mod wire;
 
 use std::collections::VecDeque;
@@ -156,8 +157,23 @@ pub fn isolated_capture_screen(
     cursor: bool,
     sink: VideoSink<Frame>,
 ) -> Result<(IsolatedCapture, CaptureFormat)> {
+    open_generation(device, helper, target, fps, cursor, sink, None)
+}
+
+fn open_generation(
+    device: &GraphicsDevice,
+    helper: &Path,
+    target: CaptureTarget,
+    fps: u32,
+    cursor: bool,
+    sink: VideoSink<Frame>,
+    epoch: Option<Arc<recovery::Epoch>>,
+) -> Result<(IsolatedCapture, CaptureFormat)> {
     wire::fps(fps)?;
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = epoch
+        .as_ref()
+        .and_then(|e| e.deadline)
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(8));
     let (process, mut input, output) = Process::spawn(helper)?;
     let control = Arc::new(Control {
         process,
@@ -166,6 +182,9 @@ pub fn isolated_capture_screen(
         stats: Mutex::new(IsolatedCaptureStats::default()),
     });
     let (commands, pending) = mpsc::sync_channel(64);
+    if let Some(epoch) = &epoch {
+        epoch.attach(&control)?;
+    }
     let releases = Arc::new(Releases {
         commands,
         control: Arc::downgrade(&control),
@@ -227,10 +246,24 @@ pub fn isolated_capture_screen(
                 move || {
                     let mut started = Some(started);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let start = |format: CaptureFormat, luid| -> Result<()> {
+                            anyhow::ensure!(
+                                luid == device.adapter_luid(),
+                                "capture helper adapter LUID differs from parent"
+                            );
+                            anyhow::ensure!(
+                                format.fps == fps,
+                                "capture helper returned a different frame rate"
+                            );
+                            if let Some(e) = &epoch {
+                                e.verify(target)?;
+                            }
+                            Ok(())
+                        };
                         receive(
                             output,
                             &device,
-                            fps,
+                            start,
                             &control,
                             &releases,
                             &mut started,
@@ -239,7 +272,13 @@ pub fn isolated_capture_screen(
                     }));
                     let error = match result {
                         Ok(Ok(())) => return,
-                        Ok(Err(error)) => format!("capture helper: {error:#}"),
+                        Ok(Err(error)) => {
+                            if let Some(e) = &epoch {
+                                e.transport_lost
+                                    .store(error.is::<TransportLost>(), Ordering::Release);
+                            }
+                            format!("capture helper: {error:#}")
+                        }
                         Err(_) => "capture helper sink/receiver panicked".into(),
                     };
                     control.fail(error.clone());
@@ -273,7 +312,7 @@ pub fn isolated_capture_screen(
             control.stopping.store(true, Ordering::Release);
             control.process.shutdown(false);
             drop(capture);
-            Err(error).context("capture helper did not start within eight seconds")
+            Err(error).context("capture helper did not start before its deadline")
         }
     }
 }
@@ -404,10 +443,18 @@ impl Imports {
     }
 }
 
+#[derive(Debug)]
+struct TransportLost;
+impl std::fmt::Display for TransportLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("capture helper transport lost")
+    }
+}
+
 fn receive(
     mut output: ChildStdout,
     device: &GraphicsDevice,
-    fps: u32,
+    verify: impl FnOnce(CaptureFormat, (u32, i32)) -> Result<()>,
     control: &Control,
     releases: &Weak<Releases>,
     started: &mut Option<mpsc::SyncSender<Result<CaptureFormat, String>>>,
@@ -416,14 +463,7 @@ fn receive(
     let _apartment = Apartment::new()?;
     match Message::read(&mut output)? {
         Message::Ready(format, luid) => {
-            if luid != device.adapter_luid() {
-                bail!(
-                    "capture helper adapter LUID differs from the parent; cross-adapter/readback fallback is not supported"
-                );
-            }
-            if format.fps != fps {
-                bail!("capture helper returned a different frame rate");
-            }
+            verify(format, luid)?;
             started
                 .as_ref()
                 .context("capture startup already completed")?
@@ -447,6 +487,16 @@ fn receive(
         let message = match Message::read(&mut output) {
             Ok(message) => message,
             Err(_) if control.stopping.load(Ordering::Acquire) => return Ok(()),
+            Err(error)
+                if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe
+                    )
+                }) =>
+            {
+                return Err(error.context(TransportLost));
+            }
             Err(error) => return Err(error),
         };
         match message {

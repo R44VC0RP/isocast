@@ -552,6 +552,19 @@ pub trait Platform: Clone + Send + Sync + 'static {
         sink: VideoSink<Self::Frame>,
     ) -> anyhow::Result<(Self::Capture, CaptureFormat)>;
 
+    /// A platform able to resume the original target can invalidate its old
+    /// pictures without permanently closing the slot and its subscribers.
+    fn capture_pinned_screen(
+        &self,
+        target: ScreenTarget<'_>,
+        fps: u32,
+        ten_bit: bool,
+        cursor: bool,
+        sink: ScreenSink<Self::Frame>,
+    ) -> anyhow::Result<(Self::Capture, CaptureFormat)> {
+        self.capture_screen(target, fps, ten_bit, cursor, sink.video)
+    }
+
     /// The capture is still open but intentionally holding its last frame
     /// until the source becomes available again (e.g. a minimized window).
     fn capture_paused(_capture: &Self::Capture) -> bool {
@@ -956,6 +969,13 @@ pub struct VideoSink<F> {
     pub stopped: Box<dyn Fn(String) + Send + Sync>,
 }
 
+pub struct ScreenSink<F> {
+    pub video: VideoSink<F>,
+    /// Invalidate pictures immediately. `ended` terminates this capture;
+    /// a later window matching the setup cannot replace it in a pinned take.
+    pub interruption: Box<dyn Fn(String, bool) + Send + Sync>,
+}
+
 /// What a capture delivers: frame size in pixels, and the frame rate the
 /// files recording it run at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -984,6 +1004,10 @@ pub trait FramePool: Send {
 /// One media file being written: a video track and zero or more audio
 /// tracks, all timed on the master clock.
 pub trait FileWriter: Send {
+    /// A known source outage extends through Stop. Keep real audio, but
+    /// don't encode a repeat of the pre-interruption picture to cover it.
+    fn end_at_last_picture(&mut self) {}
+
     type Frame;
 
     /// Opt-in per-output recovery. Other writers retain finish-early behavior.

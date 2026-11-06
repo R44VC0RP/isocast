@@ -690,6 +690,39 @@ fn displays(notes: &mut Vec<String>) -> Result<Vec<DisplayInfo>> {
     Ok(displays)
 }
 
+pub(crate) fn display_pin(target: CaptureTarget) -> Result<(String, usize)> {
+    displays(&mut Vec::new())?
+        .into_iter()
+        .find(|d| match target {
+            CaptureTarget::PrimaryDisplay => d.display.main,
+            CaptureTarget::Monitor(handle) => d.monitor == handle,
+            _ => false,
+        })
+        .map(|d| (d.display.id, d.monitor))
+        .context("no unique physical display identity")
+}
+
+fn pinned_display(path: &str) -> Result<DisplayInfo> {
+    displays(&mut Vec::new())?
+        .into_iter()
+        .find(|d| d.display.id.eq_ignore_ascii_case(path))
+        .context("original physical display is no longer present")
+}
+
+pub(crate) fn pinned_monitor(path: &str) -> Result<usize> {
+    Ok(pinned_display(path)?.monitor)
+}
+
+pub(crate) fn pinned_monitor_route(
+    path: &str,
+) -> Result<(CaptureTarget, Option<WindowsDisplayOwner>)> {
+    let display = pinned_display(path)?;
+    Ok((
+        CaptureTarget::Monitor(display.monitor),
+        Some(owner(Some(&display))),
+    ))
+}
+
 fn source_mode(
     path: &DISPLAYCONFIG_PATH_INFO,
     modes: &[DISPLAYCONFIG_MODE_INFO],
@@ -832,10 +865,22 @@ fn windows(notes: &mut Vec<String>) -> Result<Vec<WindowInfo>> {
                 && GetWindow(hwnd, GW_OWNER).is_err()
                 && GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 == 0
         };
-        if !candidate || cloaked(hwnd) {
-            continue;
-        }
-        let Some((width, height)) = frame_size(hwnd).filter(|&(w, h)| w > 0 && h > 0) else {
+        let size = (candidate && !cloaked(hwnd))
+            .then(|| frame_size(hwnd))
+            .flatten();
+        // A session-0 runner has real HWNDs but no visible desktop or DWM
+        // frame bounds. Only the marked test HWND can stand in as a 160x90
+        // producer; it must still match the real process and title below.
+        #[cfg(debug_assertions)]
+        let size = if crate::broker::recovery::fixture_pixel(CaptureTarget::Window(handle))
+            .is_some()
+            && crate::broker::recovery::fixture_mode().as_deref() == Some("fixture")
+        {
+            Some((160, 90))
+        } else {
+            size
+        };
+        let Some((width, height)) = size.filter(|&(w, h)| w > 0 && h > 0) else {
             continue;
         };
         let mut pid = 0;

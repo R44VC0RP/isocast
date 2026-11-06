@@ -89,7 +89,7 @@ impl LossCounts {
 
 /// Verify the actual first AU, even if the driver or transport marked it
 /// clean. Mixed IDR/inter slices and open-GOP HEVC CRA are not a boundary.
-fn closed_idr(codec: VideoCodec, mut au: &[u8]) -> bool {
+pub(super) fn closed_idr(codec: VideoCodec, mut au: &[u8]) -> bool {
     let mut found = false;
     while !au.is_empty() {
         let Some((n, rest)) = au.split_first_chunk::<4>() else {

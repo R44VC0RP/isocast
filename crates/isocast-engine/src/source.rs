@@ -172,11 +172,20 @@ pub(crate) struct FrameSlot<F> {
     /// Signalled when a frame arrives.
     arrived: Condvar,
     stopped: Mutex<Option<String>>,
+    pub(crate) screen_edge: OnceLock<Mutex<ScreenEdge>>,
     /// Frames received since the timeline started.
     pub(crate) captured: AtomicU64,
     /// When the last second's frames arrived, to measure the rate.
     arrivals: Mutex<VecDeque<Instant>>,
     timeline: Arc<Timeline>,
+}
+
+pub(crate) struct ScreenEdge {
+    pub reason: String,
+    pub detected: Time,
+    pub first: Option<Time>,
+    pub ended: bool,
+    pub retry_at: Option<Time>,
 }
 
 impl<F: Clone> FrameSlot<F> {
@@ -199,6 +208,7 @@ impl<F: Clone> FrameSlot<F> {
             capacity: capacity.max(1),
             arrived: Condvar::new(),
             stopped: Mutex::new(None),
+            screen_edge: OnceLock::new(),
             captured: AtomicU64::new(0),
             arrivals: Mutex::new(VecDeque::new()),
             timeline,
@@ -1012,8 +1022,65 @@ fn screen<P: Platform>(
     let ten_bit = setup.recording.iso.captures_ten_bit(source);
     // Screens have no frame rate of their own; they follow the canvas.
     let sink = slot_sink(&slot);
-    let (capture, format) =
-        platform.capture_screen(target, setup.canvas.fps, ten_bit, cursor, sink)?;
+    let video = VideoSink {
+        frame: Box::new({
+            let slot = slot.clone();
+            move |frame, at| {
+                if let Some(edge) = slot.screen_edge.get() {
+                    let mut edge = edge.lock();
+                    if edge.ended || at < edge.detected {
+                        return;
+                    }
+                    (sink.frame)(frame, at);
+                    edge.first.get_or_insert(at);
+                    return;
+                }
+                (sink.frame)(frame, at);
+            }
+        }),
+        stopped: sink.stopped,
+    };
+    let interruption = Box::new({
+        let slot = slot.clone();
+        let platform = platform.clone();
+        move |reason: String, ended| {
+            let detected = platform.now();
+            let edge = slot.screen_edge.get_or_init(|| {
+                Mutex::new(ScreenEdge {
+                    reason: reason.clone(),
+                    detected,
+                    first: None,
+                    ended,
+                    retry_at: None,
+                })
+            });
+            let mut edge = edge.lock();
+            if edge.first.is_some() {
+                edge.detected = detected;
+                edge.retry_at = None;
+            }
+            if !ended {
+                edge.retry_at = Some(detected);
+            }
+            edge.first = None;
+            edge.ended = ended;
+            edge.reason.clone_from(&reason);
+            slot.clear();
+            if ended {
+                slot.stop(reason);
+            }
+        }
+    });
+    let (capture, format) = platform.capture_pinned_screen(
+        target,
+        setup.canvas.fps,
+        ten_bit,
+        cursor,
+        crate::ScreenSink {
+            video,
+            interruption,
+        },
+    )?;
     Ok(captured_video(slot, capture, format, None))
 }
 
