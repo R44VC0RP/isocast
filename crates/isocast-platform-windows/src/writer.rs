@@ -703,8 +703,8 @@ impl VideoWriter {
                 *expected == config && boundary.is_some(),
                 "rollover requires the preflight description and a verified closed IDR"
             );
-            self.rotate(packet.pts, config.clone())?;
-            boundary = self.check_boundary(&packet)?;
+            let checked_at = self.rotate(packet.pts, config.clone())?;
+            boundary = boundary.map(|(ticket, _)| (ticket, checked_at));
         }
         if let Some(frozen) = &self.decoder_config {
             if *frozen != config {

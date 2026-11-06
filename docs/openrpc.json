@@ -15742,6 +15742,11 @@
             "const": "committed",
             "description": "The first closed IDR reached a complete fragment.",
             "type": "string"
+          },
+          {
+            "const": "reserved_no_media",
+            "description": "The reservation received no media and is not a file on the take timeline.",
+            "type": "string"
           }
         ]
       },

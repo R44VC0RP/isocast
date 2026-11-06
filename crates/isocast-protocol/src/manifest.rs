@@ -107,6 +107,8 @@ pub enum RolloverState {
     Pending,
     /// The first closed IDR reached a complete fragment.
     Committed,
+    /// The reservation received no media and is not a file on the take timeline.
+    ReservedNoMedia,
     #[serde(other)]
     Unknown,
 }

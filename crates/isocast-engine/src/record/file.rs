@@ -1181,6 +1181,70 @@ mod tests {
     }
 
     #[test]
+    fn reserve_part_after_a_closed_pause_uses_saved_pts_and_retracts_before_admission() {
+        use isocast_protocol::manifest::RolloverState;
+        // Use a nonzero epoch and a take that starts after an earlier pause;
+        // raw host epoch, raw host cut, or mapping the saved PTS twice are all wrong.
+        let at = |seconds: i64| Time::from_nanos(seconds * 1_000_000_000);
+        for outcome in ["admit", "timeout", "stop"] {
+            let clock = Arc::new(RecordingClock::new(at(10), [30].into_iter()));
+            clock.change(true, at(11), None).unwrap();
+            clock.change(false, at(13), None).unwrap();
+            let epoch = at(14);
+            let context = super::super::recovery::OutputRecovery {
+                clock: clock.clone(),
+                plan: plan("program", epoch),
+            };
+            context
+                .plan
+                .start
+                .store(at(12).as_nanos(), Ordering::Release);
+            clock.change(true, at(15), None).unwrap();
+            clock.change(false, at(18), None).unwrap();
+            let id = context.interrupted(at(14), at(19), "codec failed").unwrap();
+            let ticket = context.attempt(id, at(19)).unwrap();
+            let cut = clock.state.read().map(at(20));
+            let pending = context
+                .reserve_part(
+                    ticket,
+                    "program.part002.mov".into(),
+                    cut,
+                    at(20),
+                    "native".into(),
+                    None,
+                )
+                .unwrap();
+            let (_, ack) = clock.recovery.part_commits.lock().pop().unwrap();
+            assert_eq!(context.plan.parts.lock()[1].offset, 3.0);
+            let now = if outcome == "timeout" {
+                ticket.deadline
+            } else {
+                ack.send(Ok(())).unwrap();
+                at(21)
+            };
+            if outcome == "stop" {
+                clock.recovery.stop_at(now);
+            }
+            let result = pending.admit(2, now, || now);
+            let snapshot = clock.recovery.snapshot(&clock.state.read(), epoch, now);
+            let r = snapshot.incidents[0].rollover.as_ref().unwrap();
+            assert_eq!(r.take_offset_ns, 3_000_000_000);
+            if outcome == "admit" {
+                assert_eq!(result.unwrap(), now);
+                assert_eq!(r.state, RolloverState::Pending); // ack is not a saved picture
+                assert_eq!(context.plan.parts.lock().len(), 2);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(r.state, RolloverState::ReservedNoMedia);
+                assert_eq!(context.plan.parts.lock().len(), 1);
+                if outcome == "timeout" {
+                    assert!(ack.send(Ok(())).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn an_output_recovers_at_the_idr_pts_not_at_native_delivery_time() {
         let epoch = Time::from_nanos(0);
         let at = |n| epoch.add_ticks(n, 30);

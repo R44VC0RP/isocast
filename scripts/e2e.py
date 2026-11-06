@@ -5060,6 +5060,89 @@ def scenario_win_output_rollover(e, cfg, evidence):
         evidence.setdefault('cases',[]).append(dict(crash=crash,profiles=profiles,backend=backend,offset=cut,incident=incident,
                 frames=[f['frames'] for f in (a,b)],sibling_drops=sibling.get('dropped_frames'),nle_starts=[x[0] for x in angle]))
 
+    # Program only: no longer-lived sibling can accidentally mask a take
+    # length computed from the first program file. Crash hooks exit without
+    # draining or dropping the writers; examine the disk BEFORE any recovery.
+    for stage in ('orphan', 'acknowledged', 'complete'):
+        e.stop()
+        e.env.pop('ISOCAST_TEST_PART_COMMIT_HOLD', None)
+        e.env['ISOCAST_TEST_ENCODER_FAILURE'] = 'program/program:rollover:1'
+        e.env['ISOCAST_TEST_PART_CRASH'] = stage
+        e.start()
+        e.rpc('debug_set', {'enabled': False})
+        cfg = setup(e.root, 'h264', iso=False, width=160, height=90, fps=fps)
+        cfg['recording']['folder'] = str(e.root / ('program-' + stage))
+        e.apply(cfg)
+        seconds = 10
+        path = Path(e.rpc('start', {'seconds': seconds})['manifest'])
+        until(lambda: any(f['source'] == 'program' and (f.get('committed_seconds') or 0) >= 2
+                          for f in (e.rpc('status').get('live') or {}).get('files', [])),
+              description='committed program prefix')
+        first, = read_json(path)['files']
+        prefix = path.parent / first['path']
+        part = prefix.with_name(prefix.stem + '.part002' + prefix.suffix)
+        e.rpc('debug_set', {'enabled': True})
+        if stage == 'complete':
+            def resumed():
+                live = e.rpc('status').get('live') or {}
+                return next((i for i in (live.get('video_recovery') or {}).get('incidents', [])
+                             if (i.get('rollover') or {}).get('state') == 'committed'), None)
+            incident = until(resumed, description='committed program rollover in live status')
+            require('committed_seconds' in incident['reason'], 'live status did not explain the prefix limit')
+            m = until(lambda: finished(path), 30, 'rolled program finalization')
+            a, b = m['files']
+            require(m['status'] == 'complete' and [f['source'] for f in (a,b)] == ['program']*2
+                    and [f['part']['number'] for f in (a,b)] == [1,2], f'wrong program parts: {m}')
+            physical_end = 0
+            profiles = []
+            for f in (a,b):
+                movie = path.parent / f['path']
+                info = probe(movie)
+                video = next(s for s in info['streams'] if s['codec_type'] == 'video')
+                ffmpeg('-xerror', '-i', movie, '-map', '0', '-f', 'null', '-')
+                require(int(video['nb_read_frames']) == f['frames'] > 0, 'program part count disagrees with decode')
+                profiles.append(video['profile'])
+                physical_end = max(physical_end, f['start_offset_seconds'] + float(info['format']['duration']))
+            require(profiles[0] != profiles[1] and 'Baseline' in profiles[1], f'wrong program profiles: {profiles}')
+            require(abs(m['duration_seconds'] - physical_end) < 1/fps and abs(physical_end - seconds) <= 1/fps
+                    and m['duration_seconds'] > a['duration_seconds'] + 1, 'take length truncated at program rollover')
+            exported = e.rpc('take_export_nle', {'take': str(path), 'format': 'otio', 'folder': str(e.root/'nle')})
+            tracks, rate, _ = nle_tracks('otio', Path(exported['path']))
+            angle, = tracks
+            require([Path(c[2]).name for c in angle] == [a['path'], b['path']] and
+                    angle[-1][1] == round(m['duration_seconds'] * rate), 'program export truncated at part one')
+            evidence['program_length'] = dict(seconds=m['duration_seconds'], physical_end=physical_end,
+                                              profiles=profiles, nle_end=angle[-1][1])
+            continue
+
+        require(e.process.wait(timeout=20) == 86, f'daemon did not exit at {stage}')
+        before = read_json(path)
+        header = part.read_bytes()
+        n = int.from_bytes(header[:4], 'big')
+        require(header[4:8] == b'ftyp' and b'isw2' in header[8:n] and
+                header[n:] == b'\x00\x00\x00\x10free' + bytes(8), 'expected only the reservation header')
+        rolls = [i['rollover'] for i in (before.get('video_recovery') or {}).get('incidents', []) if i.get('rollover')]
+        require(before['status'] == 'recording' and
+                [f['path'] for f in before['files']] == ([prefix.name, part.name] if stage == 'acknowledged' else [prefix.name]),
+                f'crash missed {stage} publication boundary')
+        require([(r['state'], r['path']) for r in rolls] == ([('pending', part.name)] if stage == 'acknowledged' else []),
+                f'unexpected rollover intent before restart: {rolls}')
+        e.start()
+        m = until(lambda: (doc if doc['status'] == 'interrupted' else None) if (doc := read_json(path)) else None,
+                  description=f'recovered {stage} prefix')
+        kept, = m['files']
+        video = next(s for s in probe(prefix)['streams'] if s['codec_type'] == 'video')
+        require(kept['path'] == prefix.name and kept['frames'] == int(video['nb_read_frames']) > 0
+                and m['duration_seconds'] > 0, 'lost verified program prefix')
+        rolls = [i['rollover'] for i in (m.get('video_recovery') or {}).get('incidents', []) if i.get('rollover')]
+        require([(r['state'], r['path']) for r in rolls] == ([('reserved_no_media', part.name)] if stage == 'acknowledged' else []),
+                'restart adopted or promoted an empty reservation')
+        digest = hashlib.sha256(prefix.read_bytes()).digest()
+        e.stop(); e.start()
+        require(read_json(path) == m and part.read_bytes() == header and hashlib.sha256(prefix.read_bytes()).digest() == digest,
+                f'second restart changed {stage} recovery')
+        evidence[stage] = dict(header_bytes=len(header), prefix_frames=kept['frames'], rollovers=rolls)
+
 
 def scenario_win_encoder_preflight(e, cfg, evidence):
     """An unavailable first provider must not fail the take or hide its replacement."""
