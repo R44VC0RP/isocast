@@ -131,8 +131,14 @@ export component GeneralPage inherits SetPage {
     }
     SetGroup {
         title: "Machine Profile";
-        hint: SettingsArea.machine-summary;
-        GroupRow {
+        // The engine measures only on macOS so far: elsewhere no dead
+        // Calibrate, just what still adapts.
+        hint: PlatformText.engine-linux
+            ? "Machine calibration isn't available on Linux yet; Automatic Quality still adapts while recording."
+            : PlatformText.engine-windows
+            ? "Machine calibration isn't available on Windows yet; Automatic Quality still adapts while recording."
+            : SettingsArea.machine-summary;
+        if !PlatformText.engine-windows: GroupRow {
             label: "Silent self-test";
             place: RowPlace.only;
             trailing-pad: Theme.space-2;
@@ -141,9 +147,6 @@ export component GeneralPage inherits SetPage {
                     text: SettingsArea.machine-calibrating ? "Cancel" : "Calibrate";
                     size: ControlSize.small;
                     on-control: true;
-                    // The engine measures only on macOS so far.
-                    enabled: !PlatformText.engine-windows;
-                    tooltip: PlatformText.engine-linux ? "Not available on Linux yet: Isocast uses its built-in encoder estimates." : PlatformText.engine-windows ? "Not available on Windows yet: Isocast uses its built-in capacity table." : "";
                     clicked => { Ui.menu(SettingsArea.machine-calibrating ? "machine_cancel" : "machine_calibrate"); }
                 }
             }
