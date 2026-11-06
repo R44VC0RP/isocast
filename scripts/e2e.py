@@ -196,13 +196,16 @@ HOSTED_HOLD_CAP = 3
 # file that misses half a second still fails.
 HOSTED_LATE_START_CAP = 12
 HOSTED_SUITE_LOSS_LIMIT = 0.03
-# Hosted only: the webrtc scenario's take may lose program frames while its
-# recording starts, as hosted takes do without any monitor (#147/#149: 1 and
-# 8 frames, all within 1.9 s of start; 18 hosted runs 2026-10-25: the webrtc
-# take lost frames in 2, monitor-free projects/nle takes in 22%/8%). After
-# this window, with the WHEP viewer and 960-wide monitor still running, the
-# take must lose nothing; a test Mac allows no loss at all.
+# Hosted only: the webrtc scenario's take splits startup (the first 3 s) from
+# the steady monitor window after it. On 3-vCPU hosted macOS VMs, paravirtual
+# Metal and timer stalls (gpu_wait p99 up to 94 ms, nanosleep p99 90 ms) also
+# hit mid-take (runs 41802988928, 42002149053, 42030479512, 42102286577: 3, 1,
+# 5 and 11 frames at 5.7-6.2 s, alongside monitor-free scenarios in the same
+# runs). Cap post-start losses at the same 12-slot (0.4 s) VM stall bound as
+# HOSTED_LATE_START_CAP, still counted in check_take and the 3% suite budget;
+# test Macs allow zero loss across the whole take.
 HOSTED_MONITOR_TAKE_START_SECONDS = 3.0
+HOSTED_MONITOR_TAKE_LATER_FRAMES = 12
 # Hosted only: the vertical scenario's stream may drop this many frames, or
 # this share of the frames it sent if more, counted in the suite's budget.
 # The VM's GPU and CPU stalls cost it 1 and 4 frames of ~300 on 2026-10-23
@@ -927,17 +930,21 @@ def monitor_take_losses(manifest, startup, snapshot_seconds):
     """The webrtc monitor take's loss rule. Test Macs (`startup` None): no
     file may lose a frame. Hosted: `startup` is each source's dropped count
     in live status at `snapshot_seconds` (at least
-    HOSTED_MONITOR_TAKE_START_SECONDS in); any later loss fails, and a source
-    missing from that snapshot counts every loss as later. The losses before
-    it stay in check_take's hosted per-output and suite budgets."""
+    HOSTED_MONITOR_TAKE_START_SECONDS in); every file must be in `startup`,
+    and later losses are bounded by HOSTED_MONITOR_TAKE_LATER_FRAMES while
+    staying in check_take's hosted per-output and suite budgets."""
     if startup is None:
         for loss in drop_metrics(manifest):
             check_loss(loss, 0)
         return None
-    later = {f["source"]: f["dropped_frames"] - startup.get(f["source"], 0)
+    missing = [f["source"] for f in manifest["files"]
+               if f.get("dropped_frames") is not None and f["source"] not in startup]
+    require(not missing, f"monitor take source(s) missing from the {snapshot_seconds:g} s snapshot: {missing}")
+    later = {f["source"]: f["dropped_frames"] - startup[f["source"]]
              for f in manifest["files"] if f.get("dropped_frames") is not None}
-    require(not any(later.values()),
-            f"monitor take lost frames after its first {snapshot_seconds:g} s with monitors running: {later}")
+    require(all(0 <= n <= HOSTED_MONITOR_TAKE_LATER_FRAMES for n in later.values()),
+            f"monitor take lost more than {HOSTED_MONITOR_TAKE_LATER_FRAMES} frame(s) after its first "
+            f"{snapshot_seconds:g} s with monitors running: {later}")
     return {"snapshot_seconds": snapshot_seconds, "during_start": startup, "after_start": later}
 
 
@@ -1482,10 +1489,10 @@ def scenario_webrtc(e, cfg, evidence):
                     process.kill()
                     process.wait(timeout=5)
         manifest = until(lambda: finished(started["manifest"]), description="monitor take finalization")
-        # This protection take requires zero loss on a test Mac. Hosted, only
-        # its recording start may lose frames (within the hosted per-output
-        # limit, counted in the suite budget); viewer eviction is allowed
-        # instead of a failure.
+        # This protection take requires zero loss on a test Mac. Hosted, post-
+        # start losses are bounded by HOSTED_MONITOR_TAKE_LATER_FRAMES (and
+        # counted in the per-output and suite budgets); viewer eviction is
+        # allowed instead of a failure.
         taken = monitor_take_losses(manifest, startup_losses, snapshot_seconds)
         if taken is not None:
             evidence["monitor_take_losses"] = taken
@@ -3216,7 +3223,7 @@ def oracle_markers(label, path, frame_at, fps, evidence, cuts=(), samples=None):
                             f"(mod 8), the picture shows {second % 8}")
     for o in onsets:
         if not any(abs(o - j / fps) <= 1 / fps + 0.002 for j, _ in every) and \
-                not any(0 <= o - c / fps <= 0.045 for c in cuts):
+                not any(-0.005 <= o - c / fps <= 0.045 for c in cuts):
             problems.append(f"a burst at {o:.4f} s where the picture shows media frame {frame_at(round(o * fps))}, "
                             f"not a whole second")
     evidence.setdefault("markers", []).append({"output": Path(path).name, "bursts": len(onsets),
@@ -3295,8 +3302,9 @@ def check_record_take(e, path, manifest, cfg, layout, count, evidence, vertical=
         offset = round((f.get("start_offset_seconds") or 0) * fps)
         oracle_compare(f"{label} {source}", file, regions, expected(offset), fps, e.root, evidence)
         if source in ("program", "a") and (f.get("audio") or []):
+            cuts = [at - offset for at, _ in pauses if at >= offset]
             oracle_markers(f"{label} {source}", file,
-                           lambda j, o=offset: media_frame(t0, take_slot(j, o), 1, count), fps, evidence)
+                           lambda j, o=offset: media_frame(t0, take_slot(j, o), 1, count), fps, evidence, cuts=cuts)
     return t0
 
 
@@ -4093,12 +4101,43 @@ def oracle_rules_selftest(work):
         "hosted: monitor take lost 8 frames, all before the snapshot": (
             monitor_take(8, {"program": 8}), "pass"),
         "hosted: monitor take lost nothing": (monitor_take(0, {"program": 0}), "pass"),
-        "hosted: monitor take lost 1 frame after the snapshot": (
-            monitor_take(9, {"program": 8}), "fail"),
+        "hosted: monitor take lost 11 frames after the snapshot (within VM stall cap)": (
+            monitor_take(11, {"program": 0}), "pass"),
+        "hosted: monitor take lost 12 frames after the snapshot (the cap)": (
+            monitor_take(20, {"program": 8}), "pass"),
+        "hosted: monitor take lost 13 frames after the snapshot": (
+            monitor_take(21, {"program": 8}), "fail"),
         "hosted: monitor take source missing from the snapshot": (
             monitor_take(1, {"other": 0}), "fail"),
         "strict: monitor take lost 1 frame at its start": (monitor_take(1, None), "fail"),
         "strict: monitor take lost nothing": (monitor_take(0, None), "pass"),
+    })
+    # Pause-cut marker tail (run 42102286577): a 40 ms whole-second beep starts
+    # at media frame 150 (paused out) and its last 6.7 ms play at file slot 30
+    # (1.0 s), where the resumed picture shows media frame 151; second 6 (frame
+    # 180) still plays normally at file slot 59.
+    def pause_marker_tail(cuts, stray_at=None):
+        samples = [0.0] * int(2.4 * RATE)
+        start = int((59 / 30) * RATE)
+        for i in range(int(0.04 * RATE)):
+            samples[start + i] = 0.5 * math.sin(2 * math.pi * ORACLE_MARKERS[6] * i / RATE)
+        # 6.7 ms tail of second 5's beep cut in at file slot 30 (1.0 s).
+        for i in range(int((0.04 - 1 / 30) * RATE)):
+            samples[RATE + i] = 0.5 * math.sin(2 * math.pi * ORACLE_MARKERS[5] * (1600 + i) / RATE)
+        if stray_at is not None:
+            start = int(stray_at * RATE)
+            for i in range(int(0.02 * RATE)):
+                samples[start + i] = 0.5 * math.sin(2 * math.pi * ORACLE_MARKERS[2] * i / RATE)
+        frame_at = lambda j: (88 + j + (33 if j >= 30 else 0)) % 3600  # noqa: E731
+        try:
+            oracle_markers("pause-cut", work / "pause-cut.mov", frame_at, 30, {}, cuts=cuts, samples=samples)
+            return "pass"
+        except Failure:
+            return "fail"
+    cases.update({
+        "pause cut into a 40 ms marker beep's tail, with cut passed": (pause_marker_tail((30,)), "pass"),
+        "pause cut into a 40 ms marker beep's tail, without cut": (pause_marker_tail(()), "fail"),
+        "stray burst away from a pause cut still fails": (pause_marker_tail((30,), stray_at=1.5), "fail"),
     })
     # Encode real camera pictures so these cases exercise the same decoder
     # and cadence rule as the V4L2 ISO. Start near a fixture loop boundary.

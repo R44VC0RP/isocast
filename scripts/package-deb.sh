@@ -120,18 +120,13 @@ printf 'Source: isocast\n\nPackage: isocast\nArchitecture: any\n' >"$work/debian
 shlibs=$(cd "$work" && dpkg-shlibdeps -O $(for exe in $exes; do printf ' root/usr/bin/%s' "$exe"; done) |
   sed -n 's/^shlibs:Depends=//p')
 test -n "$shlibs" || { echo "package-deb: dpkg-shlibdeps found no dependencies" >&2; exit 1; }
-# The binaries load with any libpipewire 0.3.50 or newer, but capture needs
-# 1.0.5 (per-buffer graph timestamps): ask for that, so a system without it
-# (Debian 12 without bookworm-backports) says so at install, not at capture.
-case $shlibs in
-*libpipewire-0.3-0*) ;;
-*) echo "package-deb: expected libpipewire in Depends: $shlibs" >&2; exit 1 ;;
-esac
-shlibs=$(printf '%s' "$shlibs" | sed -E 's/(libpipewire-0\.3-0[a-z0-9]*) \(>= [^)]*\)/\1 (>= 1.0.5)/')
-case $shlibs in
-*"libpipewire-0.3-0 (>= 1.0.5)"* | *"libpipewire-0.3-0t64 (>= 1.0.5)"*) ;;
-*) echo "package-deb: libpipewire's minimum wasn't raised to 1.0.5: $shlibs" >&2; exit 1 ;;
-esac
+# Per-buffer audio timestamps need PipeWire >= 1.0.5, but startup doesn't.
+pw=libpipewire-0.3-0
+[ "$distro" != ubuntu24.04 ] || pw=libpipewire-0.3-0t64
+for exe in isocastd isocast-ui; do
+  needed=$(readelf -d "$root/usr/bin/$exe")
+  case "$needed" in *libpipewire*) echo "package-deb: $exe still links PipeWire" >&2; exit 1 ;; esac
+done
 # Only the media helper links GStreamer. dpkg-shlibdeps includes its libraries
 # in this full desktop package; decoder plugins remain recommendations.
 for exe in isocastd isocast-media; do
@@ -159,7 +154,7 @@ Architecture: $arch
 Maintainer: $maintainer
 Installed-Size: $size
 Depends: $shlibs, $runtime
-Recommends: pipewire, wireplumber, xdg-desktop-portal, xdg-utils, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
+Recommends: $pw (>= 1.0.5), pipewire, wireplumber, xdg-desktop-portal, xdg-utils, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
 Section: video
 Priority: optional
 Homepage: https://isocast.com

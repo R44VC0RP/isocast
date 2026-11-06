@@ -205,7 +205,6 @@ impl Platform for LinuxPlatform {
         crate::media::open_media(path, part)
     }
     fn doctor_checks(&self) -> Vec<isocast_protocol::api::Check> {
-        let [server, capture] = pipewire_audio::scheduling_checks();
         use isocast_protocol::api::{Check, CheckStatus};
         let codec = match isocast_openh264::check() {
             Ok(detail) => Check {
@@ -236,21 +235,37 @@ impl Platform for LinuxPlatform {
                 Some(e.to_string()),
             ),
         };
-        vec![
+        let mut checks = vec![
             codec,
             crate::media::decoders_check(),
             portal::doctor_check(),
-            server,
-            capture,
-            Check {
-                name: "virtual camera".into(),
-                status,
-                detail,
-                fix,
-            },
-        ]
+        ];
+        match pipewire::sys::require_supported() {
+            Ok(_) => checks.extend(pipewire_audio::scheduling_checks()),
+            Err(detail) => checks.push(Check {
+                name: "PipeWire capture and playback".into(),
+                status: CheckStatus::Warning,
+                detail: detail.into(),
+                fix: Some("Install the PipeWire client library, then restart Isocast after your take. Synthetic sources do not need PipeWire.".into()),
+            }),
+        }
+        checks.push(Check {
+            name: "virtual camera".into(),
+            status,
+            detail,
+            fix,
+        });
+        checks
     }
     fn probe(&self, id: &str, source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
+        // These probes can describe a saved or default source without opening
+        // it. Don't report it as available if the backend couldn't be loaded.
+        if matches!(source, SourceKind::SystemAudio(_))
+            || matches!(source, SourceKind::Display(_) | SourceKind::Window(_))
+                && !crate::x11_session::x11_session()
+        {
+            pipewire::sys::require_supported().map_err(anyhow::Error::msg)?;
+        }
         match source {
             SourceKind::Camera(source) => camera::probe_capture(
                 &source.device,

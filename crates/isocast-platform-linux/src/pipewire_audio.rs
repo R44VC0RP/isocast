@@ -241,6 +241,7 @@ pub fn devices() -> Result<(Vec<Microphone>, Vec<AudioOutput>, Vec<AudioApp>)> {
 }
 
 fn enumerate(cancel: &AtomicBool, include_apps: bool) -> Result<Inventory> {
+    pw::sys::require_supported().map_err(anyhow::Error::msg)?;
     pw::init();
     let deadline = Instant::now() + TIMEOUT;
     let mainloop = WorkerLoop::new()?;
@@ -1360,7 +1361,7 @@ fn capture_worker(
     ready: &mpsc::SyncSender<Result<u32>>,
     started: &mut bool,
 ) -> Result<()> {
-    let version = require_buffer_timestamps()?;
+    let version = pw::sys::require_supported().map_err(anyhow::Error::msg)?;
     let inventory = enumerate(cancel, matches!(requested, Target::Application(_)))?;
     let microphone = matches!(requested, Target::Microphone(_));
     let application = match requested {
@@ -2084,16 +2085,14 @@ fn capture_loop_tid(context: &pw::context::Context, stream: &pw::stream::Stream)
     unsafe {
         // PipeWire 1.1 added per-stream loop selection. Keep compatibility
         // with 1.0.5 (one data loop per capture context).
-        let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"pw_stream_get_data_loop".as_ptr());
-        let loop_ptr = if symbol.is_null() {
+        let loop_ptr = if let Some(get_loop) = pw::sys::stream_data_loop_fn() {
+            get_loop(stream.as_raw_ptr())
+        } else {
             let data = pw::sys::pw_context_get_data_loop(context.as_raw_ptr());
             if data.is_null() {
                 return None;
             }
             pw::sys::pw_data_loop_get_loop(data)
-        } else {
-            type GetLoop = unsafe extern "C" fn(*mut pw::sys::pw_stream) -> *mut pw::sys::pw_loop;
-            std::mem::transmute::<*mut libc::c_void, GetLoop>(symbol)(stream.as_raw_ptr())
         };
         let loop_ = loop_ptr.as_ref()?;
         let id = pw::spa::spa_interface_call_method!(
@@ -2109,27 +2108,6 @@ fn capture_loop_tid(context: &pw::context::Context, stream: &pw::stream::Stream)
         );
         (id > 0 && id != libc::gettid()).then_some(id)
     }
-}
-
-fn require_buffer_timestamps() -> Result<(u32, u32, u32)> {
-    // The time field was appended to pw_buffer in 1.0.5. Check the loaded
-    // library before accessing it, even if built with more recent headers.
-    // SAFETY: PipeWire returns a static, NUL-terminated library-version string.
-    let version =
-        unsafe { std::ffi::CStr::from_ptr(pw::sys::pw_get_library_version()) }.to_string_lossy();
-    let mut parts = version
-        .split('.')
-        .map(|part| part.parse::<u32>().unwrap_or(0));
-    let version_number = (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-    );
-    ensure!(
-        version_number >= (1, 0, 5),
-        "PipeWire audio capture requires libpipewire >= 1.0.5 for per-buffer timestamps; loaded {version}"
-    );
-    Ok(version_number)
 }
 
 fn selection(count: u32, channels: Option<&[u32]>) -> Result<Vec<usize>> {
@@ -2320,7 +2298,7 @@ mod tests {
     #[ignore = "needs a running PipeWire session with a default sink"]
     fn capture_queue_and_data_loop_scheduling() {
         let worker = WorkerLoop::new().unwrap();
-        let context = capture_context(&worker, require_buffer_timestamps().unwrap()).unwrap();
+        let context = capture_context(&worker, pw::sys::require_supported().unwrap()).unwrap();
         let core = context.connect_rc(None).unwrap();
         let stream = worker.stream(
             pw::stream::StreamBox::new(

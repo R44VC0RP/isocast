@@ -6235,12 +6235,13 @@ dependencies = [
 [[package]]
 name = "pipewire-sys"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ce653f53e63e5b93853218092ee9a8906a5d082c92f3f1db26316955dd63ce0"
 dependencies = [
  "bindgen",
+ "libloading",
  "libspa-sys",
- "system-deps 7.0.8",
+ "pkg-config",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

@@ -225,8 +225,13 @@ ldconfig=$(command -v ldconfig || echo /sbin/ldconfig)
 if libs=$("$ldconfig" -p 2>/dev/null); then
   for so in libxkbcommon-x11.so.0 libxkbcommon.so.0 libvulkan.so.1 libEGL.so.1 \
     libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1 libX11.so.6 \
-    libX11-xcb.so.1 libXcursor.so.1 libXrandr.so.2 libXi.so.6; do
-    case " $libs" in *"$so "*) ;; *) echo "install.sh: $so missing from the loader cache; install it with your package manager (see README.txt)" >&2 ;; esac
+    libX11-xcb.so.1 libXcursor.so.1 libXrandr.so.2 libXi.so.6 libpipewire-0.3.so.0; do
+    case " $libs" in *"$so "*) continue ;; esac
+    if [ "$so" = libpipewire-0.3.so.0 ]; then
+      echo "install.sh: $so missing from the loader cache (optional: PipeWire capture and playback)" >&2
+    else
+      echo "install.sh: $so missing from the loader cache; install it with your package manager (see README.txt)" >&2
+    fi
   done
 fi
 

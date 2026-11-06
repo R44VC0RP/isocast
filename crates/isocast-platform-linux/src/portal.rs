@@ -189,6 +189,7 @@ type OnClosed = Box<dyn FnOnce() + Send>;
 pub fn doctor_check() -> isocast_protocol::api::Check {
     use isocast_protocol::api::{Check, CheckStatus};
     let result = std::thread::spawn(|| -> Result<()> {
+        pipewire::sys::require_supported().map_err(anyhow::Error::msg)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -229,7 +230,11 @@ pub fn doctor_check() -> isocast_protocol::api::Check {
             };
         }
     }
-    let fix = result.is_err().then(|| "Install xdg-desktop-portal and your desktop’s screen-sharing backend (e.g. xdg-desktop-portal-gnome or xdg-desktop-portal-kde), then log in to the desktop again.".into());
+    let fix = result.is_err().then(|| if pipewire::sys::require_supported().is_err() {
+        "Install the PipeWire client library for portal screen capture; restart Isocast after your take.".into()
+    } else {
+        "Install xdg-desktop-portal and your desktop’s screen-sharing backend (e.g. xdg-desktop-portal-gnome or xdg-desktop-portal-kde), then log in to the desktop again.".into()
+    });
     Check {
         name: "ScreenCast portal".into(),
         status: if result.is_ok() {
@@ -602,6 +607,9 @@ async fn begin_dialog(
 /// shows it. Waits for the person up to 70 s for a start, 3 minutes for a
 /// pick; fails if another dialog of ours stays open past 10 s.
 fn open(key: String, kind: Kind, asked: Asked, cursor: bool) -> Result<Share> {
+    // Before asking the desktop for consent. An explicit X11 pick can still
+    // fall back without PipeWire, and a picked native X11 stream bypasses open.
+    pipewire::sys::require_supported().map_err(BackendUnavailable)?;
     let answer = Duration::from_secs(match asked {
         Asked::Start => 70,
         Asked::Pick => 180,

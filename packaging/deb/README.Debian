@@ -34,9 +34,9 @@ OpenH264 each user installed (~/.local/lib/isocast; remove it with
 
 Debian 12 (bookworm)
 --------------------
-Isocast's Linux capture needs PipeWire 1.0.5 or newer; bookworm has 0.3.65,
-so the Debian 12 package depends on PipeWire from bookworm-backports.
-Install that first, then the package:
+The package can be installed on stock bookworm for synthetic recording.
+PipeWire audio capture needs 1.0.5 or newer; bookworm has 0.3.65. If you
+want desktop capture, install PipeWire from bookworm-backports:
 
     echo 'deb http://deb.debian.org/debian bookworm-backports main' |
       sudo tee /etc/apt/sources.list.d/backports.list

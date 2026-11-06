@@ -76,9 +76,10 @@ What it needs (install with your package manager)
     Debian/Ubuntu: gstreamer1.0-libav gstreamer1.0-plugins-good
     Fedora:        gstreamer1-plugin-libav gstreamer1-plugins-good
     Arch:          gst-libav gst-plugins-good
-- Screen, microphone, desktop audio and camera capture (as it arrives):
-  PipeWire, and xdg-desktop-portal with your desktop's backend
-  (xdg-desktop-portal-gnome, -kde or -wlr) for choosing a screen.
+- PipeWire is optional. Portal screen sharing, microphone and desktop/app
+  audio capture, and audio playback use its client library. For screen
+  selection also install xdg-desktop-portal with your desktop's backend.
+  Synthetic sources, native V4L2 cameras and native X11 capture don't use it.
 
 Where things go
 ---------------

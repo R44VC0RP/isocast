@@ -400,7 +400,7 @@ jobs:
         if: env.MODE == 'full'
         run: |
           cargo clippy --release --locked --all-targets -p isocast-media -p isocast-media-protocol -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials -p isocast-daemon -- -D warnings
-          cargo test --release --locked -p isocast-media -p isocast-media-protocol -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials
+          cargo test --release --locked -p pipewire-sys -p isocast-media -p isocast-media-protocol -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials
           # The client's own tests on Linux too (the daemon's local and remote transports).
           cargo test --release --locked -p isocast-client
           cargo test --release --locked -p isocast-discovery
@@ -686,7 +686,7 @@ jobs:
           .github/scripts/apt-install.sh xvfb xauth xdotool ffmpeg libxkbcommon-x11-0
           bash scripts/linux-x11-capture-check.sh
 
-      - name: Synthetic take without GStreamer
+      - name: Synthetic take without GStreamer or PipeWire
         if: env.MODE == 'full'
         run: |
           codec=("$HOME"/.local/lib/isocast/libopenh264-*.so)
@@ -934,10 +934,8 @@ jobs:
       - name: Debian runtime and recording probe
         if: matrix.image == 'debian:12'
         run: |
-          echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/backports.list
           apt-get update
-          apt-get install -y --no-install-recommends -t bookworm-backports libpipewire-0.3-0
-          apt-get install -y --no-install-recommends ca-certificates curl bzip2 libgstreamer-plugins-base1.0-0 mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 ffmpeg python3
+          apt-get install -y --no-install-recommends ca-certificates curl bzip2 libgstreamer-plugins-base1.0-0 mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 libpipewire-0.3-0 ffmpeg python3
       - name: Arch runtime and recording probe
         if: matrix.image == 'archlinux:latest'
         run: pacman -Syu --needed --noconfirm libpipewire gst-plugins-base-libs vulkan-swrast vulkan-icd-loader ffmpeg python curl bzip2 webkitgtk-6.0 gtk4 dbus
@@ -971,7 +969,7 @@ jobs:
               assert counts['h264'] > 0 and counts['aac'] > 0, counts
           PY
 
-      - name: Debian desktop and doctor with the incompatible browser helper present
+      - name: Debian desktop and doctor with the incompatible browser helper and stock PipeWire
         if: matrix.image == 'debian:12'
         env:
           ISOCAST_CALIBRATION: 'off'
@@ -986,9 +984,13 @@ jobs:
           isocast doctor --json > /tmp/doctor.json
           python3 - <<'PY'
           import json
-          check, = (c for c in json.load(open('/tmp/doctor.json'))['checks'] if c['name'] == 'browser sources')
+          checks = {c['name']: c for c in json.load(open('/tmp/doctor.json'))['checks']}
+          check = checks['browser sources']
           print(check)
           assert check['status'] == 'warning' and ('is missing' in check['detail'] or 'GLIBC_' in check['detail']), check
+          pw = checks['PipeWire capture and playback']
+          print(pw)
+          assert pw['status'] == 'warning' and 'loaded 0.3.65, needs 1.0.5 (bookworm-backports)' in pw['detail'], pw
           PY
           isocast apply --revision 0 packaging/linux/test-setup.toml
           isocast-ui --snapshot /tmp/desktop.png --size 640x400
@@ -1076,7 +1078,7 @@ jobs:
         run: packaging/deb/test-installed.sh packaging/linux/test-setup.toml deb/isocast_*.deb
 
   deb-debian-test:
-    # The Debian 12 .deb in a fresh debian:12 container, with backports.
+    # The Debian 12 .deb in stock bookworm; backports are optional at runtime.
     name: .deb Debian 12 install test (${{ matrix.arch }})
     needs: deb-debian
     runs-on: ${{ matrix.runner }}
@@ -1106,10 +1108,7 @@ jobs:
 
       - name: Install
         run: |
-          echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/backports.list
           apt-get -o Acquire::Retries=3 update
-          # As README.Debian says: PipeWire from backports first, then the package.
-          apt-get -o Acquire::Retries=3 install -y -t bookworm-backports libpipewire-0.3-0
           # Depends only (no Recommends), as on Ubuntu.
           apt-get -o Acquire::Retries=3 install -y --no-install-recommends ./deb/isocast_*.deb
           # The test's own tools (not the package's).
