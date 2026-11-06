@@ -116,8 +116,7 @@ impl Writer {
     }
 
     fn from_file(mut file: MediaFile, container: Container, created: u64) -> Result<Self> {
-        let mut head = ftyp(container);
-        head.extend_from_slice(&placeholder());
+        let head = reservation_header(container);
         file.write_all(&head)?;
         Ok(Self {
             file,
@@ -150,6 +149,18 @@ impl Writer {
 
     pub fn has_tracks(&self) -> bool {
         !self.tracks.is_empty()
+    }
+
+    #[cfg(windows)]
+    pub fn reservation_id(&self) -> Result<String> {
+        self.file.reservation_id()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn only_header(&self) -> Result<bool> {
+        let header = reservation_header(self.container);
+        Ok(self.file.metadata()?.len() == header.len() as u64
+            && read_range(&self.file, 0, header.len() as u64)? == header)
     }
 
     pub(crate) fn container(&self) -> Container {
@@ -1173,6 +1184,12 @@ fn placeholder() -> [u8; PLACEHOLDER] {
     out[..4].copy_from_slice(&(PLACEHOLDER as u32).to_be_bytes());
     out[4..8].copy_from_slice(b"free");
     out
+}
+
+pub(crate) fn reservation_header(container: Container) -> Vec<u8> {
+    let mut bytes = ftyp(container);
+    bytes.extend_from_slice(&placeholder());
+    bytes
 }
 
 fn ftyp(container: Container) -> Vec<u8> {

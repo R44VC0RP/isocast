@@ -127,6 +127,13 @@ pub struct Writer {
 }
 
 impl Writer {
+    #[cfg(windows)]
+    pub fn only_reservation_header(&self) -> Result<bool> {
+        self.mux
+            .as_ref()
+            .context("movie is finished")?
+            .only_header()
+    }
     /// Reserve a new movie without re-resolving the recording folder or
     /// opening an existing path. It gets its own tracks and fragment index.
     #[cfg(windows)]

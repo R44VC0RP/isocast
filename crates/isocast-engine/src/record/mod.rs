@@ -1145,11 +1145,21 @@ impl Take {
     }
 
     fn errors(&self) -> Vec<String> {
-        self.results
+        let mut errors: Vec<_> = self
+            .results
             .iter()
             .flatten()
             .filter_map(|r| r.as_ref().err().map(|err| format!("{err:#}")))
-            .collect()
+            .collect();
+        for plan in &self.plans {
+            errors.extend(
+                plan.parts
+                    .lock()
+                    .iter()
+                    .filter_map(|p| p.finish_error.clone()),
+            );
+        }
+        errors
     }
 
     fn status(&self, errors: &[String]) -> SessionStatus {
@@ -1838,6 +1848,7 @@ fn take_manifest<P: Platform>(
                             },
                             path: p.path.clone(),
                             part: Some(isocast_protocol::manifest::MoviePart {
+                                finish_error: p.finish_error.clone(),
                                 number: i as u32 + 1,
                                 video_duration_seconds: f.map(|v| v.video.as_secs_f64()),
                             }),

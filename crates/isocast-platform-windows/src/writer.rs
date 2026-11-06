@@ -523,6 +523,9 @@ impl VideoWriter {
             self.inject_fault()?;
         }
         self.drain_ready()?;
+        if self.waiting() {
+            return Ok(false);
+        }
         if !repeated
             && self.recovery.context.is_some()
             && self
@@ -620,6 +623,9 @@ impl VideoWriter {
             {
                 self.collect(packet)?;
                 self.drain_ready()?;
+                if self.waiting() {
+                    return Ok(false);
+                }
             } else {
                 // Synchronous MFTs may report NEED_MORE_INPUT immediately;
                 // retry busy admission without spinning or moving the deadline.
@@ -644,9 +650,9 @@ impl VideoWriter {
 
     fn collect(&mut self, packet: EncodedVideo) -> Result<()> {
         let result = self.collect_inner(packet);
-        if result.is_ok() {
+        if result.is_ok() && !self.waiting() {
             self.completed += 1;
-        } else {
+        } else if result.is_err() {
             // A later inter-picture packet may reference the refused picture.
             // Retain the decodable prefix, not a corrupt continuation of it.
             self.output_failed = true;
@@ -695,16 +701,13 @@ impl VideoWriter {
                 "video.decoder_config: packet parameter sets disagree with the encoder configuration"
             );
         }
-        let mut boundary = self.check_boundary(&packet)?;
-        #[cfg(debug_assertions)]
-        let rollover = self.parts.changed.is_some();
+        let boundary = self.check_boundary(&packet)?;
         if let Some(expected) = &self.parts.changed {
             anyhow::ensure!(
                 *expected == config && boundary.is_some(),
                 "rollover requires the preflight description and a verified closed IDR"
             );
-            let checked_at = self.rotate(packet.pts, config.clone())?;
-            boundary = boundary.map(|(ticket, _)| (ticket, checked_at));
+            return self.begin_rollover(packet, config);
         }
         if let Some(frozen) = &self.decoder_config {
             if *frozen != config {
@@ -732,20 +735,6 @@ impl VideoWriter {
             // The packet mux normally holds the newest picture. Announce the
             // resumed generation only once its independently decodable IDR is on disk.
             self.commit_packets()?;
-            #[cfg(debug_assertions)]
-            if rollover
-                && self
-                    .recovery
-                    .recipe
-                    .as_ref()
-                    .is_some_and(|r| r.changed_profile)
-                && isocast_diagnostics::developer()
-                && std::env::var_os("ISOCAST_TEST_PART_COMMIT_HOLD").is_some()
-            {
-                // A killable interval after the IDR's real commit and before
-                // the live ledger advances. This is only a scheduling hook.
-                std::thread::sleep(Duration::from_secs(3));
-            }
             self.publish_resume(ticket, packet.pts, checked_at);
             self.flush_staged()?;
             self.finish_prior(false)?;
@@ -773,6 +762,9 @@ impl VideoWriter {
         // A correct provider returns no more than our eight pending pictures.
         // The extra poll also pumps MF's input-credit events when it is empty.
         for _ in 0..=MAX_PENDING {
+            if !self.poll_handoff()? {
+                return Ok(());
+            }
             let Some(encoder) = self.encoder.as_mut() else {
                 return Ok(());
             };
@@ -813,7 +805,7 @@ impl VideoWriter {
 
     fn drain_accepted(&mut self, deadline: Instant) -> Result<()> {
         self.drain_ready()?;
-        while !self.pending.is_empty() {
+        while !self.pending.is_empty() && !self.waiting() {
             self.wait_output(deadline)?;
         }
         Ok(())
@@ -938,6 +930,7 @@ impl VideoWriter {
         // Drop must not attempt a second adapter drain after an error.
         self.closed = true;
         let mut failure = self.failed.take().map(anyhow::Error::msg);
+        self.cancel_handoff();
         self.parts.changed = None;
         if let Err(e) = self.flush_staged().and_then(|_| self.finish_prior(true)) {
             note_error(&mut failure, e);
@@ -1402,6 +1395,7 @@ impl FileWriter for VideoWriter {
     fn append_audio(&mut self, track: usize, samples: &[f32], pts: Time) -> Result<bool> {
         let result = self
             .healthy()
+            .and_then(|()| self.poll_handoff().map(|_| ()))
             .and_then(|()| self.route_audio(track, samples, pts));
         self.keep_error(result)
     }

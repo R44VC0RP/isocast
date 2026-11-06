@@ -57,7 +57,95 @@ pub fn write_manifest_in(
     if bytes.len() > MAX_MANIFEST {
         bail!("manifest exceeds 4 MiB");
     }
-    directory.replace_metadata(name, &bytes, durable)
+    #[cfg(windows)]
+    let cleanup = name.to_string_lossy().ends_with(".session.json")
+        && manifest.status != SessionStatus::Recording
+        && manifest
+            .video_recovery
+            .iter()
+            .flat_map(|v| &v.incidents)
+            .any(|e| {
+                e.rollover
+                    .as_ref()
+                    .is_some_and(|r| r.state == RolloverState::ReservedNoMedia)
+            });
+    #[cfg(windows)]
+    let durable = durable || cleanup;
+    directory.replace_metadata(name, &bytes, durable)?;
+    #[cfg(windows)]
+    if cleanup {
+        for warning in remove_dismissed(directory, manifest) {
+            eprintln!("{warning}");
+        }
+    }
+    Ok(())
+}
+
+/// Only a durably published, final timeline can release its unused reservations.
+/// No glob, no path opens, no adoption of legacy intents without an identity.
+#[cfg(windows)]
+fn remove_dismissed(directory: &Directory, manifest: &SessionManifest) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for e in manifest.video_recovery.iter().flat_map(|v| &v.incidents) {
+        let Some(r) = &e.rollover else { continue };
+        let Some(id) = r.reservation_id.as_deref() else {
+            continue;
+        };
+        if e.scope != VideoRecoveryScope::Output
+            || r.part < 2
+            || r.state != RolloverState::ReservedNoMedia
+            || manifest
+                .files
+                .iter()
+                .any(|f| f.path.eq_ignore_ascii_case(&r.path))
+        {
+            continue;
+        }
+        let Some(first) = manifest
+            .files
+            .iter()
+            .find(|f| f.source == e.owner_id && f.part.as_ref().is_none_or(|p| p.number == 1))
+        else {
+            continue;
+        };
+        let root = Path::new(&first.path);
+        let leaf = Path::new(&r.path);
+        let Some(base) = root.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let stem = format!("{base}.part{:03}", r.part);
+        let Some(suffix) = leaf
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .and_then(|s| s.strip_prefix(&stem))
+        else {
+            continue;
+        };
+        if root.extension() != leaf.extension()
+            || !(suffix.is_empty()
+                || suffix
+                    .strip_prefix(" (")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .is_some_and(|n| (1..=100).contains(&n) && suffix == format!(" ({n})")))
+        {
+            continue;
+        }
+        let container = match Path::new(&r.path).extension().and_then(OsStr::to_str) {
+            Some("mov") => isocast_protocol::Container::Mov,
+            Some("mp4") => isocast_protocol::Container::Mp4,
+            _ => continue,
+        };
+        if let Err(e) =
+            directory.remove_reserved(OsStr::new(&r.path), id, &mp4::reservation_header(container))
+        {
+            warnings.push(format!(
+                "{}: could not remove empty reservation: {e:#}",
+                r.path
+            ));
+        }
+    }
+    warnings
 }
 
 /// Durable final outcome, written before attempting the publicly polled name.
@@ -209,9 +297,15 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                 continue;
             }
         };
+        #[cfg(windows)]
+        let mut public_final = true;
         match read_final(&directory, &name, &manifest) {
             Ok(Some((saved, finished))) => {
                 if let Err(error) = publish_document(&directory, &name, &saved) {
+                    #[cfg(windows)]
+                    {
+                        public_final = false;
+                    }
                     result.warnings.push(format!(
                         "{}: final outcome is safe in {} but publication is still pending: {error:#}",
                         name.to_string_lossy(), final_name(&name).to_string_lossy()
@@ -220,6 +314,12 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                 // Never downgrade a durably finished take to interrupted, even
                 // if the external reader is still present on this startup.
                 if finished.status == SessionStatus::Complete || recording_only {
+                    #[cfg(windows)]
+                    if public_final {
+                        result
+                            .warnings
+                            .extend(remove_dismissed(&directory, &finished));
+                    }
                     continue;
                 }
                 // Failed writers may still have repairable fragments. Preserve
@@ -234,6 +334,12 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
         }
         if recording_only && manifest.status != SessionStatus::Recording {
             continue;
+        }
+        #[cfg(windows)]
+        if manifest.status == SessionStatus::Complete {
+            result
+                .warnings
+                .extend(remove_dismissed(&directory, &manifest));
         }
         if !matches!(
             manifest.status,
@@ -382,6 +488,8 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                         if e.state == VideoRecoveryState::Recovering {
                             e.state = VideoRecoveryState::Stopped;
                         }
+                        e.reason
+                            .push_str("; rollover reservation contained no media at restart");
                         empty_rows.push(index);
                         continue;
                     }
@@ -401,11 +509,26 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
         // that directory entry. Remove its row from both representations to
         // preserve unknown fields on the *same* surviving physical files.
         for index in empty_rows.into_iter().rev() {
-            manifest.files.remove(index);
+            let removed = manifest.files.remove(index);
             document["files"]
                 .as_array_mut()
                 .context("expected manifest files")?
                 .remove(index);
+            let mut siblings = manifest
+                .files
+                .iter_mut()
+                .enumerate()
+                .filter(|(_, f)| f.source == removed.source);
+            if let Some((i, only)) = siblings.next()
+                && siblings.next().is_none()
+                && only.part.as_ref().is_some_and(|p| p.number == 1)
+            {
+                only.part = None;
+                document["files"][i]
+                    .as_object_mut()
+                    .expect("parsed file")
+                    .remove("part");
+            }
         }
         // Unknown files or alignment mean an unknown session end, not zero or
         // the maximum of whichever files happened to be readable.
@@ -465,6 +588,12 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                     name.to_string_lossy()
                 ));
             }
+        }
+        #[cfg(windows)]
+        if persisted && (changed || public_final) {
+            result
+                .warnings
+                .extend(remove_dismissed(&directory, &manifest));
         }
         if manifest.status == SessionStatus::Interrupted
             || manifest.errors.iter().any(|e| e.starts_with(NOTE))
@@ -557,6 +686,7 @@ fn update_document(value: &mut Value, manifest: &SessionManifest) -> Result<()> 
                 row["rollover"]["state"] = serde_json::to_value(r.state)?;
                 row["state"] = serde_json::to_value(e.state)?;
                 if r.state == RolloverState::ReservedNoMedia {
+                    row["reason"] = e.reason.clone().into();
                     continue;
                 }
                 row["end_slot_exclusive"] = e.end_slot_exclusive.into();
@@ -649,6 +779,13 @@ mod tests {
             let e = &saved["video_recovery"]["incidents"][0];
             assert_ne!(e["state"], "resumed");
             assert_eq!(
+                e["reason"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("rollover reservation contained no media at restart"),
+                !torn
+            );
+            assert_eq!(
                 e["rollover"]["state"],
                 if torn { "pending" } else { "reserved_no_media" }
             );
@@ -658,6 +795,66 @@ mod tests {
             assert_eq!(std::fs::read(&manifest).unwrap(), first);
             assert_eq!(std::fs::read(&movie).unwrap(), bytes);
         }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_durable_public_final_can_delete_the_identical_empty_sibling() {
+        use std::io::Write;
+        let folder = std::env::temp_dir().join(format!(
+            "isocast-disposition-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        let directory = Directory::for_recording(&folder).unwrap();
+        let name = OsStr::new("take.session.json");
+        let row = serde_json::json!({"source":"program","kind":"program","path":"program.mov","fps":30,"width":160,"height":90,"audio":[]});
+        let part = folder.join("program.part002.mov");
+        for case in ["owned", "replacement", "torn", "listed"] {
+            let reserved =
+                mp4::Writer::create(&part, isocast_protocol::Container::Mov, UNIX_EPOCH).unwrap();
+            let id = reserved.reservation_id().unwrap();
+            drop(reserved);
+            let mut doc = serde_json::json!({"version":1,"setup":"roll","status":"failed","started_at":"2026-11-06T00:00:00Z","host_time_ns":1,"errors":[],"files":[row],
+                "video_recovery":{"history_limited":false,"incident_count":1,"incidents":[{
+                    "incident_id":1,"scope":"output","owner_id":"program","state":"ended_early","fault_kind":"storage_failed","attempts_started":1,"reason":"first write failed",
+                    "fps":30,"first_lost_slot":55,"end_slot_exclusive":60,"lost_slots":5,"rollover":{"state":"reserved_no_media","part":2,"path":"program.part002.mov","take_offset_ns":2_000_000_000u64,"reservation_id":id}}]}});
+            if case == "replacement" {
+                let moved = folder.join("held.mov");
+                std::fs::rename(&part, &moved).unwrap();
+                std::fs::copy(moved, &part).unwrap();
+            }
+            if case == "torn" {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&part)
+                    .unwrap()
+                    .write_all(&[1])
+                    .unwrap();
+            }
+            if case == "listed" {
+                let mut listed = row.clone();
+                listed["path"] = "program.part002.mov".into();
+                doc["files"].as_array_mut().unwrap().push(listed);
+            }
+            let manifest: SessionManifest = serde_json::from_value(doc).unwrap();
+            save_final_in(&directory, name, &manifest).unwrap();
+            assert!(part.exists(), "sidecar is not the public final document");
+            let before = std::fs::read(&part).unwrap();
+            write_manifest_in(&directory, name, &manifest, true).unwrap();
+            if case == "owned" {
+                assert!(!part.exists());
+            } else {
+                assert_eq!(std::fs::read(&part).unwrap(), before);
+                std::fs::remove_file(&part).unwrap();
+            }
+        }
+        drop(directory);
         std::fs::remove_dir_all(folder).unwrap();
     }
 

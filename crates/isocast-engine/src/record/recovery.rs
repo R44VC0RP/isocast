@@ -43,12 +43,13 @@ impl OutputRecovery {
     pub fn reserve_part(
         &self,
         ticket: Attempt,
-        path: String,
+        reservation: ReservedMovie,
         saved: Time,
         now: Time,
         backend: String,
         preset: Option<u32>,
-    ) -> anyhow::Result<PendingPart<'_>> {
+    ) -> anyhow::Result<PendingPart> {
+        let ReservedMovie { path, identity } = reservation;
         anyhow::ensure!(
             self.can_resume(ticket, saved, now),
             "stale rollover generation"
@@ -88,6 +89,7 @@ impl OutputRecovery {
                 return false;
             }
             e.rollover = Some(VideoRollover {
+                reservation_id: Some(identity),
                 state: RolloverState::Pending,
                 part: number,
                 path,
@@ -112,12 +114,13 @@ impl OutputRecovery {
         drop(requests);
         ledger.revision.fetch_add(1, Ordering::Release);
         Ok(PendingPart {
-            owner: self,
+            owner: self.clone(),
             ticket,
             number,
             saved,
             ack: rx,
-            admitted: false,
+            deadline: ticket.deadline.min(now + Duration::from_secs(3)),
+            retain: false,
         })
     }
 
@@ -128,6 +131,24 @@ impl OutputRecovery {
             row.facts = Some(facts);
         }
         self.clock.recovery.revision.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn prior_finish_failed(&self, ticket: Attempt, number: u32, why: &str) {
+        let mut parts = self.plan.parts.lock();
+        let row = &mut parts[(number - 1) as usize];
+        let error = format!(
+            "{}: {}",
+            row.path,
+            why.chars().take(1024).collect::<String>()
+        );
+        row.finish_error = Some(error.clone());
+        let ledger = &self.clock.recovery;
+        // This incident has resumed. Do not mark the healthy output inactive
+        // or create a new encoder fault for a different physical file.
+        ledger.entries.lock()[ticket.incident as usize - 1]
+            .reason
+            .push_str(&format!("; part {number} finalization failed: {error}"));
+        ledger.revision.fetch_add(1, Ordering::Release);
     }
     pub fn interrupted(&self, first_missing: Time, now: Time, reason: &str) -> Option<u64> {
         let from = self.clock.state.read().host_time(first_missing);
@@ -235,46 +256,53 @@ impl OutputRecovery {
     }
 }
 
-/// Owned by the single file worker while its sibling movie is still header-only.
+pub struct ReservedMovie {
+    pub path: String,
+    pub identity: String,
+}
+
+/// Owned by the single file worker until the first picture commits.
 /// Dropping an unadmitted part retracts its row, not the physical header: the
 /// last durable checkpoint may still name it, even if the ack never arrived.
 #[must_use]
-pub struct PendingPart<'a> {
-    owner: &'a OutputRecovery,
+pub struct PendingPart {
+    owner: OutputRecovery,
     ticket: Attempt,
     number: u32,
     saved: Time,
     ack: std::sync::mpsc::Receiver<Result<(), String>>,
-    admitted: bool,
+    deadline: Time,
+    retain: bool,
 }
 
-impl PendingPart<'_> {
-    pub fn admit(
-        mut self,
-        expected: u32,
-        waiting_at: Time,
-        now: impl FnOnce() -> Time,
-    ) -> anyhow::Result<Time> {
+impl PendingPart {
+    pub fn poll_ack(&self, expected: u32, now: Time) -> anyhow::Result<bool> {
+        use std::sync::mpsc::TryRecvError;
         anyhow::ensure!(self.number == expected, "unexpected physical part ordinal");
-        self.ack
-            .recv_timeout(
-                Duration::from_secs(3).min(self.ticket.deadline.saturating_since(waiting_at)),
-            )
-            .map_err(|_| anyhow::anyhow!("rollover intent was not durably acknowledged"))?
-            .map_err(|msg| anyhow::Error::msg(msg).context(PartMetadataWrite))?;
-        let checked_at = now();
         anyhow::ensure!(
-            self.owner.can_resume(self.ticket, self.saved, checked_at),
+            self.owner.can_resume(self.ticket, self.saved, now),
             "recovery expired before the first picture"
         );
-        self.admitted = true;
-        Ok(checked_at)
+        match self.ack.try_recv() {
+            Ok(Ok(())) => Ok(true),
+            Ok(Err(msg)) => Err(anyhow::Error::msg(msg).context(PartMetadataWrite)),
+            Err(TryRecvError::Empty) if now < self.deadline => Ok(false),
+            Err(_) => anyhow::bail!("rollover intent was not durably acknowledged"),
+        }
+    }
+    /// Once a write starts even unwinding must leave the row discoverable.
+    pub fn writing(&mut self) {
+        self.retain = true;
+    }
+    /// The owned mux handle still contains *only* its original header.
+    pub fn retract_empty(mut self) {
+        self.retain = false;
     }
 }
 
-impl Drop for PendingPart<'_> {
+impl Drop for PendingPart {
     fn drop(&mut self) {
-        if self.admitted {
+        if self.retain {
             return;
         }
         let mut parts = self.owner.plan.parts.lock();
@@ -284,6 +312,9 @@ impl Drop for PendingPart<'_> {
         let roll = incident.rollover.as_mut().expect("queued rollover");
         debug_assert_eq!(parts.last().map(|p| &p.path), Some(&roll.path));
         parts.pop();
+        if parts.len() == 1 {
+            parts.clear();
+        } // back to the ordinary single-file plan
         roll.state = RolloverState::ReservedNoMedia;
         ledger.revision.fetch_add(1, Ordering::Release);
     }
@@ -306,6 +337,7 @@ impl std::fmt::Display for PartMetadataWrite {
 }
 
 pub(super) struct PhysicalPart {
+    pub finish_error: Option<String>,
     pub encoder: Option<isocast_protocol::manifest::ManifestEncoder>,
     pub audio_loss_base: u64,
     pub path: String,
@@ -317,6 +349,7 @@ impl PhysicalPart {
         Self {
             path,
             encoder: None,
+            finish_error: None,
             audio_loss_base: 0,
             offset,
             facts: None,

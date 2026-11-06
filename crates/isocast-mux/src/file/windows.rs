@@ -392,9 +392,42 @@ fn delete_metadata_temp(file: &File) -> io::Result<()> {
     // Fail closed if validation itself fails. A leftover hidden .partial is
     // preferable to deleting an object we cannot prove is our regular file.
     validate_file(file)?;
+    delete_on_close(file)
+}
+
+pub(super) fn reservation_id(file: &File) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let id = file_identity(file)?;
+    let mut hash = Sha256::new();
+    hash.update(id.volume.to_le_bytes());
+    hash.update(id.id);
+    hash.update(id.created.to_le_bytes());
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+pub(super) fn remove_reserved(
+    directory: &File,
+    name: &OsStr,
+    id: &str,
+    header: &[u8],
+) -> Result<()> {
+    let file = match open_child(directory, name, OpenMode::CancelEmpty) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    anyhow::ensure!(
+        reservation_id(&file)? == id,
+        "reservation identity changed; file retained"
+    );
+    validate_empty_header(&file, name, header)?;
+    delete_on_close(&file).context("could not mark empty media for deletion")
+}
+
+fn delete_on_close(file: &File) -> io::Result<()> {
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
-    // SAFETY: this is our still-open create-new DELETE handle, with write and
-    // delete sharing denied since creation. It has not been renamed/published.
+    // SAFETY: callers retain a validated DELETE handle denying competing
+    // writers/deleters. The kernel marks that object, not a path resolution.
     if unsafe {
         SetFileInformationByHandle(
             file.as_raw_handle(),
@@ -436,23 +469,8 @@ pub(super) fn cancel_empty(
     }
     validate_empty_header(&file, name, expected_header)
         .context("reopened media no longer contains only its initial header")?;
-    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
-    // SAFETY: this live DELETE handle has been revalidated against the original
-    // owned object and exact empty header. Only this handle is marked; no path
-    // deletion, truncation, POSIX disposition or sharing bypass is used.
-    if unsafe {
-        SetFileInformationByHandle(
-            file.as_raw_handle(),
-            FileDispositionInfo,
-            (&info as *const FILE_DISPOSITION_INFO).cast(),
-            size_of::<FILE_DISPOSITION_INFO>() as u32,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error()).context("could not mark empty media for deletion");
-    }
     // File closes before returning to the caller that owns the folder lease.
-    Ok(())
+    delete_on_close(&file).context("could not mark empty media for deletion")
 }
 
 fn validate_empty_header(file: &File, name: &OsStr, expected: &[u8]) -> Result<()> {

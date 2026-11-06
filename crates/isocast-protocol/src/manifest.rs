@@ -115,6 +115,9 @@ pub enum RolloverState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VideoRollover {
+    /// Identity of the exclusively created placeholder; older intents cannot authorize deletion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_id: Option<String>,
     pub state: RolloverState,
     pub part: u32,
     pub path: String,
@@ -123,6 +126,9 @@ pub struct VideoRollover {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MoviePart {
+    /// Failure finishing this physical movie, independent of later parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_error: Option<String>,
     /// One-based physical part in this output (same `source` and take).
     pub number: u32,
     /// Picture extent; the old part may carry real audio beyond its last picture.
