@@ -1,0 +1,46 @@
+name: Install Windows FFmpeg
+description: Restore or download the pinned FFmpeg essentials archive and add its binaries to PATH.
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      id: archive
+      with:
+        path: ${{ runner.temp }}/ffmpeg-essentials.zip
+        key: windows-x64-ffmpeg-${{ hashFiles('.github/actions/windows-ffmpeg/action.yml') }}
+
+    - shell: pwsh
+      env:
+        CACHE_HIT: ${{ steps.archive.outputs.cache-hit }}
+      run: |
+        $version = '9.0.2'
+        $sha256 = '60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba'
+        $build = "ffmpeg-$version-essentials_build"
+        $zip = "$env:RUNNER_TEMP/ffmpeg-essentials.zip"
+        if ($env:CACHE_HIT -ne 'true') {
+          $urls = @(
+            "https://github.com/GyanD/codexffmpeg/releases/download/$version/$build.zip"
+            "https://www.gyan.dev/ffmpeg/builds/packages/$build.zip"
+          )
+          foreach ($url in $urls) {
+            Write-Host "Downloading $url"
+            curl.exe --fail --location --silent --show-error --max-time 180 --output $zip $url
+            if ($LASTEXITCODE -eq 0 -and (Get-FileHash $zip).Hash -eq $sha256) { break }
+            Write-Warning "Download failed or SHA-256 did not match: $url"
+            Remove-Item $zip -Force -ErrorAction SilentlyContinue
+          }
+        }
+        if (!(Test-Path $zip) -or (Get-FileHash $zip).Hash -ne $sha256) {
+          throw "No verified FFmpeg $version archive available"
+        }
+        tar.exe -xf $zip -C $env:RUNNER_TEMP
+        if ($LASTEXITCODE -ne 0) { throw "Could not extract $zip" }
+        $bin = "$env:RUNNER_TEMP/$build/bin"
+        foreach ($tool in 'ffmpeg', 'ffprobe') {
+          $output = & "$bin/$tool.exe" -version
+          Write-Host $output[0]
+          if ($LASTEXITCODE -ne 0 -or $output[0] -notlike "$tool version $version-*") {
+            throw "Expected $tool $version"
+          }
+        }
+        $bin >> $env:GITHUB_PATH
