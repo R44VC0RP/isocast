@@ -540,6 +540,17 @@ struct Scan {
     complete: bool,
 }
 
+/// Distinct from a missing, partial, damaged or foreign file. Only the exact
+/// header written by `from_file`, without a single trailing byte, qualifies.
+#[derive(Debug)]
+pub(crate) struct EmptyReservation;
+impl std::fmt::Display for EmptyReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("movie contains only the reservation header; no complete fragment index reached the file")
+    }
+}
+impl std::error::Error for EmptyReservation {}
+
 fn scan(file: &MediaFile) -> Result<Option<Scan>> {
     let len = file.metadata()?.len();
     ensure!(
@@ -562,6 +573,9 @@ fn scan(file: &MediaFile) -> Result<Option<Scan>> {
         return Ok(None);
     };
     let probe = add(start, PLACEHOLDER as u64)?;
+    if len == probe && read_range(file, start, PLACEHOLDER as u64)? == placeholder() {
+        return Err(EmptyReservation.into());
+    }
     ensure!(
         len >= add(probe, 8)?,
         "no complete fragment index reached the file"

@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use isocast_protocol::manifest::{
-    InterruptedRecording, MANIFEST_VERSION, SessionManifest, SessionStatus,
+    InterruptedRecording, MANIFEST_VERSION, ManifestFile, RolloverState, SessionManifest,
+    SessionStatus, VideoFaultKind, VideoIncident, VideoRecoveryScope, VideoRecoveryState,
 };
 use serde_json::Value;
 
@@ -258,7 +259,8 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
         let mut repaired = false;
         let mut all_verified = true;
         let mut verified_ends = Vec::with_capacity(manifest.files.len());
-        for file in &mut manifest.files {
+        let mut empty_rows = Vec::new();
+        for (index, file) in manifest.files.iter_mut().enumerate() {
             // An unfinished live checkpoint holds accepted inputs, not saved
             // media. A previously finalized/recovered take can hold real facts;
             // temporary inaccessibility must not erase those on the next launch.
@@ -288,6 +290,10 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                     .context("file is not an isw2 encoded recording; left untouched")?;
                 Ok((inspected.media, false))
             })();
+            let intent = manifest
+                .video_recovery
+                .as_mut()
+                .and_then(|ledger| ledger.incidents.iter_mut().find(|e| pending_part(e, file)));
             match outcome {
                 Ok((saved, changed)) => {
                     repaired |= changed;
@@ -303,40 +309,21 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                         // can promote it. Never infer a resume from a name,
                         // an empty reservation or an audio-only fragment.
                         if part.video_duration_seconds.is_some()
-                            && let Some(ledger) = manifest.video_recovery.as_mut()
+                            && let Some(e) = intent
+                            && e.state == VideoRecoveryState::Recovering
+                            && e.fault_kind == VideoFaultKind::EncoderFailed
                         {
-                            use isocast_protocol::manifest::{
-                                RolloverState, VideoFaultKind, VideoRecoveryScope,
-                                VideoRecoveryState,
-                            };
-                            for e in &mut ledger.incidents {
-                                if let Some(r) = &mut e.rollover
-                                    && r.state == RolloverState::Pending
-                                    && r.path == file.path
-                                    && r.part == part.number
-                                    && e.scope == VideoRecoveryScope::Output
-                                    && e.fault_kind == VideoFaultKind::EncoderFailed
-                                    && e.state == VideoRecoveryState::Recovering
-                                    && e.owner_id == file.source
-                                    && e.fps == file.fps
-                                    && (1..=240).contains(&e.fps)
-                                    && file.start_offset_seconds.is_some_and(|s| {
-                                        (s - r.take_offset_ns as f64 / 1e9).abs() < 1e-8
-                                    })
-                                {
-                                    // Same exclusive grid edge as engine file_end:
-                                    // floor(n * 1e9 / fps) + 1ns >= offset.
-                                    let slot = (u128::from(r.take_offset_ns.saturating_sub(1))
-                                        * u128::from(e.fps))
-                                    .div_ceil(1_000_000_000)
-                                        as u64;
-                                    if slot >= e.first_lost_slot {
-                                        r.state = RolloverState::Committed;
-                                        e.state = VideoRecoveryState::Resumed;
-                                        e.end_slot_exclusive = slot;
-                                        e.lost_slots = slot - e.first_lost_slot;
-                                    }
-                                }
+                            let r = e.rollover.as_mut().expect("matched intent");
+                            // Same exclusive grid edge as engine file_end:
+                            // floor(n * 1e9 / fps) + 1ns >= offset.
+                            let slot = (u128::from(r.take_offset_ns.saturating_sub(1))
+                                * u128::from(e.fps))
+                            .div_ceil(1_000_000_000) as u64;
+                            if slot >= e.first_lost_slot {
+                                r.state = RolloverState::Committed;
+                                e.state = VideoRecoveryState::Resumed;
+                                e.end_slot_exclusive = slot;
+                                e.lost_slots = slot - e.first_lost_slot;
                             }
                         }
                     }
@@ -385,6 +372,19 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                     );
                 }
                 Err(error) => {
+                    if error.is::<mp4::EmptyReservation>()
+                        && let Some(e) = intent
+                        && file.frames.is_none()
+                        && file.duration_seconds.is_none()
+                    {
+                        e.rollover.as_mut().expect("matched intent").state =
+                            RolloverState::ReservedNoMedia;
+                        if e.state == VideoRecoveryState::Recovering {
+                            e.state = VideoRecoveryState::Stopped;
+                        }
+                        empty_rows.push(index);
+                        continue;
+                    }
                     all_verified = false;
                     verified_ends.push(None);
                     note(
@@ -396,6 +396,16 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
                     );
                 }
             }
+        }
+        // Keep the header untouched; we have no recording-time ownership of
+        // that directory entry. Remove its row from both representations to
+        // preserve unknown fields on the *same* surviving physical files.
+        for index in empty_rows.into_iter().rev() {
+            manifest.files.remove(index);
+            document["files"]
+                .as_array_mut()
+                .context("expected manifest files")?
+                .remove(index);
         }
         // Unknown files or alignment mean an unknown session end, not zero or
         // the maximum of whichever files happened to be readable.
@@ -470,6 +480,22 @@ fn recover_with(folder: &Path, recording_only: bool) -> Result<Recovery> {
     Ok(result)
 }
 
+fn pending_part(e: &VideoIncident, file: &ManifestFile) -> bool {
+    e.scope == VideoRecoveryScope::Output
+        && e.owner_id == file.source
+        && e.fps == file.fps
+        && (1..=240).contains(&e.fps)
+        && e.rollover.as_ref().is_some_and(|r| {
+            r.state == RolloverState::Pending
+                && r.path == file.path
+                && r.part > 1
+                && file.part.as_ref().is_some_and(|p| p.number == r.part)
+                && file
+                    .start_offset_seconds
+                    .is_some_and(|s| (s - r.take_offset_ns as f64 / 1e9).abs() < 1e-8)
+        })
+}
+
 fn names(directory: &Directory) -> Result<Vec<OsString>> {
     directory.manifest_names(MAX_SESSIONS)
 }
@@ -521,13 +547,18 @@ fn update_document(value: &mut Value, manifest: &SessionManifest) -> Result<()> 
             .and_then(Value::as_array_mut)
     {
         for (row, e) in rows.iter_mut().zip(&known.incidents) {
-            if e.rollover
-                .as_ref()
-                .is_some_and(|r| r.state == isocast_protocol::manifest::RolloverState::Committed)
+            if let Some(r) = &e.rollover
+                && matches!(
+                    r.state,
+                    RolloverState::Committed | RolloverState::ReservedNoMedia
+                )
                 && row["rollover"]["state"] == "pending"
             {
-                row["rollover"]["state"] = "committed".into();
+                row["rollover"]["state"] = serde_json::to_value(r.state)?;
                 row["state"] = serde_json::to_value(e.state)?;
+                if r.state == RolloverState::ReservedNoMedia {
+                    continue;
+                }
                 row["end_slot_exclusive"] = e.end_slot_exclusive.into();
                 row["lost_slots"] = e.lost_slots.into();
             }
@@ -574,6 +605,61 @@ fn update_document(value: &mut Value, manifest: &SessionManifest) -> Result<()> 
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn empty_rollover_is_never_promoted_and_a_torn_movie_is_not_dismissed() {
+        let folder = std::env::temp_dir().join(format!(
+            "isocast-empty-rollover-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        let name = "program.part002.mov";
+        let movie = folder.join(name);
+        drop(mp4::Writer::create(&movie, isocast_protocol::Container::Mov, UNIX_EPOCH).unwrap());
+        let header = std::fs::read(&movie).unwrap();
+        let manifest = folder.join("take.session.json");
+        let intent = serde_json::json!({
+            "version":1, "setup":"roll", "status":"recording",
+            "started_at":"2026-11-06T00:00:00Z", "host_time_ns":1, "errors":[],
+            "files":[{"source":"program", "kind":"program", "path":name, "part":{"number":2},
+                "fps":30, "width":160, "height":90, "audio":[], "start_offset_seconds":2.0}],
+            "video_recovery":{"history_limited":false,"incident_count":1,"incidents":[{
+                "incident_id":1,"scope":"output","owner_id":"program","state":"recovering",
+                "fault_kind":"encoder_failed","attempts_started":1,"reason":"encoder failure",
+                "fps":30,"first_lost_slot":55,"end_slot_exclusive":60,"lost_slots":5,
+                "rollover":{"state":"pending","part":2,"path":name,"take_offset_ns":2_000_000_000u64}
+            }]}
+        });
+        for torn in [true, false] {
+            let mut bytes = header.clone();
+            if torn {
+                bytes.push(0);
+            }
+            std::fs::write(&movie, &bytes).unwrap();
+            std::fs::write(&manifest, serde_json::to_vec(&intent).unwrap()).unwrap();
+            let recovered = recover_directory(&folder).unwrap();
+            assert_eq!(recovered.incomplete, torn);
+            let first = std::fs::read(&manifest).unwrap();
+            let saved: Value = serde_json::from_slice(&first).unwrap();
+            assert_eq!(saved["files"].as_array().unwrap().len(), usize::from(torn));
+            let e = &saved["video_recovery"]["incidents"][0];
+            assert_ne!(e["state"], "resumed");
+            assert_eq!(
+                e["rollover"]["state"],
+                if torn { "pending" } else { "reserved_no_media" }
+            );
+            let again = recover_directory(&folder).unwrap();
+            assert_eq!(again.incomplete, torn);
+            assert!(!again.sessions[0].newly_detected);
+            assert_eq!(std::fs::read(&manifest).unwrap(), first);
+            assert_eq!(std::fs::read(&movie).unwrap(), bytes);
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 
     #[test]
     fn final_sidecar_preserves_extensions_and_cannot_replace_another_take() {

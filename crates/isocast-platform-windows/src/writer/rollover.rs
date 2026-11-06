@@ -26,7 +26,7 @@ pub(super) struct Parts {
 }
 
 impl VideoWriter {
-    pub(super) fn rotate(&mut self, cut: Time, config: Vec<u8>) -> Result<()> {
+    pub(super) fn rotate(&mut self, cut: Time, config: Vec<u8>) -> Result<Time> {
         let context = self
             .recovery
             .context
@@ -83,6 +83,8 @@ impl VideoWriter {
         let mut next = Self::part(&spec, self.codec, self.timescale, reservation, audio);
         next.configure(config)?;
         next.start = Some(cut);
+        #[cfg(debug_assertions)]
+        self.crash_at_reservation("orphan");
         // Retain even an empty reservation on ambiguous publication failure.
         // No packet is written before the manifest writer acknowledges sync.
         next.closed = true;
@@ -91,7 +93,7 @@ impl VideoWriter {
             .encoder
             .as_ref()
             .context("missing replacement encoder")?;
-        let number = context.reserve_part(
+        let intent = context.reserve_part(
             ticket,
             name,
             cut,
@@ -99,7 +101,11 @@ impl VideoWriter {
             format!("{:?}", encoder.backend()),
             encoder.nvenc_preset(),
         )?;
-        anyhow::ensure!(number == index + 1, "unexpected physical part ordinal");
+        let checked_at = intent.admit(index + 1, crate::now(), || {
+            #[cfg(debug_assertions)]
+            self.crash_at_reservation("acknowledged");
+            crate::now()
+        })?;
         next.closed = false;
         next.parts.index = index;
         next.parts.root = Some(root);
@@ -122,7 +128,23 @@ impl VideoWriter {
         next.last_video = self.last_video.take();
         let old = std::mem::replace(self, next);
         self.parts.previous = Some(Box::new(old));
-        Ok(())
+        Ok(checked_at)
+    }
+
+    #[cfg(debug_assertions)]
+    fn crash_at_reservation(&self, stage: &str) {
+        if self
+            .recovery
+            .recipe
+            .as_ref()
+            .is_some_and(|r| r.changed_profile)
+            && isocast_diagnostics::developer()
+            && std::env::var("ISOCAST_TEST_PART_CRASH").as_deref() == Ok(stage)
+        {
+            // No Rust drops or recording finalizers. The harness checks the
+            // exact header and published document before it starts recovery.
+            std::process::exit(86);
+        }
     }
 
     pub(super) fn flush_staged(&mut self) -> Result<()> {

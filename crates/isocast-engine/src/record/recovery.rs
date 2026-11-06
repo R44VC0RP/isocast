@@ -38,9 +38,8 @@ impl OutputRecovery {
         })
     }
 
-    /// Publish the reserved name/offset durably before allowing the mux to
-    /// write media. The coordinator is the sole manifest writer, including
-    /// during user splits. A dead/blocked coordinator cannot strand Stop.
+    /// Queue the name/offset for the sole manifest writer. The file worker
+    /// must obtain admission from the returned reservation before writing media.
     pub fn reserve_part(
         &self,
         ticket: Attempt,
@@ -49,7 +48,7 @@ impl OutputRecovery {
         now: Time,
         backend: String,
         preset: Option<u32>,
-    ) -> anyhow::Result<u32> {
+    ) -> anyhow::Result<PendingPart<'_>> {
         anyhow::ensure!(
             self.can_resume(ticket, saved, now),
             "stale rollover generation"
@@ -112,10 +111,14 @@ impl OutputRecovery {
         requests.push((self.plan.take, tx));
         drop(requests);
         ledger.revision.fetch_add(1, Ordering::Release);
-        rx.recv_timeout(Duration::from_secs(3).min(ticket.deadline.saturating_since(now)))
-            .map_err(|_| anyhow::anyhow!("rollover intent was not durably acknowledged"))?
-            .map_err(|msg| anyhow::Error::msg(msg).context(PartMetadataWrite))?;
-        Ok(number)
+        Ok(PendingPart {
+            owner: self,
+            ticket,
+            number,
+            saved,
+            ack: rx,
+            admitted: false,
+        })
     }
 
     pub fn finish_part(&self, number: u32, facts: PartFacts) {
@@ -204,7 +207,7 @@ impl OutputRecovery {
                 e.resumed = Some(picture);
                 if let Some(roll) = e.rollover.as_mut() {
                     roll.state = RolloverState::Committed;
-                    e.reason.push_str("; resumed in a new output part with ");
+                    e.reason.push_str("; committed_seconds stays at the continuous prefix before the picture gap; resumed in a new output part with ");
                 } else {
                     e.reason.push_str("; resumed in the same file with ");
                 }
@@ -229,6 +232,60 @@ impl OutputRecovery {
     }
     pub fn storage_failed(&self, id: u64, now: Time, why: &str) {
         self.clock.recovery.storage_failed(id, now, why);
+    }
+}
+
+/// Owned by the single file worker while its sibling movie is still header-only.
+/// Dropping an unadmitted part retracts its row, not the physical header: the
+/// last durable checkpoint may still name it, even if the ack never arrived.
+#[must_use]
+pub struct PendingPart<'a> {
+    owner: &'a OutputRecovery,
+    ticket: Attempt,
+    number: u32,
+    saved: Time,
+    ack: std::sync::mpsc::Receiver<Result<(), String>>,
+    admitted: bool,
+}
+
+impl PendingPart<'_> {
+    pub fn admit(
+        mut self,
+        expected: u32,
+        waiting_at: Time,
+        now: impl FnOnce() -> Time,
+    ) -> anyhow::Result<Time> {
+        anyhow::ensure!(self.number == expected, "unexpected physical part ordinal");
+        self.ack
+            .recv_timeout(
+                Duration::from_secs(3).min(self.ticket.deadline.saturating_since(waiting_at)),
+            )
+            .map_err(|_| anyhow::anyhow!("rollover intent was not durably acknowledged"))?
+            .map_err(|msg| anyhow::Error::msg(msg).context(PartMetadataWrite))?;
+        let checked_at = now();
+        anyhow::ensure!(
+            self.owner.can_resume(self.ticket, self.saved, checked_at),
+            "recovery expired before the first picture"
+        );
+        self.admitted = true;
+        Ok(checked_at)
+    }
+}
+
+impl Drop for PendingPart<'_> {
+    fn drop(&mut self) {
+        if self.admitted {
+            return;
+        }
+        let mut parts = self.owner.plan.parts.lock();
+        let ledger = &self.owner.clock.recovery;
+        let mut entries = ledger.entries.lock();
+        let incident = &mut entries[self.ticket.incident as usize - 1];
+        let roll = incident.rollover.as_mut().expect("queued rollover");
+        debug_assert_eq!(parts.last().map(|p| &p.path), Some(&roll.path));
+        parts.pop();
+        roll.state = RolloverState::ReservedNoMedia;
+        ledger.revision.fetch_add(1, Ordering::Release);
     }
 }
 
