@@ -326,6 +326,33 @@ and recordings stay in place.
 Isocast is in alpha: expect rough edges, and keep a backup recorder for
 anything you can't redo.
 
+### Run an engine on a server
+
+Use the portable Linux tarball for the server's `uname -m`. On Debian 12,
+install `libssl3 libgcc-s1 libvulkan1 mesa-vulkan-drivers curl bzip2 ca-certificates`
+(use your GPU's Vulkan driver instead of Mesa's software driver if available).
+From the unpacked tarball, run as the user who will own the recordings:
+
+```sh
+./install.sh --engine-only
+export PATH="$HOME/.local/bin:$PATH"
+isocast doctor
+isocast remote enable
+isocast remote pair --show
+```
+
+The CLI starts the daemon. Nothing opens a desktop window, and installation
+alone does not enable network access. On the controlling computer, use the
+same Isocast build, run `isocast remote pair SERVER --code-stdin`, and enter
+the displayed six-digit code within two minutes. Check `isocast --engine SERVER status`.
+Allow TCP 47470 only from intended clients on your LAN or VPN. See
+[Remote engines](docs/remote-engines.md) for permissions, keys and revocation.
+
+The install downloads verified Cisco OpenH264 for software H.264 recording
+and streaming (`--engine-only --no-openh264` skips it). GStreamer adds file
+decoding; PipeWire adds desktop capture and playback; GTK 4 and WebKitGTK 6
+add browser sources on glibc 2.39+. None is needed for synthetic takes or RTMP.
+
 ## First steps
 
 1. **Open Isocast and allow access.** On a Mac, the permissions step asks for
