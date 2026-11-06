@@ -36,7 +36,7 @@ impl Fake {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("helper");
+        let script = dir.join("helper.py");
         let state = dir.join("state");
         std::fs::write(
             &script,
@@ -46,8 +46,17 @@ impl Fake {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A parallel fork can inherit our writable fd even after we close it.
+        // Have install own the executable's writer; a rename would keep the inode.
+        assert!(
+            Command::new("install")
+                .args(["-m", "755"])
+                .arg(&script)
+                .arg(dir.join("helper"))
+                .status()
+                .unwrap()
+                .success()
+        );
         Self { dir }
     }
 
