@@ -49,6 +49,8 @@ pub(crate) struct HotkeyRuntime {
     overflow: Arc<AtomicBool>,
     #[cfg(windows)]
     native: isocast_platform_windows::hotkeys::WindowsHotkeys,
+    #[cfg(target_os = "linux")]
+    daemon: OnceLock<std::sync::Weak<Daemon>>,
 }
 
 enum Input {
@@ -217,8 +219,11 @@ impl Daemon {
 
     pub(crate) fn start_hotkeys(self: &Arc<Self>) {
         let (tx, rx) = mpsc::sync_channel(256);
-        let _ = self.hotkeys.sender.set(tx);
         let weak = Arc::downgrade(self);
+        // Before `sender`: refresh_hotkeys starts once `sender` is set.
+        #[cfg(target_os = "linux")]
+        let _ = self.hotkeys.daemon.set(weak.clone());
+        let _ = self.hotkeys.sender.set(tx);
         std::thread::spawn(move || {
             let mut pressed = Presses::default();
             while let Ok(input) = rx.recv() {
@@ -338,15 +343,15 @@ impl Daemon {
             return;
         }
         let (bindings, issues) = config.usable();
-        let mut warnings = if issues.is_empty() {
+        let warnings = if issues.is_empty() {
             Vec::new()
         } else {
             vec![hotkeys::describe(&issues)]
         };
         let generation = registered.generation + 1;
         *registered = Registered {
-            identity: identity.clone(),
-            config: config.clone(),
+            identity,
+            config,
             bindings: bindings.clone(),
             generation,
             pending: true,
@@ -386,53 +391,96 @@ impl Daemon {
                 overflow.store(true, Ordering::Release);
             }
         });
-        #[cfg(any(target_os = "macos", windows))]
-        let registrations = if crate::PARENT_OWNED.load(Ordering::SeqCst) {
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+        if crate::PARENT_OWNED.load(Ordering::SeqCst) {
             // Foreground record previously opened no global shortcuts. A
             // private engine must not steal the app's chords or fire actions
             // from an otherwise inactive profile. Focused API input still works.
-            keys.into_iter()
+            let registrations = keys
+                .into_iter()
                 .map(|key| Registration {
                     binding: key.binding,
                     global: false,
                     warning: None,
                 })
-                .collect()
-        } else {
+                .collect();
+            let _ = on_key;
+            self.settle_hotkeys(generation, registrations, warnings, 0);
+            return;
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        let registrations = {
             #[cfg(target_os = "macos")]
             let native = &isocast_platform_macos::hotkeys::MacHotkeys;
             #[cfg(windows)]
             let native = &self.hotkeys.native;
             native.replace(keys, generation, on_key)
         };
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(target_os = "linux")]
+        {
+            let waiting = isocast_platform_linux::hotkeys::waiting(&keys);
+            let daemon = self.hotkeys.daemon.get().cloned().unwrap_or_default();
+            let announced = warnings.len();
+            let settle = warnings.clone();
+            isocast_platform_linux::hotkeys::LinuxHotkeys::shared().replace(
+                keys,
+                generation,
+                on_key,
+                Box::new(move |registrations| {
+                    if let Some(daemon) = daemon.upgrade() {
+                        daemon.settle_hotkeys(generation, registrations, settle, announced);
+                    }
+                }),
+            );
+            // Without a runtime, `done` has run already.
+            let mut registered = self.hotkeys.registered.lock();
+            let current = registered.generation == generation;
+            if current && registered.pending {
+                registered.registrations = waiting;
+                registered.pending = false;
+            }
+            drop(registered);
+            if current {
+                for message in warnings {
+                    eprintln!("isocastd: {message}");
+                    self.publish(Event::Warning { message });
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         let registrations: Vec<Registration> = {
             let _ = on_key;
             keys.into_iter().map(|key| Registration { binding: key.binding, global: false,
                 warning: Some("global registration is not implemented on this platform; use focused input".into()) }).collect()
         };
-        warnings.extend(
-            registrations
-                .iter()
-                .filter_map(|r| {
-                    r.warning
-                        .as_ref()
-                        .map(|w| format!("hotkeys.{}.keys: {w}", r.binding))
-                })
-                .collect::<Vec<_>>(),
-        );
+        #[cfg(not(target_os = "linux"))]
+        self.settle_hotkeys(generation, registrations, warnings, 0);
+    }
+
+    fn settle_hotkeys(
+        &self,
+        generation: u64,
+        registrations: Vec<Registration>,
+        mut warnings: Vec<String>,
+        announced: usize,
+    ) {
+        // A global binding's warning is a note kept on its registration
+        // (Linux: the desktop doesn't say which keys it uses); it isn't
+        // published on every start and edit.
+        warnings.extend(registrations.iter().filter(|r| !r.global).filter_map(|r| {
+            r.warning
+                .as_ref()
+                .map(|w| format!("hotkeys.{}.keys: {w}", r.binding))
+        }));
         let mut registered = self.hotkeys.registered.lock();
-        *registered = Registered {
-            identity,
-            bindings,
-            registrations,
-            generation,
-            config,
-            warnings: warnings.clone(),
-            pending: false,
-        };
+        if registered.generation != generation {
+            return;
+        }
+        registered.registrations = registrations;
+        registered.warnings = warnings.clone();
+        registered.pending = false;
         drop(registered);
-        for message in warnings {
+        for message in warnings.into_iter().skip(announced) {
             eprintln!("isocastd: {message}");
             self.publish(Event::Warning { message });
         }
@@ -991,6 +1039,74 @@ fn drop_retired(value: &mut Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registration(binding: &str, warning: Option<&str>) -> Registration {
+        Registration {
+            binding: binding.into(),
+            global: warning.is_none(),
+            warning: warning.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_late_answer_for_a_replaced_generation_is_dropped() {
+        let daemon = crate::Daemon::default();
+        daemon.hotkeys.registered.lock().generation = 2;
+        daemon.settle_hotkeys(1, vec![registration("old", None)], Vec::new(), 0);
+        assert!(daemon.hotkeys.registered.lock().registrations.is_empty());
+    }
+
+    #[test]
+    fn an_answer_settles_its_generation_after_the_configuration_warnings() {
+        let daemon = crate::Daemon::default();
+        {
+            let mut registered = daemon.hotkeys.registered.lock();
+            registered.generation = 3;
+            registered.pending = true;
+        }
+        daemon.settle_hotkeys(
+            3,
+            vec![
+                registration("a", None),
+                registration("b", Some("not bound")),
+            ],
+            vec!["configuration issue".into()],
+            1,
+        );
+        let registered = daemon.hotkeys.registered.lock();
+        assert!(!registered.pending);
+        assert_eq!(
+            registered.registrations,
+            vec![
+                registration("a", None),
+                registration("b", Some("not bound"))
+            ]
+        );
+        assert_eq!(
+            registered.warnings,
+            vec!["configuration issue", "hotkeys.b.keys: not bound"]
+        );
+    }
+
+    #[test]
+    fn a_global_bindings_note_stays_on_its_registration() {
+        let daemon = crate::Daemon::default();
+        daemon.hotkeys.registered.lock().generation = 4;
+        let noted = Registration {
+            binding: "studio".into(),
+            global: true,
+            warning: Some("the desktop doesn't say which keys it uses".into()),
+        };
+        daemon.settle_hotkeys(
+            4,
+            vec![noted.clone(), registration("b", Some("not bound"))],
+            Vec::new(),
+            0,
+        );
+        let registered = daemon.hotkeys.registered.lock();
+        assert_eq!(registered.registrations[0], noted);
+        assert_eq!(registered.warnings, vec!["hotkeys.b.keys: not bound"]);
+    }
 
     fn token(source: InputSource, owner: u64) -> PressToken {
         (1, "marker".into(), source, owner)

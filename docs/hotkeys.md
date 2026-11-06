@@ -174,7 +174,12 @@ native registration results, held-source overrides, and Studio Mode state.
 `pending` says a native registration update is in progress; focused input
 returns a retryable explanation during it rather than waiting for the native
 event loop. A queued registration that times out is cancelled, so it cannot
-install global grabs later while claiming to be focused-only.
+install global grabs later while claiming to be focused-only. Linux is the
+exception: binding through the portal can wait on a desktop dialog, so
+`pending` stays false and each binding reports `global: false` with the
+warning "waiting for the desktop's GlobalShortcuts portal; focused input
+works meanwhile" until the portal answers; it may then become global. No
+event announces that; read `hotkeys_get` again (see "Linux" below).
 `hotkeys_set` accepts **exactly one** of `bindings` (replace everything) or
 `patch` (replace/remove by binding id), plus an optional `revision` for
 optimistic concurrency. At most 256 bindings per profile. Duplicate chords
@@ -294,3 +299,40 @@ either ends the hold. No system-wide keyboard hook is installed; with no
 holds the thread sleeps until a registered press or shutdown. Rebinding joins
 the old thread and releases its registrations before installing the new ones.
 Settings records an unclaimed chord from the focused window; Escape cancels.
+
+## Linux
+
+The daemon registers as `dev.isocast.Isocast` with the desktop portal's
+host Registry and binds the profile's bindings through the GlobalShortcuts
+portal, with each chord as the preferred trigger. (An engine owned by
+foreground `isocast record` binds none, as on macOS.) The desktop picks the
+keys: GNOME and KDE ask the person, and Hyprland takes them from its config
+(`bind = MODS, KEY, global, dev.isocast.Isocast:<binding>`). When the
+desktop doesn't say which keys it uses (Hyprland never does), the binding is
+global and its registration carries a note on how to assign keys; the note
+isn't published as a warning. The portal needs the app's desktop entry:
+installed builds have it; for a development build run
+`scripts/linux-dev-install.sh`. A portal older than xdg-desktop-portal 1.19
+has no app Registry: the daemon binds without registering, and if the portal
+then refuses, the warning says the portal is too old.
+
+Binding runs in the background, because the desktop may show a dialog.
+`hotkeys set`, a profile switch and the daemon's start return at once with
+every binding focused-only and the warning "waiting for the desktop's
+GlobalShortcuts portal; focused input works meanwhile". When the portal
+answers, `hotkeys get` shows the result and its warnings are published. A
+later change cancels a registration still in flight and closes its session
+before it opens the next one. The portal specification says closing the
+session ends its dialog, but GNOME 50 leaves the old dialog open (its answer
+is dropped), so an edit made while a dialog is open stacks a second dialog
+on top. The desktop's dialog has no time limit. A missing portal, or one
+that doesn't connect, register and open a session within 5 s, leaves every
+binding focused-only, with the reason in its warning. A dialog that ends
+without binding leaves every binding focused-only and says so: "you declined
+the desktop's shortcut dialog; …" for a cancelled request, and "the
+desktop's shortcut dialog ended without binding them (GNOME's Cancel ends it
+this way, as does a desktop error); …" when the desktop reports it ended some
+other way. In either case, change a hotkey or restart Isocast to be asked
+again, or use focused input.
+
+Global capture on other platforms currently reports focused-only status.
