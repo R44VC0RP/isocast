@@ -735,17 +735,25 @@ fn collect_coredumps(
     redactor: &mut Redactor,
     omitted: &mut Vec<String>,
 ) {
-    use std::process::Command;
-    let run = |args: &[&str]| {
-        Command::new("coredumpctl")
-            .args(args)
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-    };
-    let Some(list) = run(&["list", "--no-pager", "--json=short"]) else {
-        return;
+    use std::time::{Duration, Instant};
+    // A large journal or a stuck D-Bus call must not stall the report.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let limit = |most: Duration| most.min(deadline.saturating_duration_since(Instant::now()));
+    let list_limit = limit(Duration::from_secs(5));
+    let list = match run_until(
+        "coredumpctl",
+        &["list", "--no-pager", "--json=short"],
+        list_limit,
+    ) {
+        Ran::Done(list) => list,
+        // Also when there is no core dump at all: list exits 1.
+        Ran::Failed => return,
+        Ran::TimedOut => {
+            omitted.push(format!(
+                "linux-crashes/: coredumpctl list gave no answer within {list_limit:.1?}"
+            ));
+            return;
+        }
     };
     let Some(entries) = coredump_list(&list) else {
         return;
@@ -757,24 +765,107 @@ fn collect_coredumps(
         let current: usize = contents.values().map(String::len).sum();
         // A bare PID matches records of any boot, program or user.
         let since = time / 1_000_000;
-        let Some(info) = run(&[
-            "info",
-            "--no-pager",
-            "-1",
-            &format!("--since=@{since}"),
-            &format!("--until=@{}", since + 1),
-            &format!("COREDUMP_PID={pid}"),
-            &format!("COREDUMP_UID={uid}"),
-            &format!("COREDUMP_EXE={path}"),
-        ]) else {
-            omitted.push(format!("{name}: coredumpctl info failed"));
+        let info_limit = limit(Duration::from_secs(2));
+        if info_limit.is_zero() {
+            omitted.push(format!("{name}: core dump time limit reached"));
             continue;
+        }
+        let info = match run_until(
+            "coredumpctl",
+            &[
+                "info",
+                "--no-pager",
+                "-1",
+                &format!("--since=@{since}"),
+                &format!("--until=@{}", since + 1),
+                &format!("COREDUMP_PID={pid}"),
+                &format!("COREDUMP_UID={uid}"),
+                &format!("COREDUMP_EXE={path}"),
+            ],
+            info_limit,
+        ) {
+            Ran::Done(info) => info,
+            Ran::Failed => {
+                omitted.push(format!("{name}: coredumpctl info failed"));
+                continue;
+            }
+            Ran::TimedOut => {
+                omitted.push(format!(
+                    "{name}: coredumpctl info gave no answer within {info_limit:.1?}"
+                ));
+                continue;
+            }
         };
         if info.len() as u64 > MAX_FILE || current.saturating_add(info.len()) > MAX_BUNDLE {
             omitted.push(format!("{name}: size/type limit"));
             continue;
         }
         contents.insert(name, coredump_text(&info, redactor));
+    }
+}
+
+/// How [`run_until`] ended.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq)]
+enum Ran {
+    /// Exited successfully, or wrote more than `MAX_FILE`: at most
+    /// `MAX_FILE + 1` bytes of its stdout.
+    Done(String),
+    /// Couldn't start or exited unsuccessfully.
+    Failed,
+    /// Killed at the time limit.
+    TimedOut,
+}
+
+/// Runs `program`, killing it after `limit`.
+#[cfg(target_os = "linux")]
+fn run_until(program: &str, args: &[&str], limit: std::time::Duration) -> Ran {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .env("SYSTEMD_COLORS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Ran::Failed;
+    };
+    // Read while waiting: a full pipe would hold the child until the limit.
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let reader = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = (&mut stdout).take(MAX_FILE + 1).read_to_end(&mut text);
+        text
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => break None,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ran::Failed;
+            }
+        }
+    };
+    // After a kill the reader isn't joined: a process the command started
+    // can keep the pipe open; the thread ends when the pipe closes.
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ran::TimedOut;
+    };
+    let text = reader.join().unwrap_or_default();
+    // Output over the cap ends the command with SIGPIPE; the caller reports
+    // the size limit.
+    if status.success() || text.len() as u64 > MAX_FILE {
+        Ran::Done(String::from_utf8_lossy(&text).into_owned())
+    } else {
+        Ran::Failed
     }
 }
 
@@ -1010,6 +1101,43 @@ mod linux_tests {
         let newest = coredump_entries(&many, 1000);
         assert_eq!(newest.len(), 10);
         assert_eq!((newest[0].0, newest[9].0), (11, 2));
+    }
+
+    #[test]
+    fn run_until_kills_a_command_at_its_limit() {
+        let started = std::time::Instant::now();
+        assert_eq!(
+            run_until("sleep", &["5"], std::time::Duration::from_millis(100)),
+            Ran::TimedOut
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(
+            run_until("false", &[], std::time::Duration::from_secs(5)),
+            Ran::Failed
+        );
+        assert_eq!(
+            run_until(
+                "isocast-no-such-program",
+                &[],
+                std::time::Duration::from_secs(5)
+            ),
+            Ran::Failed
+        );
+    }
+
+    #[test]
+    fn run_until_reads_output_larger_than_a_pipe() {
+        // 1 MiB fills a 64 KiB pipe many times over; without reading while
+        // waiting the command would block until the limit.
+        let Ran::Done(text) = run_until(
+            "sh",
+            &["-c", "head -c 1048576 /dev/zero | tr '\\0' x"],
+            std::time::Duration::from_secs(5),
+        ) else {
+            panic!("sh did not finish");
+        };
+        assert_eq!(text.len(), 1 << 20);
+        assert!(text.bytes().all(|b| b == b'x'));
     }
 
     #[test]
