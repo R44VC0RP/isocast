@@ -1263,6 +1263,12 @@ jobs:
         if: env.MODE == 'full'
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib playback::tests
 
+      - name: Check encoder preflight luma levels and fallback decisions
+        if: env.MODE == 'full'
+        run: |
+          cargo test --locked -p isocast-platform-windows --lib mf::probe::tests
+          cargo test --locked -p isocast-platform-windows --lib preflight_tests
+
       - name: Check capture target lifetime and helper restart limits
         if: env.MODE == 'full'
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib broker::recovery::tests
@@ -1275,6 +1281,14 @@ jobs:
         if: env.MODE == 'full'
         timeout-minutes: 10
         uses: ./.github/actions/windows-ffmpeg
+
+      - name: Qualify real HEVC probe packets with the runner's installed decoders
+        if: env.MODE == 'full'
+        shell: pwsh
+        run: |
+          $ext = Get-AppxPackage -Name '*HEVC*'
+          if ($ext) { $ext | Select-Object Name,Version; $env:ISOCAST_TEST_HAS_HEVC_EXTENSION = '1' } else { 'No HEVC Store extension installed for runner' }
+          cargo test --locked -p isocast-platform-windows --lib hevc_probe_with_installed_decoders -- --ignored --nocapture
 
       # Media Foundation decoding of files ffmpeg makes at test time (H.264/AAC
       # MP4 and MOV timing with edit lists and late tracks, WAV, an FFV1 file
@@ -1416,15 +1430,21 @@ jobs:
           name: windows-app-audio
           path: windows-app-audio.json
 
-      - name: Record with the preflight fallback after an injected NVENC open failure
+      - name: Reject an encoder open failure and a decoded wrong picture before recording
         timeout-minutes: 5
         run: |
-          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_encoder_preflight --engine-env ISOCAST_TEST_FAIL_NVENC_OPEN=1 --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-preflight" --report windows-preflight.json
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_encoder_preflight --engine-env ISOCAST_TEST_FAIL_NVENC_OPEN=1 --engine-env ISOCAST_TEST_BAD_PROBE_PICTURE=1 --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-preflight" --report windows-preflight.json
           python -c 'import json; r, = json.load(open("windows-preflight.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
 
       - name: Recover recordings and check isolated workspaces (hosted breakaway skip)
         timeout-minutes: 10
         run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --only win_isolated --only win_machine_profile --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json
+
+      - name: Accept the recording encoder when no pixel decoder is installed
+        timeout-minutes: 5
+        run: |
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_preflight_no_decoder --engine-env ISOCAST_TEST_NO_PROBE_DECODER=1 --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/without-decoder" --report without-decoder.json
+          python -c 'import json; r, = json.load(open("without-decoder.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
 
       - name: Recover a recording encoder at a same-file IDR
         timeout-minutes: 10

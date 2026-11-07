@@ -42,6 +42,7 @@ impl VideoEncoding {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum Parameters {
     /// Every SPS is checked against the requested profile as it arrives.
     H264 {
@@ -55,8 +56,8 @@ pub(crate) enum Parameters {
 }
 
 impl Parameters {
-    pub(crate) fn check_probe(&self, frame: &Frame) -> Result<()> {
-        self.config()?; // Requires complete parameter sets and the negotiated depth.
+    pub(crate) fn probe_config(&self, frame: &Frame) -> Result<Vec<u8>> {
+        let config = self.config()?; // Requires complete parameter sets and the negotiated depth.
         let expected = (frame.width(), frame.height());
         let check = |size| -> Result<()> {
             anyhow::ensure!(
@@ -73,7 +74,7 @@ impl Parameters {
             }
             Self::Hevc { sets, .. } => check(sets.size()?)?,
         }
-        Ok(())
+        Ok(config)
     }
     pub(crate) fn new(encoding: VideoEncoding, profile: H264Profile) -> Self {
         match encoding {
@@ -324,6 +325,7 @@ enum Encoder {
 }
 
 pub(crate) const PROBE_FRAMES: usize = 3;
+pub(crate) const PROBE_BARS: [u8; 2] = [64, 192];
 
 pub(crate) fn probe_pts(index: usize, fps: u32) -> Time {
     Time::from_nanos(index as i64 * 1_000_000_000 / i64::from(fps))
@@ -385,6 +387,7 @@ pub struct WindowsVideoEncoder {
     // NVENC is reused without EOS. Keep its native lifetime counters intact,
     // but don't expose consumed probe pictures to a new writer or barrier.
     probe_frames: u64,
+    pub(crate) pixel_check_skipped: bool,
     held: Option<EncodedVideo>,
     scaler: Option<ProgramScaler<WindowsPlatform>>,
     scale_drops: u64,
@@ -460,6 +463,7 @@ impl WindowsVideoEncoder {
                     scale_drops: 0,
                     delivered: 0,
                     probe_frames: 0,
+                    pixel_check_skipped: false,
                     held: None,
                     force_idr: false,
                     terminal: false,
@@ -496,6 +500,7 @@ impl WindowsVideoEncoder {
                         scale_drops: 0,
                         delivered: 0,
                         probe_frames: 0,
+                        pixel_check_skipped: false,
                         held: None,
                         force_idr: false,
                         terminal: false,
@@ -541,6 +546,7 @@ impl WindowsVideoEncoder {
         input: PixelFormat,
         preset: Option<u32>,
         allow_mf_hardware: bool,
+        batch: &mut crate::mf::probe::Batch,
     ) -> Result<Self> {
         Self::preflight_profile(
             device,
@@ -549,6 +555,7 @@ impl WindowsVideoEncoder {
             preset,
             allow_mf_hardware,
             H264Profile::High,
+            batch,
         )
     }
 
@@ -559,9 +566,9 @@ impl WindowsVideoEncoder {
         preset: Option<u32>,
         allow_mf_hardware: bool,
         profile: H264Profile,
+        batch: &mut crate::mf::probe::Batch,
     ) -> Result<Self> {
-        let frame =
-            crate::TexturePool::new(device.clone()).probe_frame(spec.width, spec.height, input)?;
+        let frame = batch.picture(device, spec.width, spec.height, input)?;
         Self::recording_policy(
             device,
             spec,
@@ -577,7 +584,7 @@ impl WindowsVideoEncoder {
         spec: &VideoTrackSpec,
         input: PixelFormat,
         preset: Option<u32>,
-        probe: Option<(&Frame, bool)>,
+        probe: Option<(&crate::mf::probe::Picture, bool)>,
         profile: H264Profile,
     ) -> Result<Self> {
         let depth = spec.encoder.effective_bit_depth();
@@ -604,7 +611,7 @@ impl WindowsVideoEncoder {
                 .context("video.fps: GOP length overflow")?,
             low_latency: true,
         };
-        let ((encoder, backend, actual_quality), mut reasons) = select_recording(
+        let ((encoder, backend, actual_quality, pixel_note), mut reasons) = select_recording(
             preset.is_none() || probe.is_some(),
             probe.is_none_or(|(_, allow)| allow),
             |mode| {
@@ -627,7 +634,8 @@ impl WindowsVideoEncoder {
                         MfMode::Hardware => EncoderBackend::MediaFoundationHardware(name),
                         MfMode::Software => EncoderBackend::MediaFoundationSoftware(name),
                     };
-                    return Ok((Encoder::Mf(encoder), backend, actual_quality));
+                    let note = encoder.info().pixel_check_skipped.clone();
+                    return Ok((Encoder::Mf(encoder), backend, actual_quality, note));
                 }
                 #[cfg(debug_assertions)]
                 if probe.is_some() && std::env::var_os("ISOCAST_TEST_FAIL_NVENC_OPEN").is_some() {
@@ -641,13 +649,15 @@ impl WindowsVideoEncoder {
                     quality.nvenc_qp,
                     preset.unwrap_or(5),
                 )?;
-                if let Some((frame, _)) = probe {
-                    encoder.probe(frame, settings.fps)?;
-                }
+                let note = match probe {
+                    Some((frame, _)) => encoder.probe(frame, settings.fps, quality.nvenc_qp)?,
+                    None => None,
+                };
                 Ok((
                     Encoder::Nvenc(encoder),
                     EncoderBackend::Nvenc,
                     quality.mf_quality,
+                    note,
                 ))
             },
         )
@@ -661,6 +671,8 @@ impl WindowsVideoEncoder {
                 ));
             }
         }
+        let pixel_check_skipped = pixel_note.is_some();
+        reasons.extend(pixel_note);
         let probe_frames = if probe.is_some() && backend == EncoderBackend::Nvenc {
             PROBE_FRAMES as u64
         } else {
@@ -681,6 +693,7 @@ impl WindowsVideoEncoder {
             scale_drops: 0,
             delivered: 0,
             probe_frames,
+            pixel_check_skipped,
             held: None,
             force_idr: true,
             terminal: false,
@@ -819,8 +832,8 @@ impl WindowsVideoEncoder {
             Encoder::Mf(encoder) => encoder.stats(),
         }?;
         stats.ready_packets += usize::from(self.held.is_some());
-        stats.accepted -= self.probe_frames;
-        stats.completed -= self.probe_frames;
+        stats.accepted = stats.accepted.saturating_sub(self.probe_frames);
+        stats.completed = stats.completed.saturating_sub(self.probe_frames);
         stats.dropped += self.scale_drops;
         Ok(stats)
     }
