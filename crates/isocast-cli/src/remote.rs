@@ -137,8 +137,8 @@ fn status(method: Method, json: bool) -> Result<()> {
 fn key_note(os: EngineOs, status: &RemoteStatus, json: bool) -> Option<&'static str> {
     (!json && os == EngineOs::Linux && status.identity.is_some()).then_some(
         "note: this Linux engine's remote key is stored in its desktop keyring, or, on a \
-         computer without one, in a plaintext 0600 file in $XDG_CONFIG_HOME/isocast/credentials \
-         (default ~/.config/isocast/credentials)",
+         computer without one or with ISOCAST_SECRET_STORE=file, in a plaintext 0600 file in \
+         $XDG_CONFIG_HOME/isocast/credentials (default ~/.config/isocast/credentials)",
     )
 }
 

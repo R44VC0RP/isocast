@@ -69,7 +69,7 @@ pub fn discover(folder: Option<PathBuf>, json: bool) -> Result<ExitCode> {
                 isocast_protocol::platform_text::select_linux(
                     " (stream key in plain text: --obs-stream-key moves it to the Keychain)",
                     " (stream key in plain text: --obs-stream-key moves it to Credential Manager)",
-                    " (stream key in plain text: --obs-stream-key moves it to Isocast's credentials file)",
+                    " (stream key in plain text: --obs-stream-key moves it to the keyring)",
                 )
             } else {
                 ""
