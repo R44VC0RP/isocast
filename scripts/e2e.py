@@ -6202,7 +6202,7 @@ function tone() {
 }
 (async () => {
   const a = tone(); await a.resume(); await wait(700);
-  await a.suspend(); await wait(75); await a.resume(); await wait(700);
+  await Promise.all([a.suspend(), wait(75)]); await a.resume(); await wait(700);
   const b = tone(); await b.resume(); await wait(300);
   // Give the new primary a known module-loading delay at handoff.
   const load = b.audioWorklet.addModule.bind(b.audioWorklet);
@@ -6228,7 +6228,7 @@ function tone() {
                 if last is not None and i - last > RATE * 0.04:
                     holes.append((round(last / RATE, 3), round((i - last) / RATE, 3)))
                 last = i
-        require(len(holes) == 2 and all(0.04 < duration < 0.25 for _, duration in holes)
+        require(len(holes) == 2 and all(0.04 < duration < 0.2 for _, duration in holes)
                 and 0.8 < holes[1][0] - holes[0][0] < 1.4,
                 f"{source}: expected distinct suspend and handoff holes, got {holes}")
         evidence["lifecycle"][source] = {"dropouts": entry["audio_dropouts"], "holes_s": holes}

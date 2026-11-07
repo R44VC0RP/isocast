@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_browser_protocol as protocol;
 use isocast_engine::{
-    AudioSink, BrowserAudioStamper, BrowserControl, BrowserPage, CaptureFormat, FramePool,
-    PageLocation, SAMPLE_RATE, Time, VideoSink,
+    AudioSink, BrowserAudioStamper, BrowserAudioTiming, BrowserControl, BrowserPage, CaptureFormat,
+    FramePool, PageLocation, SAMPLE_RATE, Time, VideoSink,
 };
 
 /// How often waits check whether the source was stopped.
@@ -41,6 +41,14 @@ pub trait HelperOs: Send + Sync + 'static {
     fn adopt(&self, child: &Child) -> Result<Box<dyn Confinement>>;
     /// The host clock that pictures and sound are stamped on.
     fn now(&self) -> Time;
+    /// Unix wall-clock microseconds corresponding to [`Self::now`], for
+    /// anchoring `Date.now()` page audio timestamps.
+    fn wall_micros(&self) -> Option<u64> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| u64::try_from(d.as_micros()).ok())
+    }
     /// Advice from a helper that ended before loading the page: its exit
     /// code, its `FAIL` reason if it sent one, and the end of its stderr.
     fn explain_start_failure(
@@ -718,7 +726,25 @@ impl<P: FramePool> Source<P> {
                         }
                     }
                 }
-                protocol::Header::Audio { rate, len } => {
+                header @ (protocol::Header::Audio { .. } | protocol::Header::TimedAudio { .. }) => {
+                    let (rate, timing, len) = match header {
+                        protocol::Header::Audio { rate, len } => {
+                            (rate, BrowserAudioTiming::Arrival, len)
+                        }
+                        protocol::Header::TimedAudio {
+                            rate,
+                            resumed: false,
+                            end_us,
+                            len,
+                        } => (rate, BrowserAudioTiming::Continuous { end_us }, len),
+                        protocol::Header::TimedAudio {
+                            rate,
+                            resumed: true,
+                            end_us,
+                            len,
+                        } => (rate, BrowserAudioTiming::Resumed { end_us }, len),
+                        _ => unreachable!(),
+                    };
                     if len == 0 {
                         // Ordered before samples on every top-level document start.
                         stamper = BrowserAudioStamper::default();
@@ -731,6 +757,7 @@ impl<P: FramePool> Source<P> {
                         .context("reading browser audio")
                         .map_err(helper)?;
                     let now = shared.os.now();
+                    let wall_us = shared.os.wall_micros();
                     if let Some(sink) = &self.audio {
                         let samples: Vec<f32> = bytes
                             .as_chunks::<4>()
@@ -742,7 +769,7 @@ impl<P: FramePool> Source<P> {
                         let samples = resampler.run(rate, samples);
                         let frames = samples.len() / 2;
                         if frames > 0 {
-                            let (at, gap) = stamper.stamp(frames, now);
+                            let (at, gap) = stamper.stamp_timed(frames, timing, wall_us, now);
                             if let Some(gap) = gap {
                                 (sink.report_gap)(at, gap);
                             }

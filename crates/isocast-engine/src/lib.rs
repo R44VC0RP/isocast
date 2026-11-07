@@ -49,7 +49,7 @@ use isocast_protocol::api::Machine;
 use isocast_protocol::devices::{Devices, PermissionKind, PermissionsReport};
 use isocast_protocol::{Canvas, Container, Encoder, SourceKind};
 
-pub use time::{BrowserAudioStamper, Time};
+pub use time::{BrowserAudioStamper, BrowserAudioTiming, Time};
 
 /// Something that works, but less well than it should, with how to fix it
 /// ([`Platform::browser_warning`]); `doctor` reports it as a warning.
