@@ -65,7 +65,10 @@ fn child_entry() {
             assert!(has_secret(&service, ACCOUNT).unwrap());
             assert!(delete_secret(&service, ACCOUNT).unwrap());
             assert!(!has_secret(&service, ACCOUNT).unwrap());
-            assert!(files(&config()).is_empty());
+            assert_eq!(secret(&service, ACCOUNT).unwrap(), None);
+            let kept = files(&config());
+            assert_eq!(kept.len(), 1, "an empty file marks the delete: {kept:?}");
+            assert_eq!(std::fs::metadata(&kept[0]).unwrap().len(), 0);
         }
         "keyring" => {
             set_secret(&service, ACCOUNT, VALUE).unwrap();
@@ -87,6 +90,28 @@ fn child_entry() {
         "keyring-old" => {
             set_secret(&service, ACCOUNT, OLD).unwrap();
             assert_eq!(lookup(&service), OLD);
+        }
+        "delete-file" => {
+            delete_secret(&service, ACCOUNT).unwrap();
+            assert!(!has_secret(&service, ACCOUNT).unwrap());
+            assert_eq!(files(&config()).len(), 1);
+        }
+        "deleted-stays" => {
+            assert_eq!(lookup(&service), OLD, "the keyring keeps its older item");
+            assert!(!has_secret(&service, ACCOUNT).unwrap());
+            assert_eq!(secret(&service, ACCOUNT).unwrap(), None);
+            set_secret(&service, ACCOUNT, NEWER).unwrap();
+            assert!(
+                files(&config()).is_empty(),
+                "a keyring write removes the mark"
+            );
+            assert_eq!(secret(&service, ACCOUNT).unwrap().as_deref(), Some(NEWER));
+            assert!(delete_secret(&service, ACCOUNT).unwrap());
+            assert!(
+                files(&config()).is_empty(),
+                "a keyring delete leaves no mark"
+            );
+            assert_eq!(lookup(&service), "");
         }
         "file-wins" => {
             assert_eq!(lookup(&service), OLD, "the keyring keeps its older item");
@@ -347,6 +372,15 @@ fn a_silent_session_bus_is_an_error_after_its_time_limit() {
     let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let address = format!("unix:path={}", socket.display());
     run(scratch.child("hung", None, Some(&address)));
+}
+
+#[test]
+#[ignore = "starts dbus-run-session and gnome-keyring-daemon"]
+fn a_secret_deleted_without_the_keyring_stays_deleted() {
+    let scratch = Scratch::new("deleted-stays");
+    run(scratch.child("keyring-old", Some(WITH_KEYRING), None));
+    run(scratch.child("delete-file", None, Some("unix:path=/nonexistent")));
+    run(scratch.child("deleted-stays", Some(WITH_KEYRING), None));
 }
 
 #[test]

@@ -4,7 +4,9 @@
 //! (headless machines, CI, VMs) they are plaintext 0600 files in an
 //! owner-only XDG directory, which processes running as this user can read.
 //! A file is always newer than the keyring's item: a keyring write deletes
-//! it, so reads take the file first. Isocast never starts the keyring's
+//! it, so reads take the file first. A secret deleted while the keyring is
+//! away leaves an empty file, which hides the keyring's older item until a
+//! keyring write or delete removes it. Isocast never starts the keyring's
 //! unlock or confirmation prompts: a locked keyring is an error.
 
 use std::collections::HashMap;
@@ -663,29 +665,56 @@ fn with_keyring<T: Send>(f: impl AsyncFnOnce(&Keyring) -> Result<T> + Send) -> R
     }
 }
 
+/// What the files hold for a secret.
+enum Filed {
+    Value(String),
+    /// An empty file: the secret was deleted while the keyring was away, and
+    /// the keyring's older item must stay hidden.
+    Deleted,
+    Nothing,
+}
+
+fn filed(service: &str, account: &str) -> Result<Filed> {
+    Ok(match file_secret(service, account)? {
+        None => Filed::Nothing,
+        Some(value) if value.is_empty() => Filed::Deleted,
+        Some(value) => Filed::Value(value),
+    })
+}
+
 pub fn secret(service: &str, account: &str) -> Result<Option<String>> {
-    if let Some(value) = file_secret(service, account)? {
-        return Ok(Some(value));
+    match filed(service, account)? {
+        Filed::Value(value) => Ok(Some(value)),
+        Filed::Deleted => Ok(None),
+        Filed::Nothing => {
+            Ok(with_keyring(async |keyring| keyring.read(service, account).await)?.flatten())
+        }
     }
-    Ok(with_keyring(async |keyring| keyring.read(service, account).await)?.flatten())
 }
 
 /// True for an item in a locked keyring too.
 pub fn has_secret(service: &str, account: &str) -> Result<bool> {
-    if file_secret(service, account)?.is_some() {
-        return Ok(true);
+    match filed(service, account)? {
+        Filed::Value(_) => Ok(true),
+        Filed::Deleted => Ok(false),
+        Filed::Nothing => {
+            let kept = with_keyring(async |keyring| {
+                let (unlocked, locked) = keyring.search(service, account).await?;
+                Ok(!unlocked.is_empty() || !locked.is_empty())
+            })?;
+            Ok(kept == Some(true))
+        }
     }
-    let kept = with_keyring(async |keyring| {
-        let (unlocked, locked) = keyring.search(service, account).await?;
-        Ok(!unlocked.is_empty() || !locked.is_empty())
-    })?;
-    Ok(kept == Some(true))
 }
 
 pub fn set_secret(service: &str, account: &str, value: &str) -> Result<()> {
     ensure!(
         value.len() as u64 <= MAX_SECRET,
         "secret store: value for {service} ({account}) exceeds 64 KiB; store a smaller secret"
+    );
+    ensure!(
+        !value.is_empty(),
+        "secret store: value for {service} ({account}) is empty; delete the secret instead"
     );
     match with_keyring(async |keyring| keyring.store(service, account, value).await)? {
         // Reads take a file first, so an older one must go.
@@ -695,9 +724,18 @@ pub fn set_secret(service: &str, account: &str, value: &str) -> Result<()> {
 }
 
 pub fn delete_secret(service: &str, account: &str) -> Result<bool> {
-    let in_keyring = with_keyring(async |keyring| keyring.delete(service, account).await)?;
-    let in_file = file_delete(service, account)?;
-    Ok(in_keyring == Some(true) || in_file)
+    let in_file = matches!(filed(service, account)?, Filed::Value(_));
+    match with_keyring(async |keyring| keyring.delete(service, account).await)? {
+        Some(in_keyring) => {
+            file_delete(service, account)?;
+            Ok(in_keyring || in_file)
+        }
+        // The keyring may hold an older item, which must not come back.
+        None => {
+            file_set(service, account, "")?;
+            Ok(in_file)
+        }
+    }
 }
 
 #[cfg(test)]
