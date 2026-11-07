@@ -10,34 +10,43 @@
   const disconnect = AudioNode.prototype.disconnect;
   const createGain = Context.prototype.createGain;
   const createMediaElementSource = Context.prototype.createMediaElementSource;
+  const suspend = Context.prototype.suspend;
   const play = HTMLMediaElement.prototype.play;
+  const CHUNK_FRAMES = 1024;
+  const CHUNK_SAMPLES = CHUNK_FRAMES * 2;
 
   // Shared by the worklet module and the CSP fallback. Even when a page
-  // requests a different rate, the wire clock is 2048 frames / 48000 Hz.
+  // requests a different rate, the wire clock is CHUNK_FRAMES / 48000 Hz;
+  // endUs is Date.now() wall time in microseconds when the chunk flushed.
   function chunker(rate, send) {
-    let chunk = new Float32Array(4096), used = 0;
+    let chunk = new Float32Array(CHUNK_SAMPLES), used = 0, resumed = false;
     let previousL, previousR, phase = 0;
-    function append(l, r) {
+    function flush(endMs = Date.now()) {
+      if (used === 0) return;
+      const out = used === chunk.length ? chunk.buffer : chunk.buffer.slice(0, used * 4);
+      const wasResumed = resumed;
+      chunk = new Float32Array(CHUNK_SAMPLES);
+      used = 0;
+      resumed = false;
+      send(out, Math.max(0, Math.round(endMs * 1000)), wasResumed);
+    }
+    function append(l, r, endMs) {
       chunk[used++] = l;
       chunk[used++] = r;
-      if (used === chunk.length) {
-        send(chunk.buffer);
-        chunk = new Float32Array(4096);
-        used = 0;
-      }
+      if (used === chunk.length) flush(endMs);
     }
-    return (left, right, frames) => {
+    const write = (left, right, frames, endMs = Date.now()) => {
       for (let i = 0; i < frames; i++) {
         const l = left ? left[i] : 0, r = right ? right[i] : l;
         if (rate === 48000) {
-          append(l, r);
+          append(l, r, endMs);
         } else {
           // Linear interpolation, carrying both neighbours and the exact
           // fractional position across render quanta (no per-block rounding).
           if (previousL !== undefined) {
             while (phase < 48000) {
               const t = phase / 48000;
-              append(previousL + (l - previousL) * t, previousR + (r - previousR) * t);
+              append(previousL + (l - previousL) * t, previousR + (r - previousR) * t, endMs);
               phase += rate;
             }
             phase -= 48000;
@@ -47,6 +56,9 @@
         }
       }
     };
+    write.flush = flush;
+    write.resumeNext = () => { resumed = true; };
+    return write;
   }
 
   function registerTap() {
@@ -54,19 +66,52 @@
       constructor() {
         super();
         this.active = true;
-        this.port.onmessage = () => { this.active = false; };
-        this.write = chunker(sampleRate, buffer => this.port.postMessage(buffer, [buffer]));
+        this.pauseArmed = false;
+        this.sawGap = false;
+        this.lastMs = undefined;
+        this.write = chunker(sampleRate, (buffer, endUs, resumed) => {
+          this.sawGap = false;
+          this.port.postMessage({ buffer, endUs, resumed }, [buffer]);
+        });
+        this.port.onmessage = ({ data }) => {
+          if (data === 'pause') {
+            if (this.sawGap) {
+              this.write.resumeNext();
+              this.sawGap = false;
+            } else {
+              this.write.flush(this.lastMs ?? Date.now());
+              this.pauseArmed = true;
+            }
+          } else if (data === 'stop') {
+            this.write.flush(this.lastMs ?? Date.now());
+            this.active = false;
+          }
+        };
       }
       process(inputs) {
-        if (this.active) this.write(inputs[0][0], inputs[0][1], inputs[0][0]?.length || 128);
-        return this.active;
+        if (!this.active) return false;
+        const now = Date.now();
+        if (this.lastMs !== undefined && now - this.lastMs >= 30) {
+          this.write.flush(this.lastMs);
+          if (this.pauseArmed) {
+            this.write.resumeNext();
+            this.pauseArmed = false;
+          } else {
+            this.sawGap = true;
+          }
+        }
+        this.write(inputs[0][0], inputs[0][1], inputs[0][0]?.length || 128, now);
+        this.lastMs = now;
+        return true;
       }
     });
   }
 
   // Serialize before the page can replace Function.prototype.toString.
   // A data module also works on WebView2 file pages (opaque origins).
-  const moduleURL = 'data:text/javascript,' + encodeURIComponent(`${chunker}\n(${registerTap})()`);
+  const moduleURL = 'data:text/javascript,' + encodeURIComponent(
+    `const CHUNK_SAMPLES = ${CHUNK_SAMPLES};\n${chunker}\n(${registerTap})()`
+  );
 
   let warnedPost = false;
   function warnPost(error) {
@@ -83,12 +128,13 @@
       warnPost(error);
     }
   }
-  function post(buffer) {
-    send('48000:' + btoa(String.fromCharCode.apply(null, new Uint8Array(buffer))));
+  function post(buffer, endUs, resumed) {
+    const sep = resumed ? '+' : '@';
+    send(`48000${sep}${endUs}:` + btoa(String.fromCharCode.apply(null, new Uint8Array(buffer))));
   }
 
   const routes = new Map();
-  let primary, output;
+  let primary, output, activeTap, hadAudio = false;
   function warn(error) {
     console.warn('Isocast could not route page audio:', error);
   }
@@ -99,29 +145,60 @@
   }
   async function listen(route, mix) {
     const context = route.context;
-    let node;
+    let node, pauseNode, stopNode;
+    const token = {};
+    let tapResumed = false;
+    function deliver(buffer, endUs, workletResumed) {
+      if (token !== activeTap) return;
+      const resumed = hadAudio && (tapResumed || workletResumed);
+      hadAudio = true;
+      tapResumed = false;
+      post(buffer, endUs, resumed);
+    }
     try {
       await (route.module ??= context.audioWorklet.addModule(moduleURL));
       if (mix !== output) return; // another context took over during load
+      activeTap = token;
+      tapResumed = hadAudio;
+      route.pausing = false;
       node = new AudioWorkletNode(context, 'isocast-audio', { channelCount: 2, channelCountMode: 'explicit' });
-      node.port.onmessage = event => { if (mix === output) post(event.data); };
+      node.port.onmessage = ({ data }) => deliver(data.buffer, data.endUs, data.resumed);
+      pauseNode = () => node.port.postMessage('pause');
+      stopNode = () => node.port.postMessage('stop');
       console.info('Isocast page audio: AudioWorklet');
     } catch (error) {
       if (mix !== output) return;
       console.warn('Isocast page audio: ScriptProcessor fallback (AudioWorklet unavailable)', error);
-      node = context.createScriptProcessor(2048, 2, 2);
-      const write = chunker(context.sampleRate, post);
+      activeTap = token;
+      tapResumed = hadAudio;
+      route.pausing = false;
+      let pauseArmed = false, lastMs;
+      node = context.createScriptProcessor(CHUNK_FRAMES, 2, 2);
+      const write = chunker(context.sampleRate, deliver);
       node.onaudioprocess = ({ inputBuffer }) => {
-        if (mix === output) write(inputBuffer.getChannelData(0), inputBuffer.getChannelData(1), inputBuffer.length);
+        if (token !== activeTap) return;
+        const now = Date.now();
+        if (lastMs !== undefined && now - lastMs >= 30) {
+          write.flush(lastMs);
+          if (pauseArmed) {
+            write.resumeNext();
+            pauseArmed = false;
+          }
+        }
+        write(inputBuffer.getChannelData(0), inputBuffer.getChannelData(1), inputBuffer.length, now);
+        lastMs = now;
       };
+      pauseNode = () => { write.flush(lastMs ?? Date.now()); pauseArmed = true; };
+      stopNode = () => write.flush(lastMs ?? Date.now());
     }
     const mute = context.createGain();
     mute.gain.value = 0;
     connect.call(mix, node);
     connect.call(node, mute);
     connect.call(mute, context.destination);
+    route.pause = pauseNode;
     route.stop = () => {
-      if (node.port) node.port.postMessage('stop');
+      stopNode?.();
       disconnect.call(mix);
       disconnect.call(node);
       disconnect.call(mute);
@@ -149,16 +226,17 @@
       if (primary?.context.state === 'running') return;
       const live = [...routes.values()];
       const next = live.find(route => route.context.state === 'running');
+      // Keep a suspended primary wired when nothing else is running, so
+      // resume() captures from the first render quantum without rebuilding
+      // its AudioWorkletNode on a contended main thread.
+      if (!next && primary && primary.context.state !== 'closed') return;
       if (primary === next) return;
       const mix = next && createGain.call(next.context);
       primary?.stop?.();
-      // Retire the old tap (including its partial chunk) before the host
-      // stamps another run. A suspended page has no primary until resume.
-      if (primary) send('48000:');
       for (const route of live) {
         disconnect.call(route.bus);
         if (route.bridge) disconnect.call(route.bridge);
-        route.bridge = route.stop = null;
+        route.bridge = route.stop = route.pause = null;
       }
       primary = next;
       output = mix;
@@ -168,15 +246,26 @@
     });
   }
 
+  function pauseRoute(route) {
+    if (route === primary && !route.pausing) {
+      route.pausing = true;
+      route.pause?.();
+    }
+  }
+
   function tap(context) {
     let route = routes.get(context);
     if (!route) guarded(() => {
-      route = { context, bus: createGain.call(context) };
+      route = { context, bus: createGain.call(context), pausing: false };
       routes.set(context, route);
       if (primary) wire(route);
       choosePrimary();
       context.addEventListener('statechange', () => guarded(() => {
-        if (context.state === 'closed') {
+        if (context.state === 'running') {
+          route.pausing = false;
+        } else if (context.state === 'suspended') {
+          pauseRoute(route);
+        } else if (context.state === 'closed') {
           routes.delete(context);
           if (route.bridge) disconnect.call(route.bridge);
         }
@@ -187,6 +276,11 @@
     // bus. If even the bus couldn't be allocated, never send it to speakers.
     return route?.bus;
   }
+  Context.prototype.suspend = function (...args) {
+    const route = routes.get(this);
+    if (route) pauseRoute(route);
+    return suspend.apply(this, args);
+  };
   AudioNode.prototype.connect = function (target, ...rest) {
     if (target instanceof AudioDestinationNode && target.context instanceof Context) {
       target = tap(target.context);

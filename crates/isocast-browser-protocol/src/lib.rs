@@ -15,6 +15,8 @@
 //! - `FRAM`: u32 width, u32 height, then width × height × 4 bytes of
 //!   straight-alpha BGRA;
 //! - `AUDI`: u32 sample rate, then interleaved stereo f32 samples;
+//! - `AUDT`: u32 sample rate, u8 kind (0 continuous, 1 resumed), u64 page
+//!   `Date.now()` wall time in microseconds, then interleaved stereo f32;
 //! - `FAIL`: a UTF-8 reason, before exiting.
 
 use std::io::Read;
@@ -24,6 +26,7 @@ use anyhow::{Context, Result, bail};
 pub const READY: &[u8; 4] = b"REDY";
 pub const FRAME: &[u8; 4] = b"FRAM";
 pub const AUDIO: &[u8; 4] = b"AUDI";
+pub const TIMED_AUDIO: &[u8; 4] = b"AUDT";
 pub const FAIL: &[u8; 4] = b"FAIL";
 
 /// Largest payload accepted: an 8192×8192 picture and its header.
@@ -49,6 +52,13 @@ pub enum Header {
     /// Interleaved stereo f32 at this rate: `len` bytes follow.
     Audio {
         rate: u32,
+        len: usize,
+    },
+    /// Timed interleaved stereo f32 from `audio.js`: `len` bytes follow.
+    TimedAudio {
+        rate: u32,
+        resumed: bool,
+        end_us: u64,
         len: usize,
     },
     /// A reason follows, `len` bytes.
@@ -81,6 +91,7 @@ pub fn read_header(input: &mut impl Read) -> Result<Option<Header>> {
     let limit = match tag {
         READY => 0,
         AUDIO => 4 + MAX_AUDIO,
+        TIMED_AUDIO => 13 + MAX_AUDIO,
         FAIL => MAX_FAIL,
         _ => MAX_PAYLOAD,
     };
@@ -117,6 +128,39 @@ pub fn read_header(input: &mut impl Read) -> Result<Option<Header>> {
                 );
             }
             Header::Audio { rate, len }
+        }
+        TIMED_AUDIO => {
+            let rate = u32_field()?;
+            let mut meta = [0u8; 9];
+            input
+                .read_exact(&mut meta)
+                .context("reading the browser helper")?;
+            let resumed = match meta[0] {
+                0 => false,
+                1 => true,
+                other => bail!("browser helper sent an unknown audio timing kind {other}"),
+            };
+            let end_us = u64::from_le_bytes(meta[1..9].try_into().expect("8 bytes"));
+            let len = len
+                .checked_sub(13)
+                .context("browser helper sent a short timed audio record")?
+                as usize;
+            if !len.is_multiple_of(8) {
+                bail!("browser helper sent audio that isn't whole stereo f32 frames");
+            }
+            if !AUDIO_RATES.contains(&rate) {
+                bail!(
+                    "browser helper sent audio at {rate} Hz (accepted: {}..={} Hz)",
+                    AUDIO_RATES.start(),
+                    AUDIO_RATES.end()
+                );
+            }
+            Header::TimedAudio {
+                rate,
+                resumed,
+                end_us,
+                len,
+            }
         }
         FAIL => Header::Fail { len: len as usize },
         tag => bail!(
@@ -207,6 +251,17 @@ pub fn audio(rate: u32, samples: &[u8]) -> Vec<u8> {
     record
 }
 
+/// An `AUDT` record: rate, resumed flag, page `Date.now()` wall time in
+/// microseconds (`end_us`), and sample bytes.
+pub fn timed_audio(rate: u32, resumed: bool, end_us: u64, samples: &[u8]) -> Vec<u8> {
+    let mut record = record(TIMED_AUDIO, 13 + samples.len());
+    record.extend_from_slice(&rate.to_le_bytes());
+    record.push(u8::from(resumed));
+    record.extend_from_slice(&end_us.to_le_bytes());
+    record.extend_from_slice(samples);
+    record
+}
+
 /// A `FAIL` record with `reason` (cut to [`MAX_FAIL`] bytes).
 pub fn fail(reason: &str) -> Vec<u8> {
     let mut end = reason.len().min(MAX_FAIL as usize);
@@ -241,6 +296,7 @@ mod tests {
         frame(&mut picture, 2, 1).copy_from_slice(&[7; 8]);
         bytes.extend(&picture);
         bytes.extend(audio(44100, &[0; 8]));
+        bytes.extend(timed_audio(48000, true, 75_000, &[1; 8]));
         bytes.extend(fail("no runtime"));
         let mut input = &bytes[..];
         assert_eq!(read_header(&mut input).unwrap(), Some(Header::Ready));
@@ -260,6 +316,17 @@ mod tests {
                 len: 8
             })
         );
+        input = &input[8..];
+        assert_eq!(
+            read_header(&mut input).unwrap(),
+            Some(Header::TimedAudio {
+                rate: 48000,
+                resumed: true,
+                end_us: 75_000,
+                len: 8,
+            })
+        );
+        assert_eq!(&input[..8], &[1; 8]);
         input = &input[8..];
         assert_eq!(
             read_header(&mut input).unwrap(),
@@ -289,6 +356,9 @@ mod tests {
         odd[4] = 4 + 6;
         assert!(read_header(&mut &odd[..]).is_err());
         assert!(read_header(&mut &audio(1, &[0; 8])[..]).is_err());
+        let mut bad_kind = timed_audio(48000, false, 0, &[0; 8]);
+        bad_kind[12] = 2;
+        assert!(read_header(&mut &bad_kind[..]).is_err());
     }
 
     #[test]

@@ -19,8 +19,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use block2::RcBlock;
 use isocast_engine::{
-    AudioSink, BrowserAudioStamper as Stamper, BrowserControl, BrowserPage, CaptureFormat,
-    FramePool as _, PageLocation, SAMPLE_RATE, VideoSink,
+    AudioSink, BrowserAudioStamper as Stamper, BrowserAudioTiming, BrowserControl, BrowserPage,
+    CaptureFormat, FramePool as _, PageLocation, SAMPLE_RATE, VideoSink,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -484,13 +484,17 @@ define_class!(
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
         fn did_receive(&self, _controller: &WKUserContentController, message: &WKScriptMessage) {
             let now = crate::host_time();
+            let wall_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| u64::try_from(d.as_micros()).ok());
             let body = unsafe { message.body() };
             let decoded = body
                 .downcast::<NSString>()
                 .map_err(|_| anyhow!("not a string"))
                 .and_then(|text| decode(&text));
             match decoded {
-                Ok((rate, samples)) => {
+                Ok((rate, timing, samples)) => {
                     // The document-start script sends an empty first record.
                     // Ordered with its audio, even on page-initiated reload.
                     if samples.is_empty() {
@@ -501,7 +505,11 @@ define_class!(
                     let samples = self.ivars().resampler.borrow_mut().run(rate, samples);
                     let frames = samples.len() / 2;
                     if frames > 0 {
-                        let (at, gap) = self.ivars().stamper.borrow_mut().stamp(frames, now);
+                        let (at, gap) = self
+                            .ivars()
+                            .stamper
+                            .borrow_mut()
+                            .stamp_timed(frames, timing, wall_us, now);
                         if let Some(gap) = gap {
                             (self.ivars().sink.report_gap)(at, gap);
                         }
@@ -532,18 +540,37 @@ impl PageAudio {
     }
 }
 
-/// A message from `audio.js`: `RATE:BASE64`, the base64 of interleaved
-/// stereo 32-bit floats.
-fn decode(message: &NSString) -> Result<(u32, Vec<f32>)> {
-    // Bound the native string before copying it. RATE (u32), colon and
-    // padded base64 are ASCII, so each occupies one UTF-16 unit per byte.
+/// A message from `audio.js`: `RATE[(@|+)END_US]:BASE64`, the base64 of
+/// interleaved stereo 32-bit floats.
+fn decode(message: &NSString) -> Result<(u32, BrowserAudioTiming, Vec<f32>)> {
+    // Bound the native string before copying it. RATE (u32), optional
+    // separator + u64 microseconds, colon and padded base64 are ASCII.
     let max_bytes = *AUDIO_RATES.end() as usize * FRAME_BYTES;
-    if message.length() > 11 + max_bytes.div_ceil(3) * 4 {
+    if message.length() > 32 + max_bytes.div_ceil(3) * 4 {
         bail!("oversized browser audio message");
     }
     let message = message.to_string();
-    let (rate, data) = message.split_once(':').context("no sample rate")?;
-    let rate: u32 = rate.parse().context("bad sample rate")?;
+    let (head, data) = message.split_once(':').context("no sample rate")?;
+    let (rate, timing) = if let Some((rate, end_us)) = head.split_once('@') {
+        (
+            rate.parse().context("bad sample rate")?,
+            BrowserAudioTiming::Continuous {
+                end_us: end_us.parse().context("bad audio timestamp")?,
+            },
+        )
+    } else if let Some((rate, end_us)) = head.split_once('+') {
+        (
+            rate.parse().context("bad sample rate")?,
+            BrowserAudioTiming::Resumed {
+                end_us: end_us.parse().context("bad audio timestamp")?,
+            },
+        )
+    } else {
+        (
+            head.parse().context("bad sample rate")?,
+            BrowserAudioTiming::Arrival,
+        )
+    };
     if !AUDIO_RATES.contains(&rate) {
         bail!("unsupported browser audio rate {rate} Hz (accepted: {AUDIO_RATES:?} Hz)");
     }
@@ -561,7 +588,7 @@ fn decode(message: &NSString) -> Result<(u32, Vec<f32>)> {
         .iter()
         .map(|b| f32::from_le_bytes(*b))
         .collect();
-    Ok((rate, samples))
+    Ok((rate, timing, samples))
 }
 
 /// Linear resampling of interleaved stereo to [`SAMPLE_RATE`], for pages
@@ -609,7 +636,8 @@ mod tests {
             "44100:{}",
             base64::engine::general_purpose::STANDARD.encode(bytes)
         );
-        let (rate, decoded) = decode(&NSString::from_str(&message)).unwrap();
+        let (rate, timing, decoded) = decode(&NSString::from_str(&message)).unwrap();
+        assert_eq!(timing, BrowserAudioTiming::Arrival);
         assert_eq!(decoded, samples);
         let mut resampler = Resampler::default();
         let out = resampler.run(rate, decoded);
@@ -617,9 +645,11 @@ mod tests {
         assert_eq!(&out[..2], &samples[..2]);
         assert!((out[2] - 0.959375).abs() < 1e-6);
         assert!((out[3] - -0.0203125).abs() < 1e-6);
-        let message = message.replacen("44100:", "48000:", 1);
-        let (rate, decoded) = decode(&NSString::from_str(&message)).unwrap();
+        let timed = message.replacen("44100:", "48000+75000:", 1);
+        let (rate, timing, decoded) = decode(&NSString::from_str(&timed)).unwrap();
+        assert_eq!(timing, BrowserAudioTiming::Resumed { end_us: 75_000 });
         assert_eq!(resampler.run(rate, decoded), samples);
+        assert!(decode(&NSString::from_str("48000@bad:")).is_err());
         assert!(decode(&NSString::from_str("no rate")).is_err());
     }
 
@@ -634,7 +664,7 @@ mod tests {
         }
         for rate in [8_000, 192_000] {
             let second = rate as usize * FRAME_BYTES;
-            assert_eq!(decode(&message(rate, second)).unwrap().1.len(), second / 4);
+            assert_eq!(decode(&message(rate, second)).unwrap().2.len(), second / 4);
             assert!(decode(&message(rate, second + FRAME_BYTES)).is_err());
         }
         // One extra byte can fit within the same padded base64 length.
@@ -670,5 +700,175 @@ mod tests {
         }
         // 48 kHz passes through untouched.
         assert_eq!(resampler.run(48_000, vec![1.0, 2.0]), vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn suspend_race_keeps_resumed_tag_for_post_gap_chunk() {
+        // Exercise the real audio.js + serialized worklet module when
+        // suspend() sends 'pause' while pre-suspend quanta continue to arrive
+        // (both a full chunk and a partial tail) before the >=30 ms gap.
+        let harness = r#"
+const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+globalThis.btoa = bytes => {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes.charCodeAt(i);
+    const b = i + 1 < bytes.length ? bytes.charCodeAt(i + 1) : 0;
+    const c = i + 2 < bytes.length ? bytes.charCodeAt(i + 2) : 0;
+    const n = (a << 16) | (b << 8) | c;
+    out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63]
+      + (i + 1 < bytes.length ? chars[(n >> 6) & 63] : '=')
+      + (i + 2 < bytes.length ? chars[n & 63] : '=');
+  }
+  return out;
+};
+let clockMs = 1_000_000;
+Date.now = () => clockMs;
+globalThis.sampleRate = 48000;
+const sent = [];
+let WorkletClass, workletInstance;
+globalThis.AudioWorkletProcessor = class {
+  constructor() {
+    this.port = { onmessage: null, postMessage: msg => this._toMain?.(msg) };
+  }
+};
+globalThis.registerProcessor = (_name, cls) => { WorkletClass = cls; };
+class AudioNode { connect(t) { return t; } disconnect() {} }
+class AudioDestinationNode extends AudioNode { constructor(ctx) { super(); this.context = ctx; } }
+class FakeAudioContext {
+  constructor() {
+    this.state = 'running';
+    this.sampleRate = 48000;
+    this.destination = new AudioDestinationNode(this);
+    this._listeners = [];
+    this.audioWorklet = {
+      addModule: url => {
+        eval(decodeURIComponent(url.slice('data:text/javascript,'.length)));
+        return Promise.resolve();
+      }
+    };
+  }
+  createGain() { const n = new AudioNode(); n.gain = { value: 1 }; return n; }
+  createMediaElementSource() { return new AudioNode(); }
+  addEventListener(_e, fn) { this._listeners.push(fn); }
+  suspend() { this.state = 'suspended'; this._listeners.forEach(f => f()); }
+  resume() { this.state = 'running'; this._listeners.forEach(f => f()); }
+}
+globalThis.AudioNode = AudioNode;
+globalThis.AudioDestinationNode = AudioDestinationNode;
+globalThis.HTMLMediaElement = class { play() {} };
+globalThis.AudioWorkletNode = class extends AudioNode {
+  constructor() {
+    super();
+    workletInstance = new WorkletClass();
+    this.port = {
+      onmessage: null,
+      postMessage: data => workletInstance.port.onmessage?.({ data }),
+    };
+    workletInstance._toMain = data => this.port.onmessage?.({ data });
+  }
+};
+globalThis.document = { addEventListener: () => {} };
+globalThis.console = { info: () => {}, warn: () => {} };
+globalThis.window = globalThis;
+globalThis.AudioContext = FakeAudioContext;
+globalThis.webkit = { messageHandlers: { isocastAudio: { postMessage: m => { sent.push(m); } } } };
+"#;
+        let driver = r#"
+ObjC.import('Foundation');
+(async () => {
+  const ctx = new AudioContext();
+  const osc = new AudioNode();
+  osc.connect(ctx.destination);
+  await Promise.resolve();
+  await Promise.resolve();
+  const q = new Float32Array(128).fill(0.25);
+  function step(n, dt = 3) {
+    for (let i = 0; i < n; i++) {
+      clockMs += dt;
+      workletInstance.process([[q, q]]);
+    }
+  }
+  // 10 quanta (1280 frames = 1 full chunk + 256 partial frames) before suspend.
+  step(10);
+  // suspend() sends 'pause', flushing the 256-frame partial, THEN 9 more
+  // pre-suspend quanta (1 full 1024-frame chunk + 128 partial frames) still
+  // run before the audio thread actually halts for 75 ms.
+  ctx.suspend();
+  step(9);
+  // Now the audio thread halts for 75 ms, resumes, and renders 10 quanta.
+  clockMs += 75;
+  ctx.resume();
+  workletInstance.process([[q, q]]);
+  step(9);
+  // Also exercise late 'pause' arriving 1 quantum after the >=30 ms gap
+  // before the resumed chunk flushes: still tags that resumed chunk '+'.
+  clockMs += 75;
+  workletInstance.process([[q, q]]);
+  ctx.suspend();
+  ctx.resume();
+  step(8);
+  const data = $(JSON.stringify(sent) + '\n').dataUsingEncoding($.NSUTF8StringEncoding);
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData(data);
+})();
+"#;
+        let script = format!("{harness}\n{}\n{driver}", include_str!("audio.js"));
+        let output = std::process::Command::new("/usr/bin/osascript")
+            .args(["-l", "JavaScript", "-e", &script])
+            .output()
+            .expect("osascript runs JavaScriptCore");
+        assert!(
+            output.status.success(),
+            "osascript failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let first_line = std::str::from_utf8(&output.stdout)
+            .expect("UTF-8")
+            .lines()
+            .next()
+            .expect("JSON line");
+        let messages: Vec<String> =
+            serde_json::from_str(first_line).expect("JSON array of messages");
+        let mut stamper = Stamper::default();
+        let mut decoded_runs = Vec::new();
+        for (i, text) in messages.iter().enumerate() {
+            let (_rate, timing, samples) = decode(&NSString::from_str(text)).unwrap();
+            let frames = samples.len() / 2;
+            let end_us = match timing {
+                BrowserAudioTiming::Continuous { end_us }
+                | BrowserAudioTiming::Resumed { end_us } => end_us,
+                BrowserAudioTiming::Arrival => panic!("expected timed chunk: {text}"),
+            };
+            // Deliver in two ~130 ms late IPC bursts (within MAX_LAG = 180 ms).
+            let arrival_us = if i <= 4 { 1_000_160_000 } else { 1_000_260_000 };
+            let now = isocast_engine::Time::from_nanos(arrival_us as i64 * 1_000);
+            let (at, gap) = stamper.stamp_timed(frames, timing, Some(arrival_us), now);
+            assert_eq!(gap, None, "unexpected dropout on {timing:?}");
+            decoded_runs.push((
+                matches!(timing, BrowserAudioTiming::Resumed { .. }),
+                frames,
+                at,
+                end_us,
+            ));
+        }
+        // Chunks 0..4 are pre-suspend (1024, 256, 1024, 128 frames): all Continuous.
+        // Chunk 4 is post-resume #1 (1024 frames, Resumed), chunk 5 is its 256-frame
+        // Continuous tail, and chunk 6 is post-resume #2 (late 'pause', 1024 frames, Resumed).
+        let flags: Vec<bool> = decoded_runs.iter().map(|r| r.0).collect();
+        assert_eq!(
+            flags,
+            [false, false, false, false, true, false, true],
+            "{decoded_runs:?}"
+        );
+        for (pre, post) in [(3, 4), (5, 6)] {
+            let pre_end = decoded_runs[pre]
+                .2
+                .add_ticks(decoded_runs[pre].1 as u64, SAMPLE_RATE);
+            let hole_ms = decoded_runs[post].2.saturating_since(pre_end).as_millis();
+            assert!(
+                (70..=80).contains(&hole_ms),
+                "expected ~75 ms suspend hole at {pre}->{post}, got {hole_ms} ms ({decoded_runs:?})"
+            );
+        }
     }
 }
