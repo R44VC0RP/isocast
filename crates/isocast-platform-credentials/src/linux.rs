@@ -1,8 +1,9 @@
 //! Secrets live in the desktop keyring through the Secret Service (GNOME
 //! Keyring, KWallet, KeePassXC) when one answers on the session bus, as items
 //! with the attributes `application`, `service` and `account`. Without one
-//! (headless machines, CI, VMs) they are plaintext 0600 files in an
-//! owner-only XDG directory, which processes running as this user can read.
+//! (headless machines, CI, VMs), or with `ISOCAST_SECRET_STORE=file`, they
+//! are plaintext 0600 files in an owner-only XDG directory, which processes
+//! running as this user can read.
 //! A file is always newer than the keyring's item: a keyring write deletes
 //! it, so reads take the file first. A secret deleted while the keyring is
 //! away leaves an empty file, which hides the keyring's older item until a
@@ -402,7 +403,8 @@ const TIMED_OUT: &str = "keyring: the session bus or its Secret Service (org.fre
 /// ask either.
 const LOCKED: &str = "keyring: the desktop keyring is locked, and Isocast never asks to unlock \
                       it; unlock it (log in to the desktop session, or unlock it in Passwords \
-                      and Keys, KWallet or KeePassXC) and retry";
+                      and Keys, KWallet or KeePassXC) and retry, or start Isocast with \
+                      ISOCAST_SECRET_STORE=file to keep its secrets in files";
 
 fn confirm(action: &str) -> String {
     format!(
@@ -557,7 +559,8 @@ impl Keyring {
         bail!(
             "keyring: the Secret Service has no default keyring (no \"default\" or \"login\" \
              alias); create one in your keyring app (Passwords and Keys, KWallet, KeePassXC) \
-             and retry"
+             and retry, or start Isocast with ISOCAST_SECRET_STORE=file to keep its secrets in \
+             files"
         )
     }
 
@@ -631,9 +634,17 @@ fn attributes<'a>(service: &'a str, account: &'a str) -> HashMap<&'a str, &'a st
 
 /// Runs `f` against the desktop keyring, on its own thread and runtime since
 /// callers may already be on one. None when there is no session bus or no
-/// Secret Service on it; callers then use the files. Any other failure is an
-/// error, never a file write.
+/// Secret Service on it, or with `ISOCAST_SECRET_STORE=file`; callers then
+/// use the files. Any other failure is an error, never a file write.
 fn with_keyring<T: Send>(f: impl AsyncFnOnce(&Keyring) -> Result<T> + Send) -> Result<Option<T>> {
+    match std::env::var_os("ISOCAST_SECRET_STORE") {
+        Some(store) if store == "file" => return Ok(None),
+        Some(store) if !store.is_empty() => bail!(
+            "secret store: ISOCAST_SECRET_STORE is {store:?}; set it to \"file\" to keep \
+             secrets in files, or unset it to use the keyring"
+        ),
+        _ => {}
+    }
     if timed_out_at().is_some_and(|at| at.elapsed() < KEYRING_BACKOFF) {
         bail!(TIMED_OUT);
     }

@@ -159,6 +159,14 @@ fn child_entry() {
             assert!(files(&config()).is_empty(), "never a file instead");
             println!("locked keyring: four calls in {took:?}: {:#}", errors[0]);
         }
+        "file-store" => {
+            set_secret(&service, ACCOUNT, VALUE).unwrap();
+            assert_eq!(files(&config()).len(), 1);
+            assert_eq!(secret(&service, ACCOUNT).unwrap().as_deref(), Some(VALUE));
+            assert_eq!(lookup(&service), "", "the keyring is never used");
+            assert!(delete_secret(&service, ACCOUNT).unwrap());
+            assert!(!has_secret(&service, ACCOUNT).unwrap());
+        }
         "refused" => {
             let expected = std::env::var("ISOCAST_KEYRING_TEST_EXPECT").unwrap();
             let error = format!("{:#}", set_secret(&service, ACCOUNT, VALUE).unwrap_err());
@@ -324,6 +332,27 @@ const WITH_EMPTY_KEYRING: &str = concat!(
 fn without_a_session_bus_secrets_are_owner_only_files() {
     let scratch = Scratch::new("files");
     run(scratch.child("files", None, Some("unix:path=/nonexistent")));
+}
+
+#[test]
+fn an_unknown_secret_store_setting_is_an_error() {
+    let scratch = Scratch::new("bad-store");
+    let mut child = scratch.child("refused", None, Some("unix:path=/nonexistent"));
+    child.env("ISOCAST_SECRET_STORE", "keyrings");
+    child.env(
+        "ISOCAST_KEYRING_TEST_EXPECT",
+        "ISOCAST_SECRET_STORE is \"keyrings\"",
+    );
+    run(child);
+}
+
+#[test]
+#[ignore = "starts dbus-run-session and gnome-keyring-daemon"]
+fn with_secret_store_file_the_keyring_is_never_used() {
+    let scratch = Scratch::new("file-store");
+    let mut child = scratch.child("file-store", Some(WITH_KEYRING), None);
+    child.env("ISOCAST_SECRET_STORE", "file");
+    run(child);
 }
 
 #[test]
