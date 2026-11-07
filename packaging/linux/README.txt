@@ -95,8 +95,13 @@ Where things go
   folder above when XDG_RUNTIME_DIR is unset or not a folder. The app, the
   CLI and the engine must see the same XDG_RUNTIME_DIR to find each other
   (over SSH or sudo it can differ from your desktop session's).
-- Stream keys and pairing keys: $XDG_CONFIG_HOME/isocast/credentials, files
-  only you can read (not an encrypted keyring yet).
+- Stream keys and pairing keys: the desktop keyring (GNOME Keyring, KWallet
+  or KeePassXC, through the Secret Service). Isocast never shows the
+  keyring's unlock prompt, so unlock it first (logging in to the desktop
+  usually does). KeePassXC may show its own access dialog; Isocast waits at
+  most 5 seconds for the call. Without a keyring, or with ISOCAST_SECRET_STORE=file,
+  keys are owner-only files in $XDG_CONFIG_HOME/isocast/credentials. To force
+  file storage, set ISOCAST_SECRET_STORE=file for both the engine and the CLI/app.
 
 Known gaps in this preview
 --------------------------
