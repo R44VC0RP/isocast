@@ -586,7 +586,7 @@ fn collect_report(
     }
     contents.insert("ISSUE.md".into(), issue.clone());
     contents.insert("metrics.jsonl".into(), metrics);
-    let redaction = json!({"policy":"credential fields/text and all HTTP/RTMP capability paths removed; serial fields omitted; home abbreviated; no environment dump or media. Text-source content and data-store values are retained unless credential-like. Default device names may contain owner names; strict mode pseudonymizes known device names/IDs/models and paths/titles with a fresh per-report HMAC key, never exported. Report credentials are seeded independently from configured Keychain accounts. Linux core dump records omit user, group, host, machine, boot, storage and session-unit lines and the user id in their message.", "hash_paths":params.hash_paths,"pseudonyms":"HMAC-SHA256 with independent random per-report key","counts":redactor.counts,"omitted":omitted});
+    let redaction = json!({"policy":"credential fields/text and all HTTP/RTMP capability paths removed; serial fields omitted; home abbreviated; no environment dump or media. Text-source content and data-store values are retained unless credential-like. Default device names may contain owner names; strict mode pseudonymizes known device names/IDs/models and paths/titles with a fresh per-report HMAC key, never exported. Report credentials are seeded independently from configured Keychain accounts. Linux core dump records keep only the process, signal, time, command line, executable, size and package lines and the message, without the user id.", "hash_paths":params.hash_paths,"pseudonyms":"HMAC-SHA256 with independent random per-report key","counts":redactor.counts,"omitted":omitted});
     contents.insert(
         "REDACTION.json".into(),
         serde_json::to_string_pretty(&redaction).unwrap(),
@@ -711,20 +711,19 @@ const LINUX_EXECUTABLES: [&str; 5] = [
     "isocast-browser",
 ];
 
-/// `coredumpctl info` lines that identify the person or machine.
+/// `coredumpctl info` fields kept before `Message:`, which comes last and is
+/// kept with everything after it. Other fields stay out, including the user,
+/// host, machine, boot, storage and session-unit ones and any systemd adds.
 #[cfg(target_os = "linux")]
-const COREDUMP_PRIVATE: [&str; 11] = [
-    "UID:",
-    "GID:",
-    "Owner UID:",
-    "Hostname:",
-    "Machine ID:",
-    "Boot ID:",
-    "Storage:",
-    "Control Group:",
-    "Unit:",
-    "User Unit:",
-    "Slice:",
+const COREDUMP_FIELDS: [&str; 8] = [
+    "PID",
+    "TID",
+    "Signal",
+    "Timestamp",
+    "Command Line",
+    "Executable",
+    "Size on Disk",
+    "Package",
 ];
 
 /// This user's Isocast core dump records under `linux-crashes/`, as
@@ -902,40 +901,52 @@ fn coredump_entries(entries: &[Value], uid: u64) -> Vec<(u64, u64, &str, &str)> 
     ours
 }
 
-/// `coredumpctl info` output, redacted, without [`COREDUMP_PRIVATE`] lines,
-/// coredumpctl's notices, the message's UID or the timestamp's age.
+/// `coredumpctl info` output, redacted: the [`COREDUMP_FIELDS`] and the
+/// message, without coredumpctl's notices, the message's UID or the
+/// timestamp's age.
 #[cfg(target_os = "linux")]
 fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
-    info.lines()
-        .filter(|line| {
-            let line = line.trim_start();
-            !line.starts_with("-- Notice:")
-                && !COREDUMP_PRIVATE.iter().any(|key| line.starts_with(key))
-        })
-        .map(|line| {
-            let mut line = line.to_owned();
-            let key = line.trim_start();
-            if key.starts_with("Timestamp:")
-                && line.ends_with(" ago)")
-                && let Some(at) = line.rfind(" (")
+    let mut in_message = false;
+    // Whether the current field is kept; its continuation lines follow it.
+    let mut keep = false;
+    let mut text = Vec::new();
+    for line in info.lines() {
+        let key = line.trim_start();
+        if key.starts_with("-- Notice:") {
+            continue;
+        }
+        if !in_message {
+            if let Some((field, _)) = key.split_once(':')
+                && !field.is_empty()
+                && field.chars().all(|c| c.is_ascii_alphabetic() || c == ' ')
             {
-                line.truncate(at);
-            } else if key.starts_with("Message:")
-                && let Some(at) = line.find(" of user ")
-            {
-                let digits = line[at + 9..]
-                    .bytes()
-                    .take_while(u8::is_ascii_digit)
-                    .count();
-                if digits > 0 {
-                    line.replace_range(at..at + 9 + digits, "");
-                }
+                in_message = field == "Message";
+                keep = in_message || COREDUMP_FIELDS.contains(&field);
             }
-            redactor.text(&line)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
+            if !keep {
+                continue;
+            }
+        }
+        let mut line = line.to_owned();
+        if key.starts_with("Timestamp:")
+            && line.ends_with(" ago)")
+            && let Some(at) = line.rfind(" (")
+        {
+            line.truncate(at);
+        } else if key.starts_with("Message:")
+            && let Some(at) = line.find(" of user ")
+        {
+            let digits = line[at + 9..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            if digits > 0 {
+                line.replace_range(at..at + 9 + digits, "");
+            }
+        }
+        text.push(redactor.text(&line));
+    }
+    text.join("\n") + "\n"
 }
 
 /// A `linux-crashes/` record's triage entry. The process name comes from
@@ -1151,14 +1162,49 @@ mod linux_tests {
     }
 
     #[test]
-    fn coredump_text_leaves_out_identifying_fields() {
-        let info = "           PID: 4242 (isocastd)\n           UID: 1000 (mat)\n      Hostname: tanner\n    Machine ID: 0123abcd\n       Boot ID: 4567ef01\n        Signal: 6 (ABRT)\n     Executable: /usr/bin/isocastd\n Control Group: /user.slice/user-1000.slice\n          Unit: user@1000.service\n     User Unit: app.slice\n         Slice: user-1000.slice\n       Storage: /var/lib/systemd/coredump/core.isocastd.zst (present)\n     Timestamp: Wed 2026-10-28 20:22:16 CET (6 days ago)\n       Message: Process 4242 (isocastd) of user 1000 dumped core.\n-- Notice: 1 systemd-coredump@.service unit is running, output may be incomplete.\n";
+    fn coredump_text_keeps_only_known_fields_and_the_message() {
+        let info = "\
+           PID: 4242 (isocastd)
+           TID: 4242 (isocastd)
+           UID: 1000 (mat)
+      Hostname: tanner
+    Machine ID: 0123abcd
+       Boot ID: 4567ef01
+        Signal: 6 (ABRT)
+     Timestamp: Wed 2026-10-28 20:22:16 CET (6 days ago)
+  Command Line: /usr/bin/isocastd --flag
+    Executable: /usr/bin/isocastd
+ Control Group: /user.slice/user-1000.slice
+                └─app-isocast.scope
+          Unit: user@1000.service
+     User Unit: app.slice
+         Slice: user-1000.slice
+   Disk Serial: WD-0042
+       Storage: /var/lib/systemd/coredump/core.isocastd.zst (present)
+  Size on Disk: 1.2M
+       Message: Process 4242 (isocastd) of user 1000 dumped core.
+
+                Stack trace of thread 4242:
+                #0  0x00007f23564b6551 abort (libc.so.6 + 0x26551)
+                ELF object binary architecture: AMD x86-64
+-- Notice: 1 systemd-coredump@.service unit is running, output may be incomplete.
+";
         let text = coredump_text(info, &mut Redactor::default());
-        assert!(text.contains("PID: 4242 (isocastd)"));
-        assert!(text.contains("Signal: 6 (ABRT)"));
-        assert!(text.contains("Executable: /usr/bin/isocastd"));
-        assert!(text.contains("Timestamp: Wed 2026-10-28 20:22:16 CET\n"));
-        assert!(text.contains("Message: Process 4242 (isocastd) dumped core."));
+        for kept in [
+            "PID: 4242 (isocastd)\n",
+            "TID: 4242 (isocastd)\n",
+            "Signal: 6 (ABRT)\n",
+            "Timestamp: Wed 2026-10-28 20:22:16 CET\n",
+            "Command Line: /usr/bin/isocastd --flag\n",
+            "Executable: /usr/bin/isocastd\n",
+            "Size on Disk: 1.2M\n",
+            "Message: Process 4242 (isocastd) dumped core.\n",
+            "Stack trace of thread 4242:\n",
+            "#0  0x00007f23564b6551 abort (libc.so.6 + 0x26551)\n",
+            "ELF object binary architecture: AMD x86-64\n",
+        ] {
+            assert!(text.contains(kept), "{kept:?} missing from {text}");
+        }
         for private in [
             "UID:",
             "Hostname:",
@@ -1166,8 +1212,11 @@ mod linux_tests {
             "Machine ID:",
             "Boot ID:",
             "Control Group:",
+            "app-isocast.scope",
             "Unit:",
             "Slice:",
+            "Disk Serial",
+            "WD-0042",
             "Storage:",
             "of user",
             "ago)",

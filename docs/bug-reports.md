@@ -56,7 +56,7 @@ The API methods are `bug_report`, `report_file` and `logs`; MCP exposes
 | `plugins/` | Bounded, redacted current/previous process-plugin output |
 | `metrics.jsonl` | Extracted one-second metric records (also present in logs) |
 | `macos-crashes/` | Up to ten user/system macOS DiagnosticReports whose names identify Isocast |
-| `linux-crashes/` | Up to ten of this user's systemd-coredump records for Isocast executables, as `coredumpctl info` prints them; user, group, host, machine, boot, storage and session-unit lines are left out |
+| `linux-crashes/` | Up to ten of this user's systemd-coredump records for Isocast executables, as `coredumpctl info` prints them; only the process, signal, time, command line, executable, size, package and message lines are kept |
 | `manifests/` | Up to ten recent session manifests in current/recent recording folders; no media |
 | `REDACTION.json` | Redaction categories/counts, privacy policy and files omitted by bounds |
 
