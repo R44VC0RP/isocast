@@ -72,7 +72,10 @@ begin
     Close it immediately: no content is changed. }
   Handle := CreateFile(Path, $C0000000, 0, 0, 3, $80, 0);
   Result := Handle = THandle(-1);
-  if not Result then CloseHandle(Handle);
+  if Result then
+    Log(Format('Cannot open %s exclusively (Win32 error %d)', [Path, DLLGetLastError]))
+  else
+    CloseHandle(Handle);
 end;
 
 function FilesInUse(): Boolean;
@@ -107,6 +110,7 @@ begin
     It refuses busy work, never starts a daemon, and bounds its IPC waits. }
   Result := Exec(Client, 'engine shutdown --json', ExtractFileDir(Client),
     SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+  Log(Format('Idle shutdown: %s, code %d', [Client, Code]));
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -129,16 +133,39 @@ begin
     Result := 'An Isocast executable or DLL is still in use. Close its clients, then retry. Setup never terminates a process.';
 end;
 
+function WaitForClientsToClose(): Boolean;
+var
+  Attempt: Integer;
+begin
+  { A just-finished CLI can still fail the exclusive-open probe with
+    ERROR_SHARING_VIOLATION. Give clients time to release their images;
+    a client that stays open must still block uninstall. }
+  for Attempt := 0 to 20 do begin
+    if Attempt > 0 then Sleep(100);
+    Result := not FileInUse(ExpandConstant('{app}\isocast-ui.exe')) and
+              not FileInUse(ExpandConstant('{app}\isocast.exe'));
+    if Result then Exit;
+  end;
+end;
+
 function InitializeUninstall(): Boolean;
+var
+  Attempt: Integer;
 begin
   { Removing an unused/broken installation must not depend on its CLI still
     being runnable. If no packaged image is in use, no process is affected. }
   Result := not FilesInUse();
   if Result then Exit;
-  if not FileInUse(ExpandConstant('{app}\isocast-ui.exe')) and
-     not FileInUse(ExpandConstant('{app}\isocast.exe')) then
-    if StopIdleDaemon(ExpandConstant('{app}\isocast.exe')) then
-      Result := not FilesInUse();
+  if WaitForClientsToClose() then
+    if StopIdleDaemon(ExpandConstant('{app}\isocast.exe')) then begin
+      { The CLI waits for the IPC endpoint, not for Windows to unmap the
+        process image and its DLLs. Never retry a refused shutdown. }
+      for Attempt := 0 to 50 do begin
+        if Attempt > 0 then Sleep(100);
+        Result := not FilesInUse();
+        if Result then Exit;
+      end;
+    end;
   if not Result then
     SuppressibleMsgBox('Close Isocast and stop all recording, streaming, replay, camera and export work before uninstalling. The engine must accept an idle shutdown. Recordings and settings are kept.', mbError, MB_OK, IDOK);
 end;
