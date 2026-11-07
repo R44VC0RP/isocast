@@ -100,6 +100,37 @@ fn child_entry() {
             assert_eq!(secret(&service, ACCOUNT).unwrap().as_deref(), Some(NEWER));
             assert!(delete_secret(&service, ACCOUNT).unwrap());
         }
+        "locked" => {
+            set_secret(&service, ACCOUNT, VALUE).unwrap();
+            let lock = Command::new("secret-tool")
+                .args([
+                    "lock",
+                    "--collection=/org/freedesktop/secrets/collection/login",
+                ])
+                .status()
+                .expect("secret-tool");
+            assert!(lock.success());
+            let started = Instant::now();
+            assert!(has_secret(&service, ACCOUNT).unwrap(), "seen while locked");
+            let errors = [
+                secret(&service, ACCOUNT).map(drop).unwrap_err(),
+                set_secret(&service, ACCOUNT, NEWER).unwrap_err(),
+                delete_secret(&service, ACCOUNT).map(drop).unwrap_err(),
+            ];
+            let took = started.elapsed();
+            for error in &errors {
+                assert!(
+                    format!("{error:#}").contains("keyring is locked"),
+                    "{error:#}"
+                );
+            }
+            assert!(
+                took < Duration::from_secs(2),
+                "no prompt to wait on: {took:?}"
+            );
+            assert!(files(&config()).is_empty(), "never a file instead");
+            println!("locked keyring: four calls in {took:?}: {:#}", errors[0]);
+        }
         "refused" => {
             let expected = std::env::var("ISOCAST_KEYRING_TEST_EXPECT").unwrap();
             let error = format!("{:#}", set_secret(&service, ACCOUNT, VALUE).unwrap_err());
@@ -282,6 +313,13 @@ fn a_secret_service_that_answers_wrongly_is_an_error() {
     let mut child = scratch.child("refused", Some(WITH_BROKEN_KEYRING), None);
     child.env("ISOCAST_KEYRING_TEST_EXPECT", "keyring:");
     run(child);
+}
+
+#[test]
+#[ignore = "starts dbus-run-session and gnome-keyring-daemon"]
+fn a_locked_keyring_is_an_error_without_a_prompt() {
+    let scratch = Scratch::new("locked");
+    run(scratch.child("locked", Some(WITH_KEYRING), None));
 }
 
 #[test]

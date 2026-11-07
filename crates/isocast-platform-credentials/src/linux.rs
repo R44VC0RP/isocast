@@ -4,7 +4,8 @@
 //! (headless machines, CI, VMs) they are plaintext 0600 files in an
 //! owner-only XDG directory, which processes running as this user can read.
 //! A file is always newer than the keyring's item: a keyring write deletes
-//! it, so reads take the file first.
+//! it, so reads take the file first. Isocast never starts the keyring's
+//! unlock or confirmation prompts: a locked keyring is an error.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -17,10 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
-use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+use zbus::Connection;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
-use zbus::{Connection, MatchRule, MessageStream, message::Type};
 
 const MAX_SECRET: u64 = 64 * 1024;
 /// A writer's temporary file lives for milliseconds; one this old whose
@@ -384,11 +384,8 @@ const SECRETS: &str = "org.freedesktop.secrets";
 const SERVICE: &str = "org.freedesktop.Secret.Service";
 const COLLECTION: &str = "org.freedesktop.Secret.Collection";
 const ITEM: &str = "org.freedesktop.Secret.Item";
-const PROMPT: &str = "org.freedesktop.Secret.Prompt";
 /// Every Secret Service call fails after this long.
 const KEYRING_CALL: Duration = Duration::from_secs(5);
-/// How long an unlock prompt on the desktop waits for the person.
-const KEYRING_PROMPT: Duration = Duration::from_secs(120);
 /// After a time-out, calls fail at once for this long, so stream status,
 /// which checks every destination's key, doesn't wait on each.
 const KEYRING_BACKOFF: Duration = Duration::from_secs(60);
@@ -396,6 +393,20 @@ static TIMED_OUT_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(N
 const TIMED_OUT: &str = "keyring: the session bus or its Secret Service (org.freedesktop.secrets) \
                          did not answer within 5 seconds; restart the desktop keyring, or log out \
                          and in, and retry (Isocast asks it again 60 s after a time-out)";
+
+/// Isocast never starts a Secret Service prompt: the daemon would wait on it
+/// while holding its state lock, as the macOS build never lets the Keychain
+/// ask either.
+const LOCKED: &str = "keyring: the desktop keyring is locked, and Isocast never asks to unlock \
+                      it; unlock it (log in to the desktop session, or unlock it in Passwords \
+                      and Keys, KWallet or KeePassXC) and retry";
+
+fn confirm(action: &str) -> String {
+    format!(
+        "keyring: the Secret Service wants a prompt to confirm this {action}, and Isocast never \
+         shows one; turn that confirmation off in your keyring app and retry"
+    )
+}
 
 fn timed_out_at() -> std::sync::MutexGuard<'static, Option<Instant>> {
     TIMED_OUT_AT
@@ -494,67 +505,27 @@ impl Keyring {
         Ok(Some(Self { conn, session }))
     }
 
-    /// Unlocked items first, then locked ones. Never prompts.
-    async fn search(&self, service: &str, account: &str) -> Result<Vec<OwnedObjectPath>> {
-        let attributes = attributes(service, account);
-        let (mut unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = call!(
+    /// The unlocked items, then the locked ones.
+    async fn search(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
+        call!(
             self,
             "/org/freedesktop/secrets",
             SERVICE,
             "SearchItems",
-            &attributes
-        )?;
-        unlocked.extend(locked);
-        Ok(unlocked)
-    }
-
-    async fn prompt(&self, prompt: &ObjectPath<'_>) -> Result<()> {
-        let rule = MatchRule::builder()
-            .msg_type(Type::Signal)
-            .interface(PROMPT)?
-            .member("Completed")?
-            .path(prompt.as_str())?
-            .build();
-        let mut completed = MessageStream::for_match_rule(rule, &self.conn, Some(4)).await?;
-        let () = call!(self, prompt.as_str(), PROMPT, "Prompt", &"")?;
-        let Ok(signal) = tokio::time::timeout(KEYRING_PROMPT, completed.next()).await else {
-            let _: Result<()> = call!(self, prompt.as_str(), PROMPT, "Dismiss", &());
-            bail!(
-                "keyring: the desktop's unlock prompt was not answered within 2 minutes; unlock \
-                 the keyring and retry"
-            );
-        };
-        let (dismissed, _): (bool, OwnedValue) = signal
-            .context("keyring: the Secret Service closed during its prompt")??
-            .body()
-            .deserialize()?;
-        ensure!(
-            !dismissed,
-            "keyring: the desktop's unlock prompt was dismissed; unlock the keyring and retry"
-        );
-        Ok(())
-    }
-
-    /// An object that is already unlocked comes back with no prompt.
-    async fn unlock(&self, path: &ObjectPath<'_>) -> Result<()> {
-        let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = call!(
-            self,
-            "/org/freedesktop/secrets",
-            SERVICE,
-            "Unlock",
-            &(vec![path],)
-        )?;
-        if !no_path(&prompt) {
-            self.prompt(&prompt).await?;
-        }
-        Ok(())
+            &attributes(service, account)
+        )
     }
 
     async fn read(&self, service: &str, account: &str) -> Result<Option<String>> {
-        let Some(item) = self.search(service, account).await?.into_iter().next() else {
+        let (unlocked, locked) = self.search(service, account).await?;
+        let Some(item) = unlocked.into_iter().next() else {
+            ensure!(locked.is_empty(), LOCKED);
             return Ok(None);
         };
-        self.unlock(&item).await?;
         let (_, _, value, _): (OwnedObjectPath, Vec<u8>, Vec<u8>, String) =
             call!(self, item.as_str(), ITEM, "GetSecret", &(&self.session,))?;
         String::from_utf8(value).map(Some).with_context(|| {
@@ -619,28 +590,31 @@ impl Keyring {
             // true: replace an item with the same attributes.
             &(properties, secret, true)
         )?;
-        if !no_path(&prompt) {
-            self.prompt(&prompt).await?;
-        }
+        ensure!(no_path(&prompt), confirm("write"));
         Ok(())
     }
 
     async fn store(&self, service: &str, account: &str, value: &str) -> Result<()> {
         let collection = self.collection().await?;
-        self.unlock(&collection).await?;
+        let locked: OwnedValue = call!(
+            self,
+            collection.as_str(),
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            &(COLLECTION, "Locked")
+        )?;
+        ensure!(!bool::try_from(locked)?, LOCKED);
         self.create(&collection, service, account, value).await
     }
 
     async fn delete(&self, service: &str, account: &str) -> Result<bool> {
-        let items = self.search(service, account).await?;
-        for item in &items {
-            self.unlock(item).await?;
+        let (unlocked, locked) = self.search(service, account).await?;
+        ensure!(locked.is_empty(), LOCKED);
+        for item in &unlocked {
             let prompt: OwnedObjectPath = call!(self, item.as_str(), ITEM, "Delete", &())?;
-            if !no_path(&prompt) {
-                self.prompt(&prompt).await?;
-            }
+            ensure!(no_path(&prompt), confirm("delete"));
         }
-        Ok(!items.is_empty())
+        Ok(!unlocked.is_empty())
     }
 }
 
@@ -696,13 +670,15 @@ pub fn secret(service: &str, account: &str) -> Result<Option<String>> {
     Ok(with_keyring(async |keyring| keyring.read(service, account).await)?.flatten())
 }
 
-/// Never prompts, even for a locked keyring.
+/// True for an item in a locked keyring too.
 pub fn has_secret(service: &str, account: &str) -> Result<bool> {
     if file_secret(service, account)?.is_some() {
         return Ok(true);
     }
-    let kept =
-        with_keyring(async |keyring| Ok(!keyring.search(service, account).await?.is_empty()))?;
+    let kept = with_keyring(async |keyring| {
+        let (unlocked, locked) = keyring.search(service, account).await?;
+        Ok(!unlocked.is_empty() || !locked.is_empty())
+    })?;
     Ok(kept == Some(true))
 }
 
