@@ -16,5 +16,9 @@ security-framework = "3.7.0"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+futures-util = "0.3"
 libc = "0.2"
 sha2 = "0.10.9"
+# The desktop keyring through the Secret Service D-Bus API (pure Rust).
+tokio = { version = "1", features = ["rt", "time"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
