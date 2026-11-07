@@ -1180,11 +1180,11 @@ impl Daemon {
                          stayed behind"
                             .into(),
                     ),
-                    (Some(_), None) => notes.push(
+                    (Some(_), None) => notes.push(format!(
                         "stream_key: OBS keeps no stream key in this profile's service.json \
-                         (or keeps it in the Keychain), so set it with `isocast stream key set`"
-                            .into(),
-                    ),
+                         (or keeps it in the {}), so set it with `isocast stream key set`",
+                        isocast_protocol::platform_text::CREDENTIAL_STORE
+                    )),
                 }
             }
             if let Some(name) = &params.name {
@@ -1220,13 +1220,15 @@ impl Daemon {
                         .notes
                         .retain(|n| !n.contains("its stream key stays in OBS"));
                     change.notes.push(format!(
-                        "moved the stream key from OBS's service.json to the Keychain (account \
+                        "moved the stream key from OBS's service.json to the {} (account \
                      {:?}); OBS's copy is untouched",
+                        isocast_protocol::platform_text::CREDENTIAL_STORE,
                         stored.account
                     ))
                 }
                 Err(err) => change.notes.push(format!(
-                    "imported, but the stream key couldn't be kept in the Keychain: {}",
+                    "imported, but the stream key couldn't be kept in the {}: {}",
+                    isocast_protocol::platform_text::CREDENTIAL_STORE,
                     err.message
                 )),
             }

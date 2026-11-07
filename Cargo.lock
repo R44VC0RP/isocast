@@ -4293,7 +4293,9 @@ dependencies = [
  "libc",
  "security-framework",
  "sha2",
+ "tokio",
  "windows",
+ "zbus",
 ]
 
 [[package]]

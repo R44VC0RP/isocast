@@ -333,7 +333,7 @@ jobs:
         timeout-minutes: 20
         run: |
           # Ubuntu 24.04's PipeWire 1.0.5 supplies pw_buffer.time; this also installs libspa-0.2-dev.
-          .github/scripts/apt-install.sh build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev avahi-daemon dbus libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+          .github/scripts/apt-install.sh build-essential pkg-config libssl-dev libvulkan1 mesa-vulkan-drivers ffmpeg nasm cmake clang libclang-dev avahi-daemon dbus gnome-keyring libsecret-tools dbus-tests libglib2.0-bin libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
           sudo systemctl start avahi-daemon
           mkdir -m 700 "$XDG_RUNTIME_DIR"
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
@@ -401,6 +401,7 @@ jobs:
         run: |
           cargo clippy --release --locked --all-targets -p isocast-media -p isocast-media-protocol -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials -p isocast-daemon -- -D warnings
           cargo test --release --locked -p pipewire-sys -p isocast-media -p isocast-media-protocol -p isocast-openh264 -p isocast-platform-linux -p isocast-platform-credentials
+          cargo test --release --locked -p isocast-platform-credentials --test keyring -- --include-ignored --test-threads=1
           # The client's own tests on Linux too (the daemon's local and remote transports).
           cargo test --release --locked -p isocast-client
           cargo test --release --locked -p isocast-discovery
