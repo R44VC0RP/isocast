@@ -1650,6 +1650,7 @@ jobs:
           ./scripts/windows/package.ps1 -BinDir target/debug -OutputDir "$env:RUNNER_TEMP/windows-package" -ToolsDir "$env:RUNNER_TEMP/package-tools" -CrtDir $crt.FullName
 
       - name: Install and uninstall without deleting user files
+        id: lifecycle
         timeout-minutes: 5
         shell: pwsh
         run: |
@@ -1682,13 +1683,24 @@ jobs:
           New-Item -ItemType Directory -Force "$install\recordings", "$env:LOCALAPPDATA\Isocast" | Out-Null
           'keep recording' | Set-Content "$install\recordings\keep.mp4"
           'keep settings' | Set-Content "$env:LOCALAPPDATA\Isocast\packaging-sentinel"
-          $process = Start-Process "$install\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          $log = "$env:RUNNER_TEMP\isocast-uninstall.log"
+          $process = Start-Process "$install\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="{0}"' -f $log) -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Uninstall failed: $($process.ExitCode)" }
           if (-not $daemon.WaitForExit(5000)) { throw 'Uninstall did not stop the installed daemon' }
           $daemon.Dispose()
           if (Test-Path "$install\isocast.exe") { throw 'Executable remains after uninstall' }
           if ((Get-Content "$install\recordings\keep.mp4") -ne 'keep recording') { throw 'Recording removed or changed' }
           if ((Get-Content "$env:LOCALAPPDATA\Isocast\packaging-sentinel") -ne 'keep settings') { throw 'Settings removed or changed' }
+
+      - name: Keep uninstall diagnostics
+        if: failure() && steps.lifecycle.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-uninstall-log
+          path: |
+            ${{ runner.temp }}/isocast-uninstall.log
+            ${{ runner.temp }}/installed-isocastd.err
+          retention-days: 14
 
       - name: Keep unsigned installer and exact payload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
