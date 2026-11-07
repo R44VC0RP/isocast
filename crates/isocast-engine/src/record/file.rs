@@ -679,7 +679,7 @@ impl<W: FileWriter> OpenFile<W> {
         let intentional_before = self.writer.intentional_video_drops();
         let appended = match frame {
             Some(frame) => self.writer.append_video(frame, pts),
-            None => self.writer.skip_video().map(|()| false),
+            None => self.writer.skip_video(pts).map(|()| false),
         };
         if let Some(at) = submit {
             self.trace.frame(
@@ -1220,12 +1220,15 @@ mod tests {
                 .unwrap();
             let (_, ack) = clock.recovery.part_commits.lock().pop().unwrap();
             assert_eq!(context.plan.parts.lock()[1].offset, 3.0);
+            if outcome != "commit" {
+                pending.refused_picture(cut.add_ticks(1, 30));
+            }
             // Two whole seconds of PCM callbacks can come and go while the
             // coordinator still owns the sender. No callback waits for it.
             for ms in (0..2000).step_by(10) {
                 assert!(
                     !pending
-                        .poll_ack(2, at(20) + Duration::from_millis(ms))
+                        .poll_ack(2, at(20) + Duration::from_millis(ms), None)
                         .unwrap()
                 );
             }
@@ -1238,7 +1241,7 @@ mod tests {
             if outcome == "stop" {
                 clock.recovery.stop_at(now);
             }
-            let result = pending.poll_ack(2, now);
+            let result = pending.poll_ack(2, now, None);
             if outcome == "commit" {
                 assert!(result.as_ref().is_ok_and(|r| *r));
                 pending.writing();
@@ -1252,6 +1255,7 @@ mod tests {
                 drop(pending);
             }
             let snapshot = clock.recovery.snapshot(&clock.state.read(), epoch, now);
+            assert_eq!(snapshot.incidents.len(), 1); // no extra loss on a cancelled handoff or an immediate commit
             let r = snapshot.incidents[0].rollover.as_ref().unwrap();
             assert_eq!(r.take_offset_ns, 3_000_000_000);
             if outcome == "commit" {
@@ -1280,6 +1284,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rollover_refusals_are_a_separate_interval_on_the_saved_picture_grid() {
+        check_rollover_refusal_interval(false);
+    }
+
+    #[test]
+    fn skipped_ticks_bound_both_ends_of_the_rollover_wait() {
+        check_rollover_refusal_interval(true);
+    }
+
+    fn check_rollover_refusal_interval(skipped_edges: bool) {
+        use super::super::recovery::{OutputRecovery, ReservedMovie};
+        use isocast_protocol::manifest::VideoFaultKind;
+        let epoch = Time::from_nanos(123_456_789);
+        let at = |n| epoch.add_ticks(n, 30);
+        let clock = Arc::new(RecordingClock::new(epoch, [30].into_iter()));
+        let ctx = OutputRecovery {
+            clock: clock.clone(),
+            plan: plan("bars", epoch),
+        };
+        ctx.plan.start.store(epoch.as_nanos(), Ordering::Release);
+        clock.change(true, at(15), None).unwrap();
+        clock.change(false, at(45), None).unwrap();
+        let id = ctx.interrupted(at(39), at(70), "codec failed").unwrap();
+        let ticket = ctx.attempt(id, at(70)).unwrap();
+        let mut part = ctx
+            .reserve_part(
+                ticket,
+                ReservedMovie {
+                    path: "bars.part002.mov".into(),
+                    identity: "owned".into(),
+                },
+                at(41),
+                at(71),
+                "native".into(),
+                None,
+            )
+            .unwrap();
+        // 41 is the retained IDR. 42 was in the encoder FIFO already.
+        if skipped_edges {
+            assert!(!part.poll_ack(2, at(73), Some(at(43))).unwrap());
+        }
+        for slot in if skipped_edges { 44..66 } else { 43..67 } {
+            part.refused_picture(at(slot));
+        }
+        let (_, reply) = clock.recovery.part_commits.lock().pop().unwrap();
+        reply.send(Ok(())).unwrap();
+        // The last skipped tick can be the very callback that consumes the ack.
+        assert!(
+            part.poll_ack(2, at(97), skipped_edges.then(|| at(66)))
+                .unwrap()
+        );
+        part.writing();
+        ctx.resumed(ticket, at(41), at(97), "native", false);
+        part.committed();
+        let snap = clock.recovery.snapshot(&clock.state.read(), epoch, at(120));
+        let [codec, wait] = snap.incidents.as_slice() else {
+            panic!("expected two disjoint intervals")
+        };
+        assert_eq!(
+            (
+                codec.first_lost_slot,
+                codec.end_slot_exclusive,
+                codec.lost_slots
+            ),
+            (39, 41, 2)
+        );
+        assert_eq!(
+            (
+                wait.first_lost_slot,
+                wait.end_slot_exclusive,
+                wait.lost_slots
+            ),
+            (43, 67, 24)
+        );
+        assert_eq!(wait.fault_kind, VideoFaultKind::RolloverAckWait);
+        assert!(wait.rollover.is_none() && wait.attempts_started == 0);
+        assert_ne!(
+            ctx.interrupted(at(68), at(99), "new fault"),
+            Some(wait.incident_id)
+        );
     }
 
     #[test]

@@ -1201,7 +1201,11 @@ fn recovery_check(
     use isocast_protocol::api::{Check, CheckStatus};
     use isocast_protocol::manifest::{VideoFaultKind, VideoRecoveryScope};
     use serde_json::json;
-    let last = recovery.incidents.last();
+    let last = recovery
+        .incidents
+        .iter()
+        .rev()
+        .find(|e| e.fault_kind != VideoFaultKind::RolloverAckWait);
     let mut detail = match last {
         Some(e) => format!(
             "{which} take: {} incident(s); scope={}, owner_id={:?}, state={}, fault_kind={}; slots [{}, {}) at {} fps ({} unavailable): {}",
@@ -1216,6 +1220,9 @@ fn recovery_check(
             e.lost_slots,
             e.reason
         ),
+        None if !recovery.incidents.is_empty() => {
+            format!("{which} take: no primary video incident retained for this take")
+        }
         None if recovery.history_limited => {
             format!("{which} take: no detailed incident retained for this take")
         }
@@ -1239,7 +1246,7 @@ fn recovery_check(
                 "Inspect the incident in the take manifest with a matching engine version."
             }
         }),
-        None if recovery.history_limited => {
+        None if recovery.history_limited || !recovery.incidents.is_empty() => {
             Some("Inspect the capture and writer errors in the take manifest.")
         }
         None => None,
@@ -6428,6 +6435,57 @@ mod tests {
         let mut unexplained = status(0);
         unexplained.video_recovery = None;
         assert_eq!(overloaded_files(&unexplained, &[])[0].output, "camera");
+    }
+
+    #[test]
+    fn doctor_headlines_the_latest_primary_incident_not_its_rollover_wait() {
+        use isocast_protocol::manifest::{
+            VideoFaultKind, VideoIncident, VideoRecovery, VideoRecoveryScope, VideoRecoveryState,
+        };
+        let fault = VideoIncident {
+            incident_id: 2,
+            scope: VideoRecoveryScope::Output,
+            owner_id: "bars".into(),
+            state: VideoRecoveryState::Resumed,
+            fault_kind: VideoFaultKind::EncoderFailed,
+            attempts_started: 1,
+            reason: "replacement changed profile".into(),
+            fps: 12,
+            first_lost_slot: 39,
+            end_slot_exclusive: 41,
+            lost_slots: 2,
+            rollover: None,
+        };
+        let older = VideoIncident {
+            incident_id: 1,
+            owner_id: "older".into(),
+            fault_kind: VideoFaultKind::WriterFailed,
+            reason: "previous writer failure".into(),
+            ..fault.clone()
+        };
+        let wait = VideoIncident {
+            incident_id: 3,
+            fault_kind: VideoFaultKind::RolloverAckWait,
+            reason: "manifest acknowledgment".into(),
+            first_lost_slot: 42,
+            end_slot_exclusive: 66,
+            lost_slots: 24,
+            ..fault.clone()
+        };
+        let recovery = VideoRecovery {
+            incident_count: 3,
+            incidents: vec![older, fault, wait],
+            history_limited: false,
+        };
+        let check = recovery_check("last finished", &recovery);
+        assert!(
+            check.detail.contains("encoder_failed")
+                && check.detail.contains("replacement changed profile")
+                && check.detail.contains("[39, 41)"),
+            "{}",
+            check.detail
+        );
+        assert_eq!(check.status, isocast_protocol::api::CheckStatus::Warning);
     }
 
     #[test]

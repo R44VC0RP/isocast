@@ -70,6 +70,8 @@ pub enum VideoFaultKind {
     WriterFailed,
     EncoderFailed,
     StorageFailed,
+    // The writer refused pictures while waiting for a rollover manifest checkpoint.
+    RolloverAckWait,
     DeviceLost,
     #[serde(other)]
     Unknown,
@@ -92,8 +94,9 @@ pub struct VideoIncident {
     /// Exclusive, through the snapshot or Stop if still unavailable.
     pub end_slot_exclusive: u64,
     /// Slots of observed unavailability, not a count of missing native samples.
-    /// For an output that ended early, these slots overlap the tail counted in
-    /// that file's `dropped_frames`. Do not add the two counts.
+    /// For an output, both resumed gaps (including rollover acknowledgment waits)
+    /// and ended-early tails are included in the affected file's `dropped_frames`.
+    /// Do not add the two counts.
     pub lost_slots: u64,
     /// Present only for a change of physical file within this logical output.
     #[serde(default, skip_serializing_if = "Option::is_none")]

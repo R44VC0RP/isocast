@@ -399,7 +399,7 @@ impl FileWriter for AssetWriter {
         autoreleasepool(|_| self.append_frame(frame, pts))
     }
 
-    fn skip_video(&mut self) -> Result<()> {
+    fn skip_video(&mut self, _pts: Time) -> Result<()> {
         autoreleasepool(|_| self.drain_ready())
     }
 
