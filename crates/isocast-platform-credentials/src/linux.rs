@@ -411,15 +411,20 @@ fn timed_out(error: &anyhow::Error) -> bool {
     })
 }
 
-// Keep the wire types visible at each call, without serde bounds, as the
-// Avahi client in isocast-discovery does.
+/// Calls a Secret Service method and decodes its reply into the type the
+/// caller binds it to.
 macro_rules! call {
     ($keyring:expr, $path:expr, $interface:expr, $method:expr, $body:expr) => {
-        $keyring
-            .conn
-            .call_method(Some(SECRETS), $path, Some($interface), $method, $body)
-            .await
-            .with_context(|| format!("keyring: {}.{} failed", $interface, $method))
+        async {
+            $keyring
+                .conn
+                .call_method(Some(SECRETS), $path, Some($interface), $method, $body)
+                .await?
+                .body()
+                .deserialize()
+        }
+        .await
+        .with_context(|| format!("keyring: {}.{} failed", $interface, $method))
     };
 }
 
@@ -436,12 +441,29 @@ struct Keyring {
 }
 
 impl Keyring {
-    async fn open() -> Result<Self> {
-        let conn = zbus::connection::Builder::session()?
-            .method_timeout(KEYRING_CALL)
-            .build()
-            .await?;
-        let (_, session): (OwnedValue, OwnedObjectPath) = conn
+    /// None when there is no session bus, or no Secret Service on it.
+    async fn open() -> Result<Option<Self>> {
+        let conn = match async {
+            zbus::connection::Builder::session()?
+                .method_timeout(KEYRING_CALL)
+                .build()
+                .await
+        }
+        .await
+        {
+            Ok(conn) => conn,
+            Err(zbus::Error::Address(_)) => return Ok(None),
+            Err(zbus::Error::Connection(io, _))
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error).context("keyring: cannot connect to the session bus"),
+        };
+        let reply = conn
             .call_method(
                 Some(SECRETS),
                 "/org/freedesktop/secrets",
@@ -449,10 +471,22 @@ impl Keyring {
                 "OpenSession",
                 &("plain", Value::from("")),
             )
-            .await?
-            .body()
-            .deserialize()?;
-        Ok(Self { conn, session })
+            .await;
+        let (_, session): (OwnedValue, OwnedObjectPath) = match reply {
+            Err(zbus::Error::MethodError(name, ..))
+                if [
+                    "org.freedesktop.DBus.Error.ServiceUnknown",
+                    "org.freedesktop.DBus.Error.NameHasNoOwner",
+                ]
+                .contains(&name.as_str()) =>
+            {
+                return Ok(None);
+            }
+            reply => reply
+                .and_then(|reply| reply.body().deserialize())
+                .with_context(|| format!("keyring: {SERVICE}.OpenSession failed"))?,
+        };
+        Ok(Some(Self { conn, session }))
     }
 
     /// Unlocked items first, then locked ones. Never prompts.
@@ -464,9 +498,7 @@ impl Keyring {
             SERVICE,
             "SearchItems",
             &attributes
-        )?
-        .body()
-        .deserialize()?;
+        )?;
         unlocked.extend(locked);
         Ok(unlocked)
     }
@@ -479,9 +511,9 @@ impl Keyring {
             .path(prompt.as_str())?
             .build();
         let mut completed = MessageStream::for_match_rule(rule, &self.conn, Some(4)).await?;
-        call!(self, prompt.as_str(), PROMPT, "Prompt", &"")?;
+        let () = call!(self, prompt.as_str(), PROMPT, "Prompt", &"")?;
         let Ok(signal) = tokio::time::timeout(KEYRING_PROMPT, completed.next()).await else {
-            let _ = call!(self, prompt.as_str(), PROMPT, "Dismiss", &());
+            let _: Result<()> = call!(self, prompt.as_str(), PROMPT, "Dismiss", &());
             bail!(
                 "keyring: the desktop's unlock prompt was not answered within 2 minutes; unlock \
                  the keyring and retry"
@@ -506,9 +538,7 @@ impl Keyring {
             SERVICE,
             "Unlock",
             &(vec![path],)
-        )?
-        .body()
-        .deserialize()?;
+        )?;
         if !no_path(&prompt) {
             self.prompt(&prompt).await?;
         }
@@ -521,9 +551,7 @@ impl Keyring {
         };
         self.unlock(&item).await?;
         let (_, _, value, _): (OwnedObjectPath, Vec<u8>, Vec<u8>, String) =
-            call!(self, item.as_str(), ITEM, "GetSecret", &(&self.session,))?
-                .body()
-                .deserialize()?;
+            call!(self, item.as_str(), ITEM, "GetSecret", &(&self.session,))?;
         String::from_utf8(value).map(Some).with_context(|| {
             format!(
                 "keyring: the item for {service} ({account}) is not text; delete it with \
@@ -533,17 +561,25 @@ impl Keyring {
         })
     }
 
-    async fn collection(&self) -> Result<Option<OwnedObjectPath>> {
-        let path: OwnedObjectPath = call!(
-            self,
-            "/org/freedesktop/secrets",
-            SERVICE,
-            "ReadAlias",
-            &"default"
-        )?
-        .body()
-        .deserialize()?;
-        Ok((!no_path(&path)).then_some(path))
+    /// The collection behind the `default` alias, else `login`.
+    async fn collection(&self) -> Result<OwnedObjectPath> {
+        for alias in ["default", "login"] {
+            let path: OwnedObjectPath = call!(
+                self,
+                "/org/freedesktop/secrets",
+                SERVICE,
+                "ReadAlias",
+                &alias
+            )?;
+            if !no_path(&path) {
+                return Ok(path);
+            }
+        }
+        bail!(
+            "keyring: the Secret Service has no default keyring (no \"default\" or \"login\" \
+             alias); create one in your keyring app (Passwords and Keys, KWallet, KeePassXC) \
+             and retry"
+        )
     }
 
     async fn create(
@@ -577,32 +613,24 @@ impl Keyring {
             "CreateItem",
             // true: replace an item with the same attributes.
             &(properties, secret, true)
-        )?
-        .body()
-        .deserialize()?;
+        )?;
         if !no_path(&prompt) {
             self.prompt(&prompt).await?;
         }
         Ok(())
     }
 
-    /// False when the keyring has no default collection.
-    async fn store(&self, service: &str, account: &str, value: &str) -> Result<bool> {
-        let Some(collection) = self.collection().await? else {
-            return Ok(false);
-        };
+    async fn store(&self, service: &str, account: &str, value: &str) -> Result<()> {
+        let collection = self.collection().await?;
         self.unlock(&collection).await?;
-        self.create(&collection, service, account, value).await?;
-        Ok(true)
+        self.create(&collection, service, account, value).await
     }
 
     async fn delete(&self, service: &str, account: &str) -> Result<bool> {
         let items = self.search(service, account).await?;
         for item in &items {
             self.unlock(item).await?;
-            let prompt: OwnedObjectPath = call!(self, item.as_str(), ITEM, "Delete", &())?
-                .body()
-                .deserialize()?;
+            let prompt: OwnedObjectPath = call!(self, item.as_str(), ITEM, "Delete", &())?;
             if !no_path(&prompt) {
                 self.prompt(&prompt).await?;
             }
@@ -620,8 +648,9 @@ fn attributes<'a>(service: &'a str, account: &'a str) -> HashMap<&'a str, &'a st
 }
 
 /// Runs `f` against the desktop keyring, on its own thread and runtime since
-/// callers may already be on one. None when no Secret Service is on the
-/// session bus; callers then use the files.
+/// callers may already be on one. None when there is no session bus or no
+/// Secret Service on it; callers then use the files. Any other failure is an
+/// error, never a file write.
 fn with_keyring<T: Send>(f: impl AsyncFnOnce(&Keyring) -> Result<T> + Send) -> Result<Option<T>> {
     if timed_out_at().is_some_and(|at| at.elapsed() < KEYRING_BACKOFF) {
         bail!(TIMED_OUT);
@@ -634,10 +663,9 @@ fn with_keyring<T: Send>(f: impl AsyncFnOnce(&Keyring) -> Result<T> + Send) -> R
                     .build()
                     .context("keyring: cannot start its D-Bus runtime")?;
                 let result = runtime.block_on(async {
-                    match Keyring::open().await {
-                        Ok(keyring) => f(&keyring).await.map(Some),
-                        Err(error) if timed_out(&error) => Err(error),
-                        Err(_) => Ok(None),
+                    match Keyring::open().await? {
+                        Some(keyring) => f(&keyring).await.map(Some),
+                        None => Ok(None),
                     }
                 });
                 // Also cancels zbus's socket tasks.
@@ -678,12 +706,11 @@ pub fn set_secret(service: &str, account: &str, value: &str) -> Result<()> {
         value.len() as u64 <= MAX_SECRET,
         "secret store: value for {service} ({account}) exceeds 64 KiB; store a smaller secret"
     );
-    if with_keyring(async |keyring| keyring.store(service, account, value).await)? == Some(true) {
+    match with_keyring(async |keyring| keyring.store(service, account, value).await)? {
         // Reads take a file first, so an older one must go.
-        file_delete(service, account)?;
-        return Ok(());
+        Some(()) => file_delete(service, account).map(drop),
+        None => file_set(service, account, value),
     }
-    file_set(service, account, value)
 }
 
 pub fn delete_secret(service: &str, account: &str) -> Result<bool> {

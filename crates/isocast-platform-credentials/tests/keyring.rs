@@ -100,6 +100,13 @@ fn child_entry() {
             assert_eq!(secret(&service, ACCOUNT).unwrap().as_deref(), Some(NEWER));
             assert!(delete_secret(&service, ACCOUNT).unwrap());
         }
+        "refused" => {
+            let expected = std::env::var("ISOCAST_KEYRING_TEST_EXPECT").unwrap();
+            let error = format!("{:#}", set_secret(&service, ACCOUNT, VALUE).unwrap_err());
+            assert!(error.contains(&expected), "{error}");
+            assert!(files(&config()).is_empty(), "never a file instead");
+            println!("refused: {error}");
+        }
         "hung" => {
             let started = Instant::now();
             let error = format!("{:#}", has_secret(&service, ACCOUNT).unwrap_err());
@@ -142,10 +149,30 @@ impl Scratch {
     /// A command that runs `role` in the child, with this scratch as its
     /// world. `wrap` is a shell line that ends by running "$@".
     fn child(&self, role: &str, wrap: Option<&str>, bus: Option<&str>) -> Command {
+        self.child_on(role, wrap.map(|line| (line, None)), bus)
+    }
+
+    /// Like `child`, on a private bus that starts no services on demand, so
+    /// an installed keyring daemon is never activated.
+    fn child_without_activation(&self, role: &str, wrap: &str) -> Command {
+        let config = self.0.join("bus.conf");
+        std::fs::write(&config, BUS_WITHOUT_ACTIVATION).unwrap();
+        self.child_on(role, Some((wrap, Some(config))), None)
+    }
+
+    fn child_on(
+        &self,
+        role: &str,
+        wrap: Option<(&str, Option<PathBuf>)>,
+        bus: Option<&str>,
+    ) -> Command {
         let exe = std::env::current_exe().unwrap();
         let mut command = match wrap {
-            Some(line) => {
+            Some((line, config)) => {
                 let mut c = Command::new("dbus-run-session");
+                if let Some(config) = config {
+                    c.arg("--config-file").arg(config);
+                }
                 c.args(["--", "sh", "-c", line, "sh"]).arg(&exe);
                 c
             }
@@ -191,14 +218,70 @@ fn run(mut command: Command) {
 /// A throwaway keyring on the private bus, unlocked with a fixed password.
 const WITH_KEYRING: &str = "printf test | gnome-keyring-daemon --unlock --components=secrets \
                             >/dev/null && exec \"$@\"";
+/// A session bus with no service directories.
+const BUS_WITHOUT_ACTIVATION: &str = r#"<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+"#;
+/// Waits for the Secret Service's name on the private bus, then runs "$@".
+macro_rules! then_run {
+    () => {
+        " gdbus wait --session --timeout 5 org.freedesktop.secrets && exec \"$@\""
+    };
+}
 /// A name owner on the private bus that takes every call and never answers.
-const WITH_HUNG_KEYRING: &str = "dbus-test-tool black-hole --session \
-                                 --name=org.freedesktop.secrets & sleep 0.5; exec \"$@\"";
+const WITH_HUNG_KEYRING: &str = concat!(
+    "dbus-test-tool black-hole --session --name=org.freedesktop.secrets &",
+    then_run!()
+);
+/// A name owner that answers every call with an empty reply.
+const WITH_BROKEN_KEYRING: &str = concat!(
+    "dbus-test-tool echo --session --name=org.freedesktop.secrets &",
+    then_run!()
+);
+/// A keyring with only its in-memory "session" collection: no "default" or
+/// "login" alias.
+const WITH_EMPTY_KEYRING: &str = concat!(
+    "gnome-keyring-daemon --start --components=secrets >/dev/null &&",
+    then_run!()
+);
 
 #[test]
 fn without_a_session_bus_secrets_are_owner_only_files() {
     let scratch = Scratch::new("files");
     run(scratch.child("files", None, Some("unix:path=/nonexistent")));
+}
+
+#[test]
+#[ignore = "starts dbus-run-session"]
+fn with_a_bus_but_no_secret_service_secrets_are_files() {
+    let scratch = Scratch::new("no-service");
+    run(scratch.child_without_activation("files", "exec \"$@\""));
+}
+
+#[test]
+#[ignore = "starts dbus-run-session and gnome-keyring-daemon"]
+fn a_keyring_without_a_default_collection_is_an_error() {
+    let scratch = Scratch::new("no-default");
+    let mut child = scratch.child("refused", Some(WITH_EMPTY_KEYRING), None);
+    child.env("ISOCAST_KEYRING_TEST_EXPECT", "has no default keyring");
+    run(child);
+}
+
+#[test]
+#[ignore = "starts dbus-run-session and dbus-test-tool"]
+fn a_secret_service_that_answers_wrongly_is_an_error() {
+    let scratch = Scratch::new("broken");
+    let mut child = scratch.child("refused", Some(WITH_BROKEN_KEYRING), None);
+    child.env("ISOCAST_KEYRING_TEST_EXPECT", "keyring:");
+    run(child);
 }
 
 #[test]
