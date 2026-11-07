@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use isocast_engine::MediaReader as _;
-
 use super::*;
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();

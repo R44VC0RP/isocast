@@ -5458,7 +5458,7 @@ def scenario_linux_media_faults(e, cfg, evidence):
                     try:
                         fd = os.pidfd_open(int(pid))
                         argv = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
-                        if argv[1:] == [b'media-v2', b'video', b'']:
+                        if argv[1:] == [b'media-v3', b'video', str(e.process.pid).encode(), b'']:
                             signal.pidfd_send_signal(fd, sig)
                             return pid
                     except (FileNotFoundError, ProcessLookupError):

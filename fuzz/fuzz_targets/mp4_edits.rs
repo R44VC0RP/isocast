@@ -5,10 +5,11 @@
 
 use std::io::Cursor;
 
-use isocast_protocol::mp4_edits::{parse_moov, read_from};
+use isocast_protocol::mp4_edits::{movie_duration, parse_moov, read_from};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {
     let _ = parse_moov(bytes);
     let _ = read_from(&mut Cursor::new(bytes));
+    let _ = movie_duration(&mut Cursor::new(bytes));
 });

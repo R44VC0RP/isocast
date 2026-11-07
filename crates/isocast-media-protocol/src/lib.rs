@@ -1,14 +1,46 @@
-//! Private file-reader wire. The opening argv selects the version and operation.
+//! Private file-reader wire. The opening argv supplies version, operation and parent PID.
 //! INIT means the plugin registry is ready. Then stdin carries a PATH (raw Unix
 //! bytes) for file operations and a NEXT per requested sample after REDY.
 //! Like the browser helper, every record has a four-byte tag and a u32 LE size.
 //! Unlike a live page, media has file timestamps and an explicit END. EOF is an error.
 
 use std::io::{self, Read, Write};
+use std::time::Duration;
 
-pub const VERSION: &str = "media-v2";
+pub const VERSION: &str = "media-v3";
 pub const MAX_TEXT: usize = 64 * 1024;
 const MAX_AUDIO: usize = 16 * 1024 * 1024;
+
+/// Audio inside the engine is 48 kHz, 32-bit float, interleaved.
+pub const SAMPLE_RATE: u32 = 48_000;
+
+/// Which part of a media file a reader decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaPart {
+    Video,
+    Audio,
+}
+
+/// What a media file holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MediaInfo {
+    /// Width and height of its picture, if it has one.
+    pub video: Option<(u32, u32)>,
+    pub audio: bool,
+    pub duration: Duration,
+}
+
+/// Decodes one part of a media file, from its start, as fast as asked.
+pub trait MediaReader: Send {
+    type Frame;
+
+    /// The next frame and its time from the start of the file; `None` at the end.
+    fn next_video(&mut self) -> anyhow::Result<Option<(Self::Frame, Duration)>>;
+
+    /// Interleaved stereo at [`SAMPLE_RATE`] and the time of its first sample;
+    /// `None` at the end.
+    fn next_audio(&mut self) -> anyhow::Result<Option<(Vec<f32>, Duration)>>;
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Header {

@@ -45,6 +45,28 @@ pub fn read(path: &Path) -> Option<Edits> {
 
 /// The same, from any seekable bytes.
 pub fn read_from<R: Read + Seek>(file: &mut R) -> Option<Edits> {
+    parse_moov(&read_moov(file)?)
+}
+
+/// Duration published in a finalized MOV/MP4 movie header. A fragment's
+/// zero/unknown placeholder does not describe how much media made it to disk.
+pub fn movie_duration(file: &mut (impl Read + Seek)) -> Option<Duration> {
+    let moov = read_moov(file)?;
+    let header = child(&moov, b"mvhd")?;
+    let scale = timescale(header)?;
+    let ticks = match header[0] {
+        0 => u64::from(be_u32(header, 16).filter(|&n| n != u32::MAX)?),
+        1 => be_u64(header, 24).filter(|&n| n != u64::MAX)?,
+        _ => return None,
+    };
+    if ticks == 0 {
+        None
+    } else {
+        seconds(ticks, scale)
+    }
+}
+
+fn read_moov(file: &mut (impl Read + Seek)) -> Option<Vec<u8>> {
     let length = file.seek(SeekFrom::End(0)).ok()?;
     let mut at = 0u64;
     for index in 0..MAX_TOP_BOXES {
@@ -81,7 +103,7 @@ pub fn read_from<R: Read + Seek>(file: &mut R) -> Option<Edits> {
             }
             let mut moov = vec![0; usize::try_from(body).ok()?];
             file.read_exact(&mut moov).ok()?;
-            return parse_moov(&moov);
+            return Some(moov);
         }
         at += size;
     }
@@ -234,6 +256,41 @@ pub(crate) mod tests {
         let mut body = vec![0; 20];
         body[12..16].copy_from_slice(&scale.to_be_bytes());
         body
+    }
+
+    #[test]
+    fn finalized_duration_uses_movie_timescale_for_both_header_versions() {
+        let mut v0 = timed(600);
+        v0[16..20].copy_from_slice(&900u32.to_be_bytes());
+        let mut v1 = vec![0; 32];
+        v1[0] = 1;
+        v1[20..24].copy_from_slice(&1_000_000_000u32.to_be_bytes());
+        v1[24..32].copy_from_slice(&6_500_000_001u64.to_be_bytes());
+        for (header, expected) in [(v0, 1_500_000_000), (v1, 6_500_000_001)] {
+            let mut bytes = bx(b"mdat", &[0; 32]);
+            bytes.extend(bx(b"moov", &bx(b"mvhd", &header)));
+            assert_eq!(
+                movie_duration(&mut Cursor::new(&bytes)),
+                Some(Duration::from_nanos(expected))
+            );
+            bytes.pop();
+            assert_eq!(movie_duration(&mut Cursor::new(bytes)), None);
+        }
+    }
+
+    #[test]
+    fn duration_rejects_missing_zero_and_unknown_headers() {
+        let probe =
+            |header: Vec<u8>| movie_duration(&mut Cursor::new(bx(b"moov", &bx(b"mvhd", &header))));
+        assert_eq!(probe(timed(600)), None);
+        let mut header = timed(600);
+        header[16..20].fill(0xff);
+        assert_eq!(probe(header), None);
+        assert_eq!(probe(vec![1; 16]), None);
+        assert_eq!(
+            movie_duration(&mut Cursor::new(bx(b"mdat", &[0; 16]))),
+            None
+        );
     }
 
     fn trak(handler: &[u8; 4], mdhd: Vec<u8>, elst: Option<Vec<u8>>) -> Vec<u8> {

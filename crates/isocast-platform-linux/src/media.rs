@@ -3,7 +3,7 @@
 //! outstanding operation has a deadline. A closed pipe is not a file end.
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
-use std::os::unix::{ffi::OsStrExt, net::UnixStream, process::CommandExt};
+use std::os::unix::{ffi::OsStrExt, net::UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -76,23 +76,10 @@ impl Helper {
         let (socket, peer) = UnixStream::pair()?;
         let mut cmd = Command::new(&exe);
         cmd.args([VERSION, op])
+            .arg(std::process::id().to_string())
             .stdin(Stdio::from(OwnedFd::from(peer.try_clone()?)))
             .stdout(Stdio::from(OwnedFd::from(peer)))
             .stderr(Stdio::inherit());
-        let parent = std::process::id();
-        // SAFETY: only prctl/getppid in the child after fork; the second check
-        // closes the race between the fork and installing the parent-death signal.
-        unsafe {
-            cmd.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::getppid() as u32 != parent {
-                    return Err(io::ErrorKind::BrokenPipe.into());
-                }
-                Ok(())
-            });
-        }
         let child = cmd
             .spawn()
             .with_context(|| format!("starting {}: {FIX}", exe.display()))?;

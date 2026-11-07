@@ -8,7 +8,6 @@ description = "Isolated Linux GStreamer file reader and codec probe"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 anyhow = "1.0.104"
-isocast-engine = { path = "../isocast-engine" }
 isocast-protocol = { path = "../isocast-protocol" }
 isocast-media-protocol = { path = "../isocast-media-protocol" }
 serde_json = "1"

@@ -6292,7 +6292,8 @@ iso = {iso}
         let changed = |a: &Setup, b: &Setup| -> Vec<&'static str> {
             ids.into_iter()
                 .filter(|id| {
-                    definition_of(&inert::Inert, a, id) != definition_of(&inert::Inert, b, id)
+                    definition_of(&inert::Inert::default(), a, id)
+                        != definition_of(&inert::Inert::default(), b, id)
                 })
                 .collect()
         };
@@ -6343,8 +6344,8 @@ iso = {iso}
             VideoEncoder, VideoSink, Volume, WriterSpec,
         };
 
-        #[derive(Clone)]
-        pub(super) struct Inert;
+        #[derive(Clone, Default)]
+        pub(super) struct Inert(pub Option<MediaInfo>);
 
         /// A resource it never makes.
         pub(super) enum Never {}
@@ -6470,7 +6471,7 @@ iso = {iso}
                 bail!("inert")
             }
             fn media_info(&self, _path: &Path) -> Result<MediaInfo> {
-                bail!("inert")
+                self.0.ok_or_else(|| anyhow::anyhow!("inert"))
             }
             fn open_media(&self, _path: &Path, _part: MediaPart) -> Result<Never> {
                 bail!("inert")
@@ -6627,6 +6628,87 @@ encoder = { codec = "hevc", quality = 70 }
     }
 
     #[test]
+    fn failed_take_probes_recorded_duration_before_estimating_from_slots() {
+        let folder =
+            std::env::temp_dir().join(format!("isocast-duration-manifest-{}", std::process::id()));
+        std::fs::create_dir(&folder).unwrap();
+        let setup = empty_engine_setup();
+        let formats = Formats {
+            video: Default::default(),
+            audio: Default::default(),
+            cameras: Default::default(),
+            recording: 1,
+        };
+        let epoch = Time::from_nanos(0);
+        let mut take = Take::begin(
+            plan_take(&setup, &formats, &folder, 1).unwrap(),
+            epoch,
+            Local::now(),
+        );
+        take.end = Some(Time::from_nanos(7_000_000_000));
+        take.results[0] = Some(Err(anyhow::anyhow!("failed writer")));
+        let plan = &take.plans[0];
+        plan.start.store(0, Ordering::SeqCst);
+        plan.newest
+            .store(epoch.add_ticks(2, 30).as_nanos(), Ordering::SeqCst);
+        let platform = inert::Inert(Some(crate::MediaInfo {
+            video: Some((64, 64)),
+            audio: false,
+            duration: Duration::from_millis(500),
+        }));
+        let manifest = || {
+            take_manifest(
+                &platform,
+                &setup,
+                &take,
+                SessionStatus::Failed,
+                &[],
+                &[],
+                None,
+                &[],
+                &formats.cameras,
+            )
+        };
+        // No readable movie: use the three handled slots, not the 7 s take.
+        assert!((manifest().files[0].duration_seconds.unwrap() - 0.1).abs() < 1e-8);
+        // A final movie header publishes 900/600 s, ahead of the platform probe.
+        let mut movie = b"\0\0\0$moov\0\0\0\x1cmvhd".to_vec();
+        movie.extend([0; 12]);
+        movie.extend(600u32.to_be_bytes());
+        movie.extend(900u32.to_be_bytes());
+        std::fs::write(&plan.spec.path, &movie).unwrap();
+        assert_eq!(manifest().files[0].duration_seconds, Some(1.5));
+        #[cfg(target_os = "macos")]
+        let recovered_duration = || {
+            let mut interrupted = manifest();
+            interrupted.status = SessionStatus::Recording;
+            interrupted.files[0].duration_seconds = None;
+            write_manifest(&take.manifest_path, &interrupted).unwrap();
+            let sessions = crate::record::recover_interrupted(&platform, &folder);
+            sessions[0].recording.files[0].duration_seconds
+        };
+        #[cfg(target_os = "macos")]
+        assert_eq!(recovered_duration(), Some(1.5));
+
+        // Like a Mac crash-safe movie before its final header patch:
+        // a zero-duration mvhd followed by a moof/mdat. Model the native
+        // probe reporting 0.5 s committed vs 4 s of accepted slots.
+        movie[32..36].fill(0);
+        movie.extend(b"\0\0\0\x18moof\0\0\0\x10mfhd\0\0\0\0\0\0\0\x01\0\0\0\x09mdat\0");
+        std::fs::write(&plan.spec.path, movie).unwrap();
+        plan.newest
+            .store(epoch.add_ticks(119, 30).as_nanos(), Ordering::SeqCst);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(manifest().files[0].duration_seconds, Some(0.5));
+            assert_eq!(recovered_duration(), Some(0.5));
+        }
+        #[cfg(any(windows, target_os = "linux"))]
+        assert!((manifest().files[0].duration_seconds.unwrap() - 4.0).abs() < 1e-8); // no decoder fallback
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn running_layer_only_reports_loss_on_a_recorded_canvas() {
         let timeline = Arc::new(Timeline::default());
         let epoch = Time::from_nanos(0);
@@ -6764,7 +6846,7 @@ encoder = { codec = "hevc", quality = 70 }
         take.end = Some(stop);
         let finalized = |take| {
             take_manifest(
-                &inert::Inert,
+                &inert::Inert::default(),
                 &setup,
                 take,
                 SessionStatus::Failed,
@@ -6827,7 +6909,7 @@ encoder = { codec = "hevc", quality = 70 }
         let setup = empty_engine_setup();
         let timeout = Duration::from_secs(5);
         for attempt in 1..=8 {
-            let engine = Engine::start(&inert::Inert, &setup, None, None).unwrap();
+            let engine = Engine::start(&inert::Inert::default(), &setup, None, None).unwrap();
             let inner = engine.inner.clone();
             // Model a reconciler preempted after checking `stopping`, before parking.
             let mut wanted = inner.wanted.lock();
@@ -6858,7 +6940,8 @@ encoder = { codec = "hevc", quality = 70 }
     fn stop_ends_monitor_streams_and_refuses_new_ones() {
         use isocast_protocol::api::{H264Profile, frames};
 
-        let engine = Engine::start(&inert::Inert, &empty_engine_setup(), None, None).unwrap();
+        let engine =
+            Engine::start(&inert::Inert::default(), &empty_engine_setup(), None, None).unwrap();
         let feed = engine
             .frames(PROGRAM, None, 30, H264Profile::High)
             .expect("a running engine streams its program");
@@ -6915,7 +6998,7 @@ encoder = { codec = "hevc", quality = 70 }
     #[test]
     fn a_window_with_nothing_chosen_waits_for_a_pick() {
         let setup = one_window();
-        let engine = Engine::start(&inert::Inert, &setup, None, None).unwrap();
+        let engine = Engine::start(&inert::Inert::default(), &setup, None, None).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let status = loop {
             let status = engine
@@ -6944,7 +7027,7 @@ encoder = { codec = "hevc", quality = 70 }
     /// the source when the recording ends, not before.
     #[test]
     fn a_source_a_recording_keeps_reopens_when_it_ends() {
-        let engine = Engine::start(&inert::Inert, &one_window(), None, None).unwrap();
+        let engine = Engine::start(&inert::Inert::default(), &one_window(), None, None).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !engine.sources().iter().any(|s| s.needs_pick) {
             assert!(
