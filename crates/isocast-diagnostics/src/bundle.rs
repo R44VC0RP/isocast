@@ -370,16 +370,7 @@ fn collect_report(
         .rev()
         .filter(|path| {
             let name = path.file_name().unwrap().to_string_lossy().to_lowercase();
-            [
-                "isocastd-",
-                "isocast-",
-                "isocast-app-",
-                "isocast-ui-",
-                "isocast_",
-                "isocastd_",
-            ]
-            .iter()
-            .any(|p| name.starts_with(p))
+            CRASH_PREFIXES.iter().any(|p| name.starts_with(p))
         })
         .take(10)
     {
@@ -398,6 +389,11 @@ fn collect_report(
             &mut redactor,
             &mut omitted,
         );
+    }
+    // As on macOS: the disconnected report exports no free text.
+    #[cfg(target_os = "linux")]
+    if live {
+        collect_coredumps(&mut contents, &mut redactor, &mut omitted);
     }
     let mut manifests = manifest_folders
         .iter()
@@ -449,6 +445,9 @@ fn collect_report(
                     native_crashes.push(summary);
                 }
             }
+        }
+        if name.starts_with("linux-crashes/") {
+            native_crashes.push(coredump_summary(name, text));
         }
         if name.ends_with(".crash.json") {
             let mut crash =
@@ -517,7 +516,7 @@ fn collect_report(
         "crash_signature":crash.map(signature),
         "retained_rust_crashes":crashes.iter().rev().take(3).map(signature).collect::<Vec<_>>(),
         "native_crashes":native_crashes.iter().rev().take(3).collect::<Vec<_>>(),
-        "abnormal_cause":if latest_abnormal.is_null() {Value::Null} else if crash.is_some() {json!("Rust panic; see matching launch crash file")} else {json!("No clean-exit marker or matching Rust crash file; SIGKILL, power loss or a native crash are possible. See macos-crashes and that launch's final log records.")},
+        "abnormal_cause":if latest_abnormal.is_null() {Value::Null} else if crash.is_some() {json!("Rust panic; see matching launch crash file")} else {json!("No clean-exit marker or matching Rust crash file; SIGKILL, power loss or a native crash are possible. See macos-crashes or linux-crashes and that launch's final log records.")},
         "last_error":snapshot["status"]["last_error"].as_str().map(|s|s.chars().take(2000).collect::<String>()),"last_warning_or_error":warnings.last(),
         "timeline":warnings,"previous_abnormal":snapshot["diagnostics"]["previous_abnormal"],
         "what_was_running":{"state":snapshot["status"]["state"],"scene":snapshot["status"]["scene"],"stream":snapshot["status"]["stream"]},
@@ -587,7 +586,7 @@ fn collect_report(
     }
     contents.insert("ISSUE.md".into(), issue.clone());
     contents.insert("metrics.jsonl".into(), metrics);
-    let redaction = json!({"policy":"credential fields/text and all HTTP/RTMP capability paths removed; serial fields omitted; home abbreviated; no environment dump or media. Text-source content and data-store values are retained unless credential-like. Default device names may contain owner names; strict mode pseudonymizes known device names/IDs/models and paths/titles with a fresh per-report HMAC key, never exported. Report credentials are seeded independently from configured Keychain accounts.", "hash_paths":params.hash_paths,"pseudonyms":"HMAC-SHA256 with independent random per-report key","counts":redactor.counts,"omitted":omitted});
+    let redaction = json!({"policy":"credential fields/text and all HTTP/RTMP capability paths removed; serial fields omitted; home abbreviated; no environment dump or media. Text-source content and data-store values are retained unless credential-like. Default device names may contain owner names; strict mode pseudonymizes known device names/IDs/models and paths/titles with a fresh per-report HMAC key, never exported. Report credentials are seeded independently from configured Keychain accounts. Linux core dump records keep only the process, signal, time, command line, executable, size and package lines and the message, without the user id.", "hash_paths":params.hash_paths,"pseudonyms":"HMAC-SHA256 with independent random per-report key","counts":redactor.counts,"omitted":omitted});
     contents.insert(
         "REDACTION.json".into(),
         serde_json::to_string_pretty(&redaction).unwrap(),
@@ -692,6 +691,305 @@ fn incident_summary(record: &Value) -> Value {
         "stream_dropped_frames":fields["stream"]["dropped_frames"],"stream_audio_dropouts":fields["stream"]["audio_dropouts"],"process":fields["system"]["process"]})
 }
 
+/// File-name prefixes of Isocast's own crash reports.
+const CRASH_PREFIXES: [&str; 6] = [
+    "isocastd-",
+    "isocast-",
+    "isocast-app-",
+    "isocast-ui-",
+    "isocast_",
+    "isocastd_",
+];
+
+/// Isocast's executable names on Linux.
+#[cfg(target_os = "linux")]
+const LINUX_EXECUTABLES: [&str; 5] = [
+    "isocastd",
+    "isocast",
+    "isocast-app",
+    "isocast-ui",
+    "isocast-browser",
+];
+
+/// `coredumpctl info` fields kept before `Message:`, which comes last and is
+/// kept with everything after it. Other fields stay out, including the user,
+/// host, machine, boot, storage and session-unit ones and any systemd adds.
+#[cfg(target_os = "linux")]
+const COREDUMP_FIELDS: [&str; 9] = [
+    "PID",
+    "TID",
+    "Signal",
+    "Timestamp",
+    "Command Line",
+    "Executable",
+    "Disk Size",
+    "Size on Disk",
+    "Package",
+];
+
+/// This user's Isocast core dump records under `linux-crashes/`, as
+/// `coredumpctl info` prints them.
+#[cfg(target_os = "linux")]
+fn collect_coredumps(
+    contents: &mut BTreeMap<String, String>,
+    redactor: &mut Redactor,
+    omitted: &mut Vec<String>,
+) {
+    use std::time::{Duration, Instant};
+    // A large journal or a stuck D-Bus call must not stall the report.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let limit = |most: Duration| most.min(deadline.saturating_duration_since(Instant::now()));
+    let list_limit = limit(Duration::from_secs(5));
+    let list = match run_until(
+        "coredumpctl",
+        &["list", "--no-pager", "--json=short"],
+        list_limit,
+    ) {
+        Ran::Done(list) => list,
+        Ran::Failed => {
+            // Even a supported list exits 1 on an empty journal. Only note a
+            // missing or unsupported tool, not an ordinary lack of crashes.
+            let version = run_until("coredumpctl", &["--version"], limit(Duration::from_secs(1)));
+            if let Some(reason) = coredump_tool_omission(version) {
+                omitted.push(reason.into());
+            }
+            return;
+        }
+        Ran::TimedOut => {
+            omitted.push(format!(
+                "linux-crashes/: coredumpctl list gave no answer within {list_limit:.1?}"
+            ));
+            return;
+        }
+    };
+    let Some(entries) = coredump_list(&list) else {
+        return;
+    };
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = u64::from(unsafe { libc::getuid() });
+    for (time, pid, exe, path) in coredump_entries(&entries, uid) {
+        let name = format!("linux-crashes/{time}-{pid}-{exe}.txt");
+        let current: usize = contents.values().map(String::len).sum();
+        // A bare PID matches records of any boot, program or user.
+        let since = time / 1_000_000;
+        let info_limit = limit(Duration::from_secs(2));
+        if info_limit.is_zero() {
+            omitted.push(format!("{name}: core dump time limit reached"));
+            continue;
+        }
+        let info = match run_until(
+            "coredumpctl",
+            &[
+                "info",
+                "--no-pager",
+                "-1",
+                &format!("--since=@{since}"),
+                &format!("--until=@{}", since + 1),
+                &format!("COREDUMP_PID={pid}"),
+                &format!("COREDUMP_UID={uid}"),
+                &format!("COREDUMP_EXE={path}"),
+            ],
+            info_limit,
+        ) {
+            Ran::Done(info) => info,
+            Ran::Failed => {
+                omitted.push(format!("{name}: coredumpctl info failed"));
+                continue;
+            }
+            Ran::TimedOut => {
+                omitted.push(format!(
+                    "{name}: coredumpctl info gave no answer within {info_limit:.1?}"
+                ));
+                continue;
+            }
+        };
+        if info.len() as u64 > MAX_FILE || current.saturating_add(info.len()) > MAX_BUNDLE {
+            omitted.push(format!("{name}: size/type limit"));
+            continue;
+        }
+        contents.insert(name, coredump_text(&info, redactor));
+    }
+}
+
+/// How [`run_until`] ended.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq)]
+enum Ran {
+    /// Exited successfully, or wrote more than `MAX_FILE`: at most
+    /// `MAX_FILE + 1` bytes of its stdout.
+    Done(String),
+    /// Couldn't start or exited unsuccessfully.
+    Failed,
+    /// Killed at the time limit.
+    TimedOut,
+}
+
+#[cfg(target_os = "linux")]
+fn coredump_tool_omission(version: Ran) -> Option<&'static str> {
+    match version {
+        Ran::Failed => Some("linux-crashes/: coredumpctl unavailable"),
+        Ran::Done(text) if text.split_whitespace().nth(1)?.parse::<u32>().ok()? < 248 => {
+            Some("linux-crashes/: coredumpctl requires systemd 248 or later")
+        }
+        _ => None,
+    }
+}
+
+/// Runs `program`, killing it after `limit`.
+#[cfg(target_os = "linux")]
+fn run_until(program: &str, args: &[&str], limit: std::time::Duration) -> Ran {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .env("SYSTEMD_COLORS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Ran::Failed;
+    };
+    // Read while waiting: a full pipe would hold the child until the limit.
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let reader = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = (&mut stdout).take(MAX_FILE + 1).read_to_end(&mut text);
+        text
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => break None,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ran::Failed;
+            }
+        }
+    };
+    // After a kill the reader isn't joined: a process the command started
+    // can keep the pipe open; the thread ends when the pipe closes.
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ran::TimedOut;
+    };
+    let text = reader.join().unwrap_or_default();
+    // Output over the cap ends the command with SIGPIPE; the caller reports
+    // the size limit.
+    if status.success() || text.len() as u64 > MAX_FILE {
+        Ran::Done(String::from_utf8_lossy(&text).into_owned())
+    } else {
+        Ran::Failed
+    }
+}
+
+/// The entries of `coredumpctl list --json=short`. While a systemd-coredump
+/// unit is still running, coredumpctl prints `-- Notice: …` after the JSON.
+#[cfg(target_os = "linux")]
+fn coredump_list(list: &str) -> Option<Vec<Value>> {
+    match serde_json::Deserializer::from_str(list)
+        .into_iter::<Value>()
+        .next()?
+    {
+        Ok(Value::Array(entries)) => Some(entries),
+        _ => None,
+    }
+}
+
+/// The ten newest `coredumpctl list` entries of `uid` for
+/// [`LINUX_EXECUTABLES`]: (time, pid, executable name, path).
+#[cfg(target_os = "linux")]
+fn coredump_entries(entries: &[Value], uid: u64) -> Vec<(u64, u64, &str, &str)> {
+    let mut ours =
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let path = entry["exe"].as_str()?;
+                let exe = Path::new(path).file_name()?.to_str()?;
+                (entry["uid"].as_u64() == Some(uid) && LINUX_EXECUTABLES.contains(&exe))
+                    .then_some((entry["time"].as_u64()?, entry["pid"].as_u64()?, exe, path))
+            })
+            .collect::<Vec<_>>();
+    ours.sort();
+    ours.reverse();
+    ours.truncate(10);
+    ours
+}
+
+/// `coredumpctl info` output, redacted: the [`COREDUMP_FIELDS`] and the
+/// message, without coredumpctl's notices, the message's UID or the
+/// timestamp's age.
+#[cfg(target_os = "linux")]
+fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
+    let mut in_message = false;
+    // Whether the current field is kept; its continuation lines follow it.
+    let mut keep = false;
+    let mut text = Vec::new();
+    for line in info.lines() {
+        let key = line.trim_start();
+        if key.starts_with("-- Notice:") {
+            continue;
+        }
+        if !in_message {
+            if let Some((field, _)) = key.split_once(':')
+                && !field.is_empty()
+                && field.chars().all(|c| c.is_ascii_alphabetic() || c == ' ')
+            {
+                in_message = field == "Message";
+                keep = in_message || COREDUMP_FIELDS.contains(&field);
+            }
+            if !keep {
+                continue;
+            }
+        }
+        let mut line = line.to_owned();
+        if key.starts_with("Timestamp:")
+            && line.ends_with(" ago)")
+            && let Some(at) = line.rfind(" (")
+        {
+            line.truncate(at);
+        } else if key.starts_with("Message:")
+            && let Some(at) = line.find(" of user ")
+        {
+            let digits = line[at + 9..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            if digits > 0 {
+                line.replace_range(at..at + 9 + digits, "");
+            }
+        }
+        text.push(redactor.text(&line));
+    }
+    text.join("\n") + "\n"
+}
+
+/// A `linux-crashes/` record's triage entry. The process name comes from
+/// the `PID:` line: strict mode fingerprints the `Executable:` path.
+fn coredump_summary(name: &str, text: &str) -> Value {
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.trim_start().strip_prefix(key))
+            .map(str::trim)
+    };
+    let pid_line = field("PID:").unwrap_or_default();
+    let (pid, process) = match pid_line.split_once(' ') {
+        Some((pid, process)) => (
+            pid,
+            process
+                .trim()
+                .strip_prefix('(')
+                .and_then(|p| p.strip_suffix(')')),
+        ),
+        None => (pid_line, None),
+    };
+    json!({"file":name,"pid":pid.parse::<u64>().ok(),"process":process,"capture_time":field("Timestamp:"),"signal":field("Signal:")})
+}
+
 fn collect(
     path: &Path,
     name: String,
@@ -790,5 +1088,171 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn coredump_summary_names_the_process_from_the_pid_line() {
+        let text = "           PID: 4242 (isocastd)\n        Signal: 6 (ABRT)\n     Timestamp: Sun 2026-10-18 10:20:00 CEST\n    Executable: [hmac:0f]\n";
+        assert_eq!(
+            super::coredump_summary("linux-crashes/1-4242-isocastd.txt", text),
+            serde_json::json!({"file":"linux-crashes/1-4242-isocastd.txt","pid":4242,"process":"isocastd","capture_time":"Sun 2026-10-18 10:20:00 CEST","signal":"6 (ABRT)"})
+        );
+        assert_eq!(
+            super::coredump_summary("linux-crashes/x.txt", "")["pid"],
+            serde_json::Value::Null
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn coredump_entries_take_only_this_users_isocast_executables() {
+        let entries = serde_json::json!([
+            {"time":1,"pid":10,"uid":1000,"exe":"/usr/bin/isocastd"},
+            {"time":2,"pid":11,"uid":1000,"exe":"/home/u/isocast/target/debug/isocast-platform-contracts"},
+            {"time":3,"pid":12,"uid":1000,"exe":"/home/u/isocast/target/debug/deps/isocast_diagnostics-0f1e2d"},
+            {"time":4,"pid":13,"uid":963,"exe":"/usr/bin/isocastd"},
+            {"time":5,"pid":14,"uid":1000,"exe":"/usr/bin/python3"},
+            {"time":6,"pid":15,"uid":1000,"exe":"/opt/isocast/isocast-ui"}
+        ]);
+        assert_eq!(
+            coredump_entries(entries.as_array().unwrap(), 1000),
+            vec![
+                (6, 15, "isocast-ui", "/opt/isocast/isocast-ui"),
+                (1, 10, "isocastd", "/usr/bin/isocastd"),
+            ]
+        );
+        let many = (0..12)
+            .map(|i| serde_json::json!({"time":i,"pid":i,"uid":1000,"exe":"/usr/bin/isocastd"}))
+            .collect::<Vec<_>>();
+        let newest = coredump_entries(&many, 1000);
+        assert_eq!(newest.len(), 10);
+        assert_eq!((newest[0].0, newest[9].0), (11, 2));
+    }
+
+    #[test]
+    fn run_until_kills_a_command_at_its_limit() {
+        let started = std::time::Instant::now();
+        assert_eq!(
+            run_until("sleep", &["5"], std::time::Duration::from_millis(100)),
+            Ran::TimedOut
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(
+            run_until("false", &[], std::time::Duration::from_secs(5)),
+            Ran::Failed
+        );
+        assert_eq!(
+            run_until(
+                "isocast-no-such-program",
+                &[],
+                std::time::Duration::from_secs(5)
+            ),
+            Ran::Failed
+        );
+    }
+
+    #[test]
+    fn run_until_reads_output_larger_than_a_pipe() {
+        // 1 MiB fills a 64 KiB pipe many times over; without reading while
+        // waiting the command would block until the limit.
+        let Ran::Done(text) = run_until(
+            "sh",
+            &["-c", "head -c 1048576 /dev/zero | tr '\\0' x"],
+            std::time::Duration::from_secs(5),
+        ) else {
+            panic!("sh did not finish");
+        };
+        assert_eq!(text.len(), 1 << 20);
+        assert!(text.bytes().all(|b| b == b'x'));
+    }
+
+    #[test]
+    fn coredump_list_reads_the_json_before_a_notice() {
+        let list = "[{\"time\":1,\"pid\":10,\"uid\":1000,\"exe\":\"/usr/bin/isocastd\"}]\n-- Notice: 1 systemd-coredump@.service unit is running, output may be incomplete.\n";
+        let entries = coredump_list(list).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["pid"], 10);
+        assert!(coredump_list("-- Notice: no JSON").is_none());
+        assert!(coredump_list("{\"not\":\"a list\"}").is_none());
+    }
+
+    #[test]
+    fn only_missing_or_old_coredumpctl_explains_a_failed_list() {
+        assert!(coredump_tool_omission(Ran::Failed).is_some());
+        for (version, omitted) in [(247, true), (248, false), (255, false)] {
+            let banner = format!("systemd {version} ({version}.1)");
+            assert_eq!(coredump_tool_omission(Ran::Done(banner)).is_some(), omitted);
+        }
+    }
+
+    #[test]
+    fn coredump_text_keeps_only_known_fields_and_the_message() {
+        let info = "\
+           PID: 4242 (isocastd)
+           TID: 4242 (isocastd)
+           UID: 1000 (mat)
+      Hostname: tanner
+    Machine ID: 0123abcd
+       Boot ID: 4567ef01
+        Signal: 6 (ABRT)
+     Timestamp: Wed 2026-10-28 20:22:16 CET (6 days ago)
+  Command Line: /usr/bin/isocastd --flag
+    Executable: /usr/bin/isocastd
+ Control Group: /user.slice/user-1000.slice
+                └─app-isocast.scope
+          Unit: user@1000.service
+     User Unit: app.slice
+         Slice: user-1000.slice
+   Disk Serial: WD-0042
+       Storage: /var/lib/systemd/coredump/core.isocastd.zst (present)
+  Size on Disk: 1.2M
+       Message: Process 4242 (isocastd) of user 1000 dumped core.
+
+                Stack trace of thread 4242:
+                #0  0x00007f23564b6551 abort (libc.so.6 + 0x26551)
+                ELF object binary architecture: AMD x86-64
+-- Notice: 1 systemd-coredump@.service unit is running, output may be incomplete.
+";
+        let text = coredump_text(info, &mut Redactor::default());
+        let older = info.replace("Size on Disk:", "Disk Size:");
+        assert!(coredump_text(&older, &mut Redactor::default()).contains("Disk Size: 1.2M\n"));
+        for kept in [
+            "PID: 4242 (isocastd)\n",
+            "TID: 4242 (isocastd)\n",
+            "Signal: 6 (ABRT)\n",
+            "Timestamp: Wed 2026-10-28 20:22:16 CET\n",
+            "Command Line: /usr/bin/isocastd --flag\n",
+            "Executable: /usr/bin/isocastd\n",
+            "Size on Disk: 1.2M\n",
+            "Message: Process 4242 (isocastd) dumped core.\n",
+            "Stack trace of thread 4242:\n",
+            "#0  0x00007f23564b6551 abort (libc.so.6 + 0x26551)\n",
+            "ELF object binary architecture: AMD x86-64\n",
+        ] {
+            assert!(text.contains(kept), "{kept:?} missing from {text}");
+        }
+        for private in [
+            "UID:",
+            "Hostname:",
+            "tanner",
+            "Machine ID:",
+            "Boot ID:",
+            "Control Group:",
+            "app-isocast.scope",
+            "Unit:",
+            "Slice:",
+            "Disk Serial",
+            "WD-0042",
+            "Storage:",
+            "of user",
+            "ago)",
+            "Notice",
+        ] {
+            assert!(!text.contains(private), "{private} left in {text}");
+        }
     }
 }

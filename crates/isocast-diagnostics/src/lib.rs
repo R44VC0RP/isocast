@@ -253,6 +253,15 @@ pub fn daemon_answered() {
     DAEMON_ANSWERED.store(true, Ordering::Relaxed);
 }
 
+/// This process's resident memory (`VmRSS` in `/proc/self/status`).
+#[cfg(target_os = "linux")]
+pub fn resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib * 1024)
+}
+
 pub fn private_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).read(true).create_new(true);
