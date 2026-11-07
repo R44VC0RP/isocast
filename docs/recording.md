@@ -11,6 +11,25 @@ audio = ["mic"]
 encoder = { codec = "hevc", quality = "high", container = "mov" }
 ```
 
+On Windows, before opening any take file, Isocast encodes three test pictures
+with each recording encoder and decodes the first keyframe to check its two
+gray bars. It checks brightness (luma) in either full or limited range, not
+chroma. Once the decoder accepts the input and output formats, a failed IDR
+submission, missing or unreadable picture, or wrong luma rejects that encoder.
+Isocast then tries the next eligible encoder without
+changing codec or bit depth. If Windows lacks a compatible decoder, the
+bitstream checks still apply: recording can proceed, status and the manifest
+note the skipped pixel check, and doctor reports a warning. Every encoder
+still encodes the pattern. Within one take start, identical first keyframes
+with the same headers, provider and settings share a single pixel check. A
+different keyframe is decoded even if the settings match. This preflight
+applies to recording outputs, **not live outputs** such as streams or previews.
+
+For HEVC, Isocast prefers Microsoft's H.265 decoder when registered. Other
+installed synchronous Media Foundation decoders can be used if it is absent
+or cannot negotiate the requested format. These native decoders run in the
+recorder process; a decoder crash can terminate it.
+
 ## Program size
 
 The program is drawn at the canvas size. `recording.program.width` and

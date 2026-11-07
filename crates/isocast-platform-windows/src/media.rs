@@ -1033,29 +1033,9 @@ impl Video {
         };
         // A 2D buffer says where its rows really are; a plain one is laid
         // out by the type's stride.
-        let lock = match buffer.cast::<IMF2DBuffer2>() {
-            Ok(two) => Locked::two(two)?,
-            Err(_) => Locked::plain(buffer, self.stride)?,
-        };
-        let length = lock.length as usize;
-        // The first row's offset in the buffer, then each row's from it.
-        let first = (lock.scan0 as isize).checked_sub(lock.start as isize);
+        let lock = Locked::new(buffer, self.stride)?;
         for (y, out) in self.pixels.chunks_exact_mut(row).enumerate() {
-            let offset = first
-                .and_then(|first| first.checked_add((y as isize).checked_mul(lock.pitch as isize)?))
-                .and_then(|offset| usize::try_from(offset).ok())
-                .filter(|offset| {
-                    !lock.start.is_null()
-                        && offset.checked_add(row).is_some_and(|end| end <= length)
-                });
-            let Some(offset) = offset else {
-                bail!(
-                    "media.frame: row {y} of a {width}x{height} picture lies outside its {length}-byte buffer (pitch {})",
-                    lock.pitch
-                );
-            };
-            // SAFETY: the row lies within the locked buffer, checked above.
-            out.copy_from_slice(unsafe { std::slice::from_raw_parts(lock.start.add(offset), row) });
+            out.copy_from_slice(lock.row(y, row)?);
             for pixel in out.as_chunks_mut::<4>().0 {
                 pixel[3] = 0xff;
             }
@@ -1097,7 +1077,7 @@ fn pooled(
 
 /// A locked picture buffer: its first row, the step between rows
 /// (negative bottom-up), and the bytes it spans. Unlocked on drop.
-struct Locked {
+pub(crate) struct Locked {
     buffer: Result<IMF2DBuffer2, IMFMediaBuffer>,
     scan0: *const u8,
     pitch: i32,
@@ -1106,6 +1086,23 @@ struct Locked {
 }
 
 impl Locked {
+    pub(crate) fn new(buffer: IMFMediaBuffer, stride: i32) -> Result<Self> {
+        match buffer.cast::<IMF2DBuffer2>() {
+            Ok(two) => Self::two(two),
+            Err(_) => Self::plain(buffer, stride),
+        }
+    }
+
+    pub(crate) fn row(&self, y: usize, bytes: usize) -> Result<&[u8]> {
+        let offset = (self.scan0 as isize).checked_sub(self.start as isize)
+            .and_then(|first| first.checked_add(isize::try_from(y).ok()?.checked_mul(self.pitch as isize)?))
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| !self.start.is_null() && !self.scan0.is_null() && bytes <= self.pitch.unsigned_abs() as usize && offset.checked_add(bytes).is_some_and(|end| end <= self.length as usize))
+            .with_context(|| format!("media.frame: row {y} ({bytes} bytes) lies outside its {}-byte buffer (pitch {})", self.length, self.pitch))?;
+        // SAFETY: this row is inside the buffer, which stays locked for the borrow.
+        Ok(unsafe { std::slice::from_raw_parts(self.start.add(offset), bytes) })
+    }
+
     fn two(buffer: IMF2DBuffer2) -> Result<Self> {
         let (mut scan0, mut pitch, mut start, mut length) =
             (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);

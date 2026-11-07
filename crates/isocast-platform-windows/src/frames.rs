@@ -467,7 +467,9 @@ impl TexturePool {
         width: u32,
         height: u32,
         format: PixelFormat,
+        bars: [u8; 2],
     ) -> Result<Frame> {
+        let _timing = isocast_diagnostics::gpu_startup_span("encoder preflight upload bars");
         anyhow::ensure!(
             (2..=16384).contains(&width)
                 && (2..=16384).contains(&height)
@@ -481,7 +483,7 @@ impl TexturePool {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(pitch as usize * rows as usize)?;
         for x in 0..width {
-            let gray = if x < width / 2 { 64u8 } else { 192 };
+            let gray = bars[usize::from(x >= width / 2)];
             match format {
                 PixelFormat::Nv12 => bytes.push(gray),
                 PixelFormat::Bgra8 => bytes.extend_from_slice(&[gray, gray, gray, 255]),

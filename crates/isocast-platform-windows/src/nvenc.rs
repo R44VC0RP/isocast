@@ -1458,8 +1458,15 @@ impl NvencEncoder {
 
     /// All test pictures have left this exact session before a writer can
     /// own it. Take timestamps are on the host clock; probe PTS start at zero.
-    pub(crate) fn probe(&mut self, frame: &Frame, fps: u32) -> Result<()> {
+    pub(crate) fn probe(
+        &mut self,
+        picture: &crate::mf::probe::Picture,
+        fps: u32,
+        qp: u32,
+    ) -> Result<Option<String>> {
+        let frame = &picture.frame;
         let deadline = Instant::now() + FINISH_WAIT;
+        let mut idr = Vec::new();
         for index in 0..crate::encoder::PROBE_FRAMES {
             let pts = crate::encoder::probe_pts(index, fps);
             while !self.try_encode(frame, pts, index == 0)? {
@@ -1473,8 +1480,20 @@ impl NvencEncoder {
                 .receive_timeout(deadline.saturating_duration_since(Instant::now()))?
                 .context("NVENC preflight: no access unit before deadline")?;
             crate::encoder::check_probe_packet(&packet, index, fps)?;
+            if index == 0 {
+                idr = packet.data;
+            }
         }
-        self.session.native.lock().parameters.check_probe(frame)
+        let parameters = self.session.native.lock().parameters.clone();
+        picture.check(
+            &parameters,
+            &idr,
+            fps,
+            Some(crate::mf::probe::Provider::Nvenc {
+                preset: self.preset(),
+                qp,
+            }),
+        )
     }
 
     /// avcC or hvcC for the encoded-packet muxer. No B-frame reordering.
