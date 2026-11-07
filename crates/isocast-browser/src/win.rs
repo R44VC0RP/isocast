@@ -221,13 +221,27 @@ impl Out {
     }
 }
 
-/// `rate:base64` from audio.js: the rate and the samples' raw bytes
-/// (interleaved stereo f32, little-endian). The page can post anything
-/// there, so a rate isocastd would refuse or more than a second of sound
-/// in one message is dropped, before decoding.
-fn decode_audio(message: &str) -> Option<(u32, Vec<u8>)> {
-    let (rate, data) = message.split_once(':')?;
-    let rate: u32 = rate.parse().ok()?;
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedAudio {
+    rate: u32,
+    timing: Option<(bool, u64)>,
+    bytes: Vec<u8>,
+}
+
+/// `rate[(@|+)end_us]:base64` from audio.js: the rate, optional page timing
+/// `(resumed, end_us)` and the samples' raw bytes (interleaved stereo f32,
+/// little-endian). The page can post anything there, so a rate isocastd would
+/// refuse or more than a second of sound in one message is dropped, before
+/// decoding.
+fn decode_audio(message: &str) -> Option<DecodedAudio> {
+    let (head, data) = message.split_once(':')?;
+    let (rate, timing) = if let Some((rate, end_us)) = head.split_once('@') {
+        (rate.parse().ok()?, Some((false, end_us.parse().ok()?)))
+    } else if let Some((rate, end_us)) = head.split_once('+') {
+        (rate.parse().ok()?, Some((true, end_us.parse().ok()?)))
+    } else {
+        (head.parse().ok()?, None)
+    };
     let second = rate as usize * 8;
     if !protocol::AUDIO_RATES.contains(&rate) || data.len() > second.div_ceil(3) * 4 {
         return None;
@@ -235,7 +249,11 @@ fn decode_audio(message: &str) -> Option<(u32, Vec<u8>)> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .ok()?;
-    (bytes.len().is_multiple_of(8) && bytes.len() <= second).then_some((rate, bytes))
+    (bytes.len().is_multiple_of(8) && bytes.len() <= second).then_some(DecodedAudio {
+        rate,
+        timing,
+        bytes,
+    })
 }
 
 pub fn main() -> i32 {
@@ -831,8 +849,19 @@ fn run(args: &Args, out: &Out) -> Result<i32, String> {
                         let mut text = PWSTR::null();
                         if message.TryGetWebMessageAsString(&mut text).is_ok() {
                             let text = CoTaskMemPWSTR::from(text).to_string();
-                            if let Some((rate, samples)) = decode_audio(&text) {
-                                send(protocol::audio(rate, &samples));
+                            if let Some(decoded) = decode_audio(&text) {
+                                let record = match decoded.timing {
+                                    Some((resumed, end_us)) if !decoded.bytes.is_empty() => {
+                                        protocol::timed_audio(
+                                            decoded.rate,
+                                            resumed,
+                                            end_us,
+                                            &decoded.bytes,
+                                        )
+                                    }
+                                    _ => protocol::audio(decoded.rate, &decoded.bytes),
+                                };
+                                send(record);
                             }
                         }
                         Ok(())
@@ -1118,7 +1147,14 @@ mod tests {
 
     #[test]
     fn page_audio_messages_are_bounded() {
-        assert_eq!(decode_audio("48000:"), Some((48000, vec![])));
+        assert_eq!(
+            decode_audio("48000:"),
+            Some(DecodedAudio {
+                rate: 48000,
+                timing: None,
+                bytes: vec![],
+            })
+        );
         let samples: Vec<u8> = [0.5f32, -0.5]
             .iter()
             .flat_map(|s| s.to_le_bytes())
@@ -1126,10 +1162,23 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&samples);
         assert_eq!(
             decode_audio(&format!("44100:{encoded}")),
-            Some((44100, samples))
+            Some(DecodedAudio {
+                rate: 44100,
+                timing: None,
+                bytes: samples.clone(),
+            })
+        );
+        assert_eq!(
+            decode_audio(&format!("48000+75000:{encoded}")),
+            Some(DecodedAudio {
+                rate: 48000,
+                timing: Some((true, 75_000)),
+                bytes: samples,
+            })
         );
         // A rate isocastd refuses, garbage, half frames.
         assert_eq!(decode_audio(&format!("1:{encoded}")), None);
+        assert_eq!(decode_audio(&format!("48000@bad:{encoded}")), None);
         assert_eq!(decode_audio("48000:@@"), None);
         let odd = base64::engine::general_purpose::STANDARD.encode([1, 2, 3]);
         assert_eq!(decode_audio(&format!("48000:{odd}")), None);

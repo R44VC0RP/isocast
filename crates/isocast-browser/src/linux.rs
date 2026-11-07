@@ -610,10 +610,23 @@ fn run(args: Args, out: Out) -> i32 {
         content.register_script_message_handler(AUDIO_HANDLER, None);
         let out = out.clone();
         content.connect_script_message_received(Some(AUDIO_HANDLER), move |_, value| {
-            if let Some((rate, samples)) = decode_audio(&value.to_str()) {
-                let mut record = Out::record(b"AUDI", 4 + samples.len());
-                record.extend_from_slice(&rate.to_le_bytes());
-                record.extend_from_slice(&samples);
+            if let Some(decoded) = decode_audio(&value.to_str()) {
+                let record = match decoded.timing {
+                    Some((resumed, end_us)) if !decoded.bytes.is_empty() => {
+                        let mut record = Out::record(b"AUDT", 13 + decoded.bytes.len());
+                        record.extend_from_slice(&decoded.rate.to_le_bytes());
+                        record.push(u8::from(resumed));
+                        record.extend_from_slice(&end_us.to_le_bytes());
+                        record.extend_from_slice(&decoded.bytes);
+                        record
+                    }
+                    _ => {
+                        let mut record = Out::record(b"AUDI", 4 + decoded.bytes.len());
+                        record.extend_from_slice(&decoded.rate.to_le_bytes());
+                        record.extend_from_slice(&decoded.bytes);
+                        record
+                    }
+                };
                 out.send_wait(record);
             }
         });
@@ -905,13 +918,27 @@ fn unpremultiply(pixels: &mut [u8]) {
 /// picks the rate, so a page could ask for any.
 const AUDIO_RATES: std::ops::RangeInclusive<u32> = 8_000..=192_000;
 
-/// `rate:base64` from audio.js: the rate and the samples' raw bytes
-/// (interleaved stereo f32, little-endian). The page can post anything
-/// there, so a rate outside [`AUDIO_RATES`] or more than a second of
-/// sound in one message is dropped, before decoding.
-fn decode_audio(message: &str) -> Option<(u32, Vec<u8>)> {
-    let (rate, data) = message.split_once(':')?;
-    let rate: u32 = rate.parse().ok()?;
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedAudio {
+    rate: u32,
+    timing: Option<(bool, u64)>,
+    bytes: Vec<u8>,
+}
+
+/// `rate[(@|+)end_us]:base64` from audio.js: the rate, optional page timing
+/// `(resumed, end_us)` and the samples' raw bytes (interleaved stereo f32,
+/// little-endian). The page can post anything there, so a rate outside
+/// [`AUDIO_RATES`] or more than a second of sound in one message is dropped,
+/// before decoding.
+fn decode_audio(message: &str) -> Option<DecodedAudio> {
+    let (head, data) = message.split_once(':')?;
+    let (rate, timing) = if let Some((rate, end_us)) = head.split_once('@') {
+        (rate.parse().ok()?, Some((false, end_us.parse().ok()?)))
+    } else if let Some((rate, end_us)) = head.split_once('+') {
+        (rate.parse().ok()?, Some((true, end_us.parse().ok()?)))
+    } else {
+        (head.parse().ok()?, None)
+    };
     let second = rate as usize * 8;
     if !AUDIO_RATES.contains(&rate) || data.len() > second.div_ceil(3) * 4 {
         return None;
@@ -919,7 +946,11 @@ fn decode_audio(message: &str) -> Option<(u32, Vec<u8>)> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .ok()?;
-    (bytes.len().is_multiple_of(8) && bytes.len() <= second).then_some((rate, bytes))
+    (bytes.len().is_multiple_of(8) && bytes.len() <= second).then_some(DecodedAudio {
+        rate,
+        timing,
+        bytes,
+    })
 }
 
 #[cfg(test)]
@@ -1071,7 +1102,23 @@ mod tests {
             "44100:{}",
             base64::engine::general_purpose::STANDARD.encode(&samples)
         );
-        assert_eq!(decode_audio(&message), Some((44100, samples)));
+        assert_eq!(
+            decode_audio(&message),
+            Some(DecodedAudio {
+                rate: 44100,
+                timing: None,
+                bytes: samples.clone(),
+            })
+        );
+        assert_eq!(
+            decode_audio(&message.replacen("44100:", "48000@12500:", 1)),
+            Some(DecodedAudio {
+                rate: 48000,
+                timing: Some((false, 12_500)),
+                bytes: samples,
+            })
+        );
+        assert_eq!(decode_audio("48000@bad:"), None);
         assert_eq!(decode_audio("48000:@@"), None);
         // Rates a page may claim but isocastd won't resample, and more
         // than a second of sound in one message.

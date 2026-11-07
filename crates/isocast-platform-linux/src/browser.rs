@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_engine::{
-    AudioSink, BrowserAudioStamper as Stamper, BrowserControl, BrowserPage, CaptureFormat,
-    FramePool as _, PageLocation, SAMPLE_RATE, VideoSink,
+    AudioSink, BrowserAudioStamper as Stamper, BrowserAudioTiming, BrowserControl, BrowserPage,
+    CaptureFormat, FramePool as _, PageLocation, SAMPLE_RATE, VideoSink,
 };
 
 use crate::frames::{Frame, FramePool};
@@ -81,6 +81,13 @@ pub(crate) mod protocol {
             rate: u32,
             len: usize,
         },
+        /// Timed interleaved stereo f32 from `audio.js`: `len` bytes follow.
+        TimedAudio {
+            rate: u32,
+            resumed: bool,
+            end_us: u64,
+            len: usize,
+        },
         /// A reason follows, `len` bytes.
         Fail {
             len: usize,
@@ -110,6 +117,7 @@ pub(crate) mod protocol {
         let limit = match &head[..4] {
             b"REDY" => 0,
             b"AUDI" => 4 + MAX_AUDIO,
+            b"AUDT" => 13 + MAX_AUDIO,
             b"FAIL" => MAX_FAIL,
             _ => MAX_PAYLOAD,
         };
@@ -147,6 +155,39 @@ pub(crate) mod protocol {
                     );
                 }
                 Header::Audio { rate, len }
+            }
+            b"AUDT" => {
+                let rate = u32_field()?;
+                let mut meta = [0u8; 9];
+                input
+                    .read_exact(&mut meta)
+                    .context("reading the browser helper")?;
+                let resumed = match meta[0] {
+                    0 => false,
+                    1 => true,
+                    other => bail!("browser helper sent an unknown audio timing kind {other}"),
+                };
+                let end_us = u64::from_le_bytes(meta[1..9].try_into().expect("8 bytes"));
+                let len = len
+                    .checked_sub(13)
+                    .context("browser helper sent a short timed audio record")?
+                    as usize;
+                if !len.is_multiple_of(8) {
+                    bail!("browser helper sent audio that isn't whole stereo f32 frames");
+                }
+                if !AUDIO_RATES.contains(&rate) {
+                    bail!(
+                        "browser helper sent audio at {rate} Hz (accepted: {}..={} Hz)",
+                        AUDIO_RATES.start(),
+                        AUDIO_RATES.end()
+                    );
+                }
+                Header::TimedAudio {
+                    rate,
+                    resumed,
+                    end_us,
+                    len,
+                }
             }
             b"FAIL" => Header::Fail { len: len as usize },
             tag => bail!(
@@ -959,12 +1000,34 @@ fn read(
                     }
                 }
             }
-            protocol::Header::Audio { rate, len } => {
+            header @ (protocol::Header::Audio { .. } | protocol::Header::TimedAudio { .. }) => {
+                let (rate, timing, len) = match header {
+                    protocol::Header::Audio { rate, len } => {
+                        (rate, BrowserAudioTiming::Arrival, len)
+                    }
+                    protocol::Header::TimedAudio {
+                        rate,
+                        resumed: false,
+                        end_us,
+                        len,
+                    } => (rate, BrowserAudioTiming::Continuous { end_us }, len),
+                    protocol::Header::TimedAudio {
+                        rate,
+                        resumed: true,
+                        end_us,
+                        len,
+                    } => (rate, BrowserAudioTiming::Resumed { end_us }, len),
+                    _ => unreachable!(),
+                };
                 let mut bytes = vec![0u8; len];
                 reader
                     .read_exact(&mut bytes)
                     .context("reading browser audio")?;
                 let now = system::now();
+                let wall_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|d| u64::try_from(d.as_micros()).ok());
                 if let Some(sink) = audio {
                     if len == 0 {
                         // Document-start marker, ordered with the page's audio.
@@ -981,7 +1044,7 @@ fn read(
                     let samples = resampler.run(rate, samples);
                     let frames = samples.len() / 2;
                     if frames > 0 {
-                        let (at, gap) = stamper.stamp(frames, now);
+                        let (at, gap) = stamper.stamp_timed(frames, timing, wall_us, now);
                         if let Some(gap) = gap {
                             (sink.report_gap)(at, gap);
                         }

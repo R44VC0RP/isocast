@@ -175,6 +175,25 @@ fn protocol_reads_each_record_and_rejects_bad_ones() {
     input = &input[8..];
     assert_eq!(protocol::read_header(&mut input).unwrap(), None);
 
+    let mut timed = b"AUDT".to_vec();
+    timed.extend(&21u32.to_le_bytes());
+    timed.extend(&48000u32.to_le_bytes());
+    timed.push(1);
+    timed.extend(&75_000u64.to_le_bytes());
+    timed.extend([0u8; 8]);
+    let mut timed_slice = &timed[..];
+    assert_eq!(
+        protocol::read_header(&mut timed_slice).unwrap(),
+        Some(protocol::Header::TimedAudio {
+            rate: 48000,
+            resumed: true,
+            end_us: 75_000,
+            len: 8,
+        })
+    );
+    timed[12] = 2;
+    assert!(protocol::read_header(&mut &timed[..]).is_err());
+
     // A picture whose size doesn't match its length, an oversized record,
     // and an unknown tag are errors, not guesses.
     let mut bad = b"FRAM".to_vec();

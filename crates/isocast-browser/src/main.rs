@@ -18,6 +18,8 @@
 //! - `REDY` (empty): the page is loading;
 //! - `FRAM`: u32 width, u32 height, then width × height × 4 bytes BGRA;
 //! - `AUDI`: u32 sample rate, then interleaved stereo f32 samples;
+//! - `AUDT`: u32 sample rate, u8 kind (0 continuous, 1 resumed), u64 page
+//!   `Date.now()` wall time in microseconds, then interleaved stereo f32;
 //! - `FAIL`: a UTF-8 reason, before exiting.
 //!
 //! Lines on stdin: `reload`, `unload`, `load`. stdin closing ends it.
