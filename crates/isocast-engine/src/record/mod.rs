@@ -1413,7 +1413,10 @@ fn create_writers<P: Platform>(
                 applied_preset: output.applied_preset,
                 backend: output.backend.clone(),
                 estimated_load: admission.estimated_load,
-                reason: output.fallback.clone().or_else(|| admission.reason.clone()),
+                reason: match (&output.fallback, &admission.reason) {
+                    (Some(fallback), Some(admission)) => Some(format!("{fallback}; {admission}")),
+                    (fallback, admission) => fallback.as_ref().or(admission.as_ref()).cloned(),
+                },
             });
         }
     }

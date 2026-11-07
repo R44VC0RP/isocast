@@ -1263,6 +1263,12 @@ jobs:
         if: env.MODE == 'full'
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib playback::tests
 
+      - name: Check encoder preflight luma levels and fallback decisions
+        if: env.MODE == 'full'
+        run: |
+          cargo test --locked -p isocast-platform-windows --lib mf::probe::tests
+          cargo test --locked -p isocast-platform-windows --lib preflight_tests
+
       - name: Check capture target lifetime and helper restart limits
         if: env.MODE == 'full'
         run: cargo test --locked -j 1 -p isocast-platform-windows --lib broker::recovery::tests
@@ -1275,6 +1281,14 @@ jobs:
         if: env.MODE == 'full'
         timeout-minutes: 10
         uses: ./.github/actions/windows-ffmpeg
+
+      - name: Qualify real HEVC probe packets with the runner's installed decoders
+        if: env.MODE == 'full'
+        shell: pwsh
+        run: |
+          $ext = Get-AppxPackage -Name '*HEVC*'
+          if ($ext) { $ext | Select-Object Name,Version; $env:ISOCAST_TEST_HAS_HEVC_EXTENSION = '1' } else { 'No HEVC Store extension installed for runner' }
+          cargo test --locked -p isocast-platform-windows --lib hevc_probe_with_installed_decoders -- --ignored --nocapture
 
       # Media Foundation decoding of files ffmpeg makes at test time (H.264/AAC
       # MP4 and MOV timing with edit lists and late tracks, WAV, an FFV1 file
@@ -1416,15 +1430,21 @@ jobs:
           name: windows-app-audio
           path: windows-app-audio.json
 
-      - name: Record with the preflight fallback after an injected NVENC open failure
+      - name: Reject an encoder open failure and a decoded wrong picture before recording
         timeout-minutes: 5
         run: |
-          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_encoder_preflight --engine-env ISOCAST_TEST_FAIL_NVENC_OPEN=1 --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-preflight" --report windows-preflight.json
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_encoder_preflight --engine-env ISOCAST_TEST_FAIL_NVENC_OPEN=1 --engine-env ISOCAST_TEST_BAD_PROBE_PICTURE=1 --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/windows-preflight" --report windows-preflight.json
           python -c 'import json; r, = json.load(open("windows-preflight.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
 
       - name: Recover recordings and check isolated workspaces (hosted breakaway skip)
         timeout-minutes: 10
         run: python scripts/e2e.py --daemon target/debug/isocastd.exe --cli target/debug/isocast.exe --only win_recovery --only win_isolated --only win_machine_profile --codec h264 --timeout 420 --work "$RUNNER_TEMP/windows-recovery" --keep-failures --report windows-recovery.json
+
+      - name: Accept the recording encoder when no pixel decoder is installed
+        timeout-minutes: 5
+        run: |
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_preflight_no_decoder --engine-env ISOCAST_TEST_NO_PROBE_DECODER=1 --windows-profile 180p30 --codec h264 --timeout 180 --work "$RUNNER_TEMP/without-decoder" --report without-decoder.json
+          python -c 'import json; r, = json.load(open("without-decoder.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
 
       - name: Recover a recording encoder at a same-file IDR
         timeout-minutes: 10
@@ -1744,6 +1764,9 @@ jobs:
           retention-days: 14
 
   win-release:
+    permissions:
+      contents: read
+      actions: read
     # Host-specific recording qualification uses optimized services, not the
     # debug binaries of the build job; built here in parallel with it.
     name: Windows release qualification (windows-latest)
@@ -1831,6 +1854,72 @@ jobs:
           Write-Host "Verified $($proof.oracle[0].checks)/$($writer.slots) exact picture IDs; cut to bars2 at slot $($proof.cut_slot); drops=$($writer.dropped), repeats=$($writer.repeated), audio dropouts=$($writer.audio_dropouts)."
 
       - name: Keep compiler oracle evidence
+        if: ${{ failure() && env.MODE == 'full' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-compiler-oracle-initial
+          path: windows-dxc.json
+
+      - name: Fetch bitstream-only release binaries for the matched take-start comparison
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: windows-monitor-binaries
+          path: ${{ runner.temp }}/bench-main
+          github-token: ${{ github.token }}
+          run-id: 42322360813
+
+      - name: Fetch per-output decode release binaries (PR snapshot 50738333)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: windows-monitor-binaries
+          path: ${{ runner.temp }}/bench-before
+          github-token: ${{ github.token }}
+          run-id: 42327763428
+
+      - name: Measure four-output release start and pixel checks on the same Windows runner
+        timeout-minutes: 15
+        run: |
+          python -u - <<'PY'
+          import sys, os, json, time, subprocess, statistics, itertools
+          from pathlib import Path
+          sys.path.insert(0,'scripts'); import e2e
+          scratch=Path(os.environ['RUNNER_TEMP']); labels=('main','before','after')
+          e2e.ENGINE_ENV['ISOCAST_GPU_STARTUP_TIMINGS']='1'
+          for w,h in [(1920,1080),(640,360)]:
+              times={k:[] for k in labels}; decode_times={k:[] for k in labels}; bad=[]
+              for i,order in enumerate(itertools.permutations(labels)):
+               for label in order:
+                  bins=Path('target/release').resolve() if label=='after' else (scratch/('bench-'+label))
+                  binary=next(bins.rglob('isocastd.exe')); root=scratch/f'start-{h}-{label}-{i}'
+                  e=e2e.Engine(root,binary)
+                  try:
+                      cfg=e2e.setup(root,codec='h264',iso=True,width=w,height=h,fps=30)
+                      cfg['sources']=[{'id':n,'kind':'color','color':c,'width':w,'height':h} for n,c in [('bars','#aa1122'),('bars2','#119922'),('bars3','#112299')]]+[cfg['sources'][-1]]; cfg['recording']['iso']['sources'].append('bars3'); e.apply(cfg)
+                      t=time.perf_counter(); reply=subprocess.run([str(binary.with_name('isocast.exe')),'start','--json'],capture_output=True,env=e.env,timeout=60); ms=round((time.perf_counter()-t)*1000,2)
+                      assert reply.returncode==0,(reply.stdout,reply.stderr); assert len(json.loads(reply.stdout)['files'])==4
+                      try:
+                          def wrote():
+                              f=(e.rpc('status').get('live') or {}).get('files',[]); return len(f)==4 and all(s['frames']>2 for s in f)
+                          e2e.until(wrote,12,description='first pictures in four files',interval=.2)
+                      except e2e.Failure as wait: print('FIRST PICTURES',wait)
+                      stopped=e.rpc('stop',timeout=60)
+                      if len(stopped['files'])!=4 or any(f['frames']==0 for f in stopped['files']) or stopped['errors']: bad.append([label,i,stopped['errors']])
+                  finally: e.close()
+                  spans={}
+                  for f in e.sock.with_suffix('.logs').glob('*isocastd*.jsonl'):
+                      for line in f.read_bytes().splitlines():
+                          if b'encoder preflight' not in line: continue
+                          record=json.loads(line)
+                          if record.get('component')=='gpu.startup': spans.setdefault(record['message'],[]).append(round(record['fields']['elapsed_us']/1000,3))
+                  dec=spans.get('encoder preflight IDR decode',[]); hits=spans.get('encoder preflight identical IDR',[])
+                  print('RUN',h,i,label,ms,'ms',spans,'frames/drops',[(f['frames'],f['dropped_frames']) for f in stopped['files']]); times[label].append(ms); decode_times[label].append(round(sum(dec),3))
+                  if label!='main': assert len(dec)+len(hits)==4,spans
+              print('START_CLI_MS',h,times,'MEDIANS_MS',{k:statistics.median(v) for k,v in times.items()}); print('DECODE_MS',h,decode_times,'MEDIANS_MS',{k:statistics.median(v) for k,v in decode_times.items()}); print('INCOMPLETE',h,bad)
+              if not bad: break
+          assert not bad,bad
+          PY
+
+      - name: Keep compiler oracle diagnostics
         if: ${{ failure() && env.MODE == 'full' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

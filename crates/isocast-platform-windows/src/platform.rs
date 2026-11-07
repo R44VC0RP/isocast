@@ -384,6 +384,7 @@ impl RecordingReopen {
             preset,
             allow_mf_hardware,
             profile,
+            &mut crate::mf::probe::Batch::default(),
         )?;
         if encoder.nvenc_preset().is_none() {
             admission.settled()?;
@@ -662,18 +663,29 @@ impl Platform for WindowsPlatform {
                     ..Default::default()
                 },
             });
+            let input = if video.encoder.effective_bit_depth() == 10 {
+                PixelFormat::Rgba10
+            } else {
+                PixelFormat::Bgra8
+            };
             let encoder = WindowsVideoEncoder::preflight(
                 &self.graphics()?,
                 &video,
-                PixelFormat::Bgra8,
+                input,
                 None,
                 true,
+                &mut crate::mf::probe::Batch::default(),
             )?;
             let why = encoder.fallback_reasons().join("; ");
+            let (status, pixels) = if encoder.pixel_check_skipped {
+                (CheckStatus::Warning, "first IDR present")
+            } else {
+                (CheckStatus::Ok, "first IDR's bar luma checked")
+            };
             Ok((
-                CheckStatus::Ok,
+                status,
                 format!(
-                    "{}x{} at {} fps: 3 validated {:?} pictures, first IDR, using {}{}",
+                    "{}x{} at {} fps: 3 validated {:?} pictures from {input:?}, {pixels}, using {}{}",
                     video.width,
                     video.height,
                     video.fps,
@@ -977,6 +989,7 @@ impl Platform for WindowsPlatform {
             }
         };
         let mut encoders = Vec::with_capacity(files.len());
+        let mut probes = crate::mf::probe::Batch::default();
         for (file, &format) in files.iter().zip(&formats) {
             let opened = (|| -> Result<(WindowsVideoEncoder, EncoderAdmissionOutput)> {
                 let video = &file.spec.video;
@@ -995,6 +1008,7 @@ impl Platform for WindowsPlatform {
                     format,
                     planned,
                     allow_mf_hardware,
+                    &mut probes,
                 )?;
                 let applied = encoder.nvenc_preset();
                 if let (Some(preset), Some(actual)) = (planned, applied)
@@ -1055,6 +1069,7 @@ impl Platform for WindowsPlatform {
             report.outputs.push(output);
         }
         let mut writers = Vec::with_capacity(files.len());
+        drop(probes);
         for ((file, encoder), input) in files.iter().zip(encoders).zip(formats) {
             match VideoWriter::from_encoder(file.spec, encoder) {
                 Ok(mut writer) => {

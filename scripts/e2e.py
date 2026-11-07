@@ -154,6 +154,7 @@ if sys.platform == "win32":
         "win_program_cut",
         "win_media",
         "win_encoder_preflight",
+        "win_preflight_no_decoder",
         "win_encoder_recovery",
         "win_capture_recovery",
         "win_output_rollover",
@@ -5214,6 +5215,13 @@ def scenario_win_encoder_preflight(e, cfg, evidence):
     actual = until(selected, description="live file's validated recording encoder")
     require("injected NVENC open failure" in actual["reason"] and "MediaFoundation" in actual["backend"],
             f"fallback not reported in status: {actual}")
+    bad_pixels = bool(e.env.get("ISOCAST_TEST_BAD_PROBE_PICTURE"))
+    if bad_pixels:
+        # WARP: the first usable candidate encoded real black pixels, then
+        # the ordinary software candidate encoded the original two bars.
+        require(re.search(r"probe bar luma mismatch: measured \[\d+, \d+\], expected \[71, 181\]", actual["reason"])
+                and "software encoder" in actual["reason"], f"missing decoded rejection and fallback: {actual}")
+        require("encoder.budget" in actual["reason"], f"lost admission reason: {actual}")
     route = e.rpc("status")["windows_gpu"]
     selected_route, = [o for o in route["encoders"] if o["output"].startswith("program/")]
     require(any("injected NVENC open failure" in r for r in selected_route["fallback_reasons"]),
@@ -5241,6 +5249,54 @@ def scenario_win_encoder_preflight(e, cfg, evidence):
             isinstance(diagnostic["display_devices"], list) and diagnostic["captures"] == [] and
             not diagnostic["encoders"], f"wrong idle doctor route: {diagnostic}")
     evidence.update(windows_gpu_live=route, windows_gpu_doctor=diagnostic)
+    if bad_pixels:
+        e.stop()
+        del e.env["ISOCAST_TEST_BAD_PROBE_PICTURE"], e.env["ISOCAST_TEST_FAIL_NVENC_OPEN"]
+        e.start()
+        check = next(c for c in e.rpc("doctor", {"setup": cfg})["checks"] if c["name"] == "recording encoder self-test")
+        require(check["status"] == "ok" and "bar luma checked" in check["detail"] and "mismatch" not in check["detail"],
+                f"normal pixel probe did not pass: {check}")
+        path, normal = take(e, 2)
+        f, = normal["files"]
+        require(normal["status"] == "complete" and f["frames"] > 0 and "mismatch" not in f["encoder"].get("reason", ""),
+                f"normal take failed: {normal}")
+        evidence.update(normal_doctor=check, normal_frames=f["frames"])
+
+
+def scenario_win_preflight_no_decoder(e, cfg, evidence):
+    """No optional pixel oracle is not evidence against an actual recording encoder."""
+    if not e.env.get("ISOCAST_TEST_NO_PROBE_DECODER"):
+        raise Skip("requires debug daemon with ISOCAST_TEST_NO_PROBE_DECODER=1")
+    for codec in ("h264", "hevc"):
+        cfg["recording"]["program"]["encoder"]["codec"] = codec
+        check = next(c for c in e.rpc("doctor", {"setup": cfg})["checks"] if c["name"] == "recording encoder self-test")
+        if codec == "hevc" and check["status"] == "problem" and "no usable Software Media Foundation Hevc encoder is installed" in check["detail"]:
+            # An absent encoder must still refuse. The native HEVC preflight
+            # test exercises three libx265 AUs on systems missing both codecs.
+            evidence[codec] = {"encoder_unavailable": check["detail"]}
+            continue
+        note = "pixel check skipped: no synchronous Media Foundation"
+        require(check["status"] == "warning" and note in check["detail"] and "bar luma checked" not in check["detail"],
+                f"{codec}: wrong doctor result without a decoder: {check}")
+        e.apply(cfg)
+        started = e.rpc("start", {})
+        def live_file():
+            files = (e.rpc("status").get("live") or {}).get("files", [])
+            return next((f for f in files if f.get("frames", 0) > 3), None)
+        live = until(live_file, description="recording despite absent pixel decoder")
+        actual = live["encoder"]
+        require(note in actual["reason"], f"{codec}: missing live skip note: {actual}")
+        route, = e.rpc("status")["windows_gpu"]["encoders"]
+        require(any(note in r for r in route["fallback_reasons"]), f"{codec}: route lost skip: {route}")
+        e.rpc("stop")
+        path = Path(started["manifest"])
+        manifest = until(lambda: finished(path), description="completed take without decoder")
+        f, = manifest["files"]
+        require(manifest["status"] == "complete" and f["encoder"] == actual, f"unexpected manifest: {manifest}")
+        stream = next(s for s in probe(path.parent / f["path"])["streams"] if s["codec_type"] == "video")
+        require(stream["codec_name"] == codec and int(stream["nb_read_frames"]) == f["frames"] > 3,
+                f"{codec}: fallback altered stream: {stream}")
+        evidence[codec] = {"doctor": check, "encoder": actual, "decoded_frames": f["frames"]}
 
 
 def scenario_win_output_scale(e, cfg, evidence):

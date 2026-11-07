@@ -1,5 +1,7 @@
 //! Media Foundation hardware encoders and the last-resort system encoder.
 
+pub(crate) mod probe;
+
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -109,7 +111,7 @@ impl MfEncoder {
         encoding: VideoEncoding,
         input: PixelFormat,
         quality: u32,
-        probe: Option<Frame>,
+        probe: Option<probe::Picture>,
     ) -> Result<Self> {
         Self::open(device, spec, mode, encoding, input, Some(quality), probe)
     }
@@ -121,7 +123,7 @@ impl MfEncoder {
         encoding: VideoEncoding,
         input: PixelFormat,
         quality: Option<u32>,
-        probe: Option<Frame>,
+        probe: Option<probe::Picture>,
     ) -> Result<Self> {
         encoding.validate(input)?;
         if spec.profile != H264Profile::High && encoding != VideoEncoding::H264 {
@@ -509,11 +511,38 @@ impl Session {
         encoding: VideoEncoding,
         input: PixelFormat,
         quality: Option<u32>,
-        probe: Option<&Frame>,
+        probe: Option<&probe::Picture>,
     ) -> Result<(Self, Vec<String>)> {
         let mut failures = Vec::new();
         let hardware = mode == MfMode::Hardware;
-        for activation in candidates(hardware, hardware.then(|| device.adapter_luid()), encoding)? {
+        let activations = candidates(hardware, hardware.then(|| device.adapter_luid()), encoding)?;
+        let choices = activations.iter().map(|a| (a.clone(), probe));
+        // Hosted WARP has only one working encoder. Prepend a separate real
+        // activation of that MFT with bad input, then try the untouched list.
+        #[cfg(debug_assertions)]
+        let bad = if mode == MfMode::Software
+            && let Some(probe) = probe
+            && !activations.is_empty()
+            && std::env::var_os("ISOCAST_TEST_BAD_PROBE_PICTURE").is_some()
+        {
+            Some(
+                probe.with_frame(crate::TexturePool::new(device.clone()).probe_frame(
+                    spec.width,
+                    spec.height,
+                    input,
+                    [0, 0],
+                )?),
+            )
+        } else {
+            None
+        };
+        #[cfg(debug_assertions)]
+        let choices = bad
+            .as_ref()
+            .map(|black| (activations[0].clone(), Some(black)))
+            .into_iter()
+            .chain(choices);
+        for (activation, probe) in choices {
             let label = name(&activation).unwrap_or_else(|_| "unnamed MFT".into());
             match Self::open_one(
                 device,
@@ -526,7 +555,7 @@ impl Session {
             )
             .and_then(|mut session| {
                 if let Some(frame) = probe {
-                    session.probe(frame)?;
+                    session.info.pixel_check_skipped = session.probe(frame)?;
                 }
                 Ok(session)
             }) {
@@ -760,6 +789,7 @@ impl Session {
                 device: device.clone(),
                 slots: Vec::new(),
                 info: MfEncoderInfo {
+                    pixel_check_skipped: None,
                     name: label,
                     hardware: mode == MfMode::Hardware,
                     asynchronous,
@@ -846,10 +876,12 @@ impl Session {
         Ok(())
     }
 
-    fn probe(&mut self, frame: &Frame) -> Result<()> {
+    fn probe(&mut self, picture: &probe::Picture) -> Result<Option<String>> {
         use crate::encoder::{PROBE_FRAMES, check_probe_packet, probe_pts};
+        let frame = &picture.frame;
         let deadline = Instant::now() + FINISH_WAIT;
         let mut received = 0;
+        let mut idr = Vec::new();
         for index in 0..PROBE_FRAMES {
             let pts = probe_pts(index, self.fps);
             self.validate_frame(frame, pts)?;
@@ -860,6 +892,9 @@ impl Session {
                 );
                 if let Some(packet) = self.receive(Duration::from_millis(1))? {
                     check_probe_packet(&packet, received, self.fps)?;
+                    if received == 0 {
+                        idr = packet.data;
+                    }
                     received += 1;
                 } else {
                     std::thread::sleep(Duration::from_millis(1));
@@ -874,13 +909,23 @@ impl Session {
         self.finish(&mut tail)?;
         for packet in tail {
             check_probe_packet(&packet, received, self.fps)?;
+            if received == 0 {
+                idr = packet.data;
+            }
             received += 1;
         }
         anyhow::ensure!(
             received == PROBE_FRAMES,
             "MF preflight: received {received}/{PROBE_FRAMES} access units"
         );
-        self.parameters.check_probe(frame)?;
+        let provider = unsafe { self.activation.0.GetGUID(&MFT_TRANSFORM_CLSID_Attribute) }
+            .ok()
+            .map(|class| probe::Provider::Mf {
+                class,
+                hardware: self.info.hardware,
+                quality: self.info.quality,
+            });
+        let pixel_note = picture.check(&self.parameters, &idr, self.fps, provider)?;
         self.deadline = None;
         self.finished = false;
         self.finishing = false;
@@ -898,7 +943,7 @@ impl Session {
             !self.info.asynchronous || self.need_input > 0,
             "MF preflight: no input credit for take after drain"
         );
-        Ok(())
+        Ok(pixel_note)
     }
 
     fn events(&mut self, timeout: Duration) -> Result<()> {
@@ -1426,6 +1471,8 @@ fn wait(event: &Event, timeout: Duration) -> Result<()> {
 
 #[derive(Debug, Clone)]
 pub struct MfEncoderInfo {
+    /// Why only the bitstream could be checked for this recording session.
+    pub pixel_check_skipped: Option<String>,
     pub name: String,
     pub hardware: bool,
     pub asynchronous: bool,
@@ -1505,6 +1552,11 @@ fn candidates(
             &mut count,
         )
     }?;
+    Ok(unsafe { take_activations(list, count) })
+}
+
+/// SAFETY: list/count are the owned array from a successful MFTEnumEx/2.
+unsafe fn take_activations(list: *mut Option<IMFActivate>, count: u32) -> Vec<IMFActivate> {
     let mut result = Vec::new();
     if !list.is_null() {
         // Move each owned COM reference out before freeing the COM array.
@@ -1515,7 +1567,7 @@ fn candidates(
         }
         unsafe { CoTaskMemFree(Some(list.cast())) };
     }
-    Ok(result)
+    result
 }
 
 fn name(activation: &IMFActivate) -> Result<String> {
@@ -1579,6 +1631,7 @@ pub fn mf_encoders_for(encoding: VideoEncoding) -> Result<Vec<MfEncoderInfo>> {
                     let transform: IMFTransform = unsafe { activation.ActivateObject() }?;
                     let attributes = unsafe { transform.GetAttributes() }?;
                     let info = MfEncoderInfo {
+                        pixel_check_skipped: None,
                         name,
                         hardware,
                         asynchronous: unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC) }
