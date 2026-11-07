@@ -31,7 +31,7 @@ enum Command {
     #[cfg_attr(
         target_os = "linux",
         command(
-            about = "Show/create this client's public identity; its private key stays in an owner-only 0600 file."
+            about = "Show/create this client's public identity; its private key stays in the desktop keyring (an owner-only 0600 file without one)."
         )
     )]
     Identity {
@@ -136,9 +136,9 @@ fn status(method: Method, json: bool) -> Result<()> {
 
 fn key_note(os: EngineOs, status: &RemoteStatus, json: bool) -> Option<&'static str> {
     (!json && os == EngineOs::Linux && status.identity.is_some()).then_some(
-        "note: this Linux engine's remote key is stored in a plaintext 0600 file in \
-         $XDG_CONFIG_HOME/isocast/credentials (default ~/.config/isocast/credentials), \
-         not an encrypted keyring",
+        "note: this Linux engine's remote key is stored in its desktop keyring, or, on a \
+         computer without one, in a plaintext 0600 file in $XDG_CONFIG_HOME/isocast/credentials \
+         (default ~/.config/isocast/credentials)",
     )
 }
 
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn linux_key_note_is_human_only_and_needs_a_key() {
         let note = key_note(EngineOs::Linux, &sample(true), false).unwrap();
-        assert!(note.contains("0600 file") && !note.contains('\n'));
+        assert!(note.contains("keyring") && note.contains("0600 file") && !note.contains('\n'));
         assert!(key_note(EngineOs::Linux, &sample(true), true).is_none());
         assert!(key_note(EngineOs::Linux, &sample(false), false).is_none());
         assert!(key_note(EngineOs::Macos, &sample(true), false).is_none());

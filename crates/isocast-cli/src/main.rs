@@ -632,7 +632,7 @@ enum Command {
     #[cfg_attr(
         target_os = "linux",
         command(
-            about = "Stream the program live over RTMP or RTMPS; keep its stream key in an owner-only 0600 file."
+            about = "Stream the program live over RTMP or RTMPS; keep its stream key in the desktop keyring (an owner-only 0600 file without one)."
         )
     )]
     Stream {
@@ -882,7 +882,7 @@ enum StreamCommand {
     #[cfg_attr(
         target_os = "linux",
         command(
-            about = "Keep or remove the stream key in an owner-only 0600 file, never in a setup."
+            about = "Keep or remove the stream key in the desktop keyring (an owner-only 0600 file without one), never in a setup."
         )
     )]
     Key {
