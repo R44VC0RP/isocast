@@ -747,7 +747,7 @@ fn collect_coredumps(
     let Some(list) = run(&["list", "--no-pager", "--json=short"]) else {
         return;
     };
-    let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&list) else {
+    let Some(entries) = coredump_list(&list) else {
         return;
     };
     // SAFETY: getuid has no preconditions and cannot fail.
@@ -778,6 +778,19 @@ fn collect_coredumps(
     }
 }
 
+/// The entries of `coredumpctl list --json=short`. While a systemd-coredump
+/// unit is still running, coredumpctl prints `-- Notice: …` after the JSON.
+#[cfg(target_os = "linux")]
+fn coredump_list(list: &str) -> Option<Vec<Value>> {
+    match serde_json::Deserializer::from_str(list)
+        .into_iter::<Value>()
+        .next()?
+    {
+        Ok(Value::Array(entries)) => Some(entries),
+        _ => None,
+    }
+}
+
 /// The ten newest `coredumpctl list` entries of `uid` for
 /// [`LINUX_EXECUTABLES`]: (time, pid, executable name, path).
 #[cfg(target_os = "linux")]
@@ -799,13 +812,14 @@ fn coredump_entries(entries: &[Value], uid: u64) -> Vec<(u64, u64, &str, &str)> 
 }
 
 /// `coredumpctl info` output, redacted, without [`COREDUMP_PRIVATE`] lines,
-/// the message's UID or the timestamp's age.
+/// coredumpctl's notices, the message's UID or the timestamp's age.
 #[cfg(target_os = "linux")]
 fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
     info.lines()
         .filter(|line| {
             let line = line.trim_start();
-            !COREDUMP_PRIVATE.iter().any(|key| line.starts_with(key))
+            !line.starts_with("-- Notice:")
+                && !COREDUMP_PRIVATE.iter().any(|key| line.starts_with(key))
         })
         .map(|line| {
             let mut line = line.to_owned();
@@ -999,8 +1013,18 @@ mod linux_tests {
     }
 
     #[test]
+    fn coredump_list_reads_the_json_before_a_notice() {
+        let list = "[{\"time\":1,\"pid\":10,\"uid\":1000,\"exe\":\"/usr/bin/isocastd\"}]\n-- Notice: 1 systemd-coredump@.service unit is running, output may be incomplete.\n";
+        let entries = coredump_list(list).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["pid"], 10);
+        assert!(coredump_list("-- Notice: no JSON").is_none());
+        assert!(coredump_list("{\"not\":\"a list\"}").is_none());
+    }
+
+    #[test]
     fn coredump_text_leaves_out_identifying_fields() {
-        let info = "           PID: 4242 (isocastd)\n           UID: 1000 (mat)\n      Hostname: tanner\n    Machine ID: 0123abcd\n       Boot ID: 4567ef01\n        Signal: 6 (ABRT)\n     Executable: /usr/bin/isocastd\n Control Group: /user.slice/user-1000.slice\n          Unit: user@1000.service\n     User Unit: app.slice\n         Slice: user-1000.slice\n       Storage: /var/lib/systemd/coredump/core.isocastd.zst (present)\n     Timestamp: Wed 2026-10-28 20:22:16 CET (6 days ago)\n       Message: Process 4242 (isocastd) of user 1000 dumped core.\n";
+        let info = "           PID: 4242 (isocastd)\n           UID: 1000 (mat)\n      Hostname: tanner\n    Machine ID: 0123abcd\n       Boot ID: 4567ef01\n        Signal: 6 (ABRT)\n     Executable: /usr/bin/isocastd\n Control Group: /user.slice/user-1000.slice\n          Unit: user@1000.service\n     User Unit: app.slice\n         Slice: user-1000.slice\n       Storage: /var/lib/systemd/coredump/core.isocastd.zst (present)\n     Timestamp: Wed 2026-10-28 20:22:16 CET (6 days ago)\n       Message: Process 4242 (isocastd) of user 1000 dumped core.\n-- Notice: 1 systemd-coredump@.service unit is running, output may be incomplete.\n";
         let text = coredump_text(info, &mut Redactor::default());
         assert!(text.contains("PID: 4242 (isocastd)"));
         assert!(text.contains("Signal: 6 (ABRT)"));
@@ -1019,6 +1043,7 @@ mod linux_tests {
             "Storage:",
             "of user",
             "ago)",
+            "Notice",
         ] {
             assert!(!text.contains(private), "{private} left in {text}");
         }
