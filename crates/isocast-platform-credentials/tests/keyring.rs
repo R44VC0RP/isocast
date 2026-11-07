@@ -99,12 +99,11 @@ fn child_entry() {
         "deleted-stays" => {
             assert_eq!(lookup(&service), OLD, "the keyring keeps its older item");
             assert!(!has_secret(&service, ACCOUNT).unwrap());
+            assert_eq!(lookup(&service), OLD, "has_secret changes nothing");
             assert_eq!(secret(&service, ACCOUNT).unwrap(), None);
+            assert_eq!(lookup(&service), "", "a read finishes the delete");
+            assert!(files(&config()).is_empty(), "and removes the mark");
             set_secret(&service, ACCOUNT, NEWER).unwrap();
-            assert!(
-                files(&config()).is_empty(),
-                "a keyring write removes the mark"
-            );
             assert_eq!(secret(&service, ACCOUNT).unwrap().as_deref(), Some(NEWER));
             assert!(delete_secret(&service, ACCOUNT).unwrap());
             assert!(
@@ -115,7 +114,11 @@ fn child_entry() {
         }
         "file-wins" => {
             assert_eq!(lookup(&service), OLD, "the keyring keeps its older item");
+            assert!(has_secret(&service, ACCOUNT).unwrap());
+            assert_eq!(lookup(&service), OLD, "has_secret changes nothing");
             assert_eq!(secret(&service, ACCOUNT).unwrap().as_deref(), Some(VALUE));
+            assert_eq!(lookup(&service), VALUE, "a read moves the file's value in");
+            assert!(files(&config()).is_empty(), "and removes the file");
             set_secret(&service, ACCOUNT, NEWER).unwrap();
             assert!(
                 files(&config()).is_empty(),
@@ -162,6 +165,14 @@ fn child_entry() {
             assert!(error.contains(&expected), "{error}");
             assert!(files(&config()).is_empty(), "never a file instead");
             println!("refused: {error}");
+        }
+        "file-while-hung" => {
+            let started = Instant::now();
+            assert_eq!(secret(&service, ACCOUNT).unwrap().as_deref(), Some(VALUE));
+            let first = started.elapsed();
+            assert_eq!(secret(&service, ACCOUNT).unwrap().as_deref(), Some(VALUE));
+            assert_eq!(files(&config()).len(), 1, "the file stays");
+            println!("file read with a hung keyring: first {first:?}");
         }
         "hung" => {
             let started = Instant::now();
@@ -381,6 +392,14 @@ fn a_secret_deleted_without_the_keyring_stays_deleted() {
     run(scratch.child("keyring-old", Some(WITH_KEYRING), None));
     run(scratch.child("delete-file", None, Some("unix:path=/nonexistent")));
     run(scratch.child("deleted-stays", Some(WITH_KEYRING), None));
+}
+
+#[test]
+#[ignore = "starts dbus-run-session and dbus-test-tool; takes about 5 s"]
+fn a_file_is_read_even_while_the_keyring_hangs() {
+    let scratch = Scratch::new("file-while-hung");
+    run(scratch.child("write-file", None, Some("unix:path=/nonexistent")));
+    run(scratch.child("file-while-hung", Some(WITH_HUNG_KEYRING), None));
 }
 
 #[test]

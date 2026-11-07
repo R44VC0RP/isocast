@@ -6,7 +6,8 @@
 //! A file is always newer than the keyring's item: a keyring write deletes
 //! it, so reads take the file first. A secret deleted while the keyring is
 //! away leaves an empty file, which hides the keyring's older item until a
-//! keyring write or delete removes it. Isocast never starts the keyring's
+//! keyring write or delete removes it. Reading a file once the keyring
+//! answers moves its value, or its delete, into the keyring. Isocast never starts the keyring's
 //! unlock or confirmation prompts: a locked keyring is an error.
 
 use std::collections::HashMap;
@@ -682,10 +683,26 @@ fn filed(service: &str, account: &str) -> Result<Filed> {
     })
 }
 
+/// A file left from a time without the keyring moves into it once the
+/// keyring answers with no prompt, and a pending delete finishes. Neither
+/// ever fails the read.
 pub fn secret(service: &str, account: &str) -> Result<Option<String>> {
     match filed(service, account)? {
-        Filed::Value(value) => Ok(Some(value)),
-        Filed::Deleted => Ok(None),
+        Filed::Value(value) => {
+            let stored =
+                with_keyring(async |keyring| keyring.store(service, account, &value).await);
+            if let Ok(Some(())) = stored {
+                let _ = file_delete(service, account);
+            }
+            Ok(Some(value))
+        }
+        Filed::Deleted => {
+            let deleted = with_keyring(async |keyring| keyring.delete(service, account).await);
+            if let Ok(Some(_)) = deleted {
+                let _ = file_delete(service, account);
+            }
+            Ok(None)
+        }
         Filed::Nothing => {
             Ok(with_keyring(async |keyring| keyring.read(service, account).await)?.flatten())
         }
