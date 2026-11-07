@@ -3435,7 +3435,7 @@ fn sample_stream(which: &str) -> anyhow::Result<StreamStatus> {
                 Isocast, and macOS lets only that copy use or replace it. Open Keychain Access, \
                 delete the “dev.isocast.release.stream” item, then paste the key and press Save Key.",
                 "The saved key could not be read from Credential Manager. Open Credential Manager › Windows Credentials and check the Isocast entry, then paste the key and press Save Key.",
-        "The saved key could not be read from Isocast's credentials file. Paste the key again to replace it.")
+        "The saved key could not be read from the keyring. Unlock the keyring, or paste the key again to replace it.")
         }),
         other => anyhow::bail!(
             "no sample stream {other:?}; one of live, reconnecting, connecting, short, \

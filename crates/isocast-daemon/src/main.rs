@@ -3643,9 +3643,10 @@ impl Daemon {
         if service != StreamService::Custom && target.server.is_some() {
             return Err(failed(anyhow::anyhow!(
                 "server: only a custom service's key belongs to a server; {0} has one key \
-                 (Keychain account \"{0}\") whatever its server, so leave the server out (or \
+                 ({1} account \"{0}\") whatever its server, so leave the server out (or \
                  give the service custom)",
-                service.id()
+                service.id(),
+                isocast_protocol::platform_text::CREDENTIAL_STORE
             )));
         }
         let server = target.server.or_else(|| {
@@ -4268,7 +4269,8 @@ impl Daemon {
             )
         } else if at_capacity {
             format!(
-                "this Mac's video encoders are at capacity, so {} {verb} dropping frames",
+                "this {}'s video encoders are at capacity, so {} {verb} dropping frames",
+                isocast_protocol::platform_text::MACHINE,
                 names.join(", ")
             )
         } else {
@@ -5709,6 +5711,10 @@ static LEGACY_IGNORED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// come back. One another build saved is ignored: the user saves the key
 /// again, under this build's own service.
 fn migrate_legacy_key(account: &str) -> Option<String> {
+    // Linux has always used the build's own service.
+    if cfg!(target_os = "linux") {
+        return None;
+    }
     let mut ignored = LEGACY_IGNORED.lock();
     if ignored.iter().any(|a| a == account)
         || key_service() == LEGACY_KEY_SERVICE
@@ -5752,7 +5758,7 @@ fn migrate_legacy_key(account: &str) -> Option<String> {
 /// Remove the legacy item for `account` if this build may (it saved it);
 /// one another build saved stays, ignored.
 fn retire_legacy_key(account: &str) {
-    if key_service() == LEGACY_KEY_SERVICE {
+    if cfg!(target_os = "linux") || key_service() == LEGACY_KEY_SERVICE {
         return;
     }
     if let Err(err) = delete_secret(LEGACY_KEY_SERVICE, account) {
