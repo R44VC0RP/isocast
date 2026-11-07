@@ -393,9 +393,9 @@ const KEYRING_PROMPT: Duration = Duration::from_secs(120);
 /// which checks every destination's key, doesn't wait on each.
 const KEYRING_BACKOFF: Duration = Duration::from_secs(60);
 static TIMED_OUT_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
-const TIMED_OUT: &str = "keyring: the Secret Service (org.freedesktop.secrets) did not answer \
-                         within 5 seconds; restart the desktop keyring, or log out and in, and \
-                         retry (Isocast asks it again 60 s after a time-out)";
+const TIMED_OUT: &str = "keyring: the session bus or its Secret Service (org.freedesktop.secrets) \
+                         did not answer within 5 seconds; restart the desktop keyring, or log out \
+                         and in, and retry (Isocast asks it again 60 s after a time-out)";
 
 fn timed_out_at() -> std::sync::MutexGuard<'static, Option<Instant>> {
     TIMED_OUT_AT
@@ -403,11 +403,13 @@ fn timed_out_at() -> std::sync::MutexGuard<'static, Option<Instant>> {
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
-/// zbus reports a call past [`KEYRING_CALL`] as a `TimedOut` I/O error.
+/// zbus reports a call past [`KEYRING_CALL`] as a `TimedOut` I/O error;
+/// `Keyring::open` reports a slow connection as a bare one.
 fn timed_out(error: &anyhow::Error) -> bool {
+    let timed_out = |io: &std::io::Error| io.kind() == std::io::ErrorKind::TimedOut;
     error.chain().any(|cause| {
-        matches!(cause.downcast_ref::<zbus::Error>(),
-            Some(zbus::Error::InputOutput(io)) if io.kind() == std::io::ErrorKind::TimedOut)
+        matches!(cause.downcast_ref::<zbus::Error>(), Some(zbus::Error::InputOutput(io)) if timed_out(io))
+            || cause.downcast_ref::<std::io::Error>().is_some_and(timed_out)
     })
 }
 
@@ -443,14 +445,17 @@ struct Keyring {
 impl Keyring {
     /// None when there is no session bus, or no Secret Service on it.
     async fn open() -> Result<Option<Self>> {
-        let conn = match async {
+        // method_timeout covers calls only, not the connect, SASL and Hello.
+        let connect = async {
             zbus::connection::Builder::session()?
                 .method_timeout(KEYRING_CALL)
                 .build()
                 .await
-        }
-        .await
-        {
+        };
+        let Ok(connected) = tokio::time::timeout(KEYRING_CALL, connect).await else {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+        };
+        let conn = match connected {
             Ok(conn) => conn,
             Err(zbus::Error::Address(_)) => return Ok(None),
             Err(zbus::Error::Connection(io, _))

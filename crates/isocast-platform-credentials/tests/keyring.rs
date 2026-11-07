@@ -300,6 +300,17 @@ fn a_file_written_without_the_keyring_wins_over_its_older_item() {
     run(scratch.child("file-wins", Some(WITH_KEYRING), None));
 }
 
+/// A socket that takes connections and never says a word, as a wedged bus
+/// does: the connection itself must be time-limited too.
+#[test]
+fn a_silent_session_bus_is_an_error_after_its_time_limit() {
+    let scratch = Scratch::new("silent-bus");
+    let socket = scratch.0.join("bus");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let address = format!("unix:path={}", socket.display());
+    run(scratch.child("hung", None, Some(&address)));
+}
+
 #[test]
 #[ignore = "starts dbus-run-session and dbus-test-tool; takes about 5 s"]
 fn a_hung_keyring_is_an_error_after_its_time_limit() {
