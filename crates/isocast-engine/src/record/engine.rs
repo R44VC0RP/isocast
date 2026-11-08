@@ -4185,6 +4185,21 @@ fn run_iso<P: Platform>(
         if tick >= shared.end() {
             break;
         }
+        if platform.retiring_video() {
+            runner.stage = None;
+            last_gpu = None;
+            gpu.lock().take();
+            runner.slot.clear();
+            missing_screen = recovery.interrupted(
+                (VideoRecoveryScope::Source, &runner.id),
+                fps,
+                tick,
+                tick,
+                VideoFaultKind::DeviceLost,
+                "recording GPU removed",
+            );
+            continue;
+        }
         if runner
             .stage
             .as_ref()
@@ -4584,7 +4599,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         thread::sleep(Duration::from_millis(20));
     }
 
-    let _recording_activity = platform.recording_activity()?;
+    let mut recording_activity = platform.recording_activity()?;
 
     // Sources whose ISO files are filtered.
     let filtered: Vec<&str> = match iso.filtered {
@@ -4811,6 +4826,12 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             }
         })
         .collect();
+    let mut warm_encoders = Some((
+        _warm,
+        _warm_destinations,
+        _warm_vertical,
+        _warm_canvas_replays,
+    ));
     if options.stop.load(Ordering::SeqCst) {
         bail!("the recording was stopped before it started, so nothing was recorded");
     }
@@ -4965,10 +4986,10 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         (after.ticks_since(engine_epoch, fps).max(0) + 1) as u64,
         fps,
     );
-    let shared = Shared {
+    let shared = Arc::new(Shared {
         epoch,
         end: AtomicI64::new(i64::MAX),
-    };
+    });
     let mut clock =
         super::pause::RecordingClock::new(epoch, plans.iter().map(|plan| plan.spec.video.fps));
     clock.iso_sources.extend(
@@ -5160,10 +5181,159 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         let mut output_activity = (1, 0);
         let mut next_space_check = platform.now();
         let mut disk_full = None;
+        let mut gpu_error = None;
+        let mut last_loss = None;
+        type Replacement = JoinHandle<(Box<dyn crate::RecordingActivity>, Result<()>)>;
+        let mut replacing: Option<Replacement> = None;
+        let mut waiting_layers = Vec::<(String, Arc<FrameSlot<P::Frame>>)>::new();
         let stop_below = reserve.max((rate * MIN_FREE_SECONDS).max(MIN_FREE_BYTES) as u64);
         let coordinator = isocast_diagnostics::contain("recording coordinator", || {
             loop {
                 let now = platform.now();
+                if !options.stop.load(Ordering::Acquire)
+                    && now < shared.end()
+                    && (recording_activity.is_some() || replacing.is_some())
+                {
+                    let recover = (|| -> Result<()> {
+                        if let Some(job) = &replacing {
+                            if !job.is_finished() {
+                                return Ok(());
+                            }
+                            let (activity, result) =
+                                replacing.take().unwrap().join().map_err(|_| {
+                                    anyhow::anyhow!("GPU replacement worker panicked")
+                                })?;
+                            recording_activity = Some(activity);
+                            result?;
+                            // The reconciler, not the take/disk clock, opens compositors.
+                            let state = inner.state.read();
+                            let mut wanted = inner.wanted.lock();
+                            wanted.get_or_insert_with(|| state.setup.clone());
+                            inner.wake.notify_all();
+                        }
+                        let activity = recording_activity.as_mut().expect("not replacing");
+                        #[cfg(debug_assertions)]
+                        activity.inject_test_loss()?;
+                        if !isocast_diagnostics::developer() {
+                            return Ok(());
+                        }
+                        let Some(generation) = activity.removed()? else {
+                            waiting_layers.retain(|(id, slot)| {
+                                if let Some((frame, at)) = slot.newest_timed()
+                                    && P::retain_frame(&frame, crate::FrameUse::Recording).is_some()
+                                {
+                                    recovery.observe_reopened_source(id, at);
+                                    return false;
+                                }
+                                true
+                            });
+                            return Ok(());
+                        };
+                        waiting_layers.clear();
+                        let reason = format!("Windows GPU generation {generation} removed");
+                        let mut unsupported = None;
+                        {
+                            let state = inner.state.read();
+                            for (id, live) in &state.sources {
+                                if let Some(video) = &live.video {
+                                    recovery.interrupted(
+                                        (VideoRecoveryScope::Source, id),
+                                        video.fps,
+                                        now,
+                                        now,
+                                        VideoFaultKind::DeviceLost,
+                                        &reason,
+                                    );
+                                    waiting_layers.push((id.clone(), video.slot.clone()));
+                                    if let Some(src) = setup.source(id)
+                                        && !matches!(
+                                            src.kind,
+                                            SourceKind::TestPattern(_)
+                                                | SourceKind::Application(_)
+                                                | SourceKind::Display(_)
+                                                | SourceKind::Window(_)
+                                        )
+                                    {
+                                        unsupported = Some(format!(
+                                            "{id}: {} has no pinned GPU restart",
+                                            src.kind.label()
+                                        ));
+                                    }
+                                }
+                            }
+                            if !state.stingers.is_empty() {
+                                unsupported =
+                                    Some("stinger media has no pinned GPU restart".into());
+                            }
+                        }
+                        if last_loss
+                            .is_some_and(|t| now.saturating_since(t) < Duration::from_secs(15))
+                        {
+                            activity.quarantine()?;
+                            bail!(
+                                "replacement GPU removed within the incident window; quarantined, restart Isocast"
+                            );
+                        }
+                        if let Some(why) = unsupported {
+                            bail!("{reason}; {why}");
+                        }
+                        anyhow::ensure!(
+                            !handover,
+                            "Windows GPU removed during a take split; finalizing"
+                        );
+                        let old = inner.clone();
+                        let warm = warm_encoders.take();
+                        last_loss = Some(now);
+                        let release = Box::new(move || {
+                            drop(warm);
+                            let (main, extras) = {
+                                let mut state = old.state.lock();
+                                (
+                                    state.compositor.take(),
+                                    std::mem::take(&mut state.extra_compositors),
+                                )
+                            };
+                            for run in main.into_iter().chain(extras.into_values()) {
+                                stop_compositor(run);
+                            }
+                            for out in std::iter::once(&old.main)
+                                .chain(old.extras.iter().map(|e| &e.output))
+                            {
+                                out.program.clear();
+                                out.program_rgb.clear();
+                                out.preview.clear();
+                            }
+                            let state = old.state.read();
+                            for video in state.sources.values().filter_map(|s| s.video.as_ref()) {
+                                video.slot.clear();
+                            }
+                        });
+                        let (gate, stop, end, platform) = (
+                            options.check_recording_only.clone(),
+                            options.stop.clone(),
+                            shared.clone(),
+                            platform.clone(),
+                        );
+                        let mut activity = recording_activity.take().unwrap();
+                        replacing = Some(
+                            thread::Builder::new()
+                                .name("recording GPU replacement".into())
+                                .spawn(move || {
+                                    let stopped = || {
+                                        stop.load(Ordering::Acquire) || platform.now() >= end.end()
+                                    };
+                                    let result = activity.replace(&*gate, &stopped, release);
+                                    (activity, result)
+                                })?,
+                        );
+                        Ok(())
+                    })();
+                    if let Err(err) = recover {
+                        gpu_error = Some(format!("recording GPU loss: {err:#}"));
+                        shared.stop_at(platform.now().max(shared.epoch));
+                        break;
+                    }
+                }
                 if inner.emergency.load(Ordering::SeqCst)
                     || inner.state.is_broken()
                     || inner.main.scenes.broken()
@@ -5681,6 +5851,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         }
         drop(std::mem::replace(&mut routes, Unroute(Vec::new())));
         let mut errors = coordinator.err().into_iter().collect::<Vec<_>>();
+        errors.extend(gpu_error);
         if inner.emergency.load(Ordering::SeqCst)
             || inner.state.is_broken()
             || inner.main.scenes.broken()

@@ -128,7 +128,7 @@ pub fn capture_screen(
                         // upload/fence, leases, pipes and recording are real.
                         #[cfg(debug_assertions)]
                         if crate::broker::recovery::fixture_mode().as_deref() == Some("fixture")
-                            && crate::broker::recovery::fixture_pixel(target).is_some()
+                            && let Some(initial) = crate::broker::recovery::fixture_pixel(target)
                         {
                             let format = CaptureFormat {
                                 width: 160,
@@ -143,6 +143,13 @@ pub fn capture_screen(
                             loop {
                                 let level = crate::broker::recovery::fixture_pixel(target)
                                     .context("the fixture window closed")?;
+                                // Mark this actual helper generation, not the time a test
+                                // toggled the HWND property on the previous helper.
+                                let level = if std::env::var_os("ISOCAST_TEST_TAKE_GPU").is_some() {
+                                    initial
+                                } else {
+                                    level
+                                };
                                 let mut pixels = vec![level; 160 * 90 * 4];
                                 for px in pixels.as_chunks_mut::<4>().0 {
                                     px[3] = 255;

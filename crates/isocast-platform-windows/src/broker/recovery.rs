@@ -1,6 +1,6 @@
 //! A job is disposable; its target and engine sink belong to the parent.
 use super::*;
-use isocast_engine::ScreenSink;
+use isocast_engine::{Platform, ScreenSink};
 use isocast_protocol::api::WindowsDisplayOwner;
 use std::collections::BTreeMap;
 use windows::Win32::Foundation::{HANDLE, HWND, LUID};
@@ -209,7 +209,7 @@ impl Pictures {
 }
 
 pub(crate) fn open(
-    device: GraphicsDevice,
+    platform: crate::WindowsPlatform,
     source: String,
     (selected, initial_owner): (CaptureTarget, Option<WindowsDisplayOwner>),
     fps: u32,
@@ -232,6 +232,11 @@ pub(crate) fn open(
                     if active.lock().stop {
                         return Ok(());
                     }
+                    if platform.retiring_video() {
+                        thread::sleep(Duration::from_millis(20));
+                        continue;
+                    }
+                    let device = platform.graphics()?.owned_by("pinned capture");
                     let replacing = startup.is_none();
                     // Selection observed the initial owner. On reopen resolve
                     // only the physical path, never the setup's alias/name,
@@ -307,6 +312,9 @@ pub(crate) fn open(
                         if active.lock().stop {
                             return Ok(());
                         }
+                        if platform.retiring_video() {
+                            break "recording GPU removed".into();
+                        }
                         let timeout = deadline
                             .filter(|_| pictures.lock().last.is_none())
                             .map(|end| end.saturating_duration_since(Instant::now()));
@@ -316,7 +324,10 @@ pub(crate) fn open(
                             );
                         }
                         #[cfg(debug_assertions)]
-                        let timeout = if !replacing && fixture {
+                        let timeout = if !replacing
+                            && fixture
+                            && std::env::var_os("ISOCAST_TEST_TAKE_GPU").is_none()
+                        {
                             if isocast_diagnostics::developer() {
                                 capture.control.process.kill();
                             }
@@ -326,10 +337,11 @@ pub(crate) fn open(
                         };
                         // Healthy captures sleep until EOF, Stop (which kills
                         // our owned process), or an explicit source-close message.
-                        let event = match timeout {
-                            Some(t) => end.recv_timeout(t),
-                            None => end.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-                        };
+                        let event = end.recv_timeout(
+                            timeout
+                                .unwrap_or(Duration::MAX)
+                                .min(Duration::from_millis(80)),
+                        );
                         match event {
                             Ok(why) => break why,
                             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -345,14 +357,24 @@ pub(crate) fn open(
                     }
                     last_at = pictures.lock().last;
                     pin.resolve(true)?;
+                    let device_lost = platform.recording_device_failed();
+                    // Device retirement is also a helper relaunch. Charge the
+                    // same budget and require fresh pictures between attempts.
                     budget.next(
-                        epoch.transport_lost.load(Ordering::Acquire),
+                        device_lost || epoch.transport_lost.load(Ordering::Acquire),
                         pictures
                             .lock()
                             .first_import
                             .map(|first| ended_at.saturating_duration_since(first)),
                         &why,
                     )?;
+                    if device_lost {
+                        (sink.interruption)(
+                            "pinned capture waiting for recording GPU".into(),
+                            false,
+                        );
+                        continue;
+                    }
                     (sink.interruption)(
                         format!("pinned capture helper exited; restarting: {why}"),
                         false,
