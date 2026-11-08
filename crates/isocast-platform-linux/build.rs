@@ -12,5 +12,10 @@ fn main() {
         .flag("-isystem../isocast-platform-windows/native")
         .file("native/nvenc.c")
         .compile("isocast_linux_nvenc");
+    println!("cargo:rerun-if-changed=native/tiled.c");
+    cc::Build::new()
+        .std("c11")
+        .file("native/tiled.c")
+        .compile("isocast_linux_tiled");
     println!("cargo:rustc-link-lib=dl");
 }

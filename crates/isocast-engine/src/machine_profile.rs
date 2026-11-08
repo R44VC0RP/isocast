@@ -814,7 +814,7 @@ fn measure_graphics<P: Platform>(
     notes: &mut Vec<String>,
 ) -> Vec<GraphicsMeasurement> {
     let mut out = Vec::new();
-    let gpu = match Gpu::new() {
+    let gpu = match Gpu::for_measurement::<P>() {
         Ok(gpu) => gpu,
         Err(err) => {
             notes.push(format!("GPU not measured: {err:#}"));

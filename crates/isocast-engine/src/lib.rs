@@ -129,6 +129,15 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// (on macOS an IOSurface): monitors in native clients' windows.
     type SharedSurface: Clone + Send + Sync + 'static;
 
+    /// Optionally enable native frame-import extensions while opening the
+    /// compositor device. None keeps wgpu's ordinary device creation path.
+    fn open_import_device(
+        _: &wgpu::Adapter,
+        _: &wgpu::DeviceDescriptor<'_>,
+    ) -> Option<(wgpu::Device, wgpu::Queue)> {
+        None
+    }
+
     /// Adapter identity clients must select before opening shared previews.
     /// Windows returns its capture/compositor LUID (low, high); platforms
     /// without an explicit adapter-selection contract return None.

@@ -2,8 +2,10 @@
 //! frames. All PipeWire objects and callbacks stay on one owned thread.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -21,6 +23,7 @@ use spa::utils::{Choice, ChoiceEnum, ChoiceFlags};
 use crate::pw_loop::WorkerLoop;
 
 use crate::frames::{Frame, FramePool};
+use crate::tiled;
 
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const LOOP_WAIT: Duration = Duration::from_millis(20);
@@ -107,7 +110,16 @@ struct State {
     stream: (u32, u32),
     pixels: VideoFormat,
     /// None while unconfigured, including between two Format events.
-    linear_dma: Option<bool>,
+    transport: Option<Transport>,
+    gpu: Option<(tiled::Importer, tiled::Identity)>,
+    images: HashMap<*const spa::sys::spa_data, Arc<tiled::Imported>>,
+    fallback: Vec<Vec<u8>>,
+    fallback_deadline: Rc<Cell<Option<Instant>>>,
+    /// Keyed by the first spa_data's address, not its recyclable fd number.
+    mappings: HashMap<*const spa::sys::spa_data, DmaMapping>,
+    warned_mismatch: bool,
+    warned_stride: bool,
+    wait_stats: Option<WaitStats>,
     pool: Option<FramePool>,
     sink: Arc<VideoSink<Frame>>,
     cancel: Arc<AtomicBool>,
@@ -120,6 +132,134 @@ struct State {
 enum End {
     Cancelled,
     NodeRemoved,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Transport {
+    Shm,
+    Linear,
+    Tiled(u64),
+}
+
+/// Opt-in hardware qualification. Measure explicit producer/GPU waits only,
+/// not memcpy, format conversion or an idle PipeWire graph. SHM has no fence.
+#[derive(Default)]
+struct WaitStats {
+    frames: u32,
+    total: Duration,
+    max: Duration,
+    transport: Option<Transport>,
+}
+
+impl WaitStats {
+    fn record(&mut self, transport: Transport, elapsed: Duration) {
+        if self.transport != Some(transport) {
+            *self = Self {
+                transport: Some(transport),
+                ..Default::default()
+            };
+        }
+        self.frames += 1;
+        self.total += elapsed;
+        self.max = self.max.max(elapsed);
+        if self.frames == 60 {
+            let name = match transport {
+                Transport::Shm => "shm",
+                Transport::Linear => "linear",
+                Transport::Tiled(_) => "tiled",
+            };
+            isocast_diagnostics::diagnostic!("info"; "PipeWire frame waits: transport={name} frames={} total_ns={} max_ns={}",self.frames,self.total.as_nanos(),self.max.as_nanos());
+            *self = Self::default();
+        }
+    }
+}
+
+pub(super) fn timed<T>(elapsed: &mut Option<Duration>, f: impl FnOnce() -> T) -> T {
+    let Some(total) = elapsed else {
+        return f();
+    };
+    let start = Instant::now();
+    let result = f();
+    *total += start.elapsed();
+    result
+}
+
+/// Older portals do not report DRM device IDs. On hybrid systems this means
+/// we cannot safely propose any tiled format before seeing a buffer.
+fn advertised_devices(
+    core: &pw::core::CoreRc,
+    registry: &pw::registry::RegistryRc,
+    worker: &WorkerLoop,
+    target: u32,
+) -> Result<Vec<u64>> {
+    let ids = Rc::new(RefCell::new(Ok(Vec::new())));
+    let found = ids.clone();
+    let keep = Rc::new(RefCell::new(None));
+    let bound = keep.clone();
+    let weak = registry.downgrade();
+    let _globals = registry
+        .add_listener_local()
+        .global(move |global| {
+            if global.id != target
+                || global.type_ != pw::types::ObjectType::Node
+                || !global
+                    .permissions
+                    .contains(pw::permissions::PermissionFlags::X)
+            {
+                return;
+            }
+            let Some(node) = weak
+                .upgrade()
+                .and_then(|r| r.bind::<pw::node::Node, _>(global).ok())
+            else {
+                return;
+            };
+            let seen = found.clone();
+            let l = node
+                .add_listener_local()
+                .param(move |_, _, _, _, pod| {
+                    let Some(pod) = pod else { return };
+                    let mut result = seen.borrow_mut();
+                    if let Ok(ids) = &mut *result {
+                        match tiled::device_id(pod) {
+                            Ok(Some(id)) => ids.push(id),
+                            Ok(None) => (),
+                            Err(error) => *result = Err(error),
+                        }
+                    }
+                })
+                .register();
+            node.enum_params(0, Some(spa::param::ParamType::EnumFormat), 0, 256);
+            *bound.borrow_mut() = Some((l, node));
+        })
+        .register();
+    // First discover the node, then wait for the format queries it sent.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    for _ in 0..2 {
+        let done = Rc::new(Cell::new(false));
+        let flag = done.clone();
+        let seq = core.sync(0)?;
+        let _barrier = core
+            .add_listener_local()
+            .done(move |id, s| {
+                if id == pw::core::PW_ID_CORE && s == seq {
+                    flag.set(true);
+                }
+            })
+            .register();
+        while !done.get() {
+            ensure!(
+                Instant::now() < deadline,
+                "portal node format query timed out"
+            );
+            worker.iterate(LOOP_WAIT)?;
+        }
+    }
+    ensure!(
+        keep.borrow().is_some(),
+        "portal node unavailable for format probe"
+    );
+    ids.replace(Ok(Vec::new()))
 }
 
 fn run(
@@ -142,9 +282,18 @@ fn run(
     let startup = Rc::new(RefCell::new("no format or buffers received".into()));
     let deadline = Instant::now() + START_TIMEOUT - Duration::from_millis(100);
     let core_failure = failure.clone();
+    let probing = Rc::new(Cell::new(false));
+    let probe_error = Rc::new(Cell::new(false));
+    let (querying, query_failed) = (probing.clone(), probe_error.clone());
     let _core_listener = core
         .add_listener_local()
         .error(move |id, _, code, message| {
+            // Discovering the optional GPU identity must not break SHM on a
+            // portal that permits linking to a node but refuses EnumFormat.
+            if querying.get() && id != pw::core::PW_ID_CORE {
+                query_failed.set(true);
+                return;
+            }
             core_failure
                 .borrow_mut()
                 .get_or_insert_with(|| format!("remote error on object {id} ({code}): {message}"));
@@ -179,11 +328,51 @@ fn run(
             "node.dont-move" => "true",
         },
     )?);
+    let gpu = tiled::Importer::probe().and_then(|gpu| {
+        probing.set(true);
+        let ids = advertised_devices(&core, &registry, &mainloop, node);
+        probing.set(false);
+        if probe_error.get() {
+            return None;
+        }
+        let ids = ids.inspect_err(|error| isocast_diagnostics::diagnostic!("info"; "PipeWire tiled offer withheld: {error:#}")).ok()?;
+        let Some(identity) = gpu.identity(&ids) else {
+            isocast_diagnostics::diagnostic!("info"; "PipeWire tiled offer withheld: no verified exporter GPU (advertised DRM device ids: {ids:?})");
+            return None;
+        };
+        Some((gpu, identity))
+    });
+    let fallback = fallback_offers(fps)?;
+    // No driver's tiled implementation has passed the hardware A/B gate.
+    // SHM, then LINEAR, remain preferred even when Vulkan can import tiles.
+    let mut offers = fallback.clone();
+    if let Some((gpu, id)) = &gpu {
+        for pixels in [
+            VideoFormat::BGRA,
+            VideoFormat::BGRx,
+            VideoFormat::RGBA,
+            VideoFormat::RGBx,
+        ] {
+            if let Some(offer) = tiled_offer(fps, pixels, gpu.modifiers(pixels), *id) {
+                offers.push(serialize(offer)?);
+            }
+        }
+    }
+    let fallback_deadline = Rc::new(Cell::new(None));
     let state = State {
         format: None,
         stream: (0, 0),
         pixels: VideoFormat::BGRA,
-        linear_dma: None,
+        transport: None,
+        gpu,
+        images: HashMap::new(),
+        fallback,
+        fallback_deadline: fallback_deadline.clone(),
+        mappings: HashMap::new(),
+        warned_mismatch: false,
+        warned_stride: false,
+        wait_stats: (std::env::var("ISOCAST_CAPTURE_WAIT_TIMINGS").as_deref() == Ok("1"))
+            .then(WaitStats::default),
         pool: None,
         sink,
         cancel: cancel.clone(),
@@ -212,7 +401,9 @@ fn run(
             if id != spa::param::ParamType::Format.as_raw() {
                 return;
             }
-            state.linear_dma = None;
+            state.transport = None;
+            state.mappings.clear();
+            state.images.clear();
             let Some(param) = param else { return };
             if let Err(error) = configure(stream, state, param, fps) {
                 state
@@ -221,11 +412,21 @@ fn run(
                     .get_or_insert_with(|| format!("negotiating screen format: {error:#}"));
             }
         })
+        .remove_buffer(|_, state, raw| {
+            // SAFETY: PipeWire supplies the live pw_buffer and spa_buffer in
+            // this callback, before it can recycle the plane or close its fd.
+            if let Some(buffer) = unsafe { raw.as_ref().and_then(|p| p.buffer.as_ref()) } {
+                state.mappings.remove(&buffer.datas.cast_const());
+                state.images.remove(&buffer.datas.cast_const());
+            }
+        })
         .process(|stream, state| {
             if state.cancel.load(Ordering::Acquire) || state.failure.borrow().is_some() {
                 return;
             }
-            if let Err(error) = process(stream, state) {
+            if let Err(error) = catch_unwind(AssertUnwindSafe(|| process(stream, state)))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("screen frame callback panicked")))
+            {
                 state
                     .failure
                     .borrow_mut()
@@ -233,24 +434,13 @@ fn run(
             }
         })
         .register()?;
-    let format = serialize(format_offer(fps))?;
-    let mut linear = format_offer(fps);
-    linear.properties.push(Property {
-        key: spa::sys::SPA_FORMAT_VIDEO_modifier,
-        flags: spa::pod::PropertyFlags::MANDATORY,
-        value: Value::Long(DRM_FORMAT_MOD_LINEAR as i64),
-    });
-    let linear = serialize(linear)?;
     stream.connect(
         spa::utils::Direction::Input,
         Some(node),
         pw::stream::StreamFlags::AUTOCONNECT
             | pw::stream::StreamFlags::MAP_BUFFERS
             | pw::stream::StreamFlags::DONT_RECONNECT,
-        &mut [
-            Pod::from_bytes(&format).context("invalid SHM format pod")?,
-            Pod::from_bytes(&linear).context("invalid LINEAR format pod")?,
-        ],
+        &mut pods(&offers)?,
     )?;
     while !cancel.load(Ordering::Acquire) {
         if node_removed.get() {
@@ -264,6 +454,12 @@ fn run(
         if let Some(reason) = failure.borrow_mut().take() {
             bail!(reason);
         }
+        ensure!(
+            !fallback_deadline
+                .get()
+                .is_some_and(|at| Instant::now() >= at),
+            "producer did not deliver a fallback screen frame within 5 seconds"
+        );
         mainloop.iterate(LOOP_WAIT)?;
     }
     // Locals drop in reverse order; the stream disconnects and flushes its
@@ -282,17 +478,12 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
     // An optional SPA long of the wrong type is left untouched by parse.
     raw.set_modifier(u64::MAX);
     raw.parse(pod)?;
-    let linear = raw.flags().contains(VideoFlags::MODIFIER);
+    let dma = raw.flags().contains(VideoFlags::MODIFIER);
     // The allocating peer may still be choosing a modifier. It publishes a
     // fixed Format before buffers arrive; never interpret an unfixed plane.
     if raw.flags().bits() & spa::sys::SPA_VIDEO_FLAG_MODIFIER_FIXATION_REQUIRED != 0 {
         return Ok(());
     }
-    ensure!(
-        !linear || raw.modifier() == DRM_FORMAT_MOD_LINEAR,
-        "expected DRM_FORMAT_MOD_LINEAR; got {:#x}",
-        raw.modifier()
-    );
     ensure!(
         matches!(
             raw.format(),
@@ -313,6 +504,57 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         size.width,
         size.height
     );
+    let transport = match (dma, raw.modifier()) {
+        (false, _) => Transport::Shm,
+        (true, DRM_FORMAT_MOD_LINEAR) => Transport::Linear,
+        (true, m) => {
+            let (gpu, identity) = state.gpu.as_ref().context("unexpected tiled format")?;
+            let selected = match tiled::device_id(pod) {
+                Ok(selected) => selected,
+                Err(error) => return fallback(stream, state, &error.to_string()),
+            };
+            if let tiled::Identity::Matched(id) = *identity
+                && selected != Some(id)
+            {
+                return fallback(
+                    stream,
+                    state,
+                    &format!(
+                        "expected DRM device id {id}, negotiated {selected:?} for modifier {m:#018x}"
+                    ),
+                );
+            }
+            if let Some(id) = selected
+                && !gpu.same_device(id)
+            {
+                return fallback(
+                    stream,
+                    state,
+                    &format!(
+                        "negotiated DRM device id {id} is not the engine GPU for modifier {m:#018x}"
+                    ),
+                );
+            }
+            if !gpu
+                .modifiers(raw.format())
+                .iter()
+                .any(|p| p.value == m && size.width <= p.width && size.height <= p.height)
+            {
+                return fallback(
+                    stream,
+                    state,
+                    &format!(
+                        "Vulkan did not offer {:?} {}x{} with modifier {m:#018x}",
+                        raw.format(),
+                        size.width,
+                        size.height
+                    ),
+                );
+            }
+            isocast_diagnostics::diagnostic!("info"; "PipeWire negotiated {:?} {}x{} DRM modifier {m:#018x}",raw.format(),size.width,size.height);
+            Transport::Tiled(m)
+        }
+    };
     // Desktop streams may report 0/1 (variable rate). The engine records at
     // the requested rate; actual delivery timestamps remain independent.
     // The portal shares windows at any size, but H.264's 4:2:0 needs even
@@ -336,7 +578,7 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         size.height,
         raw.format()
     );
-    let types = if linear {
+    let types = if dma {
         1 << spa::sys::SPA_DATA_DmaBuf
     } else {
         (1 << spa::sys::SPA_DATA_MemPtr) | (1 << spa::sys::SPA_DATA_MemFd)
@@ -373,7 +615,7 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         Pod::from_bytes(&buffers).context("invalid buffer pod")?,
         Pod::from_bytes(&header).context("invalid metadata pod")?,
     ])?;
-    state.linear_dma = Some(linear);
+    state.transport = Some(transport);
     Ok(())
 }
 
@@ -419,9 +661,74 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return Ok(());
     };
-    let (Some(format), Some(linear)) = (state.format, state.linear_dma) else {
+    let (Some(format), Some(transport)) = (state.format, state.transport) else {
         return Ok(());
     };
+    // Keep the requeue-on-Drop guard *outside* the unwind boundary. A
+    // panicking backend may have submitted the copy without returning a fence.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        read_frame(stream, state, &mut buffer, format, transport)
+    }));
+    if let Some((gpu, _)) = state.gpu.as_mut()
+        && gpu.in_flight()
+    {
+        // Stream teardown reclaims this slot. Never hand it to the producer
+        // as a completed frame, or free Vulkan's untracked image/staging now.
+        std::mem::forget(buffer);
+        tiled::disable_after_fault();
+        gpu.retire();
+        return match result {
+            Ok(Err(error)) => {
+                Err(error
+                    .context("tiled fence unconfirmed; buffer withheld, disabling tiled capture"))
+            }
+            _ => Err(anyhow::anyhow!(
+                "tiled submission did not complete; buffer withheld, disabling tiled capture"
+            )),
+        };
+    }
+    drop(buffer);
+    let frame = match result {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(error)) if matches!(transport, Transport::Tiled(_)) => {
+            return fallback(stream, state, &format!("{error:#}"));
+        }
+        Ok(Err(error)) => return Err(error),
+        Err(_) if matches!(transport, Transport::Tiled(_)) => {
+            tiled::disable_after_fault();
+            return fallback(
+                stream,
+                state,
+                "tiled frame callback panicked; disabling tiled capture",
+            );
+        }
+        Err(_) => bail!("screen frame callback panicked"),
+    };
+    if let Some((frame, timestamp)) = frame {
+        state.fallback_deadline.set(None);
+        if state.cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if !state.started.load(Ordering::Acquire) {
+            state.started.store(true, Ordering::Release);
+            if state.ready.try_send(Ok(format)).is_err() {
+                state.cancel.store(true, Ordering::Release);
+                return Ok(());
+            }
+        }
+        (state.sink.frame)(frame, timestamp);
+    }
+    Ok(())
+}
+
+fn read_frame(
+    stream: &pw::stream::Stream,
+    state: &mut State,
+    buffer: &mut pw::buffer::Buffer<'_>,
+    format: CaptureFormat,
+    transport: Transport,
+) -> Result<Option<(Frame, Time)>> {
+    let mut waited = state.wait_stats.as_ref().map(|_| Duration::ZERO);
     let header = buffer.find_meta::<MetaHeader>();
     if !state.started.load(Ordering::Acquire) {
         *state.startup.borrow_mut() = format!(
@@ -434,7 +741,7 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
             .flags()
             .intersects(MetaHeaderFlags::CORRUPTED | MetaHeaderFlags::GAP)
     }) {
-        return Ok(());
+        return Ok(None);
     }
     let pts = header.map(MetaHeader::pts);
     let timestamp = frame_time(pts, stream.time().ok().map(|time| time.now()));
@@ -442,7 +749,10 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
     // Only single-plane packed RGB was negotiated. Empty/corrupt frames are
     // not fatal (compositors can send them while a surface is hidden).
     if data.len() != 1 {
-        return Ok(());
+        if !std::mem::replace(&mut state.warned_mismatch, true) {
+            isocast_diagnostics::diagnostic!("warn"; "screen capture: dropping mismatched buffer (expected one packed plane, got {})", data.len());
+        }
+        return Ok(None);
     }
     let data = data[0].as_raw();
     if !state.started.load(Ordering::Acquire) {
@@ -460,7 +770,7 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
     // SAFETY: PipeWire owns the dequeued buffer and its chunk until requeue.
     // Unlike Data::chunk(), as_ref handles a missing chunk without panicking.
     let Some(chunk) = (unsafe { data.chunk.as_ref() }) else {
-        return Ok(());
+        return Ok(None);
     };
     if !state.started.load(Ordering::Acquire) {
         *state.startup.borrow_mut() = format!(
@@ -470,7 +780,19 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
     }
     if chunk.flags & 3 != 0 {
         // SPA_CHUNK_FLAG_CORRUPTED | SPA_CHUNK_FLAG_EMPTY
-        return Ok(());
+        return Ok(None);
+    }
+    let dma = !matches!(transport, Transport::Shm);
+    let stride = if dma {
+        chunk.stride
+    } else {
+        chunk_stride(chunk.stride, chunk.size, state.stream, state.pixels)
+    };
+    if stride == 0 {
+        if !std::mem::replace(&mut state.warned_stride, true) {
+            isocast_diagnostics::diagnostic!("warn"; "screen capture: dropping buffer with unspecified row stride and no provable packed layout");
+        }
+        return Ok(None);
     }
     let direct = fits(state.stream, format);
     let (width, height) = if direct {
@@ -498,31 +820,74 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
             }
         })
     };
-    let frame = if linear && data.type_ == spa::sys::SPA_DATA_DmaBuf {
+    let frame = if dma && data.type_ == spa::sys::SPA_DATA_DmaBuf {
         let fd = i32::try_from(data.fd).context("invalid DMA-BUF fd")?;
         ensure!(fd >= 0, "missing DMA-BUF fd");
         // SAFETY: PipeWire owns this fd until the borrowed buffer is requeued.
         let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-        // SPA permits DMA-BUF maxsize and chunk.size to be zero or a token
-        // size. Bound the read by the exporter's immutable allocation instead.
-        // SAFETY: SEEK_END with offset zero is the DMA-BUF size query.
-        let len = unsafe { libc::lseek(fd.as_raw_fd(), 0, libc::SEEK_END) };
-        if len < 0 {
-            return Err(std::io::Error::last_os_error()).context("query DMA-BUF size");
-        }
         let offset = usize::try_from(u64::from(data.mapoffset) + u64::from(chunk.offset))?;
-        let Some(layout) = Layout::packed(offset, chunk.stride, width, height, pixels) else {
-            return Ok(());
-        };
-        ensure!(
-            layout.end as u64 <= len as u64,
-            "DMA-BUF rows exceed allocation"
-        );
-        let mut mapping = DmaRead::map(fd, layout.end)?;
-        let frame = draw(mapping.bytes(), &layout);
-        mapping.end()?;
-        frame?
-    } else if !linear
+        if let Transport::Tiled(modifier) = transport {
+            timed(&mut waited, || tiled::wait_writer(fd))
+                .context("DMA-BUF acquire fence unavailable")?;
+            let (gpu, identity) = state.gpu.as_mut().context("no tiled importer")?;
+            let key = std::ptr::from_ref(data);
+            let plane = tiled::Plane {
+                fd: fd.as_raw_fd(),
+                modifier,
+                offset: offset as u64,
+                stride: u64::try_from(stride).context("negative tiled row stride")?,
+            };
+            let dynamic = data.flags & spa::sys::SPA_DATA_FLAG_DYNAMIC != 0;
+            if dynamic
+                || state
+                    .images
+                    .get(&key)
+                    .is_none_or(|image| image.plane != plane)
+            {
+                ensure!(
+                    gpu.matches_fd(fd, *identity),
+                    "DMA-BUF exporter does not match the compositor GPU"
+                );
+                let image = gpu.import(fd, plane, pixels, state.stream)?;
+                state.images.insert(key, Arc::new(image));
+            }
+            let layout = Layout::packed(0, (state.stream.0 * 4) as i32, width, height, pixels)
+                .context("invalid tiled readback size")?;
+            let frame = gpu.read(&state.images[&key], state.stream, &mut waited, |bytes| {
+                draw(bytes, &layout)
+            })??;
+            if dynamic {
+                state.images.remove(&key);
+            }
+            frame
+        } else {
+            let Some(layout) = Layout::packed(offset, stride, width, height, pixels) else {
+                return Ok(None);
+            };
+            let key = std::ptr::from_ref(data);
+            // A dynamic plane may replace the allocation even with the same fd
+            // number. Never retain a mapping of that plane across dequeues.
+            let transient;
+            let mapping = if data.flags & spa::sys::SPA_DATA_FLAG_DYNAMIC != 0 {
+                state.mappings.remove(&key);
+                transient = DmaMapping::map(fd, layout.end)?;
+                &transient
+            } else {
+                if state
+                    .mappings
+                    .get(&key)
+                    .is_none_or(|m| m.fd != fd.as_raw_fd() || m.len < layout.end)
+                {
+                    state.mappings.insert(key, DmaMapping::map(fd, layout.end)?);
+                }
+                &state.mappings[&key]
+            };
+            let mut read = timed(&mut waited, || mapping.begin_read(fd))?;
+            let frame = draw(read.bytes(), &layout);
+            timed(&mut waited, || read.end())?;
+            frame?
+        }
+    } else if !dma
         && matches!(
             data.type_,
             spa::sys::SPA_DATA_MemPtr | spa::sys::SPA_DATA_MemFd
@@ -534,12 +899,12 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
             data.maxsize,
             chunk.offset,
             chunk.size,
-            chunk_stride(chunk.stride, chunk.size, state.stream, pixels),
+            stride,
             width,
             height,
             pixels,
         ) else {
-            return Ok(());
+            return Ok(None);
         };
         // SAFETY: The checked rows fit within the mapped SHM chunk.
         draw(
@@ -547,24 +912,17 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
             &layout,
         )?
     } else {
-        return Ok(());
+        if !std::mem::replace(&mut state.warned_mismatch, true) {
+            isocast_diagnostics::diagnostic!("warn"; "screen capture: dropping buffer of type {} (mapped={}) after negotiating {}", data.type_, !data.data.is_null(), if dma { "DMA-BUF" } else { "SHM" });
+        }
+        return Ok(None);
     };
-    // Requeue before calling the sink: downstream retains only our own copy.
-    drop(buffer);
-    if let Some(frame) = frame {
-        if state.cancel.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        if !state.started.load(Ordering::Acquire) {
-            state.started.store(true, Ordering::Release);
-            if state.ready.try_send(Ok(format)).is_err() {
-                state.cancel.store(true, Ordering::Release);
-                return Ok(());
-            }
-        }
-        (state.sink.frame)(frame, timestamp);
+    if frame.is_some()
+        && let (Some(stats), Some(waited)) = (&mut state.wait_stats, waited)
+    {
+        stats.record(transport, waited);
     }
-    Ok(())
+    Ok(frame.map(|f| (f, timestamp)))
 }
 
 // Offset is the start of the valid memory chunk, not the first logical scan
@@ -634,17 +992,25 @@ impl Layout {
     }
 }
 
-/// A read-only mapping for one dequeued LINEAR plane. Drop ends CPU access
-/// even on unwind, unmaps, and never takes ownership of the producer's fd.
-struct DmaRead<'a> {
-    fd: BorrowedFd<'a>,
+/// A mapping can outlive a dequeue, but CPU access must not.
+struct DmaMapping {
+    fd: i32, // identity check only; borrowed from PipeWire for each syscall
     ptr: *mut libc::c_void,
     len: usize,
-    active: bool,
 }
 
-impl<'a> DmaRead<'a> {
-    fn map(fd: BorrowedFd<'a>, len: usize) -> Result<Self> {
+impl DmaMapping {
+    fn map(fd: BorrowedFd<'_>, len: usize) -> Result<Self> {
+        // SPA permits DMA-BUF maxsize and chunk.size to be zero or one.
+        // SAFETY: SEEK_END with offset zero is the DMA-BUF size query.
+        let allocation = unsafe { libc::lseek(fd.as_raw_fd(), 0, libc::SEEK_END) };
+        if allocation < 0 {
+            return Err(std::io::Error::last_os_error()).context("query DMA-BUF size");
+        }
+        ensure!(
+            len as u64 <= allocation as u64,
+            "DMA-BUF rows exceed allocation"
+        );
         // SAFETY: len is nonzero and within the kernel-reported allocation.
         let ptr = unsafe {
             libc::mmap(
@@ -659,17 +1025,39 @@ impl<'a> DmaRead<'a> {
         if ptr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error()).context("mmap LINEAR DMA-BUF");
         }
-        let mut mapping = Self {
-            fd,
+        Ok(Self {
+            fd: fd.as_raw_fd(),
             ptr,
             len,
-            active: false,
-        };
-        mapping.sync(1).context("DMA_BUF_SYNC_START | READ")?;
-        mapping.active = true;
-        Ok(mapping)
+        })
     }
 
+    fn begin_read<'a>(&'a self, fd: BorrowedFd<'a>) -> Result<DmaRead<'a>> {
+        let mut read = DmaRead {
+            mapping: self,
+            fd,
+            active: false,
+        };
+        read.sync(1).context("DMA_BUF_SYNC_START | READ")?;
+        read.active = true;
+        Ok(read)
+    }
+}
+
+impl Drop for DmaMapping {
+    fn drop(&mut self) {
+        // SAFETY: this object owns the mapping; no read guard can outlive it.
+        unsafe { libc::munmap(self.ptr, self.len) };
+    }
+}
+
+struct DmaRead<'a> {
+    mapping: &'a DmaMapping,
+    fd: BorrowedFd<'a>,
+    active: bool,
+}
+
+impl DmaRead<'_> {
     fn sync(&self, flags: u64) -> std::io::Result<()> {
         // linux/dma-buf.h: _IOW('b', 0, struct dma_buf_sync { __u64 flags; })
         loop {
@@ -693,7 +1081,7 @@ impl<'a> DmaRead<'a> {
 
     fn bytes(&self) -> &[u8] {
         // SAFETY: map succeeds and START completes before exposing any bytes.
-        unsafe { std::slice::from_raw_parts(self.ptr.cast(), self.len) }
+        unsafe { std::slice::from_raw_parts(self.mapping.ptr.cast(), self.mapping.len) }
     }
 
     fn end(&mut self) -> Result<()> {
@@ -707,8 +1095,6 @@ impl Drop for DmaRead<'_> {
         if self.active {
             let _ = self.end();
         }
-        // SAFETY: the mapping belongs to this guard and its borrow has ended.
-        unsafe { libc::munmap(self.ptr, self.len) };
     }
 }
 
@@ -860,6 +1246,100 @@ fn serialize(object: Object) -> Result<Vec<u8>> {
     .into_inner())
 }
 
+fn fallback(stream: &pw::stream::Stream, state: &mut State, why: &str) -> Result<()> {
+    state
+        .fallback_deadline
+        .set(Some(Instant::now() + Duration::from_secs(5)));
+    state.transport = None;
+    state.images.clear();
+    state.gpu = None;
+    isocast_diagnostics::diagnostic!("info"; "tiled screen capture unavailable: {why}; re-offering SHM and LINEAR");
+    stream.update_params(&mut pods(&state.fallback)?)?;
+    Ok(())
+}
+
+fn pods(offers: &[Vec<u8>]) -> Result<Vec<&Pod>> {
+    offers
+        .iter()
+        .map(|o| Pod::from_bytes(o).context("invalid screen format pod"))
+        .collect()
+}
+fn modifier_prop(m: u64) -> Property {
+    Property {
+        key: spa::sys::SPA_FORMAT_VIDEO_modifier,
+        flags: spa::pod::PropertyFlags::MANDATORY,
+        value: Value::Long(m as i64),
+    }
+}
+fn fallback_offers(fps: u32) -> Result<Vec<Vec<u8>>> {
+    let mut linear = format_offer(fps);
+    linear.properties.push(modifier_prop(DRM_FORMAT_MOD_LINEAR));
+    Ok(vec![serialize(format_offer(fps))?, serialize(linear)?])
+}
+
+fn tiled_offer(
+    fps: u32,
+    pixels: VideoFormat,
+    modifiers: &[tiled::Modifier],
+    identity: tiled::Identity,
+) -> Option<Object> {
+    use spa::utils::Rectangle;
+    let first = modifiers.first()?;
+    let mut offer = format_offer(fps);
+    for p in &mut offer.properties {
+        if p.key == spa::sys::SPA_FORMAT_VIDEO_format {
+            p.value = Value::Id(spa::utils::Id(pixels.as_raw()));
+        }
+        if p.key == spa::sys::SPA_FORMAT_VIDEO_size {
+            let max = Rectangle {
+                width: modifiers
+                    .iter()
+                    .map(|m| m.width)
+                    .fold(MAX_DIMENSION, u32::min),
+                height: modifiers
+                    .iter()
+                    .map(|m| m.height)
+                    .fold(MAX_DIMENSION, u32::min),
+            };
+            p.value = Value::Choice(ChoiceValue::Rectangle(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Range {
+                    default: Rectangle {
+                        width: 1920.min(max.width),
+                        height: 1080.min(max.height),
+                    },
+                    min: Rectangle {
+                        width: 1,
+                        height: 1,
+                    },
+                    max,
+                },
+            )));
+        }
+    }
+    // Pass the allocator the actual intersection as a choice, not a series
+    // of pre-fixated guesses. It will announce the modifier it allocated.
+    offer.properties.push(Property {
+        key: spa::sys::SPA_FORMAT_VIDEO_modifier,
+        flags: spa::pod::PropertyFlags::MANDATORY | spa::pod::PropertyFlags::DONT_FIXATE,
+        value: Value::Choice(ChoiceValue::Long(Choice(
+            ChoiceFlags::empty(),
+            ChoiceEnum::Enum {
+                default: first.value as i64,
+                alternatives: modifiers.iter().map(|m| m.value as i64).collect(),
+            },
+        ))),
+    });
+    if let tiled::Identity::Matched(id) = identity {
+        offer.properties.push(Property {
+            key: tiled::DEVICE_ID,
+            flags: spa::pod::PropertyFlags::MANDATORY,
+            value: Value::Bytes(id.to_ne_bytes().to_vec()),
+        });
+    }
+    Some(offer)
+}
+
 fn format_offer(fps: u32) -> Object {
     use spa::param::format::{FormatProperties as F, MediaSubtype, MediaType};
     use spa::pod::{object, property};
@@ -922,6 +1402,142 @@ fn format_offer(fps: u32) -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_pipewire_format_preserves_the_exporter_device_id() -> Result<()> {
+        // xdpw's fixed T4 format: filter the producer and consumer PODs with
+        // SPA itself. Reading the two *offers* alone misses the Choice wrapper.
+        let id = libc::makedev(226, 128);
+        let modifier = tiled::Modifier {
+            value: 0x0300_0000_0060_6014,
+            width: 1920,
+            height: 1080,
+        };
+        let offer = tiled_offer(
+            60,
+            VideoFormat::BGRx,
+            &[modifier],
+            tiled::Identity::Matched(id),
+        )
+        .unwrap();
+        let mut producer = offer.clone();
+        for p in &mut producer.properties {
+            if p.key == spa::sys::SPA_FORMAT_VIDEO_modifier {
+                *p = modifier_prop(modifier.value);
+            }
+            if p.key == spa::sys::SPA_FORMAT_VIDEO_size {
+                p.value = Value::Rectangle(spa::utils::Rectangle {
+                    width: 1920,
+                    height: 1080,
+                });
+            }
+        }
+        let bytes = serialize(producer)?;
+        let producer = Pod::from_bytes(&bytes).unwrap();
+        assert_eq!(tiled::device_id(producer)?, Some(id));
+        let bytes = serialize(offer.clone())?;
+        let consumer = Pod::from_bytes(&bytes).unwrap();
+        let mut storage = vec![0; 2048];
+        let builder = spa::pod::builder::Builder::new(&mut storage);
+        let mut filtered = std::ptr::null_mut();
+        // SAFETY: the inputs live through filtering. The builder owns the
+        // output backing store until after all reads of the fixated object.
+        let pod = unsafe {
+            assert_eq!(
+                spa::sys::spa_pod_filter(
+                    builder.as_raw_ptr(),
+                    &mut filtered,
+                    producer.as_raw_ptr(),
+                    consumer.as_raw_ptr()
+                ),
+                0
+            );
+            assert!(!filtered.is_null());
+            assert_eq!(spa::sys::spa_pod_fixate(filtered), 0);
+            Pod::from_raw(filtered)
+        };
+        let mut raw = VideoInfoRaw::new();
+        raw.parse(pod)?;
+        assert_eq!(
+            (
+                raw.format(),
+                raw.modifier(),
+                raw.size().width,
+                raw.size().height
+            ),
+            (VideoFormat::BGRx, modifier.value, 1920, 1080)
+        );
+        assert_eq!(tiled::device_id(pod)?, Some(id));
+        for value in [
+            Value::Long(id as i64),
+            Value::Bytes(vec![0; 4]),
+            Value::Choice(ChoiceValue::Long(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Enum {
+                    default: id as i64,
+                    alternatives: vec![id as i64, 1],
+                },
+            ))),
+        ] {
+            let mut bad = offer.clone();
+            bad.properties
+                .iter_mut()
+                .find(|p| p.key == tiled::DEVICE_ID)
+                .unwrap()
+                .value = value;
+            let bytes = serialize(bad)?;
+            assert!(tiled::device_id(Pod::from_bytes(&bytes).unwrap()).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tiled_pod_binds_the_exact_format_modifier_and_exporter() -> Result<()> {
+        let modifier = tiled::Modifier {
+            value: 0x0300000000000010,
+            width: 1024,
+            height: 512,
+        };
+        let other = tiled::Modifier {
+            value: modifier.value + 1,
+            ..modifier
+        };
+        assert!(tiled_offer(60, VideoFormat::BGRx, &[], tiled::Identity::Single).is_none());
+        let offer = tiled_offer(
+            60,
+            VideoFormat::BGRx,
+            &[modifier, other],
+            tiled::Identity::Matched(13),
+        )
+        .unwrap();
+        let prop = offer
+            .properties
+            .iter()
+            .find(|p| p.key == spa::sys::SPA_FORMAT_VIDEO_modifier)
+            .unwrap();
+        assert!(
+            matches!(&prop.value,Value::Choice(ChoiceValue::Long(Choice(_,ChoiceEnum::Enum{alternatives,..}))) if alternatives==&[modifier.value as i64,other.value as i64])
+        );
+        let bytes = serialize(offer)?;
+        let pod = Pod::from_bytes(&bytes).unwrap();
+        let mut raw = VideoInfoRaw::new();
+        raw.parse(pod)?;
+        assert_eq!(raw.format(), VideoFormat::BGRx);
+        assert!(raw.flags().contains(VideoFlags::MODIFIER));
+        assert_ne!(
+            raw.flags().bits() & spa::sys::SPA_VIDEO_FLAG_MODIFIER_FIXATION_REQUIRED,
+            0
+        );
+        assert_eq!(tiled::device_id(pod)?, Some(13));
+        let fallback = fallback_offers(60)?;
+        let pods = pods(&fallback)?;
+        raw.parse(pods[0])?;
+        assert!(!raw.flags().contains(VideoFlags::MODIFIER));
+        raw.parse(pods[1])?;
+        assert!(raw.flags().contains(VideoFlags::MODIFIER));
+        assert_eq!(raw.modifier(), 0);
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires the standalone LINEAR-only PipeWire producer"]

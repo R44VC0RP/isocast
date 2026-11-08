@@ -17,6 +17,7 @@ mod playback;
 mod portal;
 mod pw_loop;
 mod system;
+mod tiled;
 mod usb_setup;
 mod video_encoder;
 mod writer;
