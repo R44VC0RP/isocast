@@ -1279,6 +1279,8 @@ jobs:
           cargo test --locked -j 1 -p isocast-engine -p isocast-platform-windows --lib idle_start_
           cargo test --locked -j 1 -p isocast-platform-windows --lib gpu::tests::idle_retirement_counts_native_com_and_actual_mf_inputs -- --ignored --exact
           cargo test --locked -j 1 -p isocast-platform-windows --lib sibling_device_retirement -- --ignored --test-threads=1
+          cargo test --locked -j 1 -p isocast-platform-windows --lib late_activity_drop
+          cargo test --locked -j 1 -p isocast-platform-windows --lib refused_gpu_generation
 
       - name: Check hotkey mapping and native registration status
         if: env.MODE == 'full'
@@ -1480,6 +1482,13 @@ jobs:
           python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_take_device_recovery --engine-env ISOCAST_TEST_TAKE_GPU=remove --engine-env ISOCAST_TEST_WGC_HELPER=fixture --codec h264 --timeout 180 --work "$RUNNER_TEMP/take-gpu" --keep-failures --report take-gpu.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -c 'import json; r, = json.load(open("take-gpu.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
+
+      - name: Keep the preview and RTMP connection through mid-take GPU removal
+        shell: pwsh
+        run: |
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_live_device_recovery --engine-env ISOCAST_ENABLE_LIVE_GPU_RECOVERY=1 --engine-env ISOCAST_TEST_TAKE_GPU=developer-off --codec h264 --timeout 180 --work "$RUNNER_TEMP/live-gpu" --keep-failures --report live-gpu.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -c 'import json; r, = json.load(open("live-gpu.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
 
       - name: Exercise native WGC too when the runner has an unlocked user desktop
         shell: pwsh

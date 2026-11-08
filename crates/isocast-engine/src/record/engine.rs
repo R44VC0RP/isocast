@@ -440,6 +440,9 @@ impl<F: Clone> Drop for MonitorAudio<F> {
 pub(crate) struct ProgramTapSource<P: Platform>(Arc<Inner<P>>, CanvasId);
 
 impl<P: Platform> ProgramTapSource<P> {
+    pub(crate) fn platform(&self) -> &P {
+        &self.0.platform
+    }
     pub(crate) fn stopped(&self) -> bool {
         self.0.stopping.load(Ordering::SeqCst)
     }
@@ -1032,7 +1035,6 @@ impl<P: Platform> Inner<P> {
     fn worker<T>(&self, name: &str, run: impl FnOnce() -> T) -> Result<T, String> {
         let result = isocast_diagnostics::contain(name, run);
         if let Err(message) = &result {
-            self.worker_errors.lock().push(message.clone());
             // Only a panic that cut a change to shared control state short
             // (see `crate::critical`) needs the emergency stop; a panic
             // that merely looked at it leaves every recording running.
@@ -1043,7 +1045,16 @@ impl<P: Platform> Inner<P> {
                 || self.program_audio.list.is_broken();
             if broken {
                 self.emergency.store(true, Ordering::SeqCst);
+            } else if compositor_canvas(name).is_some()
+                && self.platform.reconnect_live_video()
+                && self.platform.recording_device_failed()
+            {
+                // The take coordinator replaces this draw worker. Marking its
+                // program slot stopped would make file workers finalize early.
+                isocast_diagnostics::diagnostic!("warn"; "{message}; retiring removed recording GPU");
+                return result;
             }
+            self.worker_errors.lock().push(message.clone());
             if name == "compositor" {
                 self.main.program.stop(message.clone());
                 self.main
@@ -2193,6 +2204,13 @@ fn setup_refusal<P: Platform>(
     new: &Setup,
 ) -> Option<isocast_protocol::Issue> {
     let current = &state.setup;
+    if inner.platform.retiring_video() && !restartable_graph(new) {
+        return Some(isocast_protocol::Issue {
+            path: "sources".into(),
+            message: "wait for GPU recovery before adding an unrestartable source or stinger"
+                .into(),
+        });
+    }
     // An open endpoint would record playback before an asynchronous reopen;
     // a pinned take cannot reopen at all. Check the actual live source,
     // even if an edit has already removed its definition from the setup.
@@ -2280,6 +2298,19 @@ fn setup_refusal<P: Platform>(
         }
     }
     None
+}
+
+fn restartable_graph(setup: &Setup) -> bool {
+    setup.sources.iter().all(|s| {
+        !s.kind.has_video()
+            || matches!(
+                s.kind,
+                SourceKind::Display(_)
+                    | SourceKind::Window(_)
+                    | SourceKind::Application(_)
+                    | SourceKind::TestPattern(_)
+            )
+    }) && stinger_files(setup).is_empty()
 }
 
 /// The stinger videos `setup`'s transitions play.
@@ -3409,7 +3440,17 @@ fn scene_slot<P: Platform>(
                     weak.upgrade()
                         .is_none_or(|inner| inner.stopping.load(Ordering::SeqCst))
                 };
-                if let Err(error) = scene_feeds::run(&platform, &feeds, scenes, epoch, stop) {
+                let drawn = isocast_diagnostics::contain("scene feed GPU draw", || {
+                    scene_feeds::run(&platform, &feeds, scenes, epoch, stop)
+                })
+                .map_err(anyhow::Error::msg)
+                .and_then(|r| r);
+                if let Err(error) = drawn {
+                    if platform.reconnect_live_video() && platform.recording_device_failed() {
+                        feeds.clear_gpu_slots();
+                        feeds.stopped();
+                        return;
+                    }
                     let wait = feeds.failed(format!("{error:#}"));
                     isocast_diagnostics::diagnostic!("warn";
                         "scene feeds stopped: {error:#}; trying again in {} s", wait.as_secs()
@@ -4599,7 +4640,30 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         thread::sleep(Duration::from_millis(20));
     }
 
-    let mut recording_activity = platform.recording_activity()?;
+    // Native owners and the coordinator must pass the SAME admission before
+    // any of them can interrupt a source/file or suppress a compositor panic.
+    let graph = Arc::downgrade(inner);
+    let gate = options.check_recording_only.clone();
+    let initially_restartable = restartable_graph(setup);
+    let mut recording_activity = platform.recording_activity(Box::new(move |commit| {
+        if !initially_restartable {
+            return Some(false);
+        }
+        let graph = graph.upgrade()?;
+        let state = graph.state.try_read()?;
+        if !state.stingers.is_empty()
+            || !restartable_graph(&state.setup)
+            || state.sources.iter().any(|(id, live)| {
+                live.video.is_some()
+                    && state.setup.source(id).is_none_or(|s| {
+                        live.definition.get("kind").and_then(|k| k.as_str()) != Some(s.kind.label())
+                    })
+            })
+        {
+            return Some(false);
+        }
+        gate.without_replay(commit)
+    }))?;
 
     // Sources whose ISO files are filtered.
     let filtered: Vec<&str> = match iso.filtered {
@@ -5182,7 +5246,6 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         let mut next_space_check = platform.now();
         let mut disk_full = None;
         let mut gpu_error = None;
-        let mut last_loss = None;
         type Replacement = JoinHandle<(Box<dyn crate::RecordingActivity>, Result<()>)>;
         let mut replacing: Option<Replacement> = None;
         let mut waiting_layers = Vec::<(String, Arc<FrameSlot<P::Frame>>)>::new();
@@ -5214,7 +5277,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         let activity = recording_activity.as_mut().expect("not replacing");
                         #[cfg(debug_assertions)]
                         activity.inject_test_loss()?;
-                        if !isocast_diagnostics::developer() {
+                        if !activity.enabled() {
                             return Ok(());
                         }
                         let Some(generation) = activity.removed()? else {
@@ -5231,7 +5294,6 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         };
                         waiting_layers.clear();
                         let reason = format!("Windows GPU generation {generation} removed");
-                        let mut unsupported = None;
                         {
                             let state = inner.state.read();
                             for (id, live) in &state.sources {
@@ -5245,37 +5307,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                         &reason,
                                     );
                                     waiting_layers.push((id.clone(), video.slot.clone()));
-                                    if let Some(src) = setup.source(id)
-                                        && !matches!(
-                                            src.kind,
-                                            SourceKind::TestPattern(_)
-                                                | SourceKind::Application(_)
-                                                | SourceKind::Display(_)
-                                                | SourceKind::Window(_)
-                                        )
-                                    {
-                                        unsupported = Some(format!(
-                                            "{id}: {} has no pinned GPU restart",
-                                            src.kind.label()
-                                        ));
-                                    }
                                 }
                             }
-                            if !state.stingers.is_empty() {
-                                unsupported =
-                                    Some("stinger media has no pinned GPU restart".into());
-                            }
-                        }
-                        if last_loss
-                            .is_some_and(|t| now.saturating_since(t) < Duration::from_secs(15))
-                        {
-                            activity.quarantine()?;
-                            bail!(
-                                "replacement GPU removed within the incident window; quarantined, restart Isocast"
-                            );
-                        }
-                        if let Some(why) = unsupported {
-                            bail!("{reason}; {why}");
                         }
                         anyhow::ensure!(
                             !handover,
@@ -5283,7 +5316,6 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         );
                         let old = inner.clone();
                         let warm = warm_encoders.take();
-                        last_loss = Some(now);
                         let release = Box::new(move || {
                             drop(warm);
                             let (main, extras) = {
@@ -5295,6 +5327,10 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             };
                             for run in main.into_iter().chain(extras.into_values()) {
                                 stop_compositor(run);
+                            }
+                            old.scene_feeds.clear_gpu_slots();
+                            for e in old.extras.iter() {
+                                e.scene_feeds.clear_gpu_slots();
                             }
                             for out in std::iter::once(&old.main)
                                 .chain(old.extras.iter().map(|e| &e.output))
@@ -6774,6 +6810,30 @@ iso = {iso}
             fn delete_secret(&self, _service: &str, _account: &str) -> Result<bool> {
                 bail!("inert")
             }
+        }
+    }
+
+    #[test]
+    fn only_restartable_video_definitions_admit_a_gpu_incident() {
+        use serde_json::json;
+        let mut setup = one_window();
+        assert!(restartable_graph(&setup));
+        setup.scenes[0].transition = Some(
+            serde_json::from_value(json!({"kind":"stinger","file":"transition.mov"})).unwrap(),
+        );
+        assert!(!restartable_graph(&setup));
+        setup.scenes[0].transition = None;
+        for kind in [
+            json!({"kind":"camera","device":"cam"}),
+            json!({"kind":"browser","url":"about:blank"}),
+            json!({"kind":"media","files":["clip.mov"]}),
+            json!({"kind":"image","path":"still.png"}),
+            json!({"kind":"color","color":"#ff0000"}),
+            json!({"kind":"slideshow","files":["still.png"]}),
+            json!({"kind":"text","text":"caption"}),
+        ] {
+            setup.sources[0].kind = serde_json::from_value(kind.clone()).unwrap();
+            assert!(!restartable_graph(&setup), "{kind}");
         }
     }
 

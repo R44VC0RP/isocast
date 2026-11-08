@@ -880,7 +880,9 @@ fn publish(connection: &mut rtmp::Connection, shared: &Shared, spec: &StreamSpec
                 Kind::Video { keyframe } => {
                     if keyframe
                         && let Some(config) = &media.config
-                        && sent_config.as_ref() != Some(config)
+                        && sent_config
+                            .as_ref()
+                            .is_none_or(|old| !Arc::ptr_eq(old, config))
                     {
                         connection.send_video(timestamp, &flv::avc_sequence_header(config))?;
                         sent_config = Some(config.clone());

@@ -247,7 +247,25 @@ pub(crate) fn watch<P: Platform>(
                 (streams.clone(), stream.clone(), key.clone());
             let worker = isocast_diagnostics::spawn(
                 format!("frames {}", key.target),
-                move || run(&streams, &stream, &key, &platform, source),
+                move || loop {
+                    match isocast_diagnostics::contain("encoded preview GPU draw", || {
+                        run(&streams, &stream, &key, &platform, &source)
+                    }) {
+                        Ok(()) => break,
+                        Err(_)
+                            if platform.reconnect_live_video()
+                                && platform.recording_device_failed() =>
+                        {
+                            for viewer in stream.viewers.lock().iter_mut() {
+                                viewer.synced = false;
+                            }
+                        }
+                        Err(why) => {
+                            end(&streams, &key, &stream, &why);
+                            break;
+                        }
+                    }
+                },
                 move |why| end(&failed_streams, &failed_key, &failed_stream, &why),
             )
             .expect("could not start a frame stream thread");
@@ -310,6 +328,7 @@ fn run<P: Platform>(
     let (mut scaled_tx, mut scaled_rx) = sync_channel(1);
     let mut pace = Pace::default();
     let mut effective_key = key.clone();
+    let mut rebinding = false;
     loop {
         if streams.stopping.load(Ordering::SeqCst) {
             return end(streams, key, shared, "engine stopped");
@@ -328,6 +347,22 @@ fn run<P: Platform>(
             }
             continue;
         };
+        if platform.reconnect_live_video() && platform.retiring_video() {
+            if encoding.is_some() || scaling.is_some() {
+                if let Some(old) = encoding.take() {
+                    old.encoder.retire_device();
+                }
+                rebinding = true;
+                scaling = None;
+                (scaled_tx, scaled_rx) = sync_channel(1);
+                for viewer in shared.viewers.lock().iter_mut() {
+                    viewer.synced = false;
+                }
+                pace = Pace::default();
+            }
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
         let fps = crate::governor::monitor_fps(fps);
         if fps == 0 {
             thread::sleep(Duration::from_millis(50));
@@ -382,9 +417,24 @@ fn run<P: Platform>(
             });
             match started {
                 Ok((started, resized)) => {
+                    rebinding = false;
                     encoding = Some(started);
                     scaling = resized;
                     shared.want_keyframe.store(true, Ordering::SeqCst);
+                }
+                Err(_) if platform.reconnect_live_video() && platform.recording_device_failed() => {
+                    continue;
+                }
+                // The generation may retire for longer than five seconds.
+                // After publication only a real sibling reopen lease is a
+                // reason to wait further; don't retry an unrelated failure.
+                Err(e)
+                    if rebinding
+                        && (platform.retiring_video()
+                            || e.is::<crate::RecoveryAdmissionBusy>()) =>
+                {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
                 }
                 Err(err) => return end(streams, key, shared, &format!("{err:#}")),
             }
@@ -416,6 +466,12 @@ fn run<P: Platform>(
                         resized
                     }
                     Ok(None) => continue,
+                    Err(_)
+                        if platform.reconnect_live_video()
+                            && platform.recording_device_failed() =>
+                    {
+                        continue;
+                    }
                     Err(_) if stage.device_lost() && gpu_retries < 3 => {
                         // Like the ISO stage, recover on a fresh shared device.
                         // Retain subscribers, but never retry a persistently
@@ -496,6 +552,9 @@ fn run<P: Platform>(
                 Ok(())
             });
         if let Err(err) = result {
+            if platform.reconnect_live_video() && platform.recording_device_failed() {
+                continue;
+            }
             return end(streams, key, shared, &format!("{err:#}"));
         }
     }

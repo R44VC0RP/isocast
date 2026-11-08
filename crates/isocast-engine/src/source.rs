@@ -866,6 +866,29 @@ fn open_native<P: Platform>(
             application.cursor,
         ),
         SourceKind::Camera(camera) => {
+            // Hosted Windows has no capture hardware. Only substitute the
+            // producer in this isolated debug fixture; admission still sees
+            // an actual Camera source definition, not a restartable pattern.
+            #[cfg(all(windows, debug_assertions))]
+            if camera.device == "isocast-e2e-camera"
+                && std::env::var("ISOCAST_TEST_TAKE_GPU").as_deref() == Ok("developer-off")
+                && let Some(setup_path) =
+                    std::env::var_os("ISOCAST_SETUP").map(std::path::PathBuf::from)
+                && setup_path.is_absolute()
+                && std::env::var_os("ISOCAST_SOCKET").map(std::path::PathBuf::from)
+                    == Some(setup_path.with_file_name("d.sock"))
+            {
+                return test_pattern(
+                    platform,
+                    id,
+                    &TestPatternSource {
+                        width: setup.canvas.width,
+                        height: setup.canvas.height,
+                        fps: setup.canvas.fps,
+                    },
+                    timeline,
+                );
+            }
             let CameraSource {
                 device,
                 width,

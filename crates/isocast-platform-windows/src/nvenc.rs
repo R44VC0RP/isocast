@@ -182,10 +182,9 @@ impl NvencAdmission {
     }
     pub fn begin() -> Result<Self> {
         let guard = ADMISSION.lock();
-        anyhow::ensure!(
-            !RECOVERY_OPEN.load(Ordering::Acquire),
-            "encoder admission reserved by a mid-take recovery; retry shortly. If the vendor open is hung past the recovery deadline, stop healthy recordings before restarting the engine"
-        );
+        if RECOVERY_OPEN.load(Ordering::Acquire) {
+            return Err(isocast_engine::RecoveryAdmissionBusy.into());
+        }
         Ok(Self {
             _serial: Some(guard),
             _recovery: None,

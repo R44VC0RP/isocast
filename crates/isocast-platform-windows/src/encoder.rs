@@ -900,6 +900,9 @@ impl WindowsVideoEncoder {
 }
 
 impl VideoEncoder for WindowsVideoEncoder {
+    fn retire_device(self) {
+        self.retire_failed();
+    }
     type Frame = Frame;
     fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
         match &mut self.encoder {
@@ -909,7 +912,10 @@ impl VideoEncoder for WindowsVideoEncoder {
     }
     fn encode(&mut self, frame: &Frame, pts: Time, keyframe: bool) -> Result<()> {
         self.input_refused()?;
-        let Some(frame) = self.prepare(frame, pts)? else {
+        let Some(frame) =
+            isocast_diagnostics::contain("live GPU scaler", || self.prepare(frame, pts))
+                .map_err(anyhow::Error::msg)??
+        else {
             self.scale_drops += 1;
             return Ok(());
         };

@@ -15,7 +15,7 @@ use parking_lot::{Condvar, Mutex};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 
-use crate::{Frame, GraphicsDevice, PixelFormat, convert::Converter};
+use crate::{Frame, PixelFormat, convert::Converter};
 
 const READERS: usize = 4;
 const IDLE: Duration = Duration::from_millis(200);
@@ -39,20 +39,28 @@ struct Feed {
 
 struct Publisher {
     feed: Arc<Feed>,
-    converter: Converter,
+    platform: crate::WindowsPlatform,
+    converter: Option<Converter>,
     staging: Option<((u32, u32), ID3D11Texture2D)>,
     destination: String,
     listener: Option<JoinHandle<Result<()>>>,
 }
 
 pub(crate) fn open(
-    device: &GraphicsDevice,
+    platform: &crate::WindowsPlatform,
     width: u32,
     height: u32,
     fps: u32,
 ) -> Result<Box<dyn CameraSink<Frame>>> {
     let mode = Mode::new(width, height, fps)?;
-    let converter = Converter::for_software(device, width, height, fps, PixelFormat::Bgra8, 8)?;
+    let converter = Converter::for_software(
+        &platform.graphics()?,
+        width,
+        height,
+        fps,
+        PixelFormat::Bgra8,
+        8,
+    )?;
     let session = session_id(std::process::id())?;
     let path = isocast_vcam_wire::destination(&isocast_protocol::api::socket_path(), session);
     let listener =
@@ -68,7 +76,8 @@ pub(crate) fn open(
         .name("camera pipe".into())
         .spawn(move || serve(listener, session, shared))?;
     Ok(Box::new(Publisher {
-        converter,
+        platform: platform.clone(),
+        converter: Some(converter),
         staging: None,
         destination: path.display().to_string(),
         feed,
@@ -216,6 +225,10 @@ impl Publisher {
 }
 
 impl CameraSink<Frame> for Publisher {
+    fn retire_video(&mut self) {
+        self.staging = None;
+        self.converter = None;
+    }
     fn fits_canvas(&self) -> bool {
         // Server 2022 WARP can lose the recording device when re-importing
         // its composited BGRA as a second DX12 draw's input. Read it once
@@ -223,7 +236,19 @@ impl CameraSink<Frame> for Publisher {
         isocast_engine::governor::is_software_renderer()
     }
     fn send(&mut self, frame: &Frame, pts: Time) -> Result<bool> {
-        let Some(nv12) = self.converter.camera_nv12(frame, &mut self.staging)? else {
+        let mode = self.feed.mode;
+        let converter = match &mut self.converter {
+            Some(c) => c,
+            slot @ None => slot.insert(Converter::for_software(
+                &self.platform.graphics()?,
+                mode.width(),
+                mode.height(),
+                mode.fps(),
+                PixelFormat::Bgra8,
+                8,
+            )?),
+        };
+        let Some(nv12) = converter.camera_nv12(frame, &mut self.staging)? else {
             return Ok(false);
         };
         self.publish(Some((pts, nv12)))

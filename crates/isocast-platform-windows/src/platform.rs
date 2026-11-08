@@ -38,6 +38,7 @@ use crate::{
 /// pools, captures and encoders share the same lazily opened D3D11 device.
 #[derive(Clone, Default)]
 pub struct WindowsPlatform {
+    active_take: Arc<Mutex<std::sync::Weak<Eligibility>>>,
     recording_generation: Arc<AtomicU64>,
     lost_generation: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
@@ -59,6 +60,25 @@ pub enum Capture {
 }
 
 impl WindowsPlatform {
+    // The only lost_generation writer. In particular, an owner detecting a
+    // removed device before the coordinator cannot bypass the admission test.
+    fn admit_loss(&self, g: u64) -> bool {
+        let active = self.active_take.lock();
+        let Some(policy) = active.upgrade() else {
+            return false;
+        };
+        if self.recording_generation.load(Ordering::Acquire) != g
+            || !(self.reconnect_live_video() || isocast_diagnostics::developer())
+        {
+            return false;
+        }
+        if self.lost_generation.load(Ordering::Acquire) == g {
+            return true;
+        }
+        policy.decide(g, std::time::Instant::now(), || {
+            self.lost_generation.store(g, Ordering::Release)
+        })
+    }
     /// Called by the daemon under start admission, BEFORE reserving a take.
     /// Never called by an encoder, a capture fault, or a compositor retry.
     pub fn prepare_idle_gpu<G>(
@@ -113,8 +133,9 @@ impl WindowsPlatform {
             |candidate| {
                 #[cfg(debug_assertions)]
                 if recording
-                    && isocast_diagnostics::developer()
-                    && std::env::var("ISOCAST_TEST_TAKE_GPU").as_deref() == Ok("remove")
+                    && std::env::var("ISOCAST_TEST_TAKE_GPU").is_ok_and(|v| {
+                        v == "developer-off" || v == "remove" && isocast_diagnostics::developer()
+                    })
                     && let Some(root) = test_socket()
                 {
                     let hold = root.with_file_name("hold-gpu-open");
@@ -192,7 +213,42 @@ impl WindowsPlatform {
     }
 }
 
+struct Eligibility {
+    graph: isocast_engine::GpuLossAdmission,
+    history: Mutex<LossHistory>,
+}
+#[derive(Default)]
+struct LossHistory {
+    accepted_at: Option<std::time::Instant>,
+    declined: Option<u64>,
+}
+impl Eligibility {
+    fn decide(&self, g: u64, now: std::time::Instant, mut commit: impl FnMut()) -> bool {
+        let mut history = self.history.lock();
+        if history.declined == Some(g) {
+            return false;
+        }
+        // Remember the *removed generation*. An unchanged removal doesn't
+        // become a new incident when replay stops or the 15s window expires.
+        let decision = if history
+            .accepted_at
+            .is_some_and(|first| now.duration_since(first) < Duration::from_secs(15))
+        {
+            Some(false)
+        } else {
+            (self.graph)(&mut commit)
+        };
+        match decision {
+            Some(true) => history.accepted_at = Some(now),
+            Some(false) => history.declined = Some(g),
+            None => {} // busy: never admit on the basis of a stale snapshot
+        }
+        decision == Some(true)
+    }
+}
+
 struct TakeGpu {
+    identity: Arc<Eligibility>,
     platform: WindowsPlatform,
     owner: Option<isocast_surfaces::generation::Owner>,
     _power: Option<crate::RecordingPowerGuard>,
@@ -211,6 +267,9 @@ fn test_socket() -> Option<PathBuf> {
 }
 
 impl isocast_engine::RecordingActivity for TakeGpu {
+    fn enabled(&self) -> bool {
+        self.platform.reconnect_live_video() || isocast_diagnostics::developer()
+    }
     #[cfg(debug_assertions)]
     fn inject_test_loss(&mut self) -> Result<()> {
         let Some(mode) = self.injection_mode.as_deref() else {
@@ -251,7 +310,7 @@ impl isocast_engine::RecordingActivity for TakeGpu {
     }
 
     fn removed(&mut self) -> Result<Option<u64>> {
-        if !isocast_diagnostics::developer()
+        if !self.enabled()
             || self
                 .last_check
                 .is_some_and(|t| t.elapsed() < Duration::from_millis(50))
@@ -266,16 +325,13 @@ impl isocast_engine::RecordingActivity for TakeGpu {
         });
         let removed = self.platform.retiring_video()
             || Gpu::needs_idle_replacement(gpu.as_ref(), native, false);
-        if removed && isocast_diagnostics::developer() {
+        if removed && self.enabled() {
             let generation = self
                 .owner
                 .as_ref()
                 .context("missing take GPU authority")?
                 .number();
-            self.platform
-                .lost_generation
-                .store(generation, Ordering::Release);
-            return Ok(Some(generation));
+            return Ok(self.platform.admit_loss(generation).then_some(generation));
         }
         Ok(None)
     }
@@ -290,34 +346,37 @@ impl isocast_engine::RecordingActivity for TakeGpu {
             &mut self.owner,
             || {
                 anyhow::ensure!(!stopped(), "recording ended before GPU freeze");
-                let guard = gate.guard()?;
+                let guard = gate.guard(self.platform.reconnect_live_video())?;
+                let active = self.platform.active_take.lock();
+                anyhow::ensure!(
+                    active.ptr_eq(&Arc::downgrade(&self.identity)) && !stopped(),
+                    "GPU take superseded before freeze"
+                );
                 self.platform.paused.store(true, Ordering::Release);
-                Ok(guard)
+                Ok((guard, active))
             },
             stopped,
             release,
         )?;
+        let active = self.platform.active_take.lock();
+        anyhow::ensure!(
+            active.ptr_eq(&Arc::downgrade(&self.identity)),
+            "GPU take superseded during open"
+        );
         self.platform
             .recording_generation
             .store(self.owner.as_ref().unwrap().number(), Ordering::Release);
         self.platform.paused.store(false, Ordering::Release);
         Ok(())
     }
-
-    fn quarantine(&self) -> Result<()> {
-        if !isocast_diagnostics::developer() {
-            return Ok(());
-        }
-        let owner = self.owner.as_ref().context("missing take GPU authority")?;
-        isocast_surfaces::generation::registry().quarantine_take(owner)?;
-        self.platform.paused.store(true, Ordering::Release);
-        // removed() already announced this generation to sibling owners.
-        Ok(())
-    }
 }
 
 impl Drop for TakeGpu {
     fn drop(&mut self) {
+        let active = self.platform.active_take.lock();
+        if !active.ptr_eq(&Arc::downgrade(&self.identity)) {
+            return;
+        }
         self.platform
             .recording_generation
             .store(0, Ordering::Release);
@@ -884,12 +943,7 @@ impl Platform for WindowsPlatform {
         height: u32,
         fps: u32,
     ) -> Result<Box<dyn isocast_engine::record::CameraSink<Frame>>> {
-        crate::virtual_camera::open(
-            &self.graphics()?.owned_by("virtual camera"),
-            width,
-            height,
-            fps,
-        )
+        crate::virtual_camera::open(self, width, height, fps)
     }
 
     fn now(&self) -> Time {
@@ -1162,15 +1216,27 @@ impl Platform for WindowsPlatform {
         system::audio_thread();
     }
 
-    fn recording_activity(&self) -> Result<Option<Box<dyn isocast_engine::RecordingActivity>>> {
+    fn recording_activity(
+        &self,
+        graph: isocast_engine::GpuLossAdmission,
+    ) -> Result<Option<Box<dyn isocast_engine::RecordingActivity>>> {
         let take = isocast_surfaces::generation::registry().take()?;
+        let identity = Arc::new(Eligibility {
+            graph,
+            history: Mutex::default(),
+        });
+        let mut active = self.active_take.lock();
+        *active = Arc::downgrade(&identity);
+        self.paused.store(false, Ordering::Release);
         self.recording_generation
             .store(take.number(), Ordering::Release);
+        drop(active);
         let power = crate::RecordingPowerGuard::new().unwrap_or_else(|error| {
             isocast_diagnostics::diagnostic!("warn"; "Windows recording power policy: {error:#}");
             None
         });
         Ok(Some(Box::new(TakeGpu {
+            identity,
             platform: self.clone(),
             owner: Some(take),
             _power: power,
@@ -1188,9 +1254,23 @@ impl Platform for WindowsPlatform {
             || (g != 0 && self.lost_generation.load(Ordering::Acquire) == g)
     }
 
+    fn reconnect_live_video(&self) -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("ISOCAST_ENABLE_LIVE_GPU_RECOVERY").is_some_and(|v| v == "1")
+        })
+    }
+
     fn recording_device_failed(&self) -> bool {
-        if !isocast_diagnostics::developer() {
+        if !(self.reconnect_live_video() || isocast_diagnostics::developer()) {
             return false;
+        }
+        if self.reconnect_live_video()
+            && self.recording_generation.load(Ordering::Acquire) != 0
+            && let Some(gpu) = Gpu::cached_windows()
+            && Gpu::needs_idle_replacement(Some(&gpu), false, false)
+        {
+            return self.admit_loss(gpu.generation().number());
         }
         if let Some(cache) = self.device.try_lock()
             && let Some(d) = cache.as_ref()
@@ -1198,10 +1278,9 @@ impl Platform for WindowsPlatform {
             let g = d.generation().number();
             if self.recording_generation.load(Ordering::Acquire) == g
                 && unsafe { d.raw().GetDeviceRemovedReason() }.is_err()
-                && isocast_diagnostics::developer()
+                && (self.reconnect_live_video() || isocast_diagnostics::developer())
             {
-                self.lost_generation.store(g, Ordering::Release);
-                return true;
+                return self.admit_loss(g);
             }
         }
         self.retiring_video()
@@ -1702,6 +1781,53 @@ impl Platform for WindowsPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_gpu_generation_never_announces_a_loss_even_after_policy_changes() {
+        use std::time::Instant;
+        let allowed = Arc::new(AtomicBool::new(false));
+        let setting = allowed.clone();
+        let policy = Eligibility {
+            graph: Box::new(move |commit| {
+                let ok = setting.load(Ordering::Acquire);
+                if ok {
+                    commit();
+                }
+                Some(ok)
+            }),
+            history: Mutex::default(),
+        };
+        let t = Instant::now();
+        assert!(!policy.decide(10, t, || panic!("published ineligible generation")));
+        allowed.store(true, Ordering::Release);
+        assert!(!policy.decide(10, t, || panic!("reconsidered same removal")));
+        let mut writes = 0;
+        assert!(policy.decide(11, t, || writes += 1));
+        assert!(!policy.decide(12, t + Duration::from_secs(2), || panic!(
+            "published double loss"
+        )));
+        assert!(!policy.decide(12, t + Duration::from_secs(20), || panic!(
+            "timer manufactured a new loss"
+        )));
+        assert!(policy.decide(13, t + Duration::from_secs(20), || writes += 1));
+        assert_eq!(writes, 2);
+    }
+
+    #[test]
+    fn late_activity_drop_cannot_unpause_a_later_take_even_on_same_generation() -> Result<()> {
+        let platform = WindowsPlatform::default();
+        let old = platform.recording_activity(Box::new(|_| Some(false)))?;
+        let current = platform.recording_activity(Box::new(|_| Some(false)))?;
+        let g = platform.recording_generation.load(Ordering::Acquire);
+        platform.paused.store(true, Ordering::Release);
+        drop(old);
+        assert_ne!(g, 0);
+        assert_eq!(platform.recording_generation.load(Ordering::Acquire), g);
+        assert!(platform.retiring_video());
+        drop(current);
+        assert!(!platform.retiring_video());
+        Ok(())
+    }
     use isocast_protocol::{MicrophoneSource, SystemAudioSource};
 
     #[test]

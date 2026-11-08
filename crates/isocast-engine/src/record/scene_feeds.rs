@@ -253,6 +253,15 @@ impl<F: Clone> SceneFeeds<F> {
     pub(super) fn clear_reuse(&self, publisher: Feed) {
         self.state.lock().publishing[publisher as usize] = None;
     }
+
+    pub(super) fn clear_gpu_slots(&self) {
+        let mut state = self.state.lock();
+        for w in state.feeds.values_mut() {
+            w.slot.clear();
+            w.published = None;
+        }
+        state.publishing = [None, None];
+    }
 }
 
 /// Draw the watched scenes until none is watched or `stop` says so.
@@ -273,6 +282,11 @@ pub(super) fn run<P: Platform>(
     let mut drawing: HashMap<Arc<str>, Drawing<P>> = HashMap::new();
     let mut drew = false;
     loop {
+        if platform.reconnect_live_video() && platform.retiring_video() {
+            feeds.clear_gpu_slots();
+            feeds.stopped();
+            return Ok(());
+        }
         if stop() {
             feeds.stopped();
             return Ok(());
