@@ -134,6 +134,8 @@ const COMMIT_WAIT: Duration = Duration::from_millis(500);
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct RecordOptions<'a> {
+    /// At a device loss, refuse an active live consumer or release idle snapshot graphics.
+    pub check_recording_only: Arc<dyn crate::RecordingOnly>,
     /// Write files here instead of `recording.folder`.
     pub folder: Option<PathBuf>,
     /// Stop after this long. Without it, record until `stop` is set.

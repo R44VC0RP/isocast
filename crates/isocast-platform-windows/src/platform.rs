@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -38,6 +38,9 @@ use crate::{
 /// pools, captures and encoders share the same lazily opened D3D11 device.
 #[derive(Clone, Default)]
 pub struct WindowsPlatform {
+    recording_generation: Arc<AtomicU64>,
+    lost_generation: Arc<AtomicU64>,
+    paused: Arc<AtomicBool>,
     device: Arc<Mutex<Option<GraphicsDevice>>>,
     outputs: Arc<crate::playback::Outputs>,
     browser_open_attempted: Arc<AtomicBool>,
@@ -75,16 +78,25 @@ impl WindowsPlatform {
         if !Gpu::needs_idle_replacement(gpu.as_ref(), native_lost, registry.retiring()) {
             return Ok(());
         }
-        let compiler = gpu
-            .as_ref()
-            .map(|_| isocast_surfaces::shader_compiler())
-            .transpose()
-            .map_err(|e| anyhow!(e.to_string()))?;
         drop(gpu);
+        self.replace_gpu(&mut None, check_idle, &|| false, release_idle)
+    }
+
+    fn replace_gpu<G>(
+        &self,
+        take: &mut Option<isocast_surfaces::generation::Owner>,
+        check: impl FnOnce() -> Result<G>,
+        stopped: &dyn Fn() -> bool,
+        release: impl FnOnce() + Send + 'static,
+    ) -> Result<()> {
+        let registry = isocast_surfaces::generation::registry();
+        let compiler = isocast_surfaces::shader_compiler().map_err(|e| anyhow!(e.to_string()))?;
+        let recording = take.is_some();
         let luid = isocast_surfaces::capture_adapter_luid()?;
-        let number = registry.replace(
+        let number = registry.replace_generation(
             Duration::from_secs(3),
-            check_idle,
+            check,
+            take,
             |receipt| {
                 let cache = self.device.clone();
                 std::thread::Builder::new()
@@ -94,11 +106,29 @@ impl WindowsPlatform {
                         Gpu::retire_windows_cache();
                         let old = cache.lock().take();
                         drop(old);
-                        release_idle();
+                        release();
                     })?;
                 Ok(())
             },
             |candidate| {
+                #[cfg(debug_assertions)]
+                if recording
+                    && isocast_diagnostics::developer()
+                    && std::env::var("ISOCAST_TEST_TAKE_GPU").as_deref() == Ok("remove")
+                    && let Some(root) = test_socket()
+                {
+                    let hold = root.with_file_name("hold-gpu-open");
+                    if hold.is_file() {
+                        isocast_diagnostics::diagnostic!("info"; "test GPU candidate open held");
+                        // Model a native open that cannot observe cancellation. Stop must
+                        // finalize before this returns; it must not publish a late candidate.
+                        let until = std::time::Instant::now() + Duration::from_secs(15);
+                        while hold.is_file() && std::time::Instant::now() < until {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                }
+                anyhow::ensure!(!stopped(), "recording ended during GPU retirement");
                 let native = GraphicsDevice::open(luid, candidate.owner("D3D11 device"))?;
                 // Prove the new native queue works before publishing either cache.
                 use windows::Win32::Graphics::Direct3D12::{D3D12_FENCE_FLAG_NONE, ID3D12Fence};
@@ -113,14 +143,11 @@ impl WindowsPlatform {
                             && native.adapter_luid() == luid,
                         "replacement adapter differs from pin"
                     );
-                    if let Some(expected) = compiler.as_ref() {
-                        anyhow::ensure!(
-                            isocast_surfaces::shader_compiler()
-                                .map_err(|e| anyhow!(e.to_string()))?
-                                == *expected,
-                            "replacement changed the qualified shader compiler"
-                        );
-                    }
+                    anyhow::ensure!(
+                        isocast_surfaces::shader_compiler().map_err(|e| anyhow!(e.to_string()))?
+                            == compiler,
+                        "replacement changed the qualified shader compiler"
+                    );
                     let fence: ID3D12Fence =
                         unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }?;
                     let queue = unsafe { gpu.queue.as_hal::<wgpu::hal::api::Dx12>() }
@@ -144,14 +171,16 @@ impl WindowsPlatform {
                     }
                 }
                 let mut cache = self.device.lock();
+                anyhow::ensure!(!stopped(), "recording ended during GPU qualification");
                 Ok(gpu.publish_windows_pair(candidate, || *cache = Some(native)))
             },
         )?;
-        isocast_diagnostics::diagnostic!("info"; "idle GPU replacement: generation {number}, pinned adapter {luid:?}, fresh fence completed");
+        let boundary = if recording { "recording" } else { "idle" };
+        isocast_diagnostics::diagnostic!("info"; "{boundary} GPU replacement: generation {number}, pinned adapter {luid:?}, fresh fence completed");
         Ok(())
     }
 
-    fn graphics(&self) -> Result<GraphicsDevice> {
+    pub(crate) fn graphics(&self) -> Result<GraphicsDevice> {
         let mut current = self.device.lock();
         if let Some(device) = &*current {
             device.generation().check()?;
@@ -160,6 +189,139 @@ impl WindowsPlatform {
         let device = GraphicsDevice::new()?;
         *current = Some(device.clone());
         Ok(device)
+    }
+}
+
+struct TakeGpu {
+    platform: WindowsPlatform,
+    owner: Option<isocast_surfaces::generation::Owner>,
+    _power: Option<crate::RecordingPowerGuard>,
+    last_check: Option<std::time::Instant>,
+    #[cfg(debug_assertions)]
+    injected: bool,
+    #[cfg(debug_assertions)]
+    injection_mode: Option<String>,
+}
+
+#[cfg(debug_assertions)]
+fn test_socket() -> Option<PathBuf> {
+    let setup = PathBuf::from(std::env::var_os("ISOCAST_SETUP")?);
+    let socket = PathBuf::from(std::env::var_os("ISOCAST_SOCKET")?);
+    (setup.is_absolute() && socket == setup.with_file_name("d.sock")).then_some(socket)
+}
+
+impl isocast_engine::RecordingActivity for TakeGpu {
+    #[cfg(debug_assertions)]
+    fn inject_test_loss(&mut self) -> Result<()> {
+        let Some(mode) = self.injection_mode.as_deref() else {
+            return Ok(());
+        };
+        let off_control = mode == "developer-off";
+        if !off_control && !isocast_diagnostics::developer() {
+            self.injected = false;
+            return Ok(());
+        }
+        if !self.injected
+            && (mode == "remove" || off_control)
+            && let Some(socket) = test_socket()
+            && (!off_control
+                || (!isocast_diagnostics::developer()
+                    && socket.with_file_name("inject-remove-device").is_file()))
+            && let Some(gpu) = Gpu::cached_windows()
+        {
+            use windows::{Win32::Graphics::Direct3D12::ID3D12Device5, core::Interface};
+            let info = gpu.device.adapter_info();
+            anyhow::ensure!(
+                (info.vendor, info.device) == (0x1414, 0x008c),
+                "recording injection requires WARP"
+            );
+            let hal =
+                unsafe { gpu.device.as_hal::<wgpu::hal::api::Dx12>() }.context("expected DX12")?;
+            unsafe {
+                hal.raw_device().cast::<ID3D12Device5>()?.RemoveDevice();
+            }
+            anyhow::ensure!(
+                unsafe { hal.raw_device().GetDeviceRemovedReason() }.is_err(),
+                "WARP injection did not remove the test device"
+            );
+            isocast_diagnostics::diagnostic!("info"; "test RemoveDevice confirmed: mode={mode} generation={}", gpu.generation().number());
+            self.injected = true;
+        }
+        Ok(())
+    }
+
+    fn removed(&mut self) -> Result<Option<u64>> {
+        if !isocast_diagnostics::developer()
+            || self
+                .last_check
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(50))
+        {
+            return Ok(None);
+        }
+        self.last_check = Some(std::time::Instant::now());
+        let gpu = Gpu::cached_windows();
+        let native = self.platform.device.try_lock().is_some_and(|d| {
+            d.as_ref()
+                .is_some_and(|d| unsafe { d.raw().GetDeviceRemovedReason() }.is_err())
+        });
+        let removed = self.platform.retiring_video()
+            || Gpu::needs_idle_replacement(gpu.as_ref(), native, false);
+        if removed && isocast_diagnostics::developer() {
+            let generation = self
+                .owner
+                .as_ref()
+                .context("missing take GPU authority")?
+                .number();
+            self.platform
+                .lost_generation
+                .store(generation, Ordering::Release);
+            return Ok(Some(generation));
+        }
+        Ok(None)
+    }
+
+    fn replace(
+        &mut self,
+        gate: &dyn isocast_engine::RecordingOnly,
+        stopped: &dyn Fn() -> bool,
+        release: Box<dyn FnOnce() + Send>,
+    ) -> Result<()> {
+        self.platform.replace_gpu(
+            &mut self.owner,
+            || {
+                anyhow::ensure!(!stopped(), "recording ended before GPU freeze");
+                let guard = gate.guard()?;
+                self.platform.paused.store(true, Ordering::Release);
+                Ok(guard)
+            },
+            stopped,
+            release,
+        )?;
+        self.platform
+            .recording_generation
+            .store(self.owner.as_ref().unwrap().number(), Ordering::Release);
+        self.platform.paused.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn quarantine(&self) -> Result<()> {
+        if !isocast_diagnostics::developer() {
+            return Ok(());
+        }
+        let owner = self.owner.as_ref().context("missing take GPU authority")?;
+        isocast_surfaces::generation::registry().quarantine_take(owner)?;
+        self.platform.paused.store(true, Ordering::Release);
+        // removed() already announced this generation to sibling owners.
+        Ok(())
+    }
+}
+
+impl Drop for TakeGpu {
+    fn drop(&mut self) {
+        self.platform
+            .recording_generation
+            .store(0, Ordering::Release);
+        self.platform.paused.store(false, Ordering::Release);
     }
 }
 
@@ -454,7 +616,7 @@ pub(crate) struct RecordingReopen {
     #[cfg(debug_assertions)]
     pub changed_profile: bool,
     platform: WindowsPlatform,
-    device: GraphicsDevice,
+    pub generation: u64,
     spec: WriterSpec,
     recording: u64,
     take: u32,
@@ -464,12 +626,46 @@ pub(crate) struct RecordingReopen {
 }
 
 impl RecordingReopen {
+    pub fn native_loss(&self) -> bool {
+        self.platform.recording_device_failed() && self.lost()
+    }
+    pub fn lost(&self) -> bool {
+        self.platform.lost_generation.load(Ordering::Acquire) == self.generation
+    }
+    pub fn successor(&mut self) -> Result<bool> {
+        if self.platform.retiring_video() {
+            return Ok(false);
+        }
+        // Never lazily open a device or wait on a cache lock on the PCM worker.
+        let Some(number) = self.platform.device.try_lock().and_then(|d| {
+            d.as_ref()
+                .filter(|d| d.generation().check().is_ok())
+                .map(|d| d.generation().number())
+        }) else {
+            return Ok(false);
+        };
+        if number <= self.generation {
+            return Ok(false);
+        }
+        self.generation = number;
+        Ok(true)
+    }
     pub fn healthy_device(&self) -> Result<()> {
-        unsafe { self.device.raw().GetDeviceRemovedReason() }
+        let d = self.platform.graphics()?;
+        anyhow::ensure!(
+            d.generation().number() == self.generation,
+            "recording GPU generation changed"
+        );
+        unsafe { d.raw().GetDeviceRemovedReason() }
             .context("D3D11 device lost; encoder-only recovery is not safe")
     }
     pub fn open(&self, lease: crate::nvenc::RecoveryAdmission) -> Result<WindowsVideoEncoder> {
         self.healthy_device()?;
+        let device = self.platform.graphics()?;
+        anyhow::ensure!(
+            device.generation().number() == self.generation,
+            "stale encoder open"
+        );
         let admission = lease.into_admission();
         admission
             .settled()
@@ -483,7 +679,7 @@ impl RecordingReopen {
             input: None,
         };
         let figures = budget_figures(
-            &self.device,
+            &device,
             &admission,
             (self.recording, 0),
             std::slice::from_ref(&file),
@@ -495,7 +691,7 @@ impl RecordingReopen {
             Figures::Planned(f) => {
                 let id = budget_id(&file);
                 let plan = f.profile.plan_accounted(
-                    &self.device,
+                    &device,
                     &admission,
                     &f.active,
                     (self.recording, 0),
@@ -529,7 +725,7 @@ impl RecordingReopen {
             profile
         };
         let mut encoder = WindowsVideoEncoder::preflight_profile(
-            &self.device,
+            &device,
             video,
             self.input,
             preset,
@@ -542,7 +738,7 @@ impl RecordingReopen {
         }
         encoder.account(
             &admission,
-            &self.device,
+            &device,
             NvencOwner {
                 recording: self.recording,
                 take: self.take,
@@ -966,13 +1162,49 @@ impl Platform for WindowsPlatform {
         system::audio_thread();
     }
 
-    fn recording_activity(&self) -> Result<Option<Box<dyn Send>>> {
+    fn recording_activity(&self) -> Result<Option<Box<dyn isocast_engine::RecordingActivity>>> {
         let take = isocast_surfaces::generation::registry().take()?;
+        self.recording_generation
+            .store(take.number(), Ordering::Release);
         let power = crate::RecordingPowerGuard::new().unwrap_or_else(|error| {
             isocast_diagnostics::diagnostic!("warn"; "Windows recording power policy: {error:#}");
             None
         });
-        Ok(Some(Box::new((power, take))))
+        Ok(Some(Box::new(TakeGpu {
+            platform: self.clone(),
+            owner: Some(take),
+            _power: power,
+            last_check: None,
+            #[cfg(debug_assertions)]
+            injected: false,
+            #[cfg(debug_assertions)]
+            injection_mode: std::env::var("ISOCAST_TEST_TAKE_GPU").ok(),
+        })))
+    }
+
+    fn retiring_video(&self) -> bool {
+        let g = self.recording_generation.load(Ordering::Acquire);
+        self.paused.load(Ordering::Acquire)
+            || (g != 0 && self.lost_generation.load(Ordering::Acquire) == g)
+    }
+
+    fn recording_device_failed(&self) -> bool {
+        if !isocast_diagnostics::developer() {
+            return false;
+        }
+        if let Some(cache) = self.device.try_lock()
+            && let Some(d) = cache.as_ref()
+        {
+            let g = d.generation().number();
+            if self.recording_generation.load(Ordering::Acquire) == g
+                && unsafe { d.raw().GetDeviceRemovedReason() }.is_err()
+                && isocast_diagnostics::developer()
+            {
+                self.lost_generation.store(g, Ordering::Release);
+                return true;
+            }
+        }
+        self.retiring_video()
     }
 
     fn retain_frame(frame: &Frame, _usage: isocast_engine::FrameUse) -> Option<Frame> {
@@ -1236,9 +1468,11 @@ impl Platform for WindowsPlatform {
                 Ok(mut writer) => {
                     writer.allow_reopen(RecordingReopen {
                         #[cfg(debug_assertions)]
-                        changed_profile: false,
+                        changed_profile: std::env::var("ISOCAST_TEST_TAKE_GPU_PROFILE")
+                            .is_ok_and(|output| output == file.output)
+                            && std::env::var_os("ISOCAST_TEST_TAKE_GPU").is_some(),
                         platform: self.clone(),
-                        device: device.owned_by("recording writer"),
+                        generation: device.generation().number(),
                         spec: file.spec.clone(),
                         recording: file.recording,
                         take: file.take,
@@ -1323,7 +1557,7 @@ impl Platform for WindowsPlatform {
             ScreenTarget::Application { app, .. } => app,
         };
         crate::broker::recovery::open(
-            self.graphics()?.owned_by("pinned capture"),
+            self.clone(),
             source.to_owned(),
             crate::devices::screen_target(target)?,
             fps,

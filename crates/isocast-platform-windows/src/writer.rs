@@ -546,7 +546,19 @@ impl VideoWriter {
             .encoder
             .as_mut()
             .expect("ready encoder")
-            .prepare(frame, pts)?
+            .prepare(frame, pts)
+            .map_err(|e| {
+                if self
+                    .recovery
+                    .recipe
+                    .as_ref()
+                    .is_some_and(|r| r.native_loss())
+                {
+                    e.context(CodecFault)
+                } else {
+                    e
+                }
+            })?
         else {
             return Ok(false);
         };
@@ -861,18 +873,23 @@ impl VideoWriter {
 
     fn end_ticks(&self, end: Option<Time>) -> Result<u64> {
         let start = self.start.context("video: the file never started")?;
-        let (_, last) = self
-            .last_video
-            .as_ref()
-            .context("video: no picture was accepted")?;
+        // Device retirement relinquishes the texture used for tail repeats;
+        // it doesn't retract the mux's already verified last picture.
+        let last = match &self.last_video {
+            Some((_, at)) => *at,
+            None => self.time_at(
+                self.last_written
+                    .context("video: no picture was accepted")?,
+            )?,
+        };
         let minimum = self
-            .ticks(*last)?
+            .ticks(last)?
             .checked_add(u64::from(FRAME_DURATION))
             .context("video end overflow")?;
         let Some(end) = end.filter(|end| *end != Time::MAX) else {
             return Ok(minimum);
         };
-        if end <= *last {
+        if end <= last {
             bail!(
                 "video.end: must be after every accepted picture; complete packets will not be trimmed"
             );
@@ -972,7 +989,9 @@ impl VideoWriter {
         };
         // The audio endpoint below is unchanged. A stopped source must not
         // acquire an extra picture just because its PCM extends further.
-        let video_end = if self.unavailable_tail {
+        let video_end = if self.unavailable_tail
+            || (self.recovery.incident.is_some() && self.last_video.is_none())
+        {
             self.end_ticks(None).ok()
         } else {
             end
@@ -1310,6 +1329,12 @@ impl VideoWriter {
 }
 
 impl FileWriter for VideoWriter {
+    fn monitors_device(&self) -> bool {
+        true
+    }
+    fn poll_device(&mut self) -> Result<()> {
+        self.retire_device()
+    }
     fn end_at_last_picture(&mut self) {
         self.unavailable_tail = true;
     }
@@ -1356,6 +1381,12 @@ impl FileWriter for VideoWriter {
     }
 
     fn append_video(&mut self, frame: &Frame, pts: Time) -> Result<bool> {
+        if frame.generation().check().is_err()
+            && self.recovery.recipe.as_ref().is_some_and(|r| r.lost())
+        {
+            self.retire_device()?;
+            return Ok(false);
+        }
         let result = self.healthy().and_then(|()| self.append(frame, pts, false));
         let result = match result {
             Err(e) if e.is::<CodecFault>() => self.handle_codec_fault(e).map(|()| false),

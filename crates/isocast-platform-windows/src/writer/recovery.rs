@@ -46,6 +46,7 @@ impl Drop for Permit {
 
 #[derive(Default)]
 pub(super) struct Recovery {
+    device_wait: bool,
     pub recipe: Option<RecordingReopen>,
     pub context: Option<OutputRecovery>,
     pub incident: Option<u64>,
@@ -121,6 +122,62 @@ pub(super) fn closed_idr(codec: VideoCodec, mut au: &[u8]) -> bool {
 }
 
 impl VideoWriter {
+    pub(super) fn retire_device(&mut self) -> Result<()> {
+        if self.recovery.device_wait
+            || !self
+                .recovery
+                .recipe
+                .as_ref()
+                .is_some_and(RecordingReopen::lost)
+        {
+            return Ok(());
+        }
+        let context = self
+            .recovery
+            .context
+            .clone()
+            .context("no recording recovery context")?;
+        self.cancel_handoff();
+        self.parts.changed = None;
+        self.flush_staged()?;
+        let first = self.time_at(
+            self.last_written
+                .context("device lost before first encoder prefix")?
+                + u64::from(FRAME_DURATION),
+        )?;
+        let why = format!(
+            "Windows GPU generation {} removed",
+            self.recovery.recipe.as_ref().unwrap().generation
+        );
+        self.recovery.incident = Some(
+            context
+                .interrupted_by(
+                    first,
+                    crate::now(),
+                    &why,
+                    isocast_protocol::manifest::VideoFaultKind::DeviceLost,
+                )
+                .context("video recovery history full")?,
+        );
+        if let Some(ticket) = self.recovery.attempt.take() {
+            context.failed_attempt(ticket, crate::now());
+        }
+        self.recovery.device_wait = true;
+        self.recovery.last_error = why;
+        self.detach_device_encoder()?;
+        self.commit_packets()?;
+        Ok(())
+    }
+
+    fn detach_device_encoder(&mut self) -> Result<()> {
+        self.last_video.take(); // retained repeat picture also owns a native device
+        self.abandon_pending();
+        if self.recovery.permit.is_none() {
+            self.recovery.permit = Some(Permit::acquire()?);
+        }
+        self.retire_without_reopen(); // no RecoveryAdmission: every sibling can release independently
+        Ok(())
+    }
     pub(crate) fn allow_reopen(&mut self, recipe: RecordingReopen) {
         #[cfg(debug_assertions)]
         let mut recipe = recipe;
@@ -178,6 +235,14 @@ impl VideoWriter {
     }
 
     pub(super) fn handle_codec_fault(&mut self, error: anyhow::Error) -> Result<()> {
+        if self
+            .recovery
+            .recipe
+            .as_ref()
+            .is_some_and(RecordingReopen::native_loss)
+        {
+            return self.retire_device();
+        }
         let Some(context) = self.recovery.context.clone() else {
             return Err(error);
         };
@@ -232,6 +297,21 @@ impl VideoWriter {
 
     /// Never wait for teardown/preflight here: this same queue carries PCM.
     pub(super) fn poll_reopen(&mut self) -> Result<bool> {
+        self.retire_device()?;
+        if self.recovery.device_wait {
+            if !self
+                .recovery
+                .recipe
+                .as_mut()
+                .expect("configured")
+                .successor()?
+            {
+                return Ok(false);
+            }
+            self.recovery.device_wait = false;
+            self.recovery.cancel = Arc::default();
+            self.recovery.permit = Some(Permit::acquire()?);
+        }
         let Some(id) = self.recovery.incident else {
             return Ok(true);
         };
@@ -419,6 +499,73 @@ impl VideoWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "runs on isolated Windows WARP with software MFTs"]
+    fn sibling_device_retirement_does_not_need_the_exclusive_reopen_lease() -> Result<()> {
+        use crate::{GraphicsDevice, PixelFormat, nvenc::RecoveryAdmission};
+        use isocast_surfaces::generation::Registry;
+        let registry = Registry::default();
+        let mut take = Some(registry.take()?);
+        let device = GraphicsDevice::open(
+            isocast_surfaces::capture_adapter_luid()?,
+            registry.register("device")?,
+        )?;
+        let make_writer = |id| {
+            let spec = WriterSpec {
+                path: std::env::temp_dir().join(format!(
+                    "isocast-sibling-{}-{id}-{}.mov",
+                    std::process::id(),
+                    crate::now().as_nanos()
+                )),
+                created: std::time::SystemTime::now(),
+                container: Container::Mov,
+                audio: vec![],
+                video: isocast_engine::VideoTrackSpec {
+                    width: 160,
+                    height: 90,
+                    fps: 10,
+                    encoder: isocast_protocol::Encoder {
+                        codec: Codec::H264,
+                        ..Default::default()
+                    },
+                },
+            };
+            VideoWriter::from_encoder(
+                &spec,
+                WindowsVideoEncoder::recording(&device, &spec.video, PixelFormat::Bgra8)?,
+            )
+        };
+        let mut writers = [make_writer(0)?, make_writer(1)?];
+        drop(device);
+        let mut held = RecoveryAdmission::try_acquire();
+        assert!(held.is_some());
+        registry.replace_generation(
+            Duration::from_secs(3),
+            || Ok(()),
+            &mut take,
+            |_| {
+                for writer in &mut writers {
+                    writer.detach_device_encoder()?;
+                }
+                Ok(())
+            },
+            |candidate| {
+                // Release the exclusive lease only *after* all native receipts retire.
+                // A sibling that acquires it to start retirement times out the barrier.
+                assert!(RecoveryAdmission::try_acquire().is_none());
+                drop(held.take());
+                Ok(candidate.publish(|| {}))
+            },
+        )?;
+        for writer in writers {
+            let _lease =
+                RecoveryAdmission::try_acquire().context("sibling couldn't reenter admission")?;
+            writer.cancel();
+        }
+        assert_eq!(take.unwrap().number(), 2);
+        Ok(())
+    }
     #[test]
     fn native_losses_survive_a_failed_recovery_without_double_counting_retirement() {
         let mut losses = LossCounts::default();

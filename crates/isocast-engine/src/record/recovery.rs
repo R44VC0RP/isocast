@@ -152,6 +152,15 @@ impl OutputRecovery {
         ledger.revision.fetch_add(1, Ordering::Release);
     }
     pub fn interrupted(&self, first_missing: Time, now: Time, reason: &str) -> Option<u64> {
+        self.interrupted_by(first_missing, now, reason, VideoFaultKind::EncoderFailed)
+    }
+    pub fn interrupted_by(
+        &self,
+        first_missing: Time,
+        now: Time,
+        reason: &str,
+        kind: VideoFaultKind,
+    ) -> Option<u64> {
         let from = self.clock.state.read().host_time(first_missing);
         self.plan.output_active.store(0, Ordering::Release);
         self.clock.recovery.interrupted(
@@ -159,7 +168,7 @@ impl OutputRecovery {
             self.plan.spec.video.fps,
             from,
             now,
-            VideoFaultKind::EncoderFailed,
+            kind,
             reason,
         )
     }
@@ -508,6 +517,23 @@ impl VideoRecoveryLedger {
         }) {
             match entries[i].split_end.or(entries[i].resumed) {
                 Some(at) if detected >= at => from = from.max(at),
+                None if kind == VideoFaultKind::DeviceLost => {
+                    // A capture/codec can notice the failed call before native
+                    // removal is confirmed. Attribute one outage, not two.
+                    let e = &mut entries[i];
+                    if e.kind != kind
+                        && e.ended.is_none()
+                        && e.kind != VideoFaultKind::StorageFailed
+                    {
+                        e.kind = kind;
+                        e.reason = format!("{reason}; {}", e.reason)
+                            .chars()
+                            .take(512)
+                            .collect();
+                        self.revision.fetch_add(1, Ordering::Release);
+                    }
+                    return Some(i as u64 + 1);
+                }
                 _ => return Some(i as u64 + 1),
             }
         }
@@ -712,7 +738,10 @@ impl VideoRecoveryLedger {
     pub(super) fn reopening_output(&self) -> bool {
         self.entries.lock().iter().any(|e| {
             e.scope == Scope::Output
-                && e.kind == VideoFaultKind::EncoderFailed
+                && matches!(
+                    e.kind,
+                    VideoFaultKind::EncoderFailed | VideoFaultKind::DeviceLost
+                )
                 && e.ended.is_none()
                 && e.resumed.is_none()
         })

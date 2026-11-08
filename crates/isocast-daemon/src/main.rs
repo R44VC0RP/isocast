@@ -1214,7 +1214,6 @@ impl State {
     }
 }
 
-#[cfg(any(windows, test))]
 impl Daemon {
     fn idle_gpu_guard(&self) -> Result<isocast_engine::critical::Read<'_, State>> {
         let state = self.state.read();
@@ -1222,6 +1221,19 @@ impl Daemon {
             anyhow::bail!("cannot replace the Windows GPU: {action} first, then start again");
         }
         Ok(state)
+    }
+}
+
+impl isocast_engine::RecordingOnly for Daemon {
+    fn guard(&self) -> Result<Box<dyn isocast_engine::RecordingGuard + '_>> {
+        let idle = self.idle_gpu_guard()?;
+        drop(
+            SNAPSHOT_GRAPHICS
+                .try_lock()
+                .context("snapshot preview still drawing; ending the take")?
+                .take(),
+        );
+        Ok(Box::new(idle))
     }
 }
 
@@ -4021,6 +4033,7 @@ impl Daemon {
                 });
             };
             let options = RecordOptions {
+                check_recording_only: daemon.clone(),
                 folder: Some(project.folder.clone()),
                 duration,
                 stop,
@@ -6478,7 +6491,10 @@ mod tests {
         daemon.state.lock().wanted_at = Some(std::time::Instant::now());
         refused("stop the preview first");
         daemon.state.lock().wanted_at = Some(std::time::Instant::now() - ENGINE_IDLE);
-        assert!(daemon.idle_gpu_guard().is_ok());
+        let guard = isocast_engine::RecordingOnly::guard(&daemon).unwrap();
+        assert!(daemon.state.try_read().is_none()); // no new live demand before freeze
+        drop(guard);
+        assert!(daemon.state.try_read().is_some());
     }
 
     #[test]

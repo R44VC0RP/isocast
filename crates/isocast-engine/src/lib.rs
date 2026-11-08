@@ -106,9 +106,30 @@ pub struct SourceOpenBudget {
     pub wait_for_picture: Option<&'static str>,
 }
 
-/// What the engine needs from the operating system.
-/// Platforms are cheap handles (macOS: a unit struct), cloned into the
-/// threads that generate synthetic sources.
+/// Take-scoped authority to retire the native video device, never the mux or mixer.
+pub trait RecordingActivity: Send {
+    #[cfg(debug_assertions)]
+    fn inject_test_loss(&mut self) -> anyhow::Result<()>;
+    /// A positive native loss, not a logical renderer error.
+    fn removed(&mut self) -> anyhow::Result<Option<u64>>;
+    fn replace(
+        &mut self,
+        gate: &dyn RecordingOnly,
+        stopped: &dyn Fn() -> bool,
+        release: Box<dyn FnOnce() + Send>,
+    ) -> anyhow::Result<()>;
+    fn quarantine(&self) -> anyhow::Result<()>;
+}
+
+/// The daemon's live-client exclusion, held only from the check through
+/// closing generation admission (never while waiting for native teardown).
+pub trait RecordingOnly: Send + Sync {
+    fn guard(&self) -> anyhow::Result<Box<dyn RecordingGuard + '_>>;
+}
+pub trait RecordingGuard {}
+impl<T> RecordingGuard for T {}
+
+/// What the engine needs from the operating system. Cheap to clone into workers.
 pub trait Platform: Clone + Send + Sync + 'static {
     /// A video frame (on macOS, a `CVPixelBuffer`). Cloning is cheap: it
     /// shares the same pixels.
@@ -415,8 +436,17 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// captured and drained, not for the persistent preview engine's life.
     /// The returned lease restores its policy when dropped, including on
     /// startup failure or unwinding. Back ends must handle nested sessions.
-    fn recording_activity(&self) -> anyhow::Result<Option<Box<dyn Send>>> {
+    fn recording_activity(&self) -> anyhow::Result<Option<Box<dyn RecordingActivity>>> {
         Ok(None)
+    }
+
+    fn retiring_video(&self) -> bool {
+        false
+    }
+    /// Called on a video error, not for each frame. Keep a pinned producer alive
+    /// if the recording coordinator owns this confirmed native failure.
+    fn recording_device_failed(&self) -> bool {
+        false
     }
 
     /// Lower a disposable calibration helper's process/thread priority.
@@ -983,6 +1013,13 @@ pub trait FramePool: Send {
 /// One media file being written: a video track and zero or more audio
 /// tracks, all timed on the master clock.
 pub trait FileWriter: Send {
+    /// Some native writers need an out-of-band tick even on a silent ISO.
+    fn monitors_device(&self) -> bool {
+        false
+    }
+    fn poll_device(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// A known source outage extends through Stop. Keep real audio, but
     /// don't encode a repeat of the pre-interruption picture to cover it.
     fn end_at_last_picture(&mut self) {}

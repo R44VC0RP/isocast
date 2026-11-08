@@ -226,7 +226,18 @@ pub(super) fn write_files<W: FileWriter>(
             // clock, which delivers each frame a frame after it is due).
             let mut draining: Option<std::time::Instant> = None;
             loop {
+                if let Err(err) = file.writer.poll_device() {
+                    failure = Err(err);
+                    break;
+                }
                 let packet = match draining {
+                    None if file.writer.monitors_device() => {
+                        match packets.recv_timeout(std::time::Duration::from_millis(40)) {
+                            Ok(packet) => Some(packet),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(_) => None,
+                        }
+                    }
                     None => packets.recv().ok(),
                     Some(until) => packets
                         .recv_timeout(until.saturating_duration_since(std::time::Instant::now()))

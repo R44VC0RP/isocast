@@ -1262,10 +1262,16 @@ fn test_pattern<P: Platform>(
             // A generator that falls behind drops frames, like a real device
             // would, instead of drifting late.
             let late = Duration::from_secs(2) / fps;
+            let mut pool = Some(pool);
             for n in 0.. {
                 let pts = start.add_ticks(n, fps);
                 if !sleep_until(&platform, &mut clock, pts, stop) {
                     return;
+                }
+                if platform.retiring_video() {
+                    pool.take();
+                    slot.clear();
+                    continue;
                 }
                 if platform.now() > pts + late {
                     continue;
@@ -1275,10 +1281,23 @@ fn test_pattern<P: Platform>(
                     slot.stop("test_pattern: injected capture failure (developer mode)".into());
                     return;
                 }
-                match pool.draw(&mut |pixels, stride| pattern.draw(n, since_start, pixels, stride))
+                if pool.is_none() {
+                    match platform.frame_pool(width, height) {
+                        Ok(new) => pool = Some(new),
+                        Err(err) => {
+                            slot.stop(format!("{err:#}"));
+                            return;
+                        }
+                    }
+                }
+                match pool
+                    .as_mut()
+                    .unwrap()
+                    .draw(&mut |pixels, stride| pattern.draw(n, since_start, pixels, stride))
                 {
                     Ok(Some(frame)) => slot.push(frame, pts),
                     Ok(None) => {}
+                    Err(_) if platform.recording_device_failed() => {}
                     Err(err) => {
                         slot.stop(format!("{err:#}"));
                         return;

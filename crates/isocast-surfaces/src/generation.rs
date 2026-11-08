@@ -192,6 +192,21 @@ impl Registry {
         release: impl FnOnce(Owner) -> Result<()>,
         open: impl FnOnce(Replacement) -> Result<Published>,
     ) -> Result<u64> {
+        self.replace_generation(timeout, check_idle, &mut None, release, open)
+    }
+
+    /// The recorder, not an idle Start or encoder, supplies its own receipt.
+    /// Transfer that exclusion across the barrier without counting it as a
+    /// native owner or ever admitting two takes on the replacement.
+    pub fn replace_generation<G>(
+        &self,
+        timeout: Duration,
+        check: impl FnOnce() -> Result<G>,
+        take: &mut Option<Owner>,
+        release: impl FnOnce(Owner) -> Result<()>,
+        open: impl FnOnce(Replacement) -> Result<Published>,
+    ) -> Result<u64> {
+        let recording = take.is_some();
         let _one = self
             .replacing
             .try_lock()
@@ -199,8 +214,25 @@ impl Registry {
         let old = {
             // Keep the daemon's live-output state locked through the freeze,
             // but never wait for teardown while holding that state lock.
-            let _idle_guard = check_idle()?;
+            let _idle_guard = check()?;
             let current = self.current.lock().unwrap();
+            if let Some(receipt) = take.as_ref() {
+                ensure!(
+                    receipt.0.kind == TAKE && Arc::ptr_eq(&receipt.0.epoch, &current),
+                    "stale recording GPU authority"
+                );
+                ensure!(
+                    current
+                        .counts
+                        .lock()
+                        .unwrap()
+                        .get(TAKE)
+                        .is_some_and(|c| c.live == 1)
+                        && Arc::strong_count(&receipt.0) == 1,
+                    "another active take still owns this generation"
+                );
+                drop(take.take());
+            }
             ensure!(
                 !current.counts.lock().unwrap().contains_key(TAKE),
                 "cannot replace the GPU during an active take"
@@ -253,10 +285,24 @@ impl Registry {
             false,
         );
         *self.current.lock().unwrap() = next.clone();
+        if recording {
+            *take = Some(next.track(TAKE));
+        }
         open(Replacement {
             owner: next.track("replacement"),
         })?; // a failed candidate stays closed
         Ok(next.number)
+    }
+
+    pub fn quarantine_take(&self, take: &Owner) -> Result<()> {
+        let current = self.current.lock().unwrap();
+        ensure!(
+            take.0.kind == TAKE && Arc::ptr_eq(&current, &take.0.epoch),
+            "stale recording GPU authority"
+        );
+        current.accepting.store(false, Ordering::Release);
+        current.track("repeated device loss").quarantine();
+        Ok(())
     }
 }
 
@@ -283,6 +329,51 @@ pub const RECEIPT_ID: windows::core::GUID =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_current_take_can_replace_and_quarantine_its_successor() {
+        let r = Registry::default();
+        let mut take = Some(r.take().unwrap());
+        let other = r.take().unwrap();
+        assert!(
+            r.replace_generation(
+                Duration::ZERO,
+                || Ok(()),
+                &mut take,
+                |_| unreachable!(),
+                |_| unreachable!()
+            )
+            .is_err()
+        );
+        take.as_ref().unwrap().check().unwrap();
+        drop(other);
+        r.replace_generation(
+            Duration::ZERO,
+            || Ok(()),
+            &mut take,
+            |_| Ok(()),
+            |c| Ok(c.publish(|| {})),
+        )
+        .unwrap();
+        let take = take.unwrap();
+        assert_eq!(take.number(), 2);
+        assert!(
+            r.replace(
+                Duration::ZERO,
+                || Ok(()),
+                |_| unreachable!(),
+                |_| unreachable!()
+            )
+            .is_err()
+        );
+        r.quarantine_take(&take).unwrap();
+        drop(take);
+        assert!(r.take().is_err());
+        let err = r
+            .replace(Duration::ZERO, || Ok(()), |_| Ok(()), |_| unreachable!())
+            .unwrap_err();
+        assert!(err.to_string().contains("restart Isocast"));
+    }
     #[test]
     fn live_client_refusal_preserves_admission_without_teardown() {
         let r = Registry::default();
