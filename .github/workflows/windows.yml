@@ -1270,9 +1270,13 @@ jobs:
           cargo test --locked -p isocast-platform-windows --lib mf::probe::tests
           cargo test --locked -p isocast-platform-windows --lib preflight_tests
 
-      - name: Check capture target lifetime and helper restart limits
+      - name: Check capture target lifetime, helper restart limits and GPU owner retirement
         if: env.MODE == 'full'
-        run: cargo test --locked -j 1 -p isocast-platform-windows --lib broker::recovery::tests
+        run: |
+          cargo test --locked -j 1 -p isocast-platform-windows --lib broker::recovery::tests
+          cargo test --locked -j 1 -p isocast-surfaces --lib generation::tests
+          cargo test --locked -j 1 -p isocast-engine -p isocast-platform-windows --lib idle_start_
+          cargo test --locked -j 1 -p isocast-platform-windows --lib gpu::tests::idle_retirement_counts_native_com_and_actual_mf_inputs -- --ignored --exact
 
       - name: Check hotkey mapping and native registration status
         if: env.MODE == 'full'

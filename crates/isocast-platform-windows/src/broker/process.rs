@@ -109,7 +109,11 @@ impl Process {
         HANDLE(self.handle as *mut _)
     }
 
-    pub(super) fn duplicate(&self, borrowed: u64) -> Result<SharedHandle> {
+    pub(super) fn duplicate(
+        &self,
+        borrowed: u64,
+        owner: isocast_surfaces::generation::Owner,
+    ) -> Result<SharedHandle> {
         let mut owned = HANDLE::default();
         // Spawn supplies the PROCESS_DUP_HANDLE right. Borrowed handles are
         // never closed here; only successfully duplicated parent handles are.
@@ -130,13 +134,17 @@ impl Process {
             }
             return Err(error).context("capture helper shared resource was unavailable");
         }
-        unsafe { SharedHandle::new(owned) }
+        unsafe { SharedHandle::new(owned, owner) }
     }
 
     pub(super) fn kill(&self) {
         let _ = unsafe { TerminateJobObject(*self.job.0, 1) };
         // Also covers assignment failure: this is ONLY our owned Child handle.
         let _ = unsafe { TerminateProcess(self.handle(), 1) };
+    }
+
+    pub(super) fn exited(&self) -> bool {
+        unsafe { WaitForSingleObject(self.handle(), 0) == WAIT_OBJECT_0 }
     }
 
     pub(crate) fn shutdown(&self, graceful: bool) {

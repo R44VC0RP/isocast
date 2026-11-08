@@ -156,6 +156,7 @@ struct Allocation {
     height: u32,
     luid: (u32, i32),
     _budget: Budget,
+    generation: crate::generation::Owner,
 }
 
 struct Budget(u64);
@@ -287,6 +288,7 @@ impl Surface {
 
     #[cfg(feature = "wgpu")]
     pub fn rgba_on(device: &wgpu::Device, width: u32, height: u32) -> Result<Self> {
+        let generation = crate::generation::registry().register("shared preview texture")?;
         let budget = Budget::new(width, height)?;
         let raw = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }
             .context("shared previews require a DX12 wgpu device")?
@@ -348,6 +350,7 @@ impl Surface {
             height,
             luid: (luid.LowPart, luid.HighPart),
             _budget: budget,
+            generation,
         })))
     }
 
@@ -357,6 +360,7 @@ impl Surface {
         device: &wgpu::Device,
         usage: wgpu::TextureUsages,
     ) -> Result<wgpu::Texture> {
+        self.0.generation.check()?;
         let raw = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }
             .context("shared previews require DX12 (no CPU/cross-adapter fallback)")?
             .raw_device()
@@ -544,6 +548,7 @@ fn serve_ring(mut stream: isocast_ipc::Stream, offers: &Offers) -> Result<()> {
 }
 
 pub fn fetch(service: &str, token: Token, timeout: Duration) -> Result<Vec<Surface>> {
+    let owner = crate::generation::registry().register("shared preview import")?;
     let mut stream = isocast_ipc::Stream::connect(service)?;
     stream.set_read_timeout(Some(timeout.min(Duration::from_secs(5))))?;
     stream.set_write_timeout(Some(timeout.min(Duration::from_secs(5))))?;
@@ -602,6 +607,7 @@ pub fn fetch(service: &str, token: Token, timeout: Duration) -> Result<Vec<Surfa
             height,
             luid,
             _budget: budget,
+            generation: owner.child("shared preview texture"),
         })));
     }
     stream.write_all(&[1])?;
@@ -652,6 +658,7 @@ struct Retirement {
     fence: ID3D12Fence,
     next: u64,
     send: mpsc::SyncSender<Retired>,
+    _owner: crate::generation::Owner,
 }
 #[cfg(feature = "wgpu")]
 static RETIRE_FAILED: AtomicBool = AtomicBool::new(false);
@@ -683,6 +690,7 @@ pub fn retire(queue: &wgpu::Queue, completion: Box<dyn FnOnce(bool) + Send>) -> 
         );
     }
     if state.is_none() {
+        let owner = crate::generation::registry().register("preview retirement queue")?;
         let mut device: Option<ID3D12Device> = None;
         unsafe { raw.GetDevice(&mut device) }?;
         let fence: ID3D12Fence = unsafe {
@@ -693,6 +701,7 @@ pub fn retire(queue: &wgpu::Queue, completion: Box<dyn FnOnce(bool) + Send>) -> 
         let event = Handle(unsafe { Owned::new(CreateEventW(None, false, false, None)?) });
         let (send, receive) = mpsc::sync_channel::<Retired>(256);
         let waiting = fence.clone();
+        let worker_owner = owner.child("preview retirement fence");
         std::thread::Builder::new()
             .name("preview GPU retirement".into())
             .spawn(move || {
@@ -713,6 +722,7 @@ pub fn retire(queue: &wgpu::Queue, completion: Box<dyn FnOnce(bool) + Send>) -> 
                         eprintln!("{error:#}; viewer slots will not be reused");
                         // An outstanding native event registration must not target
                         // a closed/recycled HANDLE. One bounded quarantine/client.
+                        worker_owner.quarantine();
                         std::mem::forget((waiting, event));
                         return;
                     }
@@ -720,6 +730,7 @@ pub fn retire(queue: &wgpu::Queue, completion: Box<dyn FnOnce(bool) + Send>) -> 
                 }
             })?;
         *state = Some(Retirement {
+            _owner: owner,
             queue: raw,
             fence,
             next: 1,

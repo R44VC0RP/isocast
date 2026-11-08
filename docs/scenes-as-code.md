@@ -666,10 +666,11 @@ be animated (`params = { "glow.amount" = 0.8 }` in a keyframe).
   otherwise gets a warning. (The loop guard bounds a runaway loop, but
   4,096 iterations per pixel can still take longer than a frame; the
   budget is what ends it.)
-- A GPU error during a frame (device lost) restarts the compositor's GPU
+- A GPU error during a frame (logical context loss) restarts the compositor's GPU
   (as a failed engine start is handled today) without the shader that was
   running; the program drops the frames in between (counted), ISO files
-  don't notice.
+  don't notice. This is not native Windows device removal: see the
+  [idle device replacement boundary](shared-frames.md#windows).
 
 ## 5.4 TSX authoring
 

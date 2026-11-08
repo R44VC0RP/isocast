@@ -148,12 +148,15 @@ impl MfEncoder {
             bail!("video: MF requires positive even dimensions and keyframe_interval >= 1");
         }
         let (tx, rx) = mpsc::sync_channel::<Job>(1);
+        device.generation().check()?;
+        let owner = device.generation().child("MF encoder worker");
         let (started, startup) = mpsc::sync_channel(1);
         let device = device.clone();
         let settings = *spec;
         let worker = std::thread::Builder::new()
             .name("Media Foundation encoder".into())
             .spawn(move || {
+                let _owner = owner;
                 let run =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
                         let _apartment = Apartment::new()?;
@@ -352,10 +355,15 @@ impl Drop for MfEncoder {
     }
 }
 
-struct Activation(IMFActivate);
+struct Activation(IMFActivate, Option<isocast_surfaces::generation::Owner>);
 impl Drop for Activation {
     fn drop(&mut self) {
-        let _ = unsafe { self.0.ShutdownObject() };
+        if unsafe { self.0.ShutdownObject() }.is_err_and(|e| e.code() != MF_E_SHUTDOWN)
+            && let Some(owner) = self.1.take()
+        {
+            // An activated encoder whose shutdown failed has not retired.
+            owner.quarantine();
+        }
     }
 }
 
@@ -452,6 +460,7 @@ struct Slot {
 struct Released {
     slot: Arc<Slot>,
     wake: Arc<Event>,
+    _owner: isocast_surfaces::generation::Owner,
 }
 impl IMFAsyncCallback_Impl for Released_Impl {
     fn GetParameters(&self, _: *mut u32, _: *mut u32) -> windows::core::Result<()> {
@@ -469,6 +478,7 @@ struct Pending {
     sample_time: i64,
     submitted: Instant,
     _sample: IMFSample,
+    _owner: isocast_surfaces::generation::Owner,
 }
 
 struct Session {
@@ -548,7 +558,7 @@ impl Session {
                 device,
                 spec,
                 mode,
-                (Activation(activation), label.clone()),
+                (Activation(activation, None), label.clone()),
                 encoding,
                 input,
                 quality,
@@ -582,12 +592,13 @@ impl Session {
         pixel_format: PixelFormat,
         quality: Option<u32>,
     ) -> Result<Self> {
-        let (activation, label) = candidate;
+        let (mut activation, label) = candidate;
         unsafe {
             let transform: IMFTransform = activation
                 .0
                 .ActivateObject()
                 .context("activate video encoder IMFTransform")?;
+            activation.1 = Some(device.generation().child("MF encoder activation"));
             let attrs = transform
                 .GetAttributes()
                 .context("get video encoder attributes")?;
@@ -1052,8 +1063,13 @@ impl Session {
         };
         let tracked = unsafe { MFCreateTrackedSample() }?;
         let sample: IMFSample = tracked.cast()?;
+        let sample_owner = self.device.generation().child("MF in-flight sample");
         let sample_time = pts.as_nanos() / 100;
         unsafe {
+            sample.SetUnknown(
+                &isocast_surfaces::generation::RECEIPT_ID,
+                &sample_owner.native_receipt(),
+            )?;
             sample.AddBuffer(&buffer)?;
             sample.SetSampleTime(sample_time)?;
             sample.SetSampleDuration(10_000_000 / i64::from(self.fps))?;
@@ -1068,6 +1084,7 @@ impl Session {
                 let callback: IMFAsyncCallback = Released {
                     slot: slot.clone(),
                     wake: self.wake.clone(),
+                    _owner: self.device.generation().child("MF tracked GPU sample"),
                 }
                 .into();
                 // Only the sample's final native release makes a GPU slot free,
@@ -1093,6 +1110,7 @@ impl Session {
             self.need_input -= 1;
         }
         self.pending.push_back(Pending {
+            _owner: sample_owner,
             pts,
             sample_time,
             submitted,

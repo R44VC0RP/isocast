@@ -260,6 +260,22 @@ the retry succeeds, that process stays on DXC until restart, even if the driver
 has recovered. It does not switch compilers during a recording. `isocast doctor`
 shows which compiler the engine selected and why.
 
+After publication, a lost **wgpu context** on a healthy native D3D12 device
+can be recreated on that same device. It does not freeze capture or encoder
+admission. A busy device cache (including a cold open) is not evidence of
+removal. Only confirmed native D3D11/D3D12 removal, or an already-retiring
+generation, calls for device replacement at the next idle recording Start.
+Stop active previews, streams, replay or virtual camera and release an engine
+hold first; Start refuses before freezing a generation those outputs need.
+
+Retirement counts native owners, including frames, importers, encoder samples
+and helper handles. A three-second timeout names the remaining owners. Release
+ordinary owners and retry; if an owner is marked **quarantined**, its work
+could not be proved complete and it is retained until exit: restart Isocast.
+After the owners retire, a candidate must complete a fresh fence on the pinned
+adapter and compiler. Its two caches become visible only with admission open.
+This boundary does not replace a removed native device during a take.
+
 On cold program startup with hardware FXC, the first canvas prepares its filters
 and transitions alongside the picture draw and takes those pipelines on success.
 WARP/CPU adapters and the DXC fallback qualify the picture alone, then build

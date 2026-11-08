@@ -585,7 +585,13 @@ mod duplication {
     impl Drop for Acquired {
         fn drop(&mut self) {
             if self.in_flight {
-                std::mem::forget(self.held.take());
+                if let Some(held) = self.held.take() {
+                    held.2
+                        .generation()
+                        .child("desktop duplication copy")
+                        .quarantine();
+                    std::mem::forget(held);
+                }
             } else if let Some(held) = self.held.take() {
                 let _ = unsafe { held.0.ReleaseFrame() };
             }

@@ -238,7 +238,7 @@ fn inspect(
         sample
     };
     let attempts = decoders.into_iter().map(|decoder| {
-        let activation = Activation(decoder);
+        let activation = Activation(decoder, None);
         let decoder: IMFTransform = match unsafe { activation.0.ActivateObject() } {
             Ok(decoder) => decoder,
             Err(e) => {

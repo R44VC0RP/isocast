@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::core::{Interface, PCWSTR};
 
 use crate::native::{Event, SharedHandle};
+use isocast_surfaces::generation::{Owner, RECEIPT_ID, registry};
 
 pub const MAX_POOL_FRAMES: usize = 32;
 
@@ -36,7 +37,7 @@ pub enum PixelFormat {
 /// Capture, compositor and encoders use the same DX12-compatible adapter;
 /// there is no cross-adapter copy or readback fallback.
 #[derive(Clone)]
-pub struct GraphicsDevice(Arc<Device>);
+pub struct GraphicsDevice(Arc<Device>, Owner);
 
 struct Device {
     raw: ID3D11Device5,
@@ -55,12 +56,17 @@ struct Submit {
 
 impl GraphicsDevice {
     pub fn new() -> Result<Self> {
-        Self::on_adapter(isocast_surfaces::capture_adapter_luid()?)
+        let owner = registry().register("D3D11 device")?;
+        Self::open(isocast_surfaces::capture_adapter_luid()?, owner)
     }
 
     /// Open the exact adapter selected by the parent, never reselect by index
     /// or power preference in the capture helper process.
     pub(crate) fn on_adapter(luid: (u32, i32)) -> Result<Self> {
+        Self::open(luid, registry().register("D3D11 device")?)
+    }
+
+    pub(crate) fn open(luid: (u32, i32), generation: Owner) -> Result<Self> {
         let _span = isocast_diagnostics::gpu_startup_span("capture.device");
         unsafe {
             let factory: IDXGIFactory4 = CreateDXGIFactory1()?;
@@ -93,6 +99,10 @@ impl GraphicsDevice {
             )
             .context("could not open the D3D11 capture device")?;
             let raw: ID3D11Device5 = device.context("D3D11 returned no device")?.cast()?;
+            raw.SetPrivateDataInterface(
+                &RECEIPT_ID,
+                &generation.child("D3D11 native device").native_receipt(),
+            )?;
             let context: ID3D11DeviceContext4 =
                 context.context("D3D11 returned no context")?.cast()?;
             // WGC also submits on this device from its internal worker. Our
@@ -102,20 +112,22 @@ impl GraphicsDevice {
             let mut fence = None;
             raw.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence)?;
             let fence: ID3D11Fence = fence.context("D3D11 returned no fence")?;
-            let shared_fence = SharedHandle::new(fence.CreateSharedHandle(
-                None,
-                GENERIC_ALL.0,
-                PCWSTR::null(),
-            )?)?;
-            Ok(Self(Arc::new(Device {
-                raw,
-                submit: Mutex::new(Submit { context, next: 1 }),
-                fence,
-                shared_fence,
-                name,
-                warp: (desc.VendorId, desc.DeviceId) == (0x1414, 0x008c),
-                luid: (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart),
-            })))
+            let shared_fence = SharedHandle::new(
+                fence.CreateSharedHandle(None, GENERIC_ALL.0, PCWSTR::null())?,
+                generation.child("D3D11 shared fence handle"),
+            )?;
+            Ok(Self(
+                Arc::new(Device {
+                    raw,
+                    submit: Mutex::new(Submit { context, next: 1 }),
+                    fence,
+                    shared_fence,
+                    name,
+                    warp: (desc.VendorId, desc.DeviceId) == (0x1414, 0x008c),
+                    luid: (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart),
+                }),
+                generation,
+            ))
         }
     }
 
@@ -137,9 +149,19 @@ impl GraphicsDevice {
 
     pub(crate) fn owns(&self, frame: &Frame) -> bool {
         Arc::ptr_eq(&self.0, &frame.device.0)
+            && self.generation().check_peer(frame.generation()).is_ok()
+    }
+
+    pub(crate) fn generation(&self) -> &Owner {
+        &self.1
+    }
+
+    pub(crate) fn owned_by(&self, kind: &'static str) -> Self {
+        Self(self.0.clone(), self.1.child(kind))
     }
 
     pub(crate) fn completed(&self) -> Result<u64> {
+        self.generation().check()?;
         let value = unsafe { self.0.fence.GetCompletedValue() };
         if value == u64::MAX {
             bail!("D3D11 capture device was removed");
@@ -163,6 +185,7 @@ impl GraphicsDevice {
         ready: u64,
         lease: Box<dyn Send + Sync>,
     ) -> Result<Frame> {
+        self.generation().check()?;
         let owner: ID3D11Device5 = unsafe { texture.GetDevice() }?.cast()?;
         let fence_owner: ID3D11Device5 = unsafe { fence.GetDevice() }?.cast()?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -215,6 +238,7 @@ impl GraphicsDevice {
                 output: false,
                 ready: AtomicU64::new(value),
                 _lease: Some(lease),
+                generation: self.generation().child("capture helper shared frame"),
             }),
             device: self.clone(),
         })
@@ -247,6 +271,7 @@ struct Slot {
     // Last field: release the remote immutable picture after its local native
     // references. Cached GPU imports must not cache this per-picture lease.
     _lease: Option<Box<dyn Send + Sync>>,
+    generation: Owner,
 }
 
 impl Slot {
@@ -257,6 +282,7 @@ impl Slot {
         format: PixelFormat,
         output: bool,
     ) -> Result<Arc<Self>> {
+        device.generation().check()?;
         if format == PixelFormat::Nv12
             && (output
                 || width == 0
@@ -296,13 +322,18 @@ impl Slot {
                 .CreateTexture2D(&desc, None, Some(&mut texture))
         }?;
         let texture = texture.context("D3D11 returned no texture")?;
+        let generation = device.generation().child("pooled texture");
+        unsafe { texture.SetPrivateDataInterface(&RECEIPT_ID, &generation.native_receipt()) }?;
         let resource: IDXGIResource1 = texture.cast()?;
         let shared = unsafe {
-            SharedHandle::new(resource.CreateSharedHandle(
-                None,
-                (DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE).0,
-                PCWSTR::null(),
-            )?)?
+            SharedHandle::new(
+                resource.CreateSharedHandle(
+                    None,
+                    (DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE).0,
+                    PCWSTR::null(),
+                )?,
+                generation.child("pooled shared texture handle"),
+            )?
         };
         Ok(Arc::new(Self {
             texture,
@@ -313,11 +344,15 @@ impl Slot {
             output,
             ready: AtomicU64::new(0),
             _lease: None,
+            generation,
         }))
     }
 }
 
 impl Frame {
+    pub(crate) fn generation(&self) -> &Owner {
+        &self.slot.generation
+    }
     pub fn width(&self) -> u32 {
         self.slot.width
     }
@@ -398,6 +433,7 @@ impl Frame {
         &mut self,
         draw: impl FnOnce(&ID3D11DeviceContext4, &ID3D11Texture2D) -> Result<()>,
     ) -> Result<()> {
+        self.generation().check()?;
         if !self.is_output() {
             bail!("captured Windows frames are read-only");
         }
@@ -457,6 +493,7 @@ impl Frame {
 pub struct TexturePool {
     device: GraphicsDevice,
     slots: Vec<Arc<Slot>>,
+    _owner: Owner,
 }
 
 impl TexturePool {
@@ -503,6 +540,7 @@ impl TexturePool {
 
     pub fn new(device: GraphicsDevice) -> Self {
         Self {
+            _owner: device.generation().child("texture pool"),
             device,
             slots: Vec::new(),
         }

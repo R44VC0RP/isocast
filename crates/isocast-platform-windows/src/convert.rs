@@ -34,6 +34,7 @@ pub(crate) struct Converter {
     input_format: DXGI_FORMAT,
     output_format: DXGI_FORMAT,
     pending: Option<Pending>,
+    owner: isocast_surfaces::generation::Owner,
 }
 
 struct Pending {
@@ -81,6 +82,8 @@ impl Converter {
         bit_depth: u8,
         software: bool,
     ) -> Result<Self> {
+        device.generation().check()?;
+        let owner = device.generation().child("MF converter");
         let input_format = match input {
             PixelFormat::Bgra8 => DXGI_FORMAT_B8G8R8A8_UNORM,
             PixelFormat::Rgba10 => DXGI_FORMAT_R10G10B10A2_UNORM,
@@ -220,6 +223,7 @@ impl Converter {
                 input_format,
                 output_format,
                 pending: None,
+                owner,
             })
         }
     }
@@ -531,6 +535,7 @@ impl Converter {
     }
 
     fn idle(&self) -> Result<()> {
+        self.owner.check()?;
         unsafe { self.device.raw().GetDeviceRemovedReason() }
             .context("D3D11 conversion device lost")?;
         if self.pending.is_some() {
@@ -682,6 +687,7 @@ impl Drop for Converter {
             // until process exit; never recycle it or close a registered event.
             eprintln!("D3D11 conversion: unfinished GPU resources retained until process exit");
             std::mem::forget(pending);
+            self.owner.clone().quarantine();
             std::mem::forget(self.event.take());
             std::mem::forget(self.fence.clone());
             std::mem::forget(self.device.clone());

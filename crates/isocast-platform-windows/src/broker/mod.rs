@@ -44,6 +44,18 @@ struct Control {
     stopping: AtomicBool,
     failure: Mutex<Option<String>>,
     stats: Mutex<IsolatedCaptureStats>,
+    owner: isocast_surfaces::generation::Owner,
+}
+
+impl Drop for Control {
+    fn drop(&mut self) {
+        self.process.shutdown(false);
+        if !self.process.exited() {
+            // A termination request alone is not proof the shared allocations
+            // in this generation's child were released.
+            self.owner.clone().quarantine();
+        }
+    }
 }
 
 impl Control {
@@ -170,6 +182,7 @@ fn open_generation(
     epoch: Option<Arc<recovery::Epoch>>,
 ) -> Result<(IsolatedCapture, CaptureFormat)> {
     wire::fps(fps)?;
+    device.generation().check()?;
     let deadline = epoch
         .as_ref()
         .and_then(|e| e.deadline)
@@ -180,6 +193,7 @@ fn open_generation(
         stopping: AtomicBool::new(false),
         failure: Mutex::new(None),
         stats: Mutex::new(IsolatedCaptureStats::default()),
+        owner: device.generation().child("capture helper shared handles"),
     });
     let (commands, pending) = mpsc::sync_channel(64);
     if let Some(epoch) = &epoch {
@@ -368,7 +382,10 @@ impl Imports {
             releases: releases.clone(),
         });
         if self.fence.is_none() {
-            let shared = control.process.duplicate(picture.fence)?;
+            let shared = control.process.duplicate(
+                picture.fence,
+                control.owner.child("helper shared fence handle"),
+            )?;
             let mut raw = None;
             unsafe { device.raw().OpenSharedFence(shared.handle(), &mut raw) }?;
             self.fence = Some(Fence {
@@ -400,7 +417,10 @@ impl Imports {
             if picture.surface <= self.newest_surface {
                 bail!("capture helper reused an expired surface id");
             }
-            let shared = Arc::new(control.process.duplicate(picture.texture)?);
+            let shared = Arc::new(control.process.duplicate(
+                picture.texture,
+                control.owner.child("helper shared texture handle"),
+            )?);
             let texture: ID3D11Texture2D =
                 unsafe { device.raw().OpenSharedResource1(shared.handle()) }?;
             let mut desc = D3D11_TEXTURE2D_DESC::default();
