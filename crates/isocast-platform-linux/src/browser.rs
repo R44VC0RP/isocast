@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_engine::{
     AudioSink, BrowserAudioStamper as Stamper, BrowserAudioTiming, BrowserControl, BrowserPage,
-    CaptureFormat, FramePool as _, PageLocation, SAMPLE_RATE, VideoSink,
+    CaptureFormat, FramePool as _, PageLocation, SAMPLE_RATE, Time, VideoSink,
 };
 
 use crate::frames::{Frame, FramePool};
@@ -57,7 +57,7 @@ pub(crate) mod protocol {
     use anyhow::{Context, Result, bail};
 
     /// Largest payload accepted: an 8192×8192 picture and its header.
-    pub const MAX_PAYLOAD: u32 = 8192 * 8192 * 4 + 8;
+    pub const MAX_PAYLOAD: u32 = 8192 * 8192 * 4 + 12;
     /// Audio sample rates accepted. The page's script chooses the rate,
     /// so it is untrusted: resampling a rate of 1 to 48 kHz would size its
     /// output at 48,000 times the input.
@@ -75,6 +75,12 @@ pub(crate) mod protocol {
         Frame {
             width: u32,
             height: u32,
+        },
+        /// A picture captured `age_us` ago; its pixels follow.
+        TimedFrame {
+            width: u32,
+            height: u32,
+            age_us: u32,
         },
         /// Interleaved stereo f32 at this rate: `len` bytes follow.
         Audio {
@@ -137,6 +143,19 @@ pub(crate) mod protocol {
                     );
                 }
                 Header::Frame { width, height }
+            }
+            b"FRMT" => {
+                let (width, height, age_us) = (u32_field()?, u32_field()?, u32_field()?);
+                if len as u64 != 12 + u64::from(width) * u64::from(height) * 4 {
+                    bail!(
+                        "browser helper sent a picture whose size doesn't match ({width}x{height}, {len} bytes)"
+                    );
+                }
+                Header::TimedFrame {
+                    width,
+                    height,
+                    age_us,
+                }
             }
             b"AUDI" => {
                 let rate = u32_field()?;
@@ -959,6 +978,7 @@ fn read(
 ) -> Result<()> {
     // Each new reader is a new helper process, including watchdog restarts.
     let (mut stamper, mut resampler) = (Stamper::default(), Resampler::default());
+    let mut last_frame: Option<Time> = None;
     let mut discard = Vec::new();
     loop {
         let Some(header) = protocol::read_header(&mut reader)? else {
@@ -967,7 +987,17 @@ fn read(
         match header {
             // Sent while the page loads: alive, just no picture yet.
             protocol::Header::Ready => shared.last_frame.store(now_nanos(), Ordering::SeqCst),
-            protocol::Header::Frame { width, height } => {
+            header @ (protocol::Header::Frame { .. } | protocol::Header::TimedFrame { .. }) => {
+                let (width, height, age_us) = match header {
+                    protocol::Header::Frame { width, height } => (width, height, 0),
+                    protocol::Header::TimedFrame {
+                        width,
+                        height,
+                        age_us,
+                    } => (width, height, age_us),
+                    _ => unreachable!(),
+                };
+                let arrived = system::now();
                 let len = width as usize * height as usize * 4;
                 if (width, height) != (spec.width, spec.height) {
                     bail!(
@@ -988,7 +1018,14 @@ fn read(
                 match frame {
                     Some(frame) => {
                         shared.last_frame.store(now_nanos(), Ordering::SeqCst);
-                        (sink.frame)(frame, system::now());
+                        // Video reference point: helper-measured capture age
+                        // subtracted from header arrival on the host clock,
+                        // clamped monotonic across variable readback times.
+                        let raw = arrived - Duration::from_micros(u64::from(age_us).min(500_000));
+                        let captured =
+                            last_frame.map_or(raw, |prev| raw.max(prev + Duration::from_nanos(1)));
+                        last_frame = Some(captured);
+                        (sink.frame)(frame, captured);
                     }
                     None => {
                         // Every pooled frame is still downstream: skip it.

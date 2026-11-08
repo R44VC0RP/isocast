@@ -15,6 +15,7 @@ on:
     # every lane restores (GitHub scopes caches to a branch, and only the
     # default branch's are readable from every other one).
     branches: [main, 'ci/**']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -563,7 +564,7 @@ jobs:
           print("browser:", {k: b["evidence"].get(k) for k in ("web_codes", "program_codes", "alpha", "tones", "writer_drops")})
           gap = r.get("browser_audio_gap")
           assert gap and gap["status"] == "PASS", f"browser_audio_gap did not pass: {gap and (gap['status'], gap.get('reason'))}"
-          print("browser_audio_gap:", {k: gap["evidence"][k] for k in ("live_dropouts", "stopped_dropouts", "manifest_dropouts")})
+          print("browser_audio_gap:", {k: gap["evidence"][k] for k in ("live_dropouts", "stopped_dropouts", "manifest_dropouts", "av_sync")})
           s = r.get("linux_capture")
           assert s and s["status"] == "PASS", f"linux_capture did not pass: {s and (s['status'], s.get('reason'))}"
           ev = s["evidence"]
@@ -1912,7 +1913,7 @@ jobs:
               scenario = results.get(name)
               assert scenario and scenario["status"] == "PASS", f"{name} did not pass: {scenario and (scenario['status'], scenario.get('reason'))}"
           print("browser:", {k: results["win_browser"]["evidence"][k] for k in ("first_picture_s", "web_codes", "program_codes", "alpha", "tone_windows", "audio_dropouts", "writer_drops", "unique_share_required")})
-          print("browser_audio_gap:", {k: results["browser_audio_gap"]["evidence"][k] for k in ("live_dropouts", "stopped_dropouts", "manifest_dropouts")})
+          print("browser_audio_gap:", {k: results["browser_audio_gap"]["evidence"][k] for k in ("live_dropouts", "stopped_dropouts", "manifest_dropouts", "av_sync")})
           PY
 
       - name: Keep browser source evidence

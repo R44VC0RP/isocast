@@ -9,11 +9,26 @@
   const connect = AudioNode.prototype.connect;
   const disconnect = AudioNode.prototype.disconnect;
   const createGain = Context.prototype.createGain;
+  const createDelay = Context.prototype.createDelay;
+  const createOscillator = Context.prototype.createOscillator;
   const createMediaElementSource = Context.prototype.createMediaElementSource;
   const suspend = Context.prototype.suspend;
   const play = HTMLMediaElement.prototype.play;
+  const appleWebKit = Boolean(window.__isocastAppleWebKit);
+  const mediaDelaySeconds = appleWebKit ? 0.1 : 0;
   const CHUNK_FRAMES = 1024;
   const CHUNK_SAMPLES = CHUNK_FRAMES * 2;
+  // See docs/browser-sources.md for measured A/V latencies per engine:
+  // - Media elements (<video>/<audio>): Apple WebKit's AVPlayer delays video
+  //   frames by CoreAudio outputLatency (up to 250 ms) while MTAudioProcessingTap
+  //   delivers PCM ~100 ms early; Chromium and WebKitGTK switch media elements
+  //   to WebAudio's pull clock, so only baseLatency applies there.
+  // - Pure WebAudio: capped at 25 ms on Apple WebKit (whose getOutputTimestamp
+  //   equals currentTime and offscreen snapshots have ~10 ms latency) and 55 ms
+  //   elsewhere (matching Windows WASAPI + DWM composition latency).
+  const MAX_APPLE_MEDIA_LATENCY_US = 250000;
+  const MAX_APPLE_WEBAUDIO_LATENCY_US = 25000;
+  const MAX_OTHER_WEBAUDIO_LATENCY_US = 55000;
 
   // Shared by the worklet module and the CSP fallback. Even when a page
   // requests a different rate, the wire clock is CHUNK_FRAMES / 48000 Hz;
@@ -67,22 +82,23 @@
         super();
         this.active = true;
         this.pauseArmed = false;
-        this.sawGap = false;
+        this.gapEndMs = undefined;
         this.lastMs = undefined;
         this.write = chunker(sampleRate, (buffer, endUs, resumed) => {
-          this.sawGap = false;
+          this.gapEndMs = undefined;
           this.port.postMessage({ buffer, endUs, resumed }, [buffer]);
         });
         this.port.onmessage = ({ data }) => {
-          if (data === 'pause') {
-            if (this.sawGap) {
+          if (data?.type === 'pause') {
+            if (this.gapEndMs !== undefined && this.gapEndMs > data.at) {
               this.write.resumeNext();
-              this.sawGap = false;
+              this.gapEndMs = undefined;
             } else {
               this.write.flush(this.lastMs ?? Date.now());
+              this.gapEndMs = undefined;
               this.pauseArmed = true;
             }
-          } else if (data === 'stop') {
+          } else if (data?.type === 'stop') {
             this.write.flush(this.lastMs ?? Date.now());
             this.active = false;
           }
@@ -96,8 +112,9 @@
           if (this.pauseArmed) {
             this.write.resumeNext();
             this.pauseArmed = false;
+            this.gapEndMs = undefined;
           } else {
-            this.sawGap = true;
+            this.gapEndMs = now;
           }
         }
         this.write(inputs[0][0], inputs[0][1], inputs[0][0]?.length || 128, now);
@@ -143,17 +160,43 @@
   function guarded(action) {
     try { return action(); } catch (error) { warn(error); }
   }
+  function outputLatencyUs(route) {
+    const context = route.context;
+    const liveOut = Math.max(0, Number(context.outputLatency) || 0);
+    if (liveOut > 0) route.lastOutputLatency = liveOut;
+    const base = Math.max(0, Number(context.baseLatency) || 0);
+    const out = liveOut > 0 ? liveOut : (route.lastOutputLatency || 0);
+    let seconds, cap;
+    if (route.hasMedia) {
+      seconds = appleWebKit ? base + out : base;
+      cap = appleWebKit ? MAX_APPLE_MEDIA_LATENCY_US : MAX_OTHER_WEBAUDIO_LATENCY_US;
+    } else {
+      seconds = base + out;
+      cap = appleWebKit ? MAX_APPLE_WEBAUDIO_LATENCY_US : MAX_OTHER_WEBAUDIO_LATENCY_US;
+    }
+    return seconds > 0 && Number.isFinite(seconds) ? Math.min(cap, Math.round(seconds * 1e6)) : 0;
+  }
+
   async function listen(route, mix) {
     const context = route.context;
-    let node, pauseNode, stopNode;
+    let node, keep, pauseNode, stopNode;
     const token = {};
     let tapResumed = false;
+    // Fix output-latency compensation for each continuous run once the audio
+    // backend reports a non-zero outputLatency, so device switches mid-run
+    // cannot jump endUs past RESYNC without a Resumed marker.
+    let lockedLatencyUs;
     function deliver(buffer, endUs, workletResumed) {
       if (token !== activeTap) return;
       const resumed = hadAudio && (tapResumed || workletResumed);
+      if (resumed) lockedLatencyUs = undefined;
+      const latencyUs = lockedLatencyUs ?? outputLatencyUs(route);
+      if (lockedLatencyUs === undefined && (Number(context.outputLatency) || 0) > 0) {
+        lockedLatencyUs = latencyUs;
+      }
       hadAudio = true;
       tapResumed = false;
-      post(buffer, endUs, resumed);
+      post(buffer, endUs + latencyUs, resumed);
     }
     try {
       await (route.module ??= context.audioWorklet.addModule(moduleURL));
@@ -161,10 +204,22 @@
       activeTap = token;
       tapResumed = hadAudio;
       route.pausing = false;
-      node = new AudioWorkletNode(context, 'isocast-audio', { channelCount: 2, channelCountMode: 'explicit' });
+      // Feed an uncaptured keepalive oscillator into input 1 (process() reads
+      // only inputs[0]) so WebKit never sees an all-silent graph in an
+      // offscreen WKWebView and throttles AudioContext rendering to 2 Hz.
+      node = new AudioWorkletNode(context, 'isocast-audio', {
+        numberOfInputs: 2,
+        channelCount: 2,
+        channelCountMode: 'explicit',
+      });
+      if (typeof createOscillator === 'function') {
+        keep = createOscillator.call(context);
+        connect.call(keep, node, 0, 1);
+        keep.start();
+      }
       node.port.onmessage = ({ data }) => deliver(data.buffer, data.endUs, data.resumed);
-      pauseNode = () => node.port.postMessage('pause');
-      stopNode = () => node.port.postMessage('stop');
+      pauseNode = () => node.port.postMessage({ type: 'pause', at: Date.now() });
+      stopNode = () => node.port.postMessage({ type: 'stop' });
       console.info('Isocast page audio: AudioWorklet');
     } catch (error) {
       if (mix !== output) return;
@@ -172,9 +227,12 @@
       activeTap = token;
       tapResumed = hadAudio;
       route.pausing = false;
-      let pauseArmed = false, lastMs;
+      let pauseArmed = false, gapEndMs, lastMs;
       node = context.createScriptProcessor(CHUNK_FRAMES, 2, 2);
-      const write = chunker(context.sampleRate, deliver);
+      const write = chunker(context.sampleRate, (buffer, endUs, resumed) => {
+        gapEndMs = undefined;
+        deliver(buffer, endUs, resumed);
+      });
       node.onaudioprocess = ({ inputBuffer }) => {
         if (token !== activeTap) return;
         const now = Date.now();
@@ -183,22 +241,39 @@
           if (pauseArmed) {
             write.resumeNext();
             pauseArmed = false;
+            gapEndMs = undefined;
+          } else {
+            gapEndMs = now;
           }
         }
         write(inputBuffer.getChannelData(0), inputBuffer.getChannelData(1), inputBuffer.length, now);
         lastMs = now;
       };
-      pauseNode = () => { write.flush(lastMs ?? Date.now()); pauseArmed = true; };
+      pauseNode = () => {
+        const at = Date.now();
+        if (gapEndMs !== undefined && gapEndMs > at) {
+          write.resumeNext();
+          gapEndMs = undefined;
+        } else {
+          write.flush(lastMs ?? at);
+          gapEndMs = undefined;
+          pauseArmed = true;
+        }
+      };
       stopNode = () => write.flush(lastMs ?? Date.now());
     }
     const mute = context.createGain();
     mute.gain.value = 0;
-    connect.call(mix, node);
+    connect.call(mix, node, 0, 0);
     connect.call(node, mute);
     connect.call(mute, context.destination);
     route.pause = pauseNode;
     route.stop = () => {
       stopNode?.();
+      if (keep) {
+        try { keep.stop(); } catch {}
+        disconnect.call(keep);
+      }
       disconnect.call(mix);
       disconnect.call(node);
       disconnect.call(mute);
@@ -210,6 +285,7 @@
   // secondary contexts cross a MediaStream; the common single one never does.
   function wire(route) {
     guarded(() => {
+      if (route.hasMedia && primary) primary.hasMedia = true;
       if (route === primary) {
         connect.call(route.bus, output);
       } else {
@@ -301,9 +377,26 @@
   // another origin (without CORS) would be silenced by Web Audio, so it
   // plays aloud instead.
   const handled = new WeakSet();
+  function markMediaRoute(context) {
+    const bus = tap(context);
+    const entry = routes.get(context);
+    if (entry) entry.hasMedia = true;
+    if (primary) primary.hasMedia = true;
+    return bus;
+  }
+  function wrapMediaSource(context, source) {
+    if (!(mediaDelaySeconds > 0) || typeof createDelay !== 'function') return source;
+    const delay = createDelay.call(context, Math.max(0.25, mediaDelaySeconds));
+    delay.delayTime.value = mediaDelaySeconds;
+    connect.call(source, delay);
+    source.connect = (target, ...rest) => AudioNode.prototype.connect.call(delay, target, ...rest);
+    source.disconnect = (...args) => AudioNode.prototype.disconnect.apply(delay, args);
+    return source;
+  }
   Context.prototype.createMediaElementSource = function (element) {
     handled.add(element);
-    return createMediaElementSource.call(this, element);
+    markMediaRoute(this);
+    return wrapMediaSource(this, createMediaElementSource.call(this, element));
   };
   function sameOrigin(element) {
     if (element.crossOrigin != null) return true;
@@ -324,7 +417,9 @@
         mediaContext = new Context({ sampleRate: 48000 });
         mediaContext.resume();
       }
-      connect.call(createMediaElementSource.call(mediaContext, element), tap(mediaContext));
+      const bus = markMediaRoute(mediaContext);
+      const source = wrapMediaSource(mediaContext, createMediaElementSource.call(mediaContext, element));
+      if (bus) source.connect(bus);
     } catch (error) {
       console.warn('Isocast could not capture a media element:', error);
     }

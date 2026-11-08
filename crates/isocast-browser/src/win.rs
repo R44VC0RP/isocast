@@ -30,6 +30,7 @@ use webview2_com::{
     CreateCoreWebView2EnvironmentCompletedHandler, NavigationCompletedEventHandler,
     NavigationStartingEventHandler, ProcessFailedEventHandler, WebMessageReceivedEventHandler,
 };
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -39,7 +40,8 @@ use windows::Graphics::SizeInt32;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{Compositor, ContainerVisual, Visual};
 use windows::Win32::Foundation::{
-    E_POINTER, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    CloseHandle, E_POINTER, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0,
+    WPARAM,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -55,8 +57,9 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, GetCurrentThreadId, OpenProcess,
-    PROCESS_QUERY_LIMITED_INFORMATION, SetWaitableTimer, TIMER_ALL_ACCESS,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateEventW, CreateWaitableTimerExW,
+    GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, SetEvent, SetWaitableTimer,
+    TIMER_ALL_ACCESS,
 };
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::Win32::System::WinRT::Direct3D11::{
@@ -183,7 +186,9 @@ impl Out {
                         // isocastd is gone.
                         std::process::exit(0);
                     }
-                    if record.starts_with(protocol::FRAME) {
+                    if record.starts_with(protocol::FRAME)
+                        || record.starts_with(protocol::TIMED_FRAME)
+                    {
                         let _ = give_back.try_send(record);
                     }
                 }
@@ -503,11 +508,31 @@ struct PageState {
     failed: RefCell<Option<String>>,
 }
 
+/// Current QPC time in 100-nanosecond units, matching WGC's `SystemRelativeTime`.
+fn qpc_100ns() -> Option<i64> {
+    unsafe extern "system" {
+        fn QueryPerformanceCounter(count: *mut i64) -> i32;
+        fn QueryPerformanceFrequency(freq: *mut i64) -> i32;
+    }
+    let (mut ticks, mut freq) = (0i64, 0i64);
+    unsafe {
+        if QueryPerformanceCounter(&mut ticks) != 0
+            && QueryPerformanceFrequency(&mut freq) != 0
+            && freq > 0
+        {
+            return i64::try_from(i128::from(ticks) * 10_000_000 / i128::from(freq)).ok();
+        }
+    }
+    None
+}
+
 /// The capture of the page's visual and its readback.
 struct Capture {
     _item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
+    ready: HANDLE,
+    arrived_token: i64,
     context: ID3D11DeviceContext,
     staging: ID3D11Texture2D,
     width: u32,
@@ -564,11 +589,39 @@ impl Capture {
         unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging)) }
             .map_err(hr("the readback texture"))?;
         let staging = staging.ok_or("D3D11 returned no readback texture")?;
-        session.StartCapture().map_err(hr("StartCapture"))?;
+        let ready = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
+            .map_err(hr("CreateEventW"))?;
+        let raw_ready = ready.0 as usize;
+        let arrived_token = match pool.FrameArrived(&TypedEventHandler::<
+            Direct3D11CaptureFramePool,
+            windows::core::IInspectable,
+        >::new(move |_, _| {
+            unsafe {
+                let _ = SetEvent(HANDLE(raw_ready as *mut core::ffi::c_void));
+            }
+            Ok(())
+        })) {
+            Ok(token) => token,
+            Err(err) => {
+                unsafe {
+                    let _ = CloseHandle(ready);
+                }
+                return Err(hr("FrameArrived")(err));
+            }
+        };
+        if let Err(err) = session.StartCapture() {
+            let _ = pool.RemoveFrameArrived(arrived_token);
+            unsafe {
+                let _ = CloseHandle(ready);
+            }
+            return Err(hr("StartCapture")(err));
+        }
         Ok(Self {
             _item: item,
             pool,
             session,
+            ready,
+            arrived_token,
             context,
             staging,
             width,
@@ -576,7 +629,7 @@ impl Capture {
         })
     }
 
-    /// The newest picture since the last call, as a `FRAM` record in
+    /// The newest picture since the last call, as a `FRMT` record in
     /// `record`; false if the visual hasn't changed.
     fn read(&self, record: &mut Vec<u8>) -> Result<bool, String> {
         let mut newest = None;
@@ -595,6 +648,10 @@ impl Capture {
         let Some(frame) = newest else {
             return Ok(false);
         };
+        // Video reference point: WGC `Direct3D11CaptureFrame::SystemRelativeTime()`
+        // QPC (DWM composition vblank), carried to `isocastd` as `FRMT` `age_us`
+        // relative to current QPC after D3D11 staging readback.
+        let captured_100ns = frame.SystemRelativeTime().map(|t| t.Duration).ok();
         let copied = (|| -> windows::core::Result<(u32, u32)> {
             let content = frame.ContentSize()?;
             let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
@@ -626,7 +683,7 @@ impl Capture {
         })();
         let _ = frame.Close();
         let (cw, ch) = copied.map_err(|e| format!("copying the page's picture: {e}"))?;
-        let pixels = protocol::frame(record, self.width, self.height);
+        let pixels = protocol::timed_frame(record, self.width, self.height);
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
             self.context
@@ -645,14 +702,23 @@ impl Capture {
         }
         // DWM composes premultiplied alpha.
         protocol::unpremultiply(pixels);
+        let age_us = captured_100ns
+            .zip(qpc_100ns())
+            .map(|(captured, now)| ((now - captured).max(0) / 10).min(500_000) as u32)
+            .unwrap_or(0);
+        protocol::set_frame_age(record, age_us);
         Ok(true)
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        let _ = self.pool.RemoveFrameArrived(self.arrived_token);
         let _ = self.session.Close();
         let _ = self.pool.Close();
+        unsafe {
+            let _ = CloseHandle(self.ready);
+        }
     }
 }
 
@@ -982,9 +1048,13 @@ fn run(args: &Args, out: &Out) -> Result<i32, String> {
     // too busy to take, and ticks where the page hadn't changed.
     let (mut pictures, mut behind, mut unchanged) = (0u64, 0u64, 0u64);
     let mut reported = Instant::now();
+    // When a tick found no new DWM frame yet, wake immediately on FrameArrived
+    // and phase-align the pacer to DWM's vblank instead of adding another 1/fps.
+    let mut waiting_for_frame = false;
     loop {
-        // Wait for the next tick, handling messages (WebView2's events and
-        // the input thread's wake-ups) meanwhile.
+        // Wait for the next tick (or FrameArrived when waiting), handling
+        // messages (WebView2's events and the input thread's wake-ups) meanwhile.
+        let mut frame_woke = false;
         loop {
             let now = Instant::now();
             let due = pacer.due();
@@ -992,25 +1062,26 @@ fn run(args: &Args, out: &Out) -> Result<i32, String> {
                 break;
             }
             let wait = due - now;
-            let handles: Vec<HANDLE> = match &timer {
-                Some(timer) => {
-                    let relative = -((wait.as_nanos() / 100) as i64).max(1);
-                    unsafe {
-                        let _ = SetWaitableTimer(*timer, &relative, 0, None, None, false);
-                    }
-                    vec![*timer]
+            let mut handles = Vec::with_capacity(2);
+            if waiting_for_frame {
+                handles.push(capture.ready);
+            }
+            if let Some(timer) = &timer {
+                let relative = -((wait.as_nanos() / 100) as i64).max(1);
+                unsafe {
+                    let _ = SetWaitableTimer(*timer, &relative, 0, None, None, false);
                 }
-                None => Vec::new(),
-            };
+                handles.push(*timer);
+            }
             let millis = (wait.as_millis() as u32).saturating_add(1);
-            unsafe {
+            let woke = unsafe {
                 MsgWaitForMultipleObjectsEx(
                     Some(&handles),
                     millis,
                     QS_ALLINPUT,
                     MWMO_INPUTAVAILABLE,
-                );
-            }
+                )
+            };
             pump();
             while let Ok(command) = commands.try_recv() {
                 match command.trim() {
@@ -1020,12 +1091,14 @@ fn run(args: &Args, out: &Out) -> Result<i32, String> {
                     "unload" if loaded => {
                         loaded = false;
                         cleared = false;
+                        waiting_for_frame = false;
                         unsafe {
                             let _ = webview.Navigate(w!("about:blank"));
                         }
                     }
                     "load" if !loaded => {
                         loaded = true;
+                        waiting_for_frame = false;
                         state.loading.set(true);
                         state.load_started.set(Instant::now());
                         unsafe {
@@ -1046,14 +1119,23 @@ fn run(args: &Args, out: &Out) -> Result<i32, String> {
                 std::thread::sleep(Duration::from_millis(200));
                 return Ok(4);
             }
+            if waiting_for_frame && woke == WAIT_OBJECT_0 {
+                frame_woke = true;
+                break;
+            }
         }
-        pacer.tick += 1;
-        // Behind by more than a tick (a slow readback, a busy machine):
-        // skip ahead rather than send a burst.
         let now = Instant::now();
-        if now > pacer.due() {
-            let ticks = (now - pacer.start).as_nanos() * u128::from(pacer.fps) / 1_000_000_000;
-            pacer.tick = ticks as u64;
+        if frame_woke {
+            pacer.start = now;
+            pacer.tick = 0;
+        } else {
+            pacer.tick += 1;
+            // Behind by more than a tick (a slow readback, a busy machine):
+            // skip ahead rather than send a burst.
+            if now > pacer.due() {
+                let ticks = (now - pacer.start).as_nanos() * u128::from(pacer.fps) / 1_000_000_000;
+                pacer.tick = ticks as u64;
+            }
         }
         if !loaded {
             if !cleared {
@@ -1087,6 +1169,7 @@ fn run(args: &Args, out: &Out) -> Result<i32, String> {
         let mut record = out.buffer();
         let sent = match capture.read(&mut record) {
             Ok(true) if !state.loading.get() => {
+                waiting_for_frame = false;
                 if out.send(record) {
                     pictures += 1;
                 } else {
@@ -1096,10 +1179,15 @@ fn run(args: &Args, out: &Out) -> Result<i32, String> {
             }
             Ok(false) => {
                 unchanged += 1;
+                waiting_for_frame = !state.loading.get();
                 false
             }
-            Ok(true) => false,
+            Ok(true) => {
+                waiting_for_frame = false;
+                false
+            }
             Err(err) => {
+                waiting_for_frame = false;
                 if !warned {
                     warned = true;
                     eprintln!("{err}");
