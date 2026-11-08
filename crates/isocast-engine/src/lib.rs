@@ -108,6 +108,7 @@ pub struct SourceOpenBudget {
 
 /// Take-scoped authority to retire the native video device, never the mux or mixer.
 pub trait RecordingActivity: Send {
+    fn enabled(&self) -> bool;
     #[cfg(debug_assertions)]
     fn inject_test_loss(&mut self) -> anyhow::Result<()>;
     /// A positive native loss, not a logical renderer error.
@@ -118,13 +119,17 @@ pub trait RecordingActivity: Send {
         stopped: &dyn Fn() -> bool,
         release: Box<dyn FnOnce() + Send>,
     ) -> anyhow::Result<()>;
-    fn quarantine(&self) -> anyhow::Result<()>;
 }
+
+/// On a proved native fault, commit only while the graph and replay checks
+/// both hold. None means a concurrent state change: no decision or side effects.
+pub type GpuLossAdmission = Box<dyn Fn(&mut dyn FnMut()) -> Option<bool> + Send + Sync>;
 
 /// The daemon's live-client exclusion, held only from the check through
 /// closing generation admission (never while waiting for native teardown).
 pub trait RecordingOnly: Send + Sync {
-    fn guard(&self) -> anyhow::Result<Box<dyn RecordingGuard + '_>>;
+    fn without_replay(&self, commit: &mut dyn FnMut()) -> Option<bool>;
+    fn guard(&self, reconnect_live: bool) -> anyhow::Result<Box<dyn RecordingGuard + '_>>;
 }
 pub trait RecordingGuard {}
 impl<T> RecordingGuard for T {}
@@ -436,11 +441,17 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// captured and drained, not for the persistent preview engine's life.
     /// The returned lease restores its policy when dropped, including on
     /// startup failure or unwinding. Back ends must handle nested sessions.
-    fn recording_activity(&self) -> anyhow::Result<Option<Box<dyn RecordingActivity>>> {
+    fn recording_activity(
+        &self,
+        _admit: GpuLossAdmission,
+    ) -> anyhow::Result<Option<Box<dyn RecordingActivity>>> {
         Ok(None)
     }
 
     fn retiring_video(&self) -> bool {
+        false
+    }
+    fn reconnect_live_video(&self) -> bool {
         false
     }
     /// Called on a video error, not for each frame. Keep a pinned producer alive
@@ -736,6 +747,16 @@ pub struct LiveVideoSpec {
     pub low_latency: bool,
 }
 
+/// A sibling still holds exclusive encoder reopen admission.
+#[derive(Debug)]
+pub struct RecoveryAdmissionBusy;
+impl std::fmt::Display for RecoveryAdmissionBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("encoder admission reserved by a mid-take recovery; retry shortly. If the vendor open is hung past the recovery deadline, stop healthy recordings before restarting the engine")
+    }
+}
+impl std::error::Error for RecoveryAdmissionBusy {}
+
 /// What a live AAC encoder makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveAudioSpec {
@@ -767,6 +788,11 @@ pub struct ParameterSets {
 /// A real-time video encoder. Frames go in with [`VideoEncoder::encode`]
 /// and come out, in decode order, from [`VideoEncoder::receive`].
 pub trait VideoEncoder: Send {
+    fn retire_device(self)
+    where
+        Self: Sized,
+    {
+    }
     type Frame;
 
     /// Cumulative intentional admission refusals included in `dropped()`.

@@ -221,6 +221,11 @@ impl SharedFrames {
                     let surfaces =
                         isocast_surfaces::fetch(&self.info.service, token, FETCH_TIMEOUT)
                             .context("could not fetch the shared surfaces")?;
+                    #[cfg(windows)]
+                    if surfaces.is_empty() {
+                        self.ring.take();
+                        continue;
+                    }
                     if surfaces.len() != ring.slots as usize {
                         bail!(
                             "isocastd sent {} surfaces for a ring of {}",

@@ -36,6 +36,8 @@ pub const MAX_SLOTS: u32 = 8;
 
 /// What a viewer's stream sends.
 pub enum SharedEvent<S> {
+    /// Withdraw any unconsumed export without ending the control connection.
+    RetireRing,
     /// A new ring of surfaces, replacing any before: at the start and when
     /// the picture's size changes.
     Ring {
@@ -206,8 +208,52 @@ pub(crate) fn watch<P: Platform>(
     isocast_diagnostics::spawn(
         format!("shared frames {}", request.target),
         move || {
-            if let Err(why) = run(&platform, &running, &tx, &request, source, filters) {
-                let _ = tx.send(SharedEvent::End(why));
+            let mut max_size = request.max_size;
+            loop {
+                // wgpu validation may unwind a draw as RemoveDevice races
+                // command encoding. Classify while this epoch is still held;
+                // only confirmed native removal preserves the subscription.
+                let result = Gpu::for_platform(&platform)
+                    .map_err(|e| format!("{e:#}"))
+                    .and_then(|gpu| {
+                        let result = isocast_diagnostics::contain("shared preview draw", || {
+                            run(
+                                &platform,
+                                &running,
+                                &tx,
+                                &request,
+                                &source,
+                                &filters,
+                                &mut max_size,
+                                &gpu,
+                            )
+                        })
+                        .and_then(|r| r);
+                        if result.is_err()
+                            && platform.reconnect_live_video()
+                            && platform.recording_device_failed()
+                        {
+                            Ok(true)
+                        } else {
+                            result
+                        }
+                    });
+                if !running.0.closed.load(Ordering::SeqCst)
+                    && platform.reconnect_live_video()
+                    && (matches!(result, Ok(true)) || platform.recording_device_failed())
+                {
+                    let _ = tx.send(SharedEvent::RetireRing);
+                    while platform.retiring_video() && !running.0.closed.load(Ordering::SeqCst) {
+                        std::thread::sleep(WAIT);
+                    }
+                    if !running.0.closed.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                }
+                if let Err(why) = result {
+                    let _ = tx.send(SharedEvent::End(why));
+                }
+                break;
             }
         },
         move |why| {
@@ -296,25 +342,26 @@ fn publish<P: Platform, F>(
 
 /// Draw frames for one viewer until it leaves (`Ok`) or the stream can't
 /// go on (the reason).
+#[allow(clippy::too_many_arguments)]
 fn run<P: Platform>(
     platform: &P,
     control: &SharedControl,
     tx: &Sender<SharedEvent<P::SharedSurface>>,
     request: &Request,
     source: impl Fn(u32, (Option<u32>, Option<u32>)) -> Result<Source<P::Frame>, String>,
-    filters: Option<LiveFilters>,
-) -> Result<(), String> {
+    filters: &Option<LiveFilters>,
+    max_size: &mut (Option<u32>, Option<u32>),
+    gpu: &Gpu,
+) -> Result<bool, String> {
     let failed = |err: anyhow::Error| format!("{err:#}");
-    let gpu = Gpu::for_platform(platform).map_err(failed)?;
-    let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm);
-    let mut importer = platform.frame_importer(&gpu).map_err(failed)?;
+    let renderer = Renderer::new(gpu, wgpu::TextureFormat::Rgba8Unorm);
+    let mut importer = platform.frame_importer(gpu).map_err(failed)?;
     let slots = request.slots.clamp(2, MAX_SLOTS) as usize;
-    let mut max_size = request.max_size;
     let mut ring: Option<Ring<P::SharedSurface>> = None;
     // A viewer can retain an old frame during resize. Keep at most one old
     // ring, coalescing further resizes until its GPU reads are acknowledged.
     let mut retired: Option<Ring<P::SharedSurface>> = None;
-    let mut generation = 0;
+    let mut generation = control.0.pending.lock().generation;
     let mut pace = Pace::default();
     // The filters drawn last, and what draws them (made on first use).
     let mut drawn_filters: Vec<Filter> = Vec::new();
@@ -324,7 +371,10 @@ fn run<P: Platform>(
     let mut next_seq = 0u64;
     loop {
         if control.0.closed.load(Ordering::SeqCst) {
-            return Ok(());
+            return Ok(false);
+        }
+        if platform.reconnect_live_video() && platform.retiring_video() {
+            return Ok(true);
         }
         publish(platform, control, tx, &mut readbacks)?;
         let front = readbacks.front().map(|read| read.seq);
@@ -352,9 +402,9 @@ fn run<P: Platform>(
             }
         }
         if let Some(size) = pending.size
-            && size != max_size
+            && size != *max_size
         {
-            max_size = size;
+            *max_size = size;
             // Drawn again at the new size, even if nothing changes.
             if let Some(ring) = &mut ring {
                 ring.fresh = true;
@@ -371,7 +421,7 @@ fn run<P: Platform>(
         }
         // Changed filters show at once, even on a still picture.
         let mut epoch = None;
-        if let Some(filters) = &filters {
+        if let Some(filters) = filters {
             let (now, started) = filters();
             epoch = started;
             if now != drawn_filters {
@@ -386,7 +436,7 @@ fn run<P: Platform>(
             control.wait(WAIT, front);
             continue;
         }
-        let size_limit = crate::governor::monitor_size(max_size);
+        let size_limit = crate::governor::monitor_size(*max_size);
         let Source { slot, grid, drawn } = source(fps, size_limit)?;
         let again = || ring.as_ref().is_none_or(|ring| ring.fresh);
         // While a map is pending, don't sleep inside Pace on the source:
@@ -412,18 +462,11 @@ fn run<P: Platform>(
         };
         if drawn_filters.iter().any(|filter| filter.enabled) {
             let filtering =
-                filtering.get_or_insert_with(|| Filters::new(&gpu, renderer.format(), true));
+                filtering.get_or_insert_with(|| Filters::new(gpu, renderer.format(), true));
             if let Some(epoch) = epoch {
                 filtering.set_epoch(epoch);
             }
-            picture = filtering.apply(
-                &gpu,
-                &renderer,
-                &request.target,
-                picture,
-                &drawn_filters,
-                at,
-            );
+            picture = filtering.apply(gpu, &renderer, &request.target, picture, &drawn_filters, at);
         }
         let input = (picture.width, picture.height);
         let size = fitted(input, size_limit);
@@ -433,7 +476,7 @@ fn run<P: Platform>(
             for _ in 0..slots {
                 surfaces.push(
                     platform
-                        .shared_surface(&gpu, size.0, size.1)
+                        .shared_surface(gpu, size.0, size.1)
                         .map_err(failed)?,
                 );
             }
@@ -448,7 +491,7 @@ fn run<P: Platform>(
             };
             control.generation(generation);
             if tx.send(event).is_err() {
-                return Ok(());
+                return Ok(false);
             }
             let readback = if platform.shared_surface_in_memory() {
                 (0..slots)
@@ -520,7 +563,7 @@ fn run<P: Platform>(
         }
         if direct.is_none() {
             renderer.encode(
-                &gpu,
+                gpu,
                 &mut encoder,
                 target,
                 &[layer],
@@ -562,7 +605,7 @@ fn run<P: Platform>(
                     depth_or_array_layers: 1,
                 },
             );
-            let _done = in_flight.submit(&gpu, encoder.finish());
+            let _done = in_flight.submit(gpu, encoder.finish());
             ring.held[index] = true;
             ring.fresh = false;
             // The callback runs on whichever thread polls or submits next
@@ -594,7 +637,7 @@ fn run<P: Platform>(
             });
             continue;
         }
-        let done = in_flight.submit(&gpu, encoder.finish());
+        let done = in_flight.submit(gpu, encoder.finish());
         ring.held[index] = true;
         ring.fresh = false;
         let tx = tx.clone();

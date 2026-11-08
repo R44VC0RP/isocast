@@ -160,6 +160,7 @@ if sys.platform == "win32":
         "win_encoder_recovery",
         "win_capture_recovery",
         "win_take_device_recovery",
+        "win_live_device_recovery",
         "win_output_rollover",
         "win_output_scale",
         "win_metadata",
@@ -4989,38 +4990,65 @@ def scenario_win_take_device_recovery(e, cfg, evidence):
         rows = live().get('files', [])
         return len(rows) == 3 and all((r.get('committed_seconds') or 0) >= 2 for r in rows)
     with pinned_window_fixture() as (title, change, _, _):
-        for case in ('developer-off', 'single', 'rollover', 'double', 'preview', 'stop-held', 'timed-held'):
+        for case in ('developer-off', 'unsupported', 'active-replay', 'single', 'rollover', 'double', 'preview', 'stop-held', 'timed-held'):
             e.stop(); change('new')
-            e.env['ISOCAST_TEST_TAKE_GPU'] = 'developer-off' if case=='developer-off' else 'remove'
+            if case in ('developer-off','preview'): e.env.pop('ISOCAST_ENABLE_LIVE_GPU_RECOVERY', None)
+            else: e.env['ISOCAST_ENABLE_LIVE_GPU_RECOVERY']='1'
+            bypass = case in ('developer-off','unsupported','active-replay')
+            e.env['ISOCAST_TEST_TAKE_GPU'] = 'developer-off' if bypass else 'remove'
             if case == 'rollover': e.env['ISOCAST_TEST_TAKE_GPU_PROFILE'] = 'iso/bars'
             else: e.env.pop('ISOCAST_TEST_TAKE_GPU_PROFILE', None)
             e.start()
             cfg = setup(e.root / case, 'h264', iso=True, width=160, height=90, fps=fps)
             cfg['sources'][0] = dict(id='bars', kind='window', app=Path(sys.executable).name, title=title, cursor=False)
             cfg['scenes'][0]['items'][0]['source'] = 'bars2'
+            if case == 'unsupported':
+                # Camera kind with a fixture producer; the other three are real
+                # sources, opened in a second scene without requiring hardware.
+                cfg['sources'][1] = dict(id='bars2',kind='camera',device='isocast-e2e-camera')
+                image=e.root/'fixture.svg'; image.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" fill="lime"/></svg>')
+                page=e.root/'fixture.html'; page.write_text('<body style="background:#00f">live</body>')
+                cfg['sources'].extend([dict(id='still',kind='image',path=str(image)),dict(id='label',kind='text',text='live',width=160,height=90),dict(id='web',kind='browser',file=str(page),width=160,height=90,fps=fps)])
+                cfg['scenes'].append(dict(id='gallery', name='Gallery',items=[item(id,(0,0,1,1),(160,90)) for id in ('still','label','web')]))
             e.apply(cfg)
-            path = Path(e.rpc('start', {} if case=='developer-off' else {'seconds': 7 if case=='timed-held' else 14})['manifest'])
+            path = Path(e.rpc('start', {} if bypass or case=='double' else {'seconds': 7 if case=='timed-held' else 14},timeout=60)['manifest'])
             until(committed, description='program and both ISOs committed')
             initial = {f['source']:f['path'] for f in read_json(path)['files']}
             change('bright')  # only a *new* helper reads this level as its generation marker
             logdir = Path(e.rpc('debug_status')['logs_folder'])
             def count_log(text):
                 return sum(f.read_text(errors='replace').count(text) for f in logdir.glob('*.jsonl'))
-            if case=='developer-off':
+            if bypass:
                 require(not e.rpc('debug_status')['active'], 'control requires developer mode off')
+                if case=='unsupported':
+                    def mixed_ready():
+                        snapshot=e.rpc('status'); sources={s['source']:s for s in snapshot['engine']['sources']}
+                        if not all(sources.get(id,{}).get('state')=='running' for id in ('bars2','still','label')): return None
+                        web=sources.get('web',{})
+                        if web.get('state')=='running': return 'running'
+                        # aws-win's SSH service has no composition desktop. Exercise the
+                        # real configured browser's refusal there; hosted CI must render.
+                        if (e.env.get('ISOCAST_TEST_SERVICE_WEBVIEW')=='1' and snapshot['windows_gpu']['session_type']=='service'
+                                and web.get('state')=='failed' and 'Compositor: Access is denied. (0x80070005)' in web.get('error','')):
+                            return 'service session: WebView2 compositor denied (0x80070005)'
+                        return None
+                    evidence['mixed_browser']=until(mixed_ready,45,'camera stand-in, image, text and browser source state')
+                if case=='active-replay': require(e.rpc('replay_start')['state']=='running','replay not running before removal')
+                replacements=count_log('recording GPU replacement: generation'); injections=count_log('test RemoveDevice confirmed: mode=developer-off')
                 marker = e.root/'inject-remove-device'; marker.touch()
-                try: until(lambda: count_log('test RemoveDevice confirmed: mode=developer-off'), 6, 'native removal with developer mode OFF')
+                try: until(lambda: count_log('test RemoveDevice confirmed: mode=developer-off')>injections, 6, 'native removal with developer mode OFF')
                 finally: marker.unlink()
                 start = live()['elapsed_seconds']; before = live()['files']; route = e.rpc('status')['windows_gpu']
                 def continuing():
-                    status = live(); require(status and not finished(path), 'developer-off GPU removal stopped take')
-                    require(not (status.get('video_recovery') or {}).get('incidents'), 'production entered device recovery')
+                    status = live(); require(status and not finished(path), f'{case} GPU removal stopped take')
+                    require(not (status.get('video_recovery') or {}).get('incidents'), f'{case} entered device recovery')
                     return status if status['elapsed_seconds']>=start+2 and all(r['frames']>next(f['frames'] for f in before if f['source']==r['source']) for r in status['files'] if r['source']!='program') else None
                 status = until(continuing, 7, 'healthy D3D11 ISOs still recording after DX12 removal')
                 after = e.rpc('status')['windows_gpu']
                 require(route.get('graphics_adapter') and after['graphics_adapter']==route['graphics_adapter'] and route['captures'] and after['captures']==route['captures'], 'native capture was retired')
+                if case=='active-replay': e.rpc('replay_stop'); time.sleep(.3)
                 e.rpc('stop'); m = until(lambda: finished(path), 8, 'operator Stop')
-                require(not m['video_recovery']['incidents'] and 'requires developer mode' not in str(m) and not count_log('recording GPU replacement: generation'), 'developer-off mode recovered or replaced the GPU')
+                require(not m['video_recovery']['incidents'] and count_log('recording GPU replacement: generation')==replacements, f'{case}: recovered or replaced the GPU')
                 window_iso, _ = manifest_file(path, m, 'bars'); pixels = ffmpeg('-xerror','-i',window_iso,'-map','0:v:0','-vf','scale=1:1','-fps_mode','passthrough','-pix_fmt','gray','-f','rawvideo','-').stdout
                 require(pixels and max(pixels)<90, 'production relaunched the pinned helper after removal')
                 evidence[case] = dict(native_removal=True, continued_seconds=status['elapsed_seconds']-start, incidents=0); continue
@@ -5052,10 +5080,17 @@ def scenario_win_take_device_recovery(e, cfg, evidence):
                 return len([i for i in incidents if i['scope']=='output' and i['state']=='resumed']) == 3
             until(resumed, 16, 'verified IDRs on all three outputs')
             if case == 'double':
+                entries=live()['video_recovery']['incidents']; count=count_log('test RemoveDevice confirmed: mode=remove'); prev=live()['elapsed_seconds']
                 e.rpc('debug_set', {'enabled':False}); time.sleep(.25); e.rpc('debug_set', {'enabled':True})
+                until(lambda:count_log('test RemoveDevice confirmed: mode=remove')>count,5,'second native removal')
+                kept=until(lambda:s if (s:=live()) and s['elapsed_seconds']>prev+2 else None,6,'take continues after second loss')
+                require(kept['video_recovery']['incidents']==entries and not finished(path),'double loss changed the ledger or ended take')
+                e.rpc('stop'); m=until(lambda:finished(path),8,'Stop after second loss')
+                require(m['video_recovery']['incidents']==entries,'second loss attributed a recovery incident')
+                for f in m['files']: ffmpeg('-xerror','-i',path.parent/f['path'],'-map','0','-f','null','-')
+                evidence[case]=dict(second_removal=True,new_incidents=0,finalized=len(m['files'])); continue
             m = until(lambda: finished(path), 25, 'all files finalized')
-            require(m['status'] == ('failed' if case=='double' else 'complete'), f'{case}: {m}')
-            require(case != 'double' or 'quarantin' in str(m['errors']).lower(), 'double loss not quarantined')
+            require(m['status'] == 'complete', f'{case}: {m}')
             incidents = m['video_recovery']['incidents']
             require({i['owner_id'] for i in incidents if i['scope']=='source' and i['fault_kind']=='device_lost' and i['state']=='resumed'} == {'bars','bars2'}, f'source ledger: {incidents}')
             if case == 'rollover':
@@ -5074,9 +5109,6 @@ def scenario_win_take_device_recovery(e, cfg, evidence):
                 cut = inc['end_slot_exclusive']; ix = slots.index(cut)
                 missing = set(range(slots[0],slots[-1]+1))-set(slots)
                 require(slots == sorted(set(slots)) and len(slots)==row['frames'] and missing == set(range(inc['first_lost_slot'],cut)) and len(missing)==inc['lost_slots']>0, f'{name}: {slots} vs {inc}')
-                if case == 'double':
-                    tail, = [i for i in incidents if i['scope']=='output' and i['owner_id']==name and i['fault_kind']=='device_lost' and i['state'] in ('stopped','ended_early')]
-                    require(slots[-1]+1 == tail['first_lost_slot'], f'quarantined output accepted another picture: {name} {tail}')
                 fresh_decode(movie, video[ix:]); ffmpeg('-xerror','-i',movie,'-map','0','-f','null','-')
                 if name == 'bars':
                     pixels = ffmpeg('-i',movie,'-map','0:v:0','-vf','scale=1:1','-fps_mode','passthrough','-pix_fmt','gray','-f','rawvideo','-').stdout
@@ -5088,6 +5120,97 @@ def scenario_win_take_device_recovery(e, cfg, evidence):
                 samples = pcm(movie); pulses = beep_onsets(samples)
                 require(row['audio_dropouts']==0 and all(a['pts']+a['duration']==b['pts'] for a,b in zip(ap,ap[1:])) and len(pulses)>=int(len(samples)/RATE)-1 and all(abs(b-a-1)<.003 for a,b in zip(pulses,pulses[1:])), f'{name}: missing PCM or displaced pulse: {pulses}')
                 evidence.setdefault(case, {})[name] = dict(frames=len(slots), gap=sorted(missing), idr=cut, audio_samples=len(samples))
+
+
+def scenario_win_live_device_recovery(e, cfg, evidence):
+    """One live connection per consumer, opt-in enabled, never debug_set."""
+    require(e.env.get('ISOCAST_ENABLE_LIVE_GPU_RECOVERY')=='1','live recovery qualification requires the explicit opt-in')
+    if e.env.get('ISOCAST_TEST_TAKE_GPU') != 'developer-off': raise Skip('requires isolated WARP debug injection')
+    import threading
+    cli = e.binary.with_name('isocast.exe'); fps = 10
+    cfg = setup(e.root, 'h264', iso=True, width=160, height=90, fps=fps)
+    cfg['governor'] = {'enabled':True,'pins':['preview.fps']}
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
+    server=f'rtmp://127.0.0.1:{port}/live'
+    cfg['stream'] = {'service':'custom','server':server,'video_bitrate_kbps':700,'audio_bitrate_kbps':128,'width':160,'height':90,'reconnect':{'enabled':False}}
+    e.apply(cfg); require(not e.rpc('debug_status')['active'],'requires developer mode off')
+    path = Path(e.rpc('start', {'seconds':22})['manifest']); output=e.root/'live.flv'
+    hold=e.root/'hold-gpu-open'; trigger=e.root/'inject-remove-device'
+    logs=Path(e.rpc('debug_status')['logs_folder']); frames=[]; camera_errors=[]
+    def rebind_ready():
+        if finished(path): raise Failure(f'take ended during live GPU recovery: {read_json(path)}')
+        return any('test GPU candidate open held' in p.read_text(errors='replace') for p in logs.glob('*.jsonl'))
+    with open(e.root/'rtmp.log','wb') as log, contextlib.ExitStack() as stack:
+        def process(argv, **kwargs):
+            p=subprocess.Popen(argv,env=e.env,**kwargs)
+            def close():
+                if p.poll() is None: p.kill(); p.wait(timeout=5)
+            stack.callback(close); return p
+        listen=process(['ffmpeg','-nostdin','-v','warning','-listen','1','-i',server+'/e2e','-c','copy','-y',str(output)],stdout=log,stderr=log)
+        preview=process([str(cli),'frames','program','--shared','--check','--width','160','--height','90','--fps','10','--seconds','16','--json'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        time.sleep(.5); e.rpc('stream_start'); stack.callback(lambda: e.rpc('stream_stop') if e.rpc('status')['stream']['state']=='live' else None)
+        if e.env.get('ISOCAST_TEST_LIVE_VCAM')=='1':
+            destination=Path(e.rpc('virtual_camera_start')['destination']); stack.callback(lambda:e.rpc('virtual_camera_stop'))
+            def read_camera():
+                try:
+                    with engine_connection(destination) as pc, pc.makefile('rb') as reader:
+                        while header:=reader.read(48):
+                            magic,w,h,_,repeat,seq,src,delivery=struct.unpack('<8s4IQqq', header)
+                            require(magic==b'ICVCNV01','invalid camera header'); data=reader.read(w*h*3//2)
+                            if len(data)!=w*h*3//2: break
+                            frames.append((seq,src,repeat,hashlib.sha256(data).digest(),time.monotonic()))
+                except Exception as ex: camera_errors.append(str(ex))
+            threading.Thread(target=read_camera, daemon=True).start()
+            until(lambda:len(frames)>=3,6,'active camera reader')
+        def established():
+            s=e.rpc('status'); files=(s.get('live') or {}).get('files',[])
+            return s['stream']['frames_sent']>=10 and len(files)==3 and all((r.get('committed_seconds') or 0)>=2 for r in files)
+        until(established,10,'connected RTMP receiver and three committed files'); time.sleep(.5)
+        # A second viewer is partway through its one-time NT name handoff.
+        # It deliberately withholds ACK: the old exporter still owns those
+        # allocations, even though its token is no longer in the offer map.
+        slow=stack.enter_context(engine_connection(e.sock)); events=stack.enter_context(slow.makefile('rb'))
+        slow.sendall(b'{"jsonrpc":"2.0","id":1,"method":"shared_frames","params":{"target":"program","fps":10,"slots":2}}\n')
+        service=json.loads(events.readline())['result']['service']; ring=json.loads(events.readline())['ring']
+        handoff=stack.enter_context(engine_connection(Path(service))); names=stack.enter_context(handoff.makefile('rb'))
+        handoff.sendall(bytes.fromhex(ring['token'])); header=names.read(16)
+        require(header[:8]==b'ISOCDX01' and len(names.read(32*ring['slots']))==32*ring['slots'],'incomplete old ring offer')
+        hold.touch(); trigger.touch()
+        try:
+            until(rebind_ready,7,'old live owners retired'); held=time.monotonic(); time.sleep(1.25)
+            handoff.sendall(b'\x02'); require(names.read(1)==b'\x01','old ring was not explicitly revoked')
+            if frames:
+                frozen=[f for f in frames if f[4]>=held]; require(frozen and all(f[2] and f[3]==frozen[0][3] for f in frozen),'camera did not keep its last complete frame')
+        finally: trigger.unlink(missing_ok=True); hold.unlink(missing_ok=True)
+        thaw=time.monotonic()
+        def resumed():
+            if finished(path): raise Failure(f'take ended before live consumers resumed: {read_json(path)}')
+            s=e.rpc('status'); entries=s['live'].get('video_recovery',{}).get('incidents',[])
+            return s['stream']['state']=='live' and sum(i['scope']=='output' and i['state']=='resumed' for i in entries)==3
+        until(resumed,10,'three committed replacement IDRs'); time.sleep(1)
+        if frames: require(not camera_errors and any(not f[2] and f[4]>thaw and f[1]>frozen[-1][1] and f[3]!=frozen[-1][3] for f in frames),'camera reader did not resume')
+        final=e.rpc('stream_stop'); listen.wait(timeout=8)
+        stdout,stderr=preview.communicate(timeout=18); require(preview.returncode==0,f'preview stopped: {stderr} {stdout}')
+        viewer=json.loads(stdout); rings=viewer['rings']; require(viewer['ended'] is None and len(rings)==2 and rings[1]['generation']>rings[0]['generation'] and viewer['check']['frames_read_back']==viewer['frames'] and not viewer['problems'],f'preview did not rebind: {viewer}')
+        m=until(lambda:finished(path),20,'finalized take'); require(m['status']=='complete',str(m))
+    require(final['reconnects']==0 and final['frames_sent']>15,'stream reconnected or stalled')
+    # Remux, never transcode: fresh_decode reads exact AVC AU bytes by MP4 file offset.
+    received=e.root/'wire.mp4'; ffmpeg('-xerror','-i',output,'-c','copy','-y',received)
+    wire=recovery_packets(received,'v:0'); times=[float(p['pts_time']) for p in wire]
+    boundaries=[i for i in range(1,len(times)) if times[i]-times[i-1]>1]; require(len(boundaries)==1 and min(boundaries)>1 and len(wire)-boundaries[0]>3,f'missing unique live outage: {times}')
+    fresh_decode(received,wire[boundaries[0]:]); ffmpeg('-xerror','-i',output,'-map','0','-f','null','-')
+    samples=pattern_samples(received,pattern_specs([('p',(0,0,1,1))],160,90),160,90,period=pattern_period(fps))
+    ids=[pattern_value(row['p'][0],row['p'][1],160,fps,160) for _,row in samples]; resumed_ids=ids[boundaries[0]:]
+    require(len(set(resumed_ids))>=3 and all(pic[:2]==('id',PATTERN_TAGS['bars']) for pic in resumed_ids), 'RTMP resumed with stale or wrong pictures')
+    audio=[float(p['pts_time']) for p in recovery_packets(received,'a:0')]; require(audio and all(0<b-a<.025 for a,b in zip(audio,audio[1:])), 'live AAC clock broke across removal')
+    gaps={}
+    for f in m['files']:
+        movie=path.parent/f['path']; packets=recovery_packets(movie,'v:0'); slots=[round((float(p['pts_time'])+f['start_offset_seconds'])*fps) for p in packets]
+        inc,=[i for i in m['video_recovery']['incidents'] if i['scope']=='output' and i['owner_id']==f['source'] and i['fault_kind']=='device_lost']
+        holes=set(range(slots[0],slots[-1]+1))-set(slots); require(holes==set(range(inc['first_lost_slot'],inc['end_slot_exclusive'])) and len(holes)==inc['lost_slots']>0,f'{f}: {holes} != {inc}')
+        fresh_decode(movie,packets[slots.index(inc['end_slot_exclusive']):]); gaps[f['source']]=len(holes)
+    evidence.update(reconnects=final['reconnects'],rtmp_frames=len(wire),wire_idr=boundaries[0],live_aac_packets=len(audio),preview_rings=rings,readbacks=viewer['frames'],stalled_offer_revoked=True,recorded_gaps=gaps,vcam_frames=len(frames))
 
 
 def fresh_decode(path, video):

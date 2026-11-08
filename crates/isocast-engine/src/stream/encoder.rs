@@ -364,7 +364,7 @@ impl Drop for Subscription {
 /// Encode the program until the last output leaves or the program stops.
 /// Returns why it ended.
 fn encode<P: Platform>(
-    mut video: P::VideoEncoder,
+    video: P::VideoEncoder,
     mut audio: P::AudioEncoder,
     tap: ProgramTap<P::Frame>,
     retapped: Receiver<ProgramTap<P::Frame>>,
@@ -399,7 +399,11 @@ fn encode<P: Platform>(
     let mut video_offset = 0;
     let mut live = false;
     let mut tap = Some(tap);
-    loop {
+    let platform = program.platform();
+    let mut encoder = Some(video);
+    let mut resume_idr = false;
+    let mut retry = None;
+    'worker: loop {
         retune
             .rate
             .active(hub.sink_count.load(Ordering::SeqCst) > 0);
@@ -408,6 +412,20 @@ fn encode<P: Platform>(
         }
         if program.stopped() {
             return Ok(Ended::Program);
+        }
+        let pause = platform.reconnect_live_video() && platform.retiring_video();
+        if pause && let Some(old) = encoder.take() {
+            old.retire_device();
+            order.video.clear();
+            resume_idr = true;
+            hub.ready.store(false, Ordering::Release);
+            config = None;
+            warm_pts = None;
+            video_offset = 0;
+            next_keyframe = None;
+            encoder_dropped = 0;
+            intentional_dropped = 0;
+            retry = None;
         }
         // One picture places the native session. Drop its tap while parked,
         // so a reservation alone does not keep the compositor drawing.
@@ -426,15 +444,58 @@ fn encode<P: Platform>(
                 Err(RecvTimeoutError::Disconnected) => return Ok(Ended::Stopped),
             }
         }
-        match tap
+        let packet = tap
             .as_ref()
             .unwrap()
             .packets
-            .recv_timeout(Duration::from_millis(5))
+            .recv_timeout(Duration::from_millis(5));
+        if encoder.is_none()
+            && !pause
+            && matches!(packet, Ok(Packet::Video { .. }))
+            && retry.is_none_or(|(_, next)| Instant::now() >= next)
         {
+            match platform.create_video_encoder(&spec.video) {
+                Ok(mut made) => {
+                    made.prioritize_video(canvas);
+                    encoder = Some(made);
+                    retune = Retune::new(canvas, spec.video.bitrate_kbps);
+                    hub.applied_kbps
+                        .store(spec.video.bitrate_kbps, Ordering::Release);
+                    hub.want_keyframe.store(true, Ordering::Release);
+                }
+                Err(e) => {
+                    let now = Instant::now();
+                    let (first, _) = *retry.get_or_insert((now, now));
+                    if now.duration_since(first) >= Duration::from_secs(5) {
+                        return Err(e.context("reopening live H.264 encoder"));
+                    }
+                    retry = Some((first, now + Duration::from_millis(150)));
+                }
+            }
+        }
+        let Some(video) = encoder.as_mut() else {
+            // Consume (and release) queued old video leases even if no fresh
+            // frames arrive. AAC and the connected RTMP sender keep their clocks.
+            match packet {
+                Ok(Packet::Audio { samples, pts, .. }) if live => {
+                    track.add(&samples, pts, &mut audio, &mut order)?;
+                    let ready = order.release();
+                    each(&|s| s.push(&ready));
+                }
+                Err(RecvTimeoutError::Disconnected) => return Ok(Ended::Program),
+                _ => {}
+            }
+            continue;
+        };
+        match packet {
             Ok(Packet::Video { frame, pts }) if !live => {
                 if warm_pts.is_none() {
-                    video.encode(&frame, pts, true)?;
+                    if let Err(e) = video.encode(&frame, pts, true) {
+                        if platform.reconnect_live_video() && platform.recording_device_failed() {
+                            continue;
+                        }
+                        return Err(e);
+                    }
                     warm_pts = Some(pts);
                 }
             }
@@ -460,7 +521,7 @@ fn encode<P: Platform>(
                 }
                 // Between frames, never mid-submission: the session, frame
                 // rate and keyframe grid stay as they are.
-                retune.apply(&mut video, spec.video.fps, &hub.applied_kbps);
+                retune.apply(video, spec.video.fps, &hub.applied_kbps);
                 let forced = hub.want_keyframe.swap(false, Ordering::SeqCst);
                 if forced {
                     // A new connection starts with this frame, and so
@@ -483,11 +544,16 @@ fn encode<P: Platform>(
                 }
                 let keyframe = forced || due || keyframe_missed;
                 let dropped = video.dropped();
-                video.encode(
+                if let Err(e) = video.encode(
                     &frame,
                     Time::from_nanos(pts.as_nanos() - video_offset),
-                    keyframe,
-                )?;
+                    keyframe || resume_idr,
+                ) {
+                    if platform.reconnect_live_video() && platform.recording_device_failed() {
+                        continue;
+                    }
+                    return Err(e);
+                }
                 keyframe_missed = keyframe && video.dropped() > dropped;
             }
             Ok(Packet::Audio { samples, pts, .. }) => {
@@ -498,7 +564,15 @@ fn encode<P: Platform>(
             | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(Ended::Program),
         }
-        while let Some(mut frame) = video.receive()? {
+        loop {
+            let mut frame = match video.receive() {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(_) if platform.reconnect_live_video() && platform.recording_device_failed() => {
+                    continue 'worker;
+                }
+                Err(e) => return Err(e),
+            };
             if !live {
                 // Release the routes before warm() can return and recording
                 // writers start, unless a real output joined in this loop.
@@ -522,6 +596,13 @@ fn encode<P: Platform>(
                 && config.as_deref() != Some(&record)
             {
                 config = Some(Arc::new(record));
+            }
+            if resume_idr {
+                anyhow::ensure!(
+                    frame.keyframe && config.is_some() && flv::closed_idr(&frame.data),
+                    "live encoder resumed without configuration and a closed IDR"
+                );
+                resume_idr = false;
             }
             order.push(Media {
                 ts: frame.dts,

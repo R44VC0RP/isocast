@@ -20,6 +20,8 @@ use isocast_protocol::virtual_camera::{VirtualCameraState, VirtualCameraStatus};
 /// False means its bounded queue is full. It retains accepted frames until
 /// consumers finish; Drop disconnects the producer, restoring the card.
 pub trait CameraSink<F>: Send {
+    /// Release native video resources, not the reader endpoint/last CPU frame.
+    fn retire_video(&mut self) {}
     fn send(&mut self, frame: &F, pts: Time) -> Result<bool>;
     /// Can fit an already-composited canvas to the negotiated output size
     /// itself, without a second compositor draw. Raw sources still need one.
@@ -183,15 +185,37 @@ pub(super) fn start<P: Platform>(
                             ready,
                             size,
                         };
-                        let result = run(
-                            &platform,
-                            &clocks,
-                            &status,
-                            &stop,
-                            &input,
-                            &mut output,
-                            &on_change,
-                        );
+                        let result = loop {
+                            let result = isocast_diagnostics::contain("camera GPU draw", || {
+                                run(
+                                    &platform,
+                                    &clocks,
+                                    &status,
+                                    &stop,
+                                    &input,
+                                    &mut output,
+                                    &on_change,
+                                )
+                            })
+                            .map_err(anyhow::Error::msg)
+                            .and_then(|r| r);
+                            if platform.reconnect_live_video()
+                                && (matches!(result, Ok(true))
+                                    || platform.recording_device_failed())
+                            {
+                                output.draw = None;
+                                (output.completed, output.ready) = sync_channel(6);
+                                output.sink.retire_video();
+                                while platform.retiring_video() && !stop.load(Ordering::Acquire) {
+                                    repeat(&status, &mut output)?;
+                                    std::thread::sleep(Duration::from_secs(1) / initial.fps.max(1));
+                                }
+                                if !stop.load(Ordering::Acquire) {
+                                    continue;
+                                }
+                            }
+                            break result.map(|_| ());
+                        };
                         let closed = output.sink.close();
                         result.and(closed)
                         // Output destruction, including bounded native close, is here.
@@ -265,7 +289,7 @@ fn run<P: Platform>(
     input: &impl Fn(Time, u32) -> Result<Option<Input<P::Frame>>>,
     output: &mut Output<P>,
     on_change: &OnCameraChange,
-) -> Result<()> {
+) -> Result<bool> {
     let initial = status.lock().clone();
     let fps = initial.fps;
     let period = Duration::from_secs(1) / fps;
@@ -288,6 +312,9 @@ fn run<P: Platform>(
     let mut latencies = Vec::with_capacity(600);
     let mut limit = None;
     loop {
+        if platform.reconnect_live_video() && platform.retiring_video() {
+            return Ok(true);
+        }
         let tick = epoch.add_ticks(next, fps);
         while let Ok(ready) = output.ready.try_recv() {
             receive(platform, status, output, ready, &mut latencies, fps)?;
@@ -307,7 +334,7 @@ fn run<P: Platform>(
             }
         })?;
         if stop.load(Ordering::Acquire) {
-            return Ok(());
+            return Ok(false);
         }
         // Skip overdue ticks, never replay a backlog into the sink.
         let now = platform.now();

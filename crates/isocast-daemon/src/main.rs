@@ -845,6 +845,12 @@ fn stream_shared_frames(
     };
     let result = loop {
         let event = match feed.events.recv_timeout(Duration::from_millis(250)) {
+            Ok(SharedEvent::RetireRing) => {
+                if let Some(token) = offered.take() {
+                    exporter.withdraw(token);
+                }
+                None
+            }
             Ok(SharedEvent::Ring {
                 generation,
                 width,
@@ -1225,8 +1231,25 @@ impl Daemon {
 }
 
 impl isocast_engine::RecordingOnly for Daemon {
-    fn guard(&self) -> Result<Box<dyn isocast_engine::RecordingGuard + '_>> {
-        let idle = self.idle_gpu_guard()?;
+    fn without_replay(&self, commit: &mut dyn FnMut()) -> Option<bool> {
+        let state = self.state.try_read()?;
+        if state.replay.active() {
+            return Some(false);
+        }
+        commit();
+        Some(true)
+    }
+    fn guard(&self, reconnect_live: bool) -> Result<Box<dyn isocast_engine::RecordingGuard + '_>> {
+        let idle = if reconnect_live {
+            let state = self.state.read();
+            anyhow::ensure!(
+                !state.replay.active(),
+                "stop the replay buffer before replacing its GPU"
+            );
+            state
+        } else {
+            self.idle_gpu_guard()?
+        };
         drop(
             SNAPSHOT_GRAPHICS
                 .try_lock()
@@ -6491,7 +6514,7 @@ mod tests {
         daemon.state.lock().wanted_at = Some(std::time::Instant::now());
         refused("stop the preview first");
         daemon.state.lock().wanted_at = Some(std::time::Instant::now() - ENGINE_IDLE);
-        let guard = isocast_engine::RecordingOnly::guard(&daemon).unwrap();
+        let guard = isocast_engine::RecordingOnly::guard(&daemon, false).unwrap();
         assert!(daemon.state.try_read().is_none()); // no new live demand before freeze
         drop(guard);
         assert!(daemon.state.try_read().is_some());

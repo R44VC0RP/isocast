@@ -131,9 +131,38 @@ pub(crate) fn metadata(meta: &Metadata) -> Vec<u8> {
     ])
 }
 
+/// Check the video slices themselves, not the provider's sync flag.
+pub(super) fn closed_idr(mut au: &[u8]) -> bool {
+    let mut found = false;
+    while !au.is_empty() {
+        let Some((n, rest)) = au.split_first_chunk::<4>() else {
+            return false;
+        };
+        let Some((nal, tail)) = rest.split_at_checked(u32::from_be_bytes(*n) as usize) else {
+            return false;
+        };
+        match nal.first().map(|b| b & 31) {
+            Some(5) => found = true,
+            None | Some(1..=4) => return false,
+            _ => {}
+        }
+        au = tail;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_complete_closed_idr_pictures_can_reprime_a_live_decoder() {
+        let idr = [0, 0, 0, 2, 0x65, 0x80];
+        assert!(closed_idr(&idr));
+        assert!(!closed_idr(&idr[..5]));
+        assert!(!closed_idr(&[0, 0, 0, 1, 0x67]));
+        assert!(!closed_idr(&[idr.as_slice(), &[0, 0, 0, 1, 0x41]].concat()));
+    }
 
     #[test]
     fn aac_lc_config_for_48_khz_stereo_is_0x1190() {

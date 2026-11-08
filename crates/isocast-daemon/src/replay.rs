@@ -206,6 +206,9 @@ impl Daemon {
             if state.tuning {
                 return Err(wrong("wait for tune to finish"));
             }
+            if native().retiring_video() {
+                return Err(wrong("wait for GPU recovery before starting replay"));
+            }
             // Until the buffer is in the state, this keeps the engine from
             // idling out and a second start out.
             state.replay.slot_mut(canvas).starting = true;

@@ -274,7 +274,25 @@ ordinary owners and retry; if an owner is marked **quarantined**, its work
 could not be proved complete and it is retained until exit: restart Isocast.
 After the owners retire, a candidate must complete a fresh fence on the pinned
 adapter and compiler. Its two caches become visible only with admission open.
-This boundary does not replace a removed native device during a take.
+During a Windows recording a separate take-owned barrier can replace a natively
+removed device on the same adapter. The viewer connection stays open: the old
+ring is retired, never rewritten, and the next ring uses a higher generation.
+A delayed release cannot release a slot in its successor. The live RTMP sender
+keeps its connection and AAC clock; replacement video starts with decoder
+configuration and a closed IDR. The virtual camera can repeat its last CPU
+picture while its converter is unavailable. Recovery is bypassed for camera,
+browser, media, image, color, slideshow or text sources, a stinger, active
+replay, or a second device removal within 15 seconds of the first. In those
+cases the take continues until Stop; recovery does not retire owners, discard
+caches, or add incidents for the declined loss. Missing pictures need not resume.
+
+Live recovery is **off by default** pending supervised physical TDR qualification.
+To opt in, set `ISOCAST_ENABLE_LIVE_GPU_RECOVERY=1` before starting the daemon.
+Without that exact value, developer mode off means no take-wide recovery;
+developer mode on retains the recording-only path for eligible takes. The
+opt-in does nothing on a healthy device or
+on a logical wgpu context loss with healthy native devices. This does not
+repair a separately removed GPU inside an external rendering client.
 
 On cold program startup with hardware FXC, the first canvas prepares its filters
 and transitions alongside the picture draw and takes those pipelines on success.

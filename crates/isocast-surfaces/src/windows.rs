@@ -520,14 +520,17 @@ fn serve_ring(mut stream: isocast_ipc::Stream, offers: &Offers) -> Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut token = [0; 16];
     stream.read_exact(&mut token)?;
-    let surfaces = offers
+    let mut surfaces = offers
         .lock()
         .unwrap()
         .remove(&Token(token))
-        .context("unknown or consumed surface offer")?;
+        .unwrap_or_default(); // revoked/superseded: convey no capabilities
     stream.write_all(MAGIC)?;
     stream.write_all(&session()?.to_le_bytes())?;
     stream.write_all(&(surfaces.len() as u32).to_le_bytes())?;
+    if surfaces.is_empty() {
+        return Ok(());
+    }
     for surface in &surfaces {
         stream.write_all(&surface.0.name.0)?;
         for value in [
@@ -541,10 +544,37 @@ fn serve_ring(mut stream: isocast_ipc::Stream, offers: &Offers) -> Result<()> {
     }
     // Retain allocations while the client opens the names. A timeout merely
     // makes a late open fail; unique names cannot alias recycled handles.
-    let mut ack = [0];
-    stream.read_exact(&mut ack)?;
-    ensure!(ack == [1], "invalid surface acknowledgment");
-    Ok(())
+    // A fetch already in progress is no longer in `offers`. Don't pin the
+    // removed generation waiting for the client to finish opening its names.
+    // Open client handles have their own lifetime; names are never reused.
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    loop {
+        if surfaces
+            .first()
+            .is_some_and(|s| s.0.generation.check().is_err())
+        {
+            surfaces.clear();
+        }
+        let mut ack = [0];
+        match stream.read_exact(&mut ack) {
+            Ok(()) if ack == [1] => return Ok(()),
+            Ok(()) if ack == [2] => {
+                stream.write_all(&[u8::from(surfaces.is_empty())])?;
+                return Ok(());
+            }
+            Ok(()) => bail!("invalid surface acknowledgment"),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) && std::time::Instant::now() < until =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 pub fn fetch(service: &str, token: Token, timeout: Duration) -> Result<Vec<Surface>> {
@@ -562,15 +592,20 @@ pub fn fetch(service: &str, token: Token, timeout: Duration) -> Result<Vec<Surfa
         "shared previews require the same Windows login session"
     );
     let count = integer(&header[12..]);
+    if count == 0 {
+        return Ok(Vec::new());
+    } // revoked while this viewer was reading older events
     ensure!(
         (2..=MAX_SLOTS as u32).contains(&count),
         "invalid shared ring count"
     );
     let mut surfaces = Vec::new();
     let mut device: Option<((u32, i32), ID3D12Device)> = None;
-    for _ in 0..count {
-        let mut record = [0; 32];
-        stream.read_exact(&mut record)?;
+    let mut records = vec![[0; 32]; count as usize];
+    for record in &mut records {
+        stream.read_exact(record)?;
+    }
+    for record in records {
         let token = Token(record[..16].try_into().unwrap());
         let (width, height) = (integer(&record[16..20]), integer(&record[20..24]));
         let luid = (integer(&record[24..28]), integer(&record[28..32]) as i32);
@@ -599,7 +634,24 @@ pub fn fetch(service: &str, token: Token, timeout: Duration) -> Result<Vec<Surfa
                 .unwrap()
                 .1
                 .OpenSharedHandleByName(PCWSTR(name.as_ptr()), GENERIC_ALL.0)
-        }?;
+        };
+        let handle = match handle {
+            Ok(h) => h,
+            Err(e) => {
+                // Only an explicit revocation may be ignored. Permission,
+                // device and ordinary import failures remain failures.
+                let mut retired = [0];
+                if stream
+                    .write_all(&[2])
+                    .and_then(|()| stream.read_exact(&mut retired))
+                    .is_ok()
+                    && retired == [1]
+                {
+                    return Ok(Vec::new());
+                }
+                return Err(e.into());
+            }
+        };
         surfaces.push(Surface(Arc::new(Allocation {
             handle: Handle(unsafe { Owned::new(handle) }),
             name: token,
