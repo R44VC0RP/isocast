@@ -71,6 +71,8 @@ pub struct Gpu {
 }
 
 static GPU: Mutex<Option<Gpu>> = Mutex::new(None);
+type ImportDevice =
+    fn(&wgpu::Adapter, &wgpu::DeviceDescriptor<'_>) -> Option<(wgpu::Device, wgpu::Queue)>;
 
 #[cfg(all(test, windows))]
 #[test]
@@ -85,8 +87,10 @@ fn idle_start_requires_native_evidence_not_contention_or_logical_loss() -> Resul
     }
     // Isolated wgpu context, not the published renderer; no RemoveDevice or
     // shaders. Model the lost callback on an actually healthy native device.
-    let (gpu, _) =
-        Gpu::open_device(isocast_surfaces::generation::registry().register("test renderer")?)?;
+    let (gpu, _) = Gpu::open_device(
+        |_, _| None,
+        isocast_surfaces::generation::registry().register("test renderer")?,
+    )?;
     gpu.lost.store(true, Ordering::Release);
     assert!(gpu.windows_removed()); // unusable logical context for status
     assert!(!Gpu::needs_idle_replacement(Some(&gpu), false, false));
@@ -139,7 +143,7 @@ impl Gpu {
         permit: &isocast_surfaces::generation::Replacement,
         start: impl FnOnce() + Send + 'static,
     ) -> Result<Self> {
-        Self::open(start, false, permit.owner("DX12 renderer"))
+        Self::open(start, false, |_, _| None, permit.owner("DX12 renderer"))
     }
 
     #[cfg(windows)]
@@ -174,24 +178,42 @@ impl Gpu {
         })
     }
     pub fn new() -> Result<Self> {
-        Self::with_thread(|| {}, false)
+        Self::with_thread(|| {}, false, |_, _| None)
+    }
+
+    /// Calibration may open the singleton first. Keep its ordinary worker
+    /// priority, but don't pin a device missing the platform's import support.
+    pub(crate) fn for_measurement<P: crate::Platform>() -> Result<Self> {
+        Self::with_thread(|| {}, false, P::open_import_device)
     }
 
     /// Completion now hands frames to protected outputs, just as their
     /// real-time drawing threads did before. Keep the same scheduling class
     /// instead of inheriting the control thread that happened to open the GPU.
-    pub(crate) fn for_platform<P: crate::Platform>(platform: &P) -> Result<Self> {
+    pub fn for_platform<P: crate::Platform>(platform: &P) -> Result<Self> {
         let platform = platform.clone();
-        Self::with_thread(move || platform.real_time_thread(), false)
+        Self::with_thread(
+            move || platform.real_time_thread(),
+            false,
+            P::open_import_device,
+        )
     }
 
     #[cfg(windows)]
     pub(crate) fn for_compositor<P: crate::Platform>(platform: &P) -> Result<Self> {
         let platform = platform.clone();
-        Self::with_thread(move || platform.real_time_thread(), true)
+        Self::with_thread(
+            move || platform.real_time_thread(),
+            true,
+            P::open_import_device,
+        )
     }
 
-    fn with_thread(start: impl FnOnce() + Send + 'static, program: bool) -> Result<Self> {
+    fn with_thread(
+        start: impl FnOnce() + Send + 'static,
+        program: bool,
+        import_device: ImportDevice,
+    ) -> Result<Self> {
         // All canvases, ISO stages and viewers in this process import into
         // the same device. Keep it through stop/start cycles, not one driver
         // connection (and shader cache) per output. A lost device is not
@@ -223,6 +245,7 @@ impl Gpu {
         let gpu = Self::open(
             start,
             program,
+            import_device,
             #[cfg(windows)]
             isocast_surfaces::generation::registry().register("DX12 renderer")?,
         )?;
@@ -258,9 +281,11 @@ impl Gpu {
     fn open(
         start: impl FnOnce() + Send + 'static,
         _program: bool,
+        import_device: ImportDevice,
         #[cfg(windows)] owner: isocast_surfaces::generation::Owner,
     ) -> Result<Self> {
         let candidate = Self::open_device(
+            import_device,
             #[cfg(windows)]
             owner,
         )?;
@@ -272,6 +297,7 @@ impl Gpu {
     }
 
     fn open_device(
+        import_device: ImportDevice,
         #[cfg(windows)] generation: isocast_surfaces::generation::Owner,
     ) -> Result<(Self, mpsc::Receiver<()>)> {
         #[cfg(windows)]
@@ -287,12 +313,15 @@ impl Gpu {
         // genuine NV12 allocations with two aspect views of one texture.
         let required_features = adapter.features()
             & (wgpu::Features::TEXTURE_FORMAT_16BIT_NORM | wgpu::Features::TEXTURE_FORMAT_NV12);
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        let desc = wgpu::DeviceDescriptor {
             label: Some("isocast"),
             required_features,
             ..Default::default()
-        }))
-        .context("could not open the GPU")?;
+        };
+        let (device, queue) = match import_device(&adapter, &desc) {
+            Some(opened) => opened,
+            None => block_on(adapter.request_device(&desc)).context("could not open the GPU")?,
+        };
         #[cfg(windows)]
         {
             let hal = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }.context("not DX12")?;
@@ -370,8 +399,8 @@ impl Gpu {
             drop(candidate);
             isocast_surfaces::retry_with_dxc(&loss)?;
             let retry = (|| {
-                let fresh =
-                    Self::open_device(generation).context("reopening the original DX12 adapter")?;
+                let fresh = Self::open_device(|_, _| None, generation)
+                    .context("reopening the original DX12 adapter")?;
                 if let Some(loss) = fresh.0.picture_warmup(program)? {
                     anyhow::bail!("device lost again: {loss}");
                 }

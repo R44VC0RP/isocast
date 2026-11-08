@@ -337,6 +337,13 @@ impl Platform for LinuxPlatform {
     fn frame_importer(&self, gpu: &Gpu) -> Result<Importer> {
         Ok(Importer(gpu.clone()))
     }
+
+    fn open_import_device(
+        adapter: &wgpu::Adapter,
+        desc: &wgpu::DeviceDescriptor<'_>,
+    ) -> Option<(wgpu::Device, wgpu::Queue)> {
+        crate::tiled::open_device(adapter, desc)
+    }
     fn encoder_frame_format(&self) -> EncoderFrameFormat {
         EncoderFrameFormat::Bgra
     }
