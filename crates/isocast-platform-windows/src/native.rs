@@ -19,7 +19,10 @@ use windows::core::{Owned, w};
 
 /// An owned, unnamed NT sharing handle, created once per resource. D3D11
 /// CreateSharedHandle cannot be called repeatedly on the same texture.
-pub(crate) struct SharedHandle(Owned<HANDLE>);
+pub(crate) struct SharedHandle {
+    handle: Owned<HANDLE>,
+    _owner: isocast_surfaces::generation::Owner,
+}
 
 // SAFETY: these are shareable kernel resource/fence handles, not apartment
 // objects. The enclosing frame/device owns them until its last reference.
@@ -30,15 +33,21 @@ impl SharedHandle {
     /// Takes ownership of a newly created/duplicated sharing handle, including
     /// on failure. Enforce non-inheritance even though every creator also
     /// requests it (null security attributes or DuplicateHandle(false)).
-    pub(crate) unsafe fn new(handle: HANDLE) -> Result<Self> {
-        let owned = Self(unsafe { Owned::new(handle) });
+    pub(crate) unsafe fn new(
+        handle: HANDLE,
+        owner: isocast_surfaces::generation::Owner,
+    ) -> Result<Self> {
+        let owned = Self {
+            handle: unsafe { Owned::new(handle) },
+            _owner: owner,
+        };
         unsafe { SetHandleInformation(owned.handle(), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
             .context("could not make the GPU sharing handle non-inheritable")?;
         Ok(owned)
     }
 
     pub(crate) fn handle(&self) -> HANDLE {
-        *self.0
+        *self.handle
     }
 }
 

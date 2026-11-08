@@ -1194,6 +1194,37 @@ struct State {
     hotkey_holds: HashMap<String, (String, bool)>,
 }
 
+impl State {
+    /// The same demand that prevents idle graph teardown must prevent a GPU
+    /// freeze. Include outputs between reserving a start and going live.
+    fn live_gpu_client(&self) -> Option<&'static str> {
+        if self.streaming() || self.streams_starting != 0 {
+            Some("stop the stream")
+        } else if self.camera.active() {
+            Some("stop the virtual camera")
+        } else if self.replay.active() {
+            Some("stop the replay buffer")
+        } else if self.hold {
+            Some("release the engine hold")
+        } else if self.wanted_at.is_some_and(|at| at.elapsed() < ENGINE_IDLE) {
+            Some("stop the preview")
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl Daemon {
+    fn idle_gpu_guard(&self) -> Result<isocast_engine::critical::Read<'_, State>> {
+        let state = self.state.read();
+        if let Some(action) = state.live_gpu_client() {
+            anyhow::bail!("cannot replace the Windows GPU: {action} first, then start again");
+        }
+        Ok(state)
+    }
+}
+
 fn recovery_check(
     which: &str,
     recovery: &isocast_protocol::manifest::VideoRecovery,
@@ -3695,6 +3726,28 @@ impl Daemon {
                 )));
             }
         };
+        #[cfg(windows)]
+        {
+            let state = self.state.read();
+            if let Some(session) = &state.session {
+                return already_recording(session, &asked);
+            }
+            if !state.tuning && !self.shutting_down.load(Ordering::SeqCst) {
+                drop(state);
+                let daemon = self.clone();
+                native()
+                    .prepare_idle_gpu(
+                        || self.idle_gpu_guard(),
+                        move || {
+                            let snapshot = SNAPSHOT_GRAPHICS.lock().take();
+                            drop(snapshot);
+                            // Use normal idle policy; don't steal an active preview or stream.
+                            daemon.stop_idle_engine_now();
+                        },
+                    )
+                    .map_err(failed)?;
+            }
+        }
         {
             let state = self.state.read();
             if params
@@ -4619,13 +4672,7 @@ impl Daemon {
         let _shutdown = self.shutdown_lock.lock();
         let engine = {
             let mut state = self.state.lock();
-            let idle = state.session.is_none()
-                && !state.camera.active()
-                && !state.replay.active()
-                && !state.streaming()
-                && state.streams_starting == 0
-                && !state.hold
-                && state.wanted_at.is_none_or(|at| at.elapsed() >= ENGINE_IDLE);
+            let idle = state.session.is_none() && state.live_gpu_client().is_none();
             if !idle {
                 return;
             }
@@ -6084,11 +6131,11 @@ fn ids_or_none<'a>(ids: impl Iterator<Item = &'a String>) -> String {
 }
 
 type Graphics = isocast_engine::snapshot::Graphics<NativePlatform>;
+static SNAPSHOT_GRAPHICS: Mutex<Option<Graphics>> = Mutex::new(None);
 
 /// The GPU, set up on first use and kept until its device is lost.
 fn with_graphics<T>(draw: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> {
-    static GRAPHICS: Mutex<Option<Graphics>> = Mutex::new(None);
-    let mut cached = GRAPHICS.lock();
+    let mut cached = SNAPSHOT_GRAPHICS.lock();
     if cached.as_ref().is_some_and(Graphics::is_lost) {
         *cached = None;
     }
@@ -6408,6 +6455,31 @@ fn to_json(value: impl serde::Serialize) -> Result<serde_json::Value, RpcError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_gpu_client_names_even_starting_streams_and_recent_previews() {
+        let daemon = Daemon::default();
+        let refused = |name| {
+            assert!(
+                daemon
+                    .idle_gpu_guard()
+                    .err()
+                    .expect("live output")
+                    .to_string()
+                    .contains(name)
+            )
+        };
+        daemon.state.lock().hold = true;
+        refused("release the engine hold first");
+        daemon.state.lock().hold = false;
+        daemon.state.lock().streams_starting = 1;
+        refused("stop the stream first");
+        daemon.state.lock().streams_starting = 0;
+        daemon.state.lock().wanted_at = Some(std::time::Instant::now());
+        refused("stop the preview first");
+        daemon.state.lock().wanted_at = Some(std::time::Instant::now() - ENGINE_IDLE);
+        assert!(daemon.idle_gpu_guard().is_ok());
+    }
 
     #[test]
     fn an_ended_iso_tail_is_not_an_encoder_overload() {

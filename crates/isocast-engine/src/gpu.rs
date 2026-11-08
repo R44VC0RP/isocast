@@ -66,17 +66,104 @@ pub struct Gpu {
     // threads. WARP needs the same cores for rendering; never fan out there.
     #[cfg(windows)]
     hardware_build_threads: bool,
+    #[cfg(windows)]
+    pub(crate) generation: isocast_surfaces::generation::Owner,
 }
 
 static GPU: Mutex<Option<Gpu>> = Mutex::new(None);
 
+#[cfg(all(test, windows))]
+#[test]
+fn idle_start_requires_native_evidence_not_contention_or_logical_loss() -> Result<()> {
+    {
+        let _opening = GPU.lock();
+        assert!(!Gpu::needs_idle_replacement(
+            Gpu::cached_windows().as_ref(),
+            false,
+            false
+        ));
+    }
+    // Isolated wgpu context, not the published renderer; no RemoveDevice or
+    // shaders. Model the lost callback on an actually healthy native device.
+    let (gpu, _) =
+        Gpu::open_device(isocast_surfaces::generation::registry().register("test renderer")?)?;
+    gpu.lost.store(true, Ordering::Release);
+    assert!(gpu.windows_removed()); // unusable logical context for status
+    assert!(!Gpu::needs_idle_replacement(Some(&gpu), false, false));
+    assert!(Gpu::needs_idle_replacement(Some(&gpu), true, false));
+    assert!(Gpu::needs_idle_replacement(Some(&gpu), false, true));
+    Ok(())
+}
+
 impl Gpu {
+    #[cfg(windows)]
+    pub fn generation(&self) -> &isocast_surfaces::generation::Owner {
+        &self.generation
+    }
+    #[cfg(windows)]
+    pub fn cached_windows() -> Option<Self> {
+        // An open/warm-up owns this lock. Contention is not evidence of loss.
+        GPU.try_lock()?.clone()
+    }
+
+    #[cfg(windows)]
+    pub fn retire_windows_cache() {
+        let old = GPU.lock().take();
+        if let Some(old) = old {
+            old.lost.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_removed(&self) -> bool {
+        self.is_lost() || self.native_removed() != Some(false)
+    }
+
+    #[cfg(windows)]
+    pub fn needs_idle_replacement(
+        cached: Option<&Self>,
+        d3d11_removed: bool,
+        retiring: bool,
+    ) -> bool {
+        retiring || d3d11_removed || cached.and_then(Self::native_removed) == Some(true)
+    }
+
+    #[cfg(windows)]
+    fn native_removed(&self) -> Option<bool> {
+        let hal = unsafe { self.device.as_hal::<wgpu::hal::api::Dx12>() }?;
+        Some(unsafe { hal.raw_device().GetDeviceRemovedReason() }.is_err())
+    }
+
+    #[cfg(windows)]
+    pub fn windows_candidate(
+        permit: &isocast_surfaces::generation::Replacement,
+        start: impl FnOnce() + Send + 'static,
+    ) -> Result<Self> {
+        Self::open(start, false, permit.owner("DX12 renderer"))
+    }
+
+    #[cfg(windows)]
+    pub fn publish_windows_pair(
+        self,
+        permit: isocast_surfaces::generation::Replacement,
+        publish_native: impl FnOnce(),
+    ) -> isocast_surfaces::generation::Published {
+        // Caller already has the D3D11 cache locked. No lazy opener can see
+        // an empty cache with admission open, or a candidate that's closed.
+        let mut cache = GPU.lock();
+        permit.publish(|| {
+            *cache = Some(self);
+            publish_native();
+        })
+    }
     /// Observe only the published renderer. Status must not race capture to
     /// pin an adapter, initialize DX12, or block while the renderer warms up.
     #[cfg(windows)]
     pub fn opened_adapter() -> Option<isocast_protocol::api::WindowsAdapter> {
         let shared = GPU.try_lock()?;
-        let gpu = shared.as_ref().filter(|gpu| !gpu.is_lost())?;
+        let gpu = shared
+            .as_ref()
+            .filter(|gpu| gpu.generation.check().is_ok() && !gpu.windows_removed())?;
         let hal = unsafe { gpu.device.as_hal::<wgpu::hal::api::Dx12>() }?;
         let luid = unsafe { hal.raw_device().GetAdapterLuid() };
         let info = gpu.device.adapter_info();
@@ -111,13 +198,34 @@ impl Gpu {
         // reusable: its existing owners drain/fail independently, and new
         // outputs share a fresh device without restarting the process.
         let mut shared = GPU.lock();
+        #[cfg(windows)]
+        let _keep_native = if let Some(gpu) = shared.as_ref()
+            && isocast_surfaces::generation::registry().managed()
+        {
+            anyhow::ensure!(
+                gpu.native_removed() == Some(false),
+                "Windows device removed; replacement requires an idle recording boundary"
+            );
+            // Preserve the existing logical wgpu-context retry, but keep the
+            // healthy D3D12 singleton alive so it cannot change generations.
+            gpu.is_lost().then(|| gpu.device.clone())
+        } else {
+            None
+        };
         if let Some(gpu) = &*shared
             && !gpu.is_lost()
         {
+            #[cfg(windows)]
+            gpu.generation.check()?;
             return Ok(gpu.clone());
         }
         *shared = None;
-        let gpu = Self::open(start, program)?;
+        let gpu = Self::open(
+            start,
+            program,
+            #[cfg(windows)]
+            isocast_surfaces::generation::registry().register("DX12 renderer")?,
+        )?;
         *shared = Some(gpu.clone());
         Ok(gpu)
     }
@@ -139,14 +247,23 @@ impl Gpu {
     /// Report the rendering adapter without creating a device or starting a renderer.
     pub fn adapter_info() -> Result<wgpu::AdapterInfo> {
         #[cfg(windows)]
+        let _probe = isocast_surfaces::generation::registry().register("DX12 adapter probe")?;
+        #[cfg(windows)]
         let (adapter, _) = isocast_surfaces::engine_adapter()?;
         #[cfg(not(windows))]
         let adapter = Self::adapter()?;
         Ok(adapter.get_info())
     }
 
-    fn open(start: impl FnOnce() + Send + 'static, _program: bool) -> Result<Self> {
-        let candidate = Self::open_device()?;
+    fn open(
+        start: impl FnOnce() + Send + 'static,
+        _program: bool,
+        #[cfg(windows)] owner: isocast_surfaces::generation::Owner,
+    ) -> Result<Self> {
+        let candidate = Self::open_device(
+            #[cfg(windows)]
+            owner,
+        )?;
         #[cfg(windows)]
         let candidate = Self::warm_windows(candidate, _program)?;
         let (gpu, submissions) = candidate;
@@ -154,7 +271,9 @@ impl Gpu {
         Ok(gpu)
     }
 
-    fn open_device() -> Result<(Self, mpsc::Receiver<()>)> {
+    fn open_device(
+        #[cfg(windows)] generation: isocast_surfaces::generation::Owner,
+    ) -> Result<(Self, mpsc::Receiver<()>)> {
         #[cfg(windows)]
         let _span = isocast_diagnostics::gpu_startup_span("renderer.device");
         #[cfg(windows)]
@@ -174,6 +293,16 @@ impl Gpu {
             ..Default::default()
         }))
         .context("could not open the GPU")?;
+        #[cfg(windows)]
+        {
+            let hal = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }.context("not DX12")?;
+            unsafe {
+                hal.raw_device().SetPrivateDataInterface(
+                    &isocast_surfaces::generation::RECEIPT_ID,
+                    &generation.child("DX12 native device").native_receipt(),
+                )
+            }?;
+        }
         let lost = Arc::new(AtomicBool::new(false));
         let failed = lost.clone();
         device.set_device_lost_callback(move |_, _| failed.store(true, Ordering::Release));
@@ -185,6 +314,8 @@ impl Gpu {
                 queue,
                 poll,
                 lost,
+                #[cfg(windows)]
+                generation,
                 fault,
                 #[cfg(windows)]
                 warmed_bgra: Arc::default(),
@@ -235,10 +366,12 @@ impl Gpu {
             return Ok(candidate);
         }
         let result = if let Some(loss) = candidate.0.picture_warmup(program)? {
+            let generation = candidate.0.generation.clone();
             drop(candidate);
             isocast_surfaces::retry_with_dxc(&loss)?;
             let retry = (|| {
-                let fresh = Self::open_device().context("reopening the original DX12 adapter")?;
+                let fresh =
+                    Self::open_device(generation).context("reopening the original DX12 adapter")?;
                 if let Some(loss) = fresh.0.picture_warmup(program)? {
                     anyhow::bail!("device lost again: {loss}");
                 }
@@ -332,10 +465,14 @@ impl Gpu {
         let _span = isocast_diagnostics::gpu_startup_span("completion.spawn");
         let poll_fault = self.fault.clone();
         let polling = self.device.clone();
+        #[cfg(windows)]
+        let worker_owner = self.generation.child("DX12 completion worker");
         let poll_lost = self.lost.clone();
         std::thread::Builder::new()
             .name("GPU completion".into())
             .spawn(move || {
+                #[cfg(windows)]
+                let _owner = worker_owner;
                 start();
                 let polled = isocast_diagnostics::contain("GPU completion", || {
                     while submissions.recv().is_ok() {
@@ -401,8 +538,12 @@ impl Gpu {
             ..Completed::default()
         }));
         let callback = done.clone();
+        #[cfg(windows)]
+        let submission_owner = self.generation.child("DX12 pending submission");
         let fault = self.fault.clone();
         commands.on_submitted_work_done(move || {
+            #[cfg(windows)]
+            let _owner = submission_owner;
             let finish = move || match previous {
                 Some(previous) => previous.then(move |_| callback.finish()),
                 None => callback.finish(),

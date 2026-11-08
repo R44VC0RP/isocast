@@ -152,6 +152,7 @@ SCENARIOS = (
 if sys.platform == "win32":
     SCENARIOS += (
         "win_program_cut",
+        "win_idle_gpu_replacement",
         "win_media",
         "win_encoder_preflight",
         "win_preflight_no_decoder",
@@ -4605,6 +4606,49 @@ def check_pattern_take(e, path, manifest, cfg, layout, evidence, t0=None, label=
             lost = {round(h["time"] * fps) for h in checked.get("held", [])} if loss_limit(evidence) else None
             evidence.setdefault("sync", []).append(dict(sync_check(file, fps, lost=lost), output=file.name))
     return t0
+
+
+def scenario_win_idle_gpu_replacement(e, cfg, evidence):
+    """Local WARP RemoveDevice only at the next idle Start. Never a desktop TDR."""
+    if e.env.get('ISOCAST_TEST_IDLE_SUITE') != '1':
+        raise Skip('requires debug daemon and --engine-env ISOCAST_TEST_IDLE_SUITE=1 on WARP')
+    for mode in ('remove', 'leak'):
+        e.stop(); e.env['ISOCAST_TEST_IDLE_GPU'] = mode; e.start()
+        w, h, fps = 320, 180, 30
+        cfg = setup(e.root / mode, 'h264', width=w, height=h, fps=fps)
+        e.apply(cfg)
+        take(e, 2)
+        before = e.rpc('status')['windows_gpu']
+        logs = e.sock.with_suffix('.logs')
+        def receipts():
+            return [r['message'] for p in logs.glob('*.jsonl') for line in p.read_text(errors='replace').splitlines()
+                    if 'idle GPU replacement: generation' in line and (r := json.loads(line)).get('message','').startswith('idle GPU replacement:')]
+        count = len(receipts())
+        require(before['render_adapter']['warp'] and before['graphics_adapter'] == before['render_adapter'], str(before))
+        e.rpc('engine', {'running': False})
+        e.rpc('debug_set', {'enabled': True})
+        if mode == 'leak':
+            try: e.rpc('start', {'seconds': 5})
+            except RpcError as ex:
+                why = ex.error['message']; require('did not retire' in why and 'DX12 importer' in why, why)
+                evidence['held_owner'] = why
+            else: raise Failure('a take started while an old importer was held')
+            e.rpc('debug_set', {'enabled': False})
+        path, m = take(e, 5)
+        check_take(path, m, 5, expected_sources=['program'])
+        movie, row = manifest_file(path, m, 'program')
+        rows = pattern_rows(movie, pattern_specs([('p',(0,0,1,1))], w,h), (w,h), fps)
+        origin = pattern_fit(rows, 'p', pattern_period(fps))
+        require(len(rows) == 150 and row['dropped_frames'] == row['repeated_frames'] == 0 and
+                all(slot == i and pic['p'] == ('id', PATTERN_TAGS['bars'], (origin+i)%pattern_period(fps))
+                    for i,(slot,_,pic) in enumerate(rows)), 'replacement did not record 150 consecutive program pictures')
+        after = e.rpc('status')['windows_gpu']
+        require(all(before[k] == after[k] for k in ('graphics_adapter','render_adapter','shader_compiler')), f'route changed: {before} vs {after}')
+        # A healthy no-op Start cannot pass as a replacement. This line is
+        # emitted only after G+1's real queue signalled its fresh fence.
+        opened = receipts()[count:]
+        require(len(opened) == 1 and 'generation 2,' in opened[0] and 'fresh fence completed' in opened[0], f'new generation receipts: {opened}')
+        evidence[mode] = dict(frames=len(rows), adapter=after['graphics_adapter'], compiler=after['shader_compiler'], receipt=opened[0])
 
 
 def scenario_win_program_cut(e, cfg, evidence):

@@ -814,6 +814,8 @@ pub struct Renderer {
     blank: wgpu::BindGroup,
     /// What [`Renderer::render`] draws with, kept between calls.
     immediate: Mutex<Immediate>,
+    #[cfg(windows)]
+    owner: isocast_surfaces::generation::Owner,
 }
 
 /// The records of a one-off list of layers, and the buffer they go in.
@@ -872,6 +874,7 @@ impl Renderer {
     #[cfg(windows)]
     pub(crate) fn with_fresh_draw_state(&self) -> Self {
         Self {
+            owner: self.owner.child("renderer pipelines"),
             format: self.format,
             pipelines: self.pipelines.clone(),
             records_layout: self.records_layout.clone(),
@@ -1033,6 +1036,8 @@ impl Renderer {
         #[cfg(not(windows))]
         let pipelines = Mode::ALL.map(row);
         Self {
+            #[cfg(windows)]
+            owner: gpu.generation.child("renderer pipelines"),
             format,
             pipelines,
             records_layout,

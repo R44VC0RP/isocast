@@ -443,12 +443,14 @@ struct Encoder {
 } // namespace
 
 extern "C" {
-void *isocast_nvenc_open(void *device, const Config *config, char *error, size_t size) {
+void *isocast_nvenc_open(void *device, const Config *config, char *error, size_t size, int *retained) {
+    *retained = 0;
     auto encoder = new (std::nothrow) Encoder();
     if (!encoder) { std::snprintf(error, size, "allocate NVIDIA encoder state: out of memory"); return nullptr; }
     if (encoder->open(device, *config)) {
         std::snprintf(error, size, "%s", encoder->error);
         if (encoder->release() == 0) delete encoder;
+        else *retained = 1;
         return nullptr;
     }
     return encoder;

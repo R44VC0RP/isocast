@@ -16,7 +16,11 @@ pub type Frame = <NativePlatform as isocast_engine::Platform>::Frame;
 #[cfg(windows)]
 pub fn native() -> &'static NativePlatform {
     static PLATFORM: std::sync::OnceLock<NativePlatform> = std::sync::OnceLock::new();
-    PLATFORM.get_or_init(NativePlatform::default)
+    PLATFORM.get_or_init(|| {
+        // A preview can open the first renderer before there has been a take.
+        isocast_surfaces::generation::registry().manage_idle_replacement();
+        NativePlatform::default()
+    })
 }
 
 #[cfg(not(windows))]

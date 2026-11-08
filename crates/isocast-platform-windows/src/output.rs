@@ -23,6 +23,7 @@ pub struct OutputPool {
     frames: Vec<Frame>,
     staging: Vec<u8>,
     failed: bool,
+    _owner: isocast_surfaces::generation::Owner,
 }
 
 impl OutputPool {
@@ -46,6 +47,7 @@ impl OutputPool {
             .try_reserve_exact(MAX_POOL_FRAMES)
             .context("could not allocate output frame slots")?;
         Ok(Self {
+            _owner: device.generation().child("output pool"),
             device,
             width,
             height,
@@ -58,6 +60,7 @@ impl OutputPool {
     }
 
     fn slot(&mut self) -> Result<Option<usize>> {
+        self.device.generation().check()?;
         if self.failed {
             bail!("output pool is unusable after a failed D3D11 upload; create a new pool");
         }

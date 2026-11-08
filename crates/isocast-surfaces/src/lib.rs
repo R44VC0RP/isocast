@@ -30,6 +30,8 @@ mod mac;
 #[cfg(target_os = "macos")]
 pub use mac::{Exporter, Surface, fetch, host_now, retained_surfaces};
 
+#[cfg(any(windows, test))]
+pub mod generation;
 #[cfg(all(windows, feature = "wgpu"))]
 mod shader_compiler;
 #[cfg(windows)]

@@ -167,6 +167,13 @@ impl ReplayOutput {
     }
 }
 
+#[test]
+fn live_gpu_client_names_a_starting_replay() {
+    let mut state = State::default();
+    state.replay.slot_mut(CanvasId::Vertical).starting = true;
+    assert_eq!(state.live_gpu_client(), Some("stop the replay buffer"));
+}
+
 impl Daemon {
     pub(super) fn replay_status(&self, canvas: CanvasId) -> ReplayStatus {
         let state = self.state.read();

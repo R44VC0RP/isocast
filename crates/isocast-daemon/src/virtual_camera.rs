@@ -87,6 +87,13 @@ fn unavailable() -> Option<String> {
     None
 }
 
+#[test]
+fn live_gpu_client_names_a_stopping_virtual_camera() {
+    let mut state = State::default();
+    state.camera.stopping = true;
+    assert_eq!(state.live_gpu_client(), Some("stop the virtual camera"));
+}
+
 /// Discovery may access sysfs; never call under the daemon state lock.
 pub(super) fn availability(status: &mut VirtualCameraStatus) {
     if matches!(

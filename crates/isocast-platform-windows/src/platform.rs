@@ -56,15 +56,166 @@ pub enum Capture {
 }
 
 impl WindowsPlatform {
+    /// Called by the daemon under start admission, BEFORE reserving a take.
+    /// Never called by an encoder, a capture fault, or a compositor retry.
+    pub fn prepare_idle_gpu<G>(
+        &self,
+        check_idle: impl Fn() -> Result<G>,
+        release_idle: impl FnOnce() + Send + 'static,
+    ) -> Result<()> {
+        let registry = isocast_surfaces::generation::registry();
+        let gpu = Gpu::cached_windows();
+        #[cfg(debug_assertions)]
+        let _held_importer = inject_idle_removal(gpu.as_ref(), &check_idle)?;
+        let native_lost = self.device.try_lock().is_some_and(|cache| {
+            cache
+                .as_ref()
+                .is_some_and(|d| unsafe { d.raw().GetDeviceRemovedReason() }.is_err())
+        });
+        if !Gpu::needs_idle_replacement(gpu.as_ref(), native_lost, registry.retiring()) {
+            return Ok(());
+        }
+        let compiler = gpu
+            .as_ref()
+            .map(|_| isocast_surfaces::shader_compiler())
+            .transpose()
+            .map_err(|e| anyhow!(e.to_string()))?;
+        drop(gpu);
+        let luid = isocast_surfaces::capture_adapter_luid()?;
+        let number = registry.replace(
+            Duration::from_secs(3),
+            check_idle,
+            |receipt| {
+                let cache = self.device.clone();
+                std::thread::Builder::new()
+                    .name("idle GPU retirement".into())
+                    .spawn(move || {
+                        let _until_exit = receipt;
+                        Gpu::retire_windows_cache();
+                        let old = cache.lock().take();
+                        drop(old);
+                        release_idle();
+                    })?;
+                Ok(())
+            },
+            |candidate| {
+                let native = GraphicsDevice::open(luid, candidate.owner("D3D11 device"))?;
+                // Prove the new native queue works before publishing either cache.
+                use windows::Win32::Graphics::Direct3D12::{D3D12_FENCE_FLAG_NONE, ID3D12Fence};
+                let gpu = Gpu::windows_candidate(&candidate, system::real_time_thread)?;
+                {
+                    let device = unsafe { gpu.device.as_hal::<wgpu::hal::api::Dx12>() }
+                        .context("expected DX12 replacement")?;
+                    let device = device.raw_device();
+                    let adapter = unsafe { device.GetAdapterLuid() };
+                    anyhow::ensure!(
+                        (adapter.LowPart, adapter.HighPart) == luid
+                            && native.adapter_luid() == luid,
+                        "replacement adapter differs from pin"
+                    );
+                    if let Some(expected) = compiler.as_ref() {
+                        anyhow::ensure!(
+                            isocast_surfaces::shader_compiler()
+                                .map_err(|e| anyhow!(e.to_string()))?
+                                == *expected,
+                            "replacement changed the qualified shader compiler"
+                        );
+                    }
+                    let fence: ID3D12Fence =
+                        unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }?;
+                    let queue = unsafe { gpu.queue.as_hal::<wgpu::hal::api::Dx12>() }
+                        .context("expected replacement queue")?;
+                    unsafe {
+                        queue.as_raw().Signal(&fence, 1)?;
+                    }
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    while unsafe { fence.GetCompletedValue() } == 0
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    anyhow::ensure!(
+                        unsafe { fence.GetCompletedValue() } == 1,
+                        "replacement fence did not complete"
+                    );
+                    unsafe {
+                        device.GetDeviceRemovedReason()?;
+                        native.raw().GetDeviceRemovedReason()?;
+                    }
+                }
+                let mut cache = self.device.lock();
+                Ok(gpu.publish_windows_pair(candidate, || *cache = Some(native)))
+            },
+        )?;
+        isocast_diagnostics::diagnostic!("info"; "idle GPU replacement: generation {number}, pinned adapter {luid:?}, fresh fence completed");
+        Ok(())
+    }
+
     fn graphics(&self) -> Result<GraphicsDevice> {
         let mut current = self.device.lock();
         if let Some(device) = &*current {
+            device.generation().check()?;
             return Ok(device.clone());
         }
         let device = GraphicsDevice::new()?;
         *current = Some(device.clone());
         Ok(device)
     }
+}
+
+#[cfg(debug_assertions)]
+fn inject_idle_removal<G>(
+    gpu: Option<&Gpu>,
+    check_idle: &impl Fn() -> Result<G>,
+) -> Result<Option<Dx12Importer>> {
+    static FIRED: AtomicBool = AtomicBool::new(false);
+    use windows::Win32::Graphics::Direct3D12::ID3D12Device5;
+    use windows::core::Interface;
+    let Some(gpu) = gpu else { return Ok(None) };
+    let mode = std::env::var("ISOCAST_TEST_IDLE_GPU").unwrap_or_default();
+    if !isocast_diagnostics::developer() || !matches!(mode.as_str(), "remove" | "leak") {
+        return Ok(None);
+    }
+    let Some(setup) = std::env::var_os("ISOCAST_SETUP").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    if !setup.is_absolute()
+        || std::env::var_os("ISOCAST_SOCKET").map(PathBuf::from)
+            != Some(setup.with_file_name("d.sock"))
+    {
+        return Ok(None);
+    }
+    let info = gpu.device.adapter_info();
+    anyhow::ensure!(
+        (info.vendor, info.device) == (0x1414, 0x008c),
+        "idle device injection requires WARP"
+    );
+    let _idle = check_idle()?;
+    if FIRED.swap(true, Ordering::AcqRel) {
+        return Ok(None);
+    }
+    let hold = (mode == "leak")
+        .then(|| Dx12Importer::new(gpu))
+        .transpose()?;
+    let hal = unsafe { gpu.device.as_hal::<wgpu::hal::api::Dx12>() }.context("expected DX12")?;
+    unsafe {
+        hal.raw_device().cast::<ID3D12Device5>()?.RemoveDevice();
+    }
+    anyhow::ensure!(
+        unsafe { hal.raw_device().GetDeviceRemovedReason() }.is_err(),
+        "injected removal not confirmed"
+    );
+    Ok(hold)
+}
+
+#[test]
+fn idle_start_is_a_noop_while_d3d11_open_owns_the_cache() -> Result<()> {
+    let platform = WindowsPlatform::default();
+    let _opening = platform.device.lock();
+    platform.prepare_idle_gpu::<()>(
+        || panic!("contention is not removal"),
+        || panic!("unexpected teardown"),
+    )
 }
 
 /// The per-engine NVENC preset calibration, beside the machine calibration
@@ -537,7 +688,12 @@ impl Platform for WindowsPlatform {
         height: u32,
         fps: u32,
     ) -> Result<Box<dyn isocast_engine::record::CameraSink<Frame>>> {
-        crate::virtual_camera::open(&self.graphics()?, width, height, fps)
+        crate::virtual_camera::open(
+            &self.graphics()?.owned_by("virtual camera"),
+            width,
+            height,
+            fps,
+        )
     }
 
     fn now(&self) -> Time {
@@ -566,10 +722,12 @@ impl Platform for WindowsPlatform {
     }
 
     fn windows_gpu_route(&self, inventory: bool) -> Option<isocast_protocol::api::WindowsGpuRoute> {
-        let graphics = self
-            .device
-            .try_lock()
-            .and_then(|guard| guard.as_ref().map(crate::route::adapter));
+        let graphics = self.device.try_lock().and_then(|guard| {
+            guard
+                .as_ref()
+                .filter(|d| d.generation().check().is_ok())
+                .map(crate::route::adapter)
+        });
         Some(crate::route::snapshot(graphics, inventory))
     }
 
@@ -598,7 +756,7 @@ impl Platform for WindowsPlatform {
     fn open_media(&self, path: &Path, part: MediaPart) -> Result<crate::media::Reader> {
         // Pictures go to the engine's device; sound needs none.
         let device = match part {
-            MediaPart::Video => Some(self.graphics()?),
+            MediaPart::Video => Some(self.graphics()?.owned_by("media video reader")),
             MediaPart::Audio => None,
         };
         crate::media::open(device, path, part)
@@ -809,13 +967,16 @@ impl Platform for WindowsPlatform {
     }
 
     fn recording_activity(&self) -> Result<Option<Box<dyn Send>>> {
-        match crate::RecordingPowerGuard::new() {
-            Ok(guard) => Ok(guard.map(|guard| Box::new(guard) as Box<dyn Send>)),
-            Err(error) => {
-                isocast_diagnostics::diagnostic!("warn"; "Windows recording power policy: {error:#}");
-                Ok(None)
-            }
-        }
+        let take = isocast_surfaces::generation::registry().take()?;
+        let power = crate::RecordingPowerGuard::new().unwrap_or_else(|error| {
+            isocast_diagnostics::diagnostic!("warn"; "Windows recording power policy: {error:#}");
+            None
+        });
+        Ok(Some(Box::new((power, take))))
+    }
+
+    fn retain_frame(frame: &Frame, _usage: isocast_engine::FrameUse) -> Option<Frame> {
+        frame.generation().check().ok().map(|()| frame.clone())
     }
 
     fn frame_pool(&self, width: u32, height: u32) -> Result<OutputPool> {
@@ -1077,7 +1238,7 @@ impl Platform for WindowsPlatform {
                         #[cfg(debug_assertions)]
                         changed_profile: false,
                         platform: self.clone(),
-                        device: device.clone(),
+                        device: device.owned_by("recording writer"),
                         spec: file.spec.clone(),
                         recording: file.recording,
                         take: file.take,
@@ -1162,7 +1323,7 @@ impl Platform for WindowsPlatform {
             ScreenTarget::Application { app, .. } => app,
         };
         crate::broker::recovery::open(
-            self.graphics()?,
+            self.graphics()?.owned_by("pinned capture"),
             source.to_owned(),
             crate::devices::screen_target(target)?,
             fps,
@@ -1180,7 +1341,7 @@ impl Platform for WindowsPlatform {
         sink: VideoSink<Frame>,
     ) -> Result<(Capture, CaptureFormat)> {
         capture_camera(
-            &self.graphics()?,
+            &self.graphics()?.owned_by("camera capture"),
             device,
             request,
             canvas,
@@ -1232,7 +1393,11 @@ impl Platform for WindowsPlatform {
     ) -> Result<(Capture, CaptureFormat, Arc<dyn BrowserControl>)> {
         // A failed GPU upload leaves a pool unusable: the source asks for a
         // new one (a few times, then it stops with the reason).
-        let (device, width, height) = (self.graphics()?, page.width, page.height);
+        let (device, width, height) = (
+            self.graphics()?.owned_by("browser source"),
+            page.width,
+            page.height,
+        );
         let make_pool = move || OutputPool::new(device.clone(), width, height);
         crate::browser::start(
             crate::browser::Helper::installed()?,

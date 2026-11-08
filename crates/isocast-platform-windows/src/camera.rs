@@ -1486,6 +1486,7 @@ impl Drop for Session {
             );
             // No detached cleanup thread and no use-after-recycle. This is a
             // fatal GPU quarantine, not a reusable stop/reopen path.
+            resources.graphics.generation().clone().quarantine();
             std::mem::forget(resources);
         }
     }
@@ -1971,6 +1972,7 @@ impl Drop for SharedCamera {
             eprintln!(
                 "Windows shared camera teardown: {error:#}; retaining owned GPU resources until process exit"
             );
+            self.graphics.generation().clone().quarantine();
             std::mem::forget(self.pixels.take());
             std::mem::forget(std::mem::take(&mut self.pending));
         }

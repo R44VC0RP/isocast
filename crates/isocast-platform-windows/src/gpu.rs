@@ -34,7 +34,6 @@ struct FrameLease {
 }
 
 pub struct Dx12Importer {
-    device: wgpu::Device,
     raw: ID3D12Device,
     queue: ID3D12CommandQueue,
     luid: (u32, i32),
@@ -42,6 +41,10 @@ pub struct Dx12Importer {
     // fence pair, so repeated device replacements cannot grow this cache.
     fence: Option<(ID3D11Fence, ID3D12Fence)>,
     surfaces: HashMap<usize, Surface>,
+    // Drop raw COM references BEFORE the wgpu owner of the DX12 DLLs. An
+    // importer can be the last owner after the renderer cache is evicted.
+    device: wgpu::Device,
+    generation: isocast_surfaces::generation::Owner,
 }
 
 struct Surface {
@@ -55,6 +58,7 @@ struct Surface {
 
 impl Dx12Importer {
     pub fn new(gpu: &Gpu) -> Result<Self> {
+        gpu.generation().check()?;
         let raw = unsafe { gpu.device.as_hal::<hal::api::Dx12>() }
             .context("Windows frame import requires a wgpu DX12 device")?
             .raw_device()
@@ -73,10 +77,12 @@ impl Dx12Importer {
             luid: (luid.LowPart, luid.HighPart),
             fence: None,
             surfaces: HashMap::new(),
+            generation: gpu.generation().child("DX12 importer"),
         })
     }
 
     fn check_adapter(&self, frame: &Frame) -> Result<()> {
+        self.generation.check_peer(frame.generation())?;
         if frame.adapter_luid() != self.luid {
             bail!(
                 "Windows frame adapter {:?} differs from compositor adapter {:?}; open capture and wgpu on the same GPU",
@@ -144,6 +150,15 @@ impl Dx12Importer {
         }
         .context("could not open the captured texture on DX12")?;
         let resource = resource.context("DX12 returned no capture texture")?;
+        unsafe {
+            resource.SetPrivateDataInterface(
+                &isocast_surfaces::generation::RECEIPT_ID,
+                &self
+                    .generation
+                    .child("DX12 imported texture")
+                    .native_receipt(),
+            )
+        }?;
         let desc = unsafe { resource.GetDesc() };
         if desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
             || desc.Width != u64::from(frame.width())
@@ -323,6 +338,66 @@ mod tests {
     use super::*;
     use crate::{GraphicsDevice, OutputPool};
     use isocast_engine::FramePool;
+
+    #[test]
+    #[ignore = "requires an isolated Windows WARP/MF run"]
+    fn idle_retirement_counts_native_com_and_actual_mf_inputs() -> Result<()> {
+        let registry = isocast_surfaces::generation::Registry::default();
+        let d = GraphicsDevice::open(
+            isocast_surfaces::capture_adapter_luid()?,
+            registry.register("device")?,
+        )?;
+        let raw = d.raw().clone(); // deliberately outlives every Rust device wrapper
+        let mut pool = OutputPool::new(d.clone(), 160, 90)?;
+        let frame = pool.draw(&mut |b, _| b.fill(128))?.context("no frame")?;
+        let spec = isocast_engine::LiveVideoSpec {
+            profile: isocast_protocol::api::H264Profile::High,
+            width: 160,
+            height: 90,
+            fps: 10,
+            bitrate_kbps: 500,
+            constant_bitrate: false,
+            keyframe_interval: 20,
+            low_latency: true,
+        };
+        let mut mf = crate::MfEncoder::new(&d, &spec, crate::MfMode::Software)?;
+        assert!(mf.try_encode(&frame, crate::now(), true)?);
+        let (generation, owners) = registry.owners();
+        assert_eq!(frame.generation().number(), generation);
+        for kind in [
+            "MF encoder worker",
+            "MF converter",
+            "MF in-flight sample",
+            "output pool",
+            "pooled texture",
+        ] {
+            assert!(owners.contains_key(kind), "{kind} missing: {owners:?}");
+        }
+        mf.finish()?;
+        drop(mf);
+        let error = registry
+            .replace(Duration::ZERO, || Ok(()), |_| Ok(()), |_| unreachable!())
+            .unwrap_err();
+        assert!(error.to_string().contains("pooled texture"));
+        assert!(frame.wait_ready(Duration::ZERO).is_err()); // refuse before touching its fence
+        assert!(pool.take().is_err());
+        drop((frame, pool, d));
+        assert_eq!(
+            registry.owners().1.into_keys().collect::<Vec<_>>(),
+            ["D3D11 native device"]
+        );
+        drop(raw);
+        assert_eq!(
+            registry.replace(
+                Duration::from_secs(2),
+                || Ok(()),
+                |_| Ok(()),
+                |c| Ok(c.publish(|| {}))
+            )?,
+            generation + 1
+        );
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires a native DX12 GPU; run under gpu.lock"]

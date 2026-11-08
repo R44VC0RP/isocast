@@ -776,6 +776,7 @@ unsafe extern "C" {
         spec: *const Config,
         error: *mut c_char,
         size: usize,
+        retained: *mut i32,
     ) -> *mut c_void;
     fn isocast_nvenc_error(encoder: *mut c_void) -> *const c_char;
     fn isocast_nvenc_sessions() -> u32;
@@ -894,6 +895,7 @@ struct Session {
     detach: AtomicBool,
     quarantined: AtomicBool,
     _device: GraphicsDevice,
+    _owner: isocast_surfaces::generation::Owner,
 }
 
 impl Session {
@@ -910,6 +912,7 @@ impl Session {
         // Never free native resources, frame leases or their device after an
         // uncertain failure, including a driver call still running at timeout.
         if !self.quarantined.swap(true, Ordering::AcqRel) {
+            self._owner.clone().quarantine();
             std::mem::forget(self.clone());
         }
         self.changed.notify_all();
@@ -1366,15 +1369,22 @@ impl NvencEncoder {
             },
         };
         let mut error = [0 as c_char; 512];
+        device.generation().check()?;
+        let owner = device.generation().child("NVENC session");
+        let mut retained = 0;
         let native = unsafe {
             isocast_nvenc_open(
                 device.raw().as_raw(),
                 &config,
                 error.as_mut_ptr(),
                 error.len(),
+                &mut retained,
             )
         };
         let native = NonNull::new(native).ok_or_else(|| {
+            if retained != 0 {
+                owner.clone().quarantine();
+            }
             anyhow!(
                 "encoder.nvenc: {}",
                 unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy()
@@ -1393,6 +1403,7 @@ impl NvencEncoder {
         })();
         if let Err(error) = headers {
             if unsafe { isocast_nvenc_close(native.as_ptr()) } != 0 {
+                owner.quarantine();
                 std::mem::forget(device.clone());
             }
             return Err(error);
@@ -1407,11 +1418,13 @@ impl NvencEncoder {
             detach: AtomicBool::new(false),
             quarantined: AtomicBool::new(false),
             _device: device.clone(),
+            _owner: owner,
         });
         let worker = match CompletionWorker::register(device.adapter_luid(), session.clone()) {
             Ok(worker) => worker,
             Err(error) => {
                 if unsafe { isocast_nvenc_close(native.as_ptr()) } != 0 {
+                    session._owner.clone().quarantine();
                     std::mem::forget(session);
                 }
                 return Err(error);
