@@ -879,6 +879,105 @@ def pulse_check(name, flashes, beeps, end, fps, lost=None):
             "skipped_flashes": skipped}
 
 
+BROWSER_PULSE_PERIOD = 26 / 27  # 28 + 8/9 frames at 30 fps: 9 pulses sample all 9 sub-frame phases
+
+
+def browser_sync_check(path, fps=30, period=BROWSER_PULSE_PERIOD, lost=None, check_median=True, near=None):
+    """Browser Take 3 A/V oracle (asynchronous ~60 Hz rAF + WebAudio captured at
+    `fps`). Unlike engine-internal `test_pattern` + `tone` (shared clock), an
+    asynchronous page's rAF paint can land in either adjacent `fps` slot, giving
+    an inherent quantization span up to `1/fps + 2 ms` when the capture pacer is
+    phase-aligned, while the signed median across phase-stepped pulses (`26/27 s`
+    = `28 + 8/9` frames at 30 fps) isolates any constant A/V shift and must stay
+    within half a frame (`0.5/fps`) on hardware and `windows-browser`. On hosted
+    Linux (`gtk4-broadwayd` + `llvmpipe`), two free-running 30 Hz timers
+    (`isocast-browser`'s `glib::timeout` snapshot loop and `isocastd`'s
+    `IsoRunner`) plus 60 Hz `rAF` span `1/fps + 1/60 + 2 ms` (`52 ms` at 30 fps,
+    still catching any >= 2-frame shift of 66.7 ms) without a median gate."""
+    values = video_samples(path, "crop=iw:ih/4:0:ih*3/4")
+    flashes = [t for i, (t, v) in enumerate(values) if v > 128 and (i == 0 or values[i - 1][1] <= 128)]
+    samples = pcm(path)
+    beeps, quiet = [], RATE
+    for i, sample in enumerate(samples):
+        if abs(sample) > 0.01:
+            if quiet >= RATE // 20:
+                beeps.append(i / RATE)
+            quiet = 0
+        else:
+            quiet += 1
+    end = values[-1][0] + 1 / fps
+    if lost is not None:
+        shown = {round(t * fps) for t, _ in values}
+        lost = set(lost) | (set(range(min(shown), max(shown) + 1)) - shown)
+    result = browser_pulse_check(
+        path.name, flashes, beeps, end, fps, period, lost, check_median=check_median, near=near
+    )
+    return {"flashes": len(flashes), "beeps": len(beeps), **result}
+
+
+def browser_pulse_check(name, flashes, beeps, end, fps, period=BROWSER_PULSE_PERIOD, lost=None,
+                        check_median=True, near=None):
+    """Check browser flash/beep pulses (Take 3 only):
+    - per-pulse bound `near`: defaults to `1/fps + 2 ms` (hardware and
+      `windows-browser`), or `1/fps + 1/60 + 2 ms` (`52 ms` at 30 fps) on hosted
+      Linux (two free-running 30 Hz timers + 60 Hz rAF);
+    - median signed offset (`beep - flash`): `|median| <= 0.5/fps` when
+      `check_median` is True (hardware and `windows-browser`);
+    - strict (`lost` None): every interior pulse paired, no held/dropped slots;
+    - hold-accounted (`lost` set): held/dropped slots accounted as in `pulse_check`."""
+    edge = (math.floor(0.15 * fps) + 0.5) / fps
+    if near is None:
+        near = 1 / fps + 0.002
+    half_frame = 0.5 / fps
+    b = [t for t in beeps if edge < t < end - edge]
+    expected_min = max(1, int((end - 2 * edge) / period))
+    require(len(b) >= expected_min,
+            f"{name}: missing pulses ({len(b)} beeps in {end:.3f}s, expected >= {expected_min})")
+    require(all(abs((y - x) - period) <= near for x, y in zip(b, b[1:])),
+            f"{name}: beep cadence is not {period:.4f}s")
+    paired, signed, late, skipped = set(), [], [], []
+    for beep in b:
+        match = [x for x in flashes if abs(x - beep) <= near]
+        require(len(match) <= 1, f"{name}: {len(match)} flashes near the beep at {beep:.4f} s")
+        if match:
+            paired.add(match[0])
+            signed.append(beep - match[0])
+            continue
+        if lost is None:
+            require(False, f"{name}: no flash within {near * 1000:.2f}ms of the beep at {beep:.4f} s")
+        slot = round(beep * fps)
+        if slot not in lost and math.ceil(beep * fps) in lost:
+            slot = math.ceil(beep * fps)
+        shown = slot
+        while shown in lost:
+            shown += 1
+        require(shown > slot, f"{name}: no flash within {near * 1000:.2f}ms of the beep at {beep:.4f} s "
+                              f"(slot {slot} was shown, not dropped or held)")
+        after = [x for x in flashes if slot / fps - 1e-6 <= x <= shown / fps + near]
+        require(len(after) <= 1, f"{name}: {len(after)} flashes after the lost slots at {beep:.4f} s")
+        if after:
+            paired.add(after[0])
+            late.append(round(beep, 4))
+        else:
+            skipped.append(round(beep, 4))
+    f_interior = [x for x in flashes if edge + near < x < end - edge - near]
+    stray = [x for x in f_interior if x not in paired and not any(abs(x - y) <= near for y in beeps)]
+    require(not stray, f"{name}: a flash at {stray[0]:.4f} s without its beep" if stray else "")
+    require(len(signed) >= max(4, expected_min // 2),
+            f"{name}: too few paired pulses ({len(signed)}) to measure median sync")
+    max_ms = max(abs(d) for d in signed) * 1000
+    median_ms = statistics.median(signed) * 1000
+    require(max_ms <= near * 1000 + 1e-6,
+            f"{name}: beep/flash offset {max_ms:.2f}ms exceeds bound ({near * 1000:.2f}ms)")
+    if check_median:
+        require(abs(median_ms) <= half_frame * 1000 + 1e-6,
+                f"{name}: median beep/flash offset {median_ms:+.2f}ms exceeds half a frame ({half_frame * 1000:.2f}ms)")
+    out = {"max_sync_ms": round(max_ms, 3), "median_sync_ms": round(median_ms, 3)}
+    if lost is not None:
+        out.update(late_flashes=late, skipped_flashes=skipped)
+    return out
+
+
 def head_slots(f):
     """A program file's slots before its first picture: the engine counts
     them in dropped_frames (#150), though the file itself starts after them.
@@ -3993,6 +4092,35 @@ def oracle_rules_selftest(work):
         "hosted: a flickering flash (two onsets at one beep)": (pulses(flicker=True), "fail"),
         "strict: a flickering flash": (pulses(flicker=True, hosted_rules=False), "fail"),
     })
+    # Browser Take 3 oracle: allows single-pulse 1/fps + 2 ms rAF quantization
+    # when the median is within half a frame, but rejects > 1/fps + 2 ms spikes
+    # and rejects constant >= half-frame median shifts.
+    def browser_pulses(offsets_ms, lost=None, check_median=True, near=None):
+        p = BROWSER_PULSE_PERIOD
+        beeps = [0.4 + k * p for k in range(len(offsets_ms))]
+        flashes = [b - (d / 1000.0) for b, d in zip(beeps, offsets_ms)]
+        try:
+            browser_pulse_check("browser.mov", flashes, beeps, 9.0, 30, p, lost,
+                                check_median=check_median, near=near)
+            return "pass"
+        except Failure:
+            return "fail"
+    cases.update({
+        "browser pulses: 33.85 ms quantization spike with 0.52 ms median": (
+            browser_pulses([0.46, 0.67, 0.67, 33.85, 0.52, 0.52, 0.52, 0.52, 0.52]), "pass"),
+        "browser pulses: 36.5 ms spike exceeds 1/fps + 2 ms": (
+            browser_pulses([0.5, 0.5, 0.5, 36.5, 0.5, 0.5, 0.5, 0.5, 0.5]), "fail"),
+        "browser pulses: constant +20 ms shift exceeds half-frame median": (
+            browser_pulses([20.0] * 9), "fail"),
+        "browser pulses: constant -33.3 ms one-frame shift fails": (
+            browser_pulses([-33.3] * 9), "fail"),
+        "hosted linux browser pulses: 42.81 ms free-running 30 Hz + 60 Hz rAF span": (
+            browser_pulses([-42.81, -13.14, -16.81, -20.48, -24.27, -28.0, -31.71, -35.41, -39.21],
+                           lost=set(), check_median=False, near=1 / 30 + 1 / 60 + 0.002), "pass"),
+        "hosted linux browser pulses: 2-frame (66.7 ms) shift still fails": (
+            browser_pulses([-66.7] * 9, lost=set(), check_median=False,
+                           near=1 / 30 + 1 / 60 + 0.002), "fail"),
+    })
     # A take whose ISO file is missing, and a file far later than the cap.
     def take_rows(files, sources):
         manifest = {"status": "complete", "errors": [], "files": [
@@ -6398,6 +6526,135 @@ function tone() {
                 and 0.8 < holes[1][0] - holes[0][0] < 1.4,
                 f"{source}: expected distinct suspend and handoff holes, got {holes}")
         evidence["lifecycle"][source] = {"dropouts": entry["audio_dropouts"], "holes_s": holes}
+
+    # A third take checks browser A/V sync on simultaneous flash + beep pulses
+    # using `browser_sync_check` (`1/fps + 2 ms` per-pulse bound for ~60 Hz rAF
+    # adjacent-slot quantization + `|median| <= 0.5/fps` across `26/27 s`
+    # phase-stepped pulses so any constant shift >= half a frame fails):
+    # - strict (`lost=None`, zero drops, median gate) on test Macs and Windows GPU hardware (`exon-desk`);
+    # - sequence-barcode hold-accounted `1/fps + 1/60 + 2 ms` (`52 ms` at 30 fps)
+    #   per-pulse bound (no median gate) on hosted Linux, where two free-running
+    #   30 Hz timers (`isocast-browser`'s `glib::timeout` snapshot loop and
+    #   `isocastd`'s `IsoRunner`) plus 60 Hz `rAF` span `1/30 + 1/60 = 50 ms` on
+    #   software Broadway/llvmpipe while still catching any >= 2-frame (66.7 ms) shift;
+    # - skipped on hosted macOS VMs (no CoreAudio hardware, #203) and on
+    #   software-WARP Windows VMs (`windows-latest` and `aws-win`, which have no
+    #   GPU and no audio output device so `baseLatency + outputLatency == 0 ms`
+    #   against 32–66 ms CPU Chromium + WARP DWM composition; `win_browser` stays
+    #   strict there, and `exon-desk` runs Take 3 strictly).
+    hosted_av = bool(loss_limit(evidence))
+    if hosted_av and sys.platform == "darwin":
+        evidence["av_sync"] = {
+            "skipped": "hosted macOS VMs lack CoreAudio hardware so WebKit's dummy AudioWorklet timer stalls under rAF + software snapshots (#203); strict on test Macs and exon-desk, hold-accounted on hosted Linux",
+        }
+        return
+    if WINDOWS and software_graphics(e, cfg):
+        evidence["av_sync"] = {
+            "skipped": "Windows software WARP VMs (windows-latest, aws-win) have no GPU and no audio output device (0 ms WASAPI compensation vs 32–66 ms CPU WARP DWM composition); win_browser stays strict here and exon-desk runs Take 3 strictly",
+        }
+        return
+    hold_accounted = hosted_av
+    hosted_linux = hosted_av and LINUX
+    check_median = not hosted_linux
+    pulse_near = (1 / 30 + 1 / 60 + 0.002) if hosted_linux else (1 / 30 + 0.002)
+    av_page = e.root / "av_pulse.html"
+    av_page.write_text("""<body style='margin:0;background:#000;overflow:hidden'>
+<canvas id='c' width='320' height='180' style='width:100vw;height:100vh;display:block'></canvas>
+<script>
+(async () => {
+  const ctx = new AudioContext({sampleRate: 48000});
+  await ctx.resume();
+  const osc = ctx.createOscillator();
+  osc.frequency.value = 1000;
+  const gain = ctx.createGain();
+  gain.gain.value = 0;
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start();
+  const P = 26 / 27;
+  const t0 = ctx.currentTime + 0.4;
+  for (let k = 0; k <= 25; k++) {
+    gain.gain.setValueAtTime(0.5, t0 + k * P);
+    gain.gain.setValueAtTime(0.0, t0 + k * P + 0.08);
+  }
+  const g = document.getElementById('c').getContext('2d');
+  let seq = 0;
+  function frame() {
+    seq = (seq + 1) & 0xffff || 1;
+    const rel = ctx.currentTime - t0;
+    const k = Math.floor(rel / P);
+    const on = rel >= 0.0 && k <= 25 && (rel - k * P) < 0.1;
+    for (let b = 0; b < 16; b++) {
+      g.fillStyle = ((seq >> (15 - b)) & 1) ? '#fff' : '#000';
+      g.fillRect(b * 20, 0, 20, 45);
+    }
+    g.fillStyle = '#fff';
+    g.fillRect(0, 45, 320, 45);
+    g.fillStyle = on ? '#fff' : '#000';
+    g.fillRect(0, 90, 320, 90);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script></body>""")
+    cfg["sources"] = [{"id": "web", "kind": "browser", "file": str(av_page), "width": 320,
+                       "height": 180, "fps": 30, "control_audio": True}]
+    e.apply(cfg)
+    e.rpc("engine", {"running": True}, timeout=60 if WINDOWS else 30)
+
+    def av_ready():
+        try:
+            png = base64.b64decode(e.rpc("snapshot", {"source": "web"})["png_base64"])
+        except RpcError:
+            return False
+        probe_png = e.root / "av_ready.png"
+        probe_png.write_bytes(png)
+        px = ffmpeg("-i", probe_png, "-vf", "crop=iw:ih/4:0:ih/4,scale=1:1:flags=area",
+                    "-pix_fmt", "gray", "-f", "rawvideo", "-").stdout
+        return bool(px) and px[0] > 128
+
+    until(av_ready, 60 if WINDOWS else 30, "browser A/V pulse page painting", interval=0.2)
+    time.sleep(1.0)
+    av_started = e.rpc("start", {"seconds": 9}, timeout=60 if WINDOWS else 30)
+    av_path = Path(av_started["manifest"])
+    av_manifest = until(lambda: finished(av_started["manifest"]), 45, "browser A/V pulse finalization")
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+    evidence["av_sync"] = {"mode": "hold_accounted" if hold_accounted else "strict"}
+    for source in ("web", "program"):
+        file, entry = manifest_file(av_path, av_manifest, source)
+        require(entry["audio_dropouts"] == 0, f"{source}: browser A/V pulse take had audio dropouts")
+        if not hosted_av:
+            require(entry["dropped_frames"] == 0,
+                    f"{source}: browser A/V pulse take dropped {entry['dropped_frames']} frame(s)")
+        lost = None
+        if hold_accounted:
+            frames_info = json.loads(command([
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_frames", "-show_entries", "frame=best_effort_timestamp_time",
+                "-of", "json", file
+            ], timeout=90).stdout)["frames"]
+            times = [float(f["best_effort_timestamp_time"]) for f in frames_info]
+            bars = ffmpeg(
+                "-i", file, "-map", "0:v:0", "-an",
+                "-vf", "crop=iw:ih/4:0:0,scale=16:1:flags=area",
+                "-fps_mode", "passthrough", "-pix_fmt", "gray", "-f", "rawvideo", "-", timeout=90
+            ).stdout
+            lost = set()
+            prev_seq = None
+            for idx, t in enumerate(times):
+                row = bars[idx * 16:(idx + 1) * 16]
+                seq = sum((1 << (15 - b)) for b in range(16) if row[b] > 128) if len(row) == 16 else 0
+                if seq == 0 or seq == prev_seq:
+                    lost.add(round(t * 30))
+                elif prev_seq is not None and ((seq - prev_seq) & 0xffff) >= 3 and idx > 0:
+                    # A >= 3 rAF jump in one 30 fps slot means slot idx - 1 got
+                    # only an early pre-pulse rAF while >= 2 newer rAF paints
+                    # were held uncomposited by software WARP/WebKit.
+                    lost.add(round(times[idx - 1] * 30))
+                prev_seq = seq
+        evidence["av_sync"][source] = browser_sync_check(
+            file, 30, BROWSER_PULSE_PERIOD, lost=lost, check_median=check_median, near=pulse_near
+        )
 
 
 def scenario_linux_browser(e, cfg, evidence):

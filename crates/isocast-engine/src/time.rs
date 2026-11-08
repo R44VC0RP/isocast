@@ -64,7 +64,8 @@ impl Sub<Duration> for Time {
 /// How a chunk of browser audio relates to the chunk before it.
 ///
 /// `end_us` is the page's Unix wall-clock time (`Date.now()` in microseconds)
-/// when the chunk finished buffering, not the audio hardware render clock.
+/// when the chunk finished buffering plus the output-latency compensation
+/// sampled at the start of the run, not the audio hardware render clock.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserAudioTiming {
     /// Host arrival time only.
@@ -81,6 +82,50 @@ struct PageClock {
     origin_us: u64,
     origin_host: Time,
     last_us: u64,
+    // Tumbling 64-chunk min-filter window on `wall_us - end_us` so NTP slew
+    // cannot accumulate across long takes.
+    window_count: u8,
+    window_best: Option<(u64, Time, i64)>,
+}
+
+impl PageClock {
+    fn new(end_us: u64, host_end: Time) -> Self {
+        Self {
+            origin_us: end_us,
+            origin_host: host_end,
+            last_us: end_us,
+            window_count: 0,
+            window_best: None,
+        }
+    }
+
+    fn reset(&mut self, end_us: u64, host_end: Time) {
+        self.origin_us = end_us;
+        self.origin_host = host_end;
+        self.window_count = 0;
+        self.window_best = None;
+    }
+
+    fn observe_wall(&mut self, end_us: u64, wall_us: Option<u64>, now: Time) {
+        const WINDOW: u8 = 64;
+        let Some((anchored, signed_us)) = wall_anchor(end_us, wall_us, now) else {
+            return;
+        };
+        if self
+            .window_best
+            .is_none_or(|(_, _, best_signed)| signed_us < best_signed)
+        {
+            self.window_best = Some((end_us, anchored, signed_us));
+        }
+        self.window_count += 1;
+        if self.window_count >= WINDOW {
+            if let Some((best_us, best_host, _)) = self.window_best.take() {
+                self.origin_us = best_us;
+                self.origin_host = best_host;
+            }
+            self.window_count = 0;
+        }
+    }
 }
 
 /// Places page audio on the host clock. Start fresh for each document.
@@ -88,18 +133,30 @@ struct PageClock {
 pub struct BrowserAudioStamper {
     // End of stamped audio and actual arrival of that same chunk.
     previous: Option<(Time, Time)>,
-    // Anchor on the page's wall clock (`Date.now()` in µs) and host clock.
+    // Anchor on the page's wall clock (`Date.now()` + output latency in µs) and host clock.
     source: Option<PageClock>,
 }
 
-fn anchor_end(end_us: u64, wall_us: Option<u64>, now: Time) -> Time {
-    const MAX_WALL_SKEW_US: u64 = 2_000_000;
-    match wall_us {
-        Some(wall) if end_us <= wall && wall - end_us <= MAX_WALL_SKEW_US => {
-            now - Duration::from_micros(wall - end_us)
-        }
-        _ => now,
+const MAX_OUTPUT_LATENCY: Duration = Duration::from_millis(250);
+
+fn wall_anchor(end_us: u64, wall_us: Option<u64>, now: Time) -> Option<(Time, i64)> {
+    const MAX_WALL_LAG_US: i128 = 2_000_000;
+    let max_lead_us = MAX_OUTPUT_LATENCY.as_micros() as i128;
+    let wall = wall_us?;
+    let signed_us = wall as i128 - end_us as i128;
+    if !(-max_lead_us..=MAX_WALL_LAG_US).contains(&signed_us) {
+        return None;
     }
+    let anchored = if signed_us >= 0 {
+        now - Duration::from_micros(signed_us as u64)
+    } else {
+        now + Duration::from_micros((-signed_us) as u64)
+    };
+    Some((anchored, signed_us as i64))
+}
+
+fn anchor_end(end_us: u64, wall_us: Option<u64>, now: Time) -> Time {
+    wall_anchor(end_us, wall_us, now).map_or(now, |(anchored, _)| anchored)
 }
 
 impl BrowserAudioStamper {
@@ -108,9 +165,11 @@ impl BrowserAudioStamper {
         self.stamp_timed(frames, BrowserAudioTiming::Arrival, None, now)
     }
 
-    /// Places a chunk using the page's wall clock when present, keeping
-    /// `source_end <= now` and chunk starts within [`crate::record::mix::MIX_DELAY`]
-    /// while reporting stalls past the mixer's jitter budget as gaps.
+    /// Places a chunk using the page's wall clock + run-start output latency
+    /// when present (`audio.js` samples output-latency compensation once at
+    /// the start of each continuous run), keeping `source_end <= now + MAX_OUTPUT_LATENCY`
+    /// and chunk starts within [`crate::record::mix::MIX_DELAY`] while
+    /// reporting stalls past the mixer's jitter budget as gaps.
     pub fn stamp_timed(
         &mut self,
         frames: usize,
@@ -130,50 +189,64 @@ impl BrowserAudioStamper {
         let min_at = now - MAX_LAG;
         match timing {
             BrowserAudioTiming::Continuous { end_us } | BrowserAudioTiming::Resumed { end_us } => {
+                // Only allow `source_end > now` to the extent this chunk's own
+                // `end_us` is ahead of host `wall_us` (output-latency compensation
+                // minus IPC delay, plus 5 ms for `Date.now()` rounding), so a prior
+                // `min_at` clamp on a stale pre-stall chunk cannot push post-stall
+                // audio up to `MAX_OUTPUT_LATENCY` into the future.
+                let max_end = match wall_us {
+                    Some(w) if end_us > w => {
+                        let ahead = Duration::from_micros((end_us - w).saturating_add(5_000));
+                        now + ahead.min(MAX_OUTPUT_LATENCY)
+                    }
+                    Some(w) if w.saturating_sub(end_us) < 5_000 => {
+                        let ahead = Duration::from_micros(5_000 - w.saturating_sub(end_us));
+                        now + ahead.min(MAX_OUTPUT_LATENCY)
+                    }
+                    _ => now,
+                };
+                let max_at = max_end - duration;
                 let Some((next, _)) = self.previous else {
                     let desired_end = anchor_end(end_us, wall_us, now);
-                    let at = (desired_end - duration).max(min_at).min(made);
+                    let at = (desired_end - duration).max(min_at).min(max_at);
                     let end = at + duration;
                     self.previous = Some((end, now));
-                    self.source = Some(PageClock {
-                        origin_us: end_us,
-                        origin_host: end,
-                        last_us: end_us,
-                    });
+                    self.source = Some(PageClock::new(end_us, end));
                     return (at, None);
                 };
                 if let Some(mut clock) = self.source.filter(|c| end_us >= c.last_us) {
                     let step = Duration::from_micros(end_us - clock.last_us).min(MAX_SPAN);
                     clock.last_us = end_us;
+                    if matches!(timing, BrowserAudioTiming::Continuous { .. }) {
+                        clock.observe_wall(end_us, wall_us, now);
+                    }
                     let total = Duration::from_micros(end_us - clock.origin_us).min(MAX_SPAN);
                     if matches!(timing, BrowserAudioTiming::Resumed { .. }) {
                         let pause = step.saturating_sub(duration);
                         let source_end = if pause <= MAX_PAUSE && total < MAX_SPAN {
                             let raw = clock.origin_host + total;
-                            if raw > now {
-                                clock.origin_host = now - total;
-                                now
+                            if raw > max_end {
+                                clock.origin_host = max_end - total;
+                                max_end
                             } else {
                                 raw
                             }
                         } else {
                             let anchored = anchor_end(end_us, wall_us, now);
-                            clock.origin_us = end_us;
-                            clock.origin_host = anchored;
+                            clock.reset(end_us, anchored);
                             anchored
                         };
-                        let desired_at = (source_end - duration).max(next.min(made));
+                        let desired_at = (source_end - duration).max(next.min(max_at));
                         let (at, gap) = if desired_at < min_at {
-                            let at = min_at.max(next.min(made));
-                            let end = (at + duration).min(now);
-                            clock.origin_us = end_us;
-                            clock.origin_host = end;
+                            let at = min_at.max(next.min(max_at));
+                            let end = (at + duration).min(max_end);
+                            clock.reset(end_us, end);
                             (
                                 at,
                                 Some(at.saturating_since(desired_at)).filter(|d| !d.is_zero()),
                             )
                         } else {
-                            (desired_at.min(made), None)
+                            (desired_at.min(max_at), None)
                         };
                         let end = at + duration;
                         self.previous = Some((end, now));
@@ -182,29 +255,31 @@ impl BrowserAudioStamper {
                     }
                     let source_end = if total < MAX_SPAN {
                         let raw = clock.origin_host + total;
-                        if raw > now {
-                            clock.origin_host = now - total;
-                            now
+                        if raw > max_end {
+                            clock.origin_host = max_end - total;
+                            max_end
                         } else {
                             raw
                         }
                     } else {
-                        clock.origin_us = end_us;
-                        clock.origin_host = now;
+                        clock.reset(end_us, now);
                         now
                     };
                     let desired_at = source_end - duration;
                     let (mut at, mut gap) = (desired_at, None);
                     if desired_at < min_at {
-                        at = min_at.max(next.min(made));
+                        at = min_at.max(next.min(max_at));
                         gap = Some(at.saturating_since(next)).filter(|d| !d.is_zero());
-                        let end = (at + duration).min(now);
-                        clock.origin_us = end_us;
-                        clock.origin_host = end;
+                        let end = (at + duration).min(max_end);
+                        clock.reset(end_us, end);
                     } else if desired_at.saturating_since(next) >= RESYNC {
                         gap = Some(desired_at.saturating_since(next));
                     } else if next.saturating_since(desired_at) < RESYNC {
-                        at = next;
+                        // Keep continuous chunks stitched, while preventing a
+                        // > MIX_DELAY IPC burst from marching `next` up to
+                        // `RESYNC` (150 ms) past `max_end` and locking all
+                        // subsequent audio several frames late.
+                        at = next.min(max_at + Duration::from_millis(8));
                     }
                     let end = at + duration;
                     self.previous = Some((end, now));
@@ -212,11 +287,7 @@ impl BrowserAudioStamper {
                     return (at, gap);
                 }
                 let anchored = anchor_end(end_us, wall_us, now);
-                self.source = Some(PageClock {
-                    origin_us: end_us,
-                    origin_host: anchored,
-                    last_us: end_us,
-                });
+                self.source = Some(PageClock::new(end_us, anchored));
             }
             BrowserAudioTiming::Arrival => {
                 self.source = None;
@@ -412,9 +483,40 @@ mod tests {
             );
             assert_eq!(gap, None, "chunk {k} reported gap at {at:?}");
             assert!(
-                at + Duration::from_nanos(1_024 * 1_000_000_000 / 48_000) <= arrival,
-                "chunk {k} ended after arrival"
+                at + Duration::from_nanos(1_024 * 1_000_000_000 / 48_000)
+                    <= arrival + MAX_OUTPUT_LATENCY,
+                "chunk {k} ended past output-latency allowance"
             );
+        }
+        // Output latency (e.g. 50 ms on Windows WASAPI) places chunks at their
+        // speaker presentation time (`end_us > wall_us` within MAX_OUTPUT_LATENCY),
+        // and the 64-chunk min-filter re-anchor bounds 1,000 ppm NTP slew over 10 min.
+        let mut slew = BrowserAudioStamper::default();
+        let host_origin = Time::from_nanos(5_000_000_000);
+        for k in 1..=28_125u64 {
+            let mono_ns = k * 1_024 * 1_000_000_000 / 48_000;
+            // Wall clock slews +1,000 ppm (+600 ms over 10 min) relative to host_time.
+            let wall_render_us = 1_700_000_000_000_000 + mono_ns / 1_000 + (mono_ns / 1_000_000);
+            let end_us = (wall_render_us / 1_000) * 1_000 + 50_000;
+            let ipc_us = if k.is_multiple_of(17) { 45_000 } else { 1_000 };
+            let arrival = host_origin + Duration::from_nanos(mono_ns + ipc_us * 1_000);
+            let wall_us = wall_render_us + ipc_us;
+            let (at, gap) = slew.stamp_timed(
+                1_024,
+                BrowserAudioTiming::Continuous { end_us },
+                Some(wall_us),
+                arrival,
+            );
+            assert_eq!(gap, None, "NTP slew chunk {k} falsely reported gap");
+            if k == 1 {
+                let expected =
+                    host_origin + Duration::from_nanos(mono_ns) + Duration::from_millis(50)
+                        - Duration::from_nanos(1_024 * 1_000_000_000 / 48_000);
+                assert!(
+                    (at.as_nanos() - expected.as_nanos()).abs() <= 2_000_000,
+                    "first output-compensated chunk at {at:?}, expected {expected:?}"
+                );
+            }
         }
         // When `next` is already past `min_at` (e.g. a frozen `end_us` while
         // chunks kept arriving), the Continuous lag clamp must not place `at`
@@ -437,6 +539,83 @@ mod tests {
                 ms(210),
             ),
             (ms(50), None)
+        );
+        // After a > MAX_LAG render stall flushes a stale pre-stall chunk (clamped
+        // to `min_at`), the first live post-stall chunk must re-anchor to `now`
+        // (+ actual output latency) rather than jumping `MAX_OUTPUT_LATENCY` ahead.
+        let mut stall = BrowserAudioStamper::default();
+        assert_eq!(
+            stall.stamp_timed(
+                480,
+                BrowserAudioTiming::Continuous { end_us: 100_000 },
+                Some(100_000),
+                ms(100),
+            ),
+            (ms(90), None)
+        );
+        assert_eq!(
+            stall.stamp_timed(
+                480,
+                BrowserAudioTiming::Continuous { end_us: 110_000 },
+                Some(600_000),
+                ms(600),
+            ),
+            (ms(405), Some(Duration::from_millis(305)))
+        );
+        let (post_at, post_gap) = stall.stamp_timed(
+            480,
+            BrowserAudioTiming::Continuous { end_us: 620_000 },
+            Some(620_000),
+            ms(620),
+        );
+        assert!(
+            (post_at.as_nanos() - ms(610).as_nanos()).abs() <= 5_000_000,
+            "post-stall chunk jumped into the future: {post_at:?}"
+        );
+        assert!(
+            post_gap.is_some_and(|g| g >= Duration::from_millis(190)),
+            "expected post-stall resync gap, got {post_gap:?}"
+        );
+        // A > MIX_DELAY main-thread IPC burst (e.g. 63 buffered 21.33 ms chunks
+        // = 1.34 s arriving at once during cold page load) must not march `next`
+        // +115..150 ms into the future and leave subsequent live audio late.
+        let mut burst = BrowserAudioStamper::default();
+        let t0 = Time::from_nanos(2_000_000_000);
+        let q_ns = 1_024u64 * 1_000_000_000 / 48_000;
+        let _ = burst.stamp_timed(
+            1_024,
+            BrowserAudioTiming::Continuous {
+                end_us: 1_700_000_000_000_000 + q_ns / 1_000,
+            },
+            Some(1_700_000_000_000_000 + q_ns / 1_000),
+            t0 + Duration::from_nanos(q_ns),
+        );
+        let burst_arrival = t0 + Duration::from_nanos(64 * q_ns);
+        let burst_wall = 1_700_000_000_000_000 + (64 * q_ns) / 1_000;
+        for k in 2..=64u64 {
+            let end_us = 1_700_000_000_000_000 + ((k * q_ns) / 1_000_000) * 1_000;
+            let _ = burst.stamp_timed(
+                1_024,
+                BrowserAudioTiming::Continuous { end_us },
+                Some(burst_wall),
+                burst_arrival,
+            );
+        }
+        let live_arrival = t0 + Duration::from_nanos(65 * q_ns);
+        let live_end_us = 1_700_000_000_000_000 + ((65 * q_ns) / 1_000_000) * 1_000;
+        let (live_at, live_gap) = burst.stamp_timed(
+            1_024,
+            BrowserAudioTiming::Continuous {
+                end_us: live_end_us,
+            },
+            Some(1_700_000_000_000_000 + (65 * q_ns) / 1_000),
+            live_arrival,
+        );
+        assert_eq!(live_gap, None);
+        let expected_live = live_arrival - Duration::from_nanos(q_ns);
+        assert!(
+            (live_at.as_nanos() - expected_live.as_nanos()).abs() <= 15_000_000,
+            "post-burst live chunk stayed late: {live_at:?} vs {expected_live:?}"
         );
     }
 

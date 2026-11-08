@@ -83,6 +83,7 @@ impl Drop for Fake {
 struct Seen {
     frames: AtomicUsize,
     first_byte: Mutex<Vec<u8>>,
+    frame_times: Mutex<Vec<Time>>,
     audio_frames: AtomicUsize,
     stopped: Mutex<Option<String>>,
 }
@@ -91,8 +92,9 @@ fn sinks(seen: &Arc<Seen>) -> (VideoSink<Frame>, AudioSink) {
     let (a, b, c, d) = (seen.clone(), seen.clone(), seen.clone(), seen.clone());
     (
         VideoSink {
-            frame: Box::new(move |frame: Frame, _| {
+            frame: Box::new(move |frame: Frame, at| {
                 a.frames.fetch_add(1, Ordering::SeqCst);
+                a.frame_times.lock().unwrap().push(at);
                 a.first_byte
                     .lock()
                     .unwrap()
@@ -194,6 +196,22 @@ fn protocol_reads_each_record_and_rejects_bad_ones() {
     timed[12] = 2;
     assert!(protocol::read_header(&mut &timed[..]).is_err());
 
+    let mut tframe = b"FRMT".to_vec();
+    tframe.extend(&20u32.to_le_bytes());
+    tframe.extend(&2u32.to_le_bytes());
+    tframe.extend(&1u32.to_le_bytes());
+    tframe.extend(&14_500u32.to_le_bytes());
+    tframe.extend([0u8; 8]);
+    let mut tframe_slice = &tframe[..];
+    assert_eq!(
+        protocol::read_header(&mut tframe_slice).unwrap(),
+        Some(protocol::Header::TimedFrame {
+            width: 2,
+            height: 1,
+            age_us: 14_500,
+        })
+    );
+
     // A picture whose size doesn't match its length, an oversized record,
     // and an unknown tag are errors, not guesses.
     let mut bad = b"FRAM".to_vec();
@@ -265,6 +283,31 @@ for n in range(1000):
         seen.audio_frames.load(Ordering::SeqCst),
         0,
         "the bad sound never reached the mixer"
+    );
+}
+
+#[test]
+fn timed_frames_with_larger_age_still_increase_monotonically() {
+    let fake = Fake::new(
+        "frmt_mono",
+        r#"
+rec(b"REDY")
+rec(b"FRMT", struct.pack("<III", w, h, 1_000) + bytes([10]) * (w * h * 4))
+rec(b"FRMT", struct.pack("<III", w, h, 400_000) + bytes([20]) * (w * h * 4))
+while True:
+    time.sleep(1)
+"#,
+    );
+    let seen = Arc::new(Seen::default());
+    let (video, audio) = sinks(&seen);
+    let (_capture, _, _) = start(fake.path(), &page(), video, Some(audio)).unwrap();
+    wait_for("two timed frames", 10, || {
+        seen.frames.load(Ordering::SeqCst) >= 2
+    });
+    let times = seen.frame_times.lock().unwrap().clone();
+    assert!(
+        times[1] >= times[0] + Duration::from_nanos(1),
+        "non-monotonic timed frames: {times:?}"
     );
 }
 

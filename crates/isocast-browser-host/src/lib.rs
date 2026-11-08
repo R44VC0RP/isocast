@@ -669,6 +669,7 @@ impl<P: FramePool> Source<P> {
         // A restarted helper cannot continue the previous one's sample clock.
         let mut stamper = BrowserAudioStamper::default();
         let mut resampler = Resampler::default();
+        let mut last_frame: Option<Time> = None;
         loop {
             let Some(header) = protocol::read_header(&mut reader).map_err(helper)? else {
                 return Ok(());
@@ -676,7 +677,17 @@ impl<P: FramePool> Source<P> {
             match header {
                 // A beat: the page is loading or still, without new pictures.
                 protocol::Header::Ready => shared.alive(),
-                protocol::Header::Frame { width, height } => {
+                header @ (protocol::Header::Frame { .. } | protocol::Header::TimedFrame { .. }) => {
+                    let (width, height, age_us) = match header {
+                        protocol::Header::Frame { width, height } => (width, height, 0),
+                        protocol::Header::TimedFrame {
+                            width,
+                            height,
+                            age_us,
+                        } => (width, height, age_us),
+                        _ => unreachable!(),
+                    };
+                    let arrived = shared.os.now();
                     let len = width as usize * height as usize * 4;
                     if (width, height) != (spec.width, spec.height) {
                         return Err(helper(anyhow!(
@@ -711,7 +722,15 @@ impl<P: FramePool> Source<P> {
                     match frame {
                         Some(frame) => {
                             shared.alive();
-                            (self.sink.frame)(frame, shared.os.now());
+                            // Video reference point: helper-measured capture age
+                            // subtracted from header arrival on the host clock,
+                            // clamped monotonic across variable readback times.
+                            let raw =
+                                arrived - Duration::from_micros(u64::from(age_us).min(500_000));
+                            let captured = last_frame
+                                .map_or(raw, |prev| raw.max(prev + Duration::from_nanos(1)));
+                            last_frame = Some(captured);
+                            (self.sink.frame)(frame, captured);
                         }
                         None => {
                             // Every pooled frame is still downstream: skip it.

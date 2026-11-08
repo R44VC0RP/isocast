@@ -14,6 +14,8 @@
 //!   is running but has no new picture (still or loading pages);
 //! - `FRAM`: u32 width, u32 height, then width × height × 4 bytes of
 //!   straight-alpha BGRA;
+//! - `FRMT`: u32 width, u32 height, u32 capture age in microseconds, then
+//!   width × height × 4 bytes of straight-alpha BGRA;
 //! - `AUDI`: u32 sample rate, then interleaved stereo f32 samples;
 //! - `AUDT`: u32 sample rate, u8 kind (0 continuous, 1 resumed), u64 page
 //!   `Date.now()` wall time in microseconds, then interleaved stereo f32;
@@ -25,12 +27,13 @@ use anyhow::{Context, Result, bail};
 
 pub const READY: &[u8; 4] = b"REDY";
 pub const FRAME: &[u8; 4] = b"FRAM";
+pub const TIMED_FRAME: &[u8; 4] = b"FRMT";
 pub const AUDIO: &[u8; 4] = b"AUDI";
 pub const TIMED_AUDIO: &[u8; 4] = b"AUDT";
 pub const FAIL: &[u8; 4] = b"FAIL";
 
 /// Largest payload accepted: an 8192×8192 picture and its header.
-pub const MAX_PAYLOAD: u32 = 8192 * 8192 * 4 + 8;
+pub const MAX_PAYLOAD: u32 = 8192 * 8192 * 4 + 12;
 /// Audio sample rates accepted. The page's script chooses the rate, so it
 /// is untrusted: resampling a rate of 1 to 48 kHz would size its output at
 /// 48,000 times the input.
@@ -48,6 +51,12 @@ pub enum Header {
     Frame {
         width: u32,
         height: u32,
+    },
+    /// A picture captured `age_us` ago; its pixels follow.
+    TimedFrame {
+        width: u32,
+        height: u32,
+        age_us: u32,
     },
     /// Interleaved stereo f32 at this rate: `len` bytes follow.
     Audio {
@@ -111,6 +120,19 @@ pub fn read_header(input: &mut impl Read) -> Result<Option<Header>> {
                 );
             }
             Header::Frame { width, height }
+        }
+        TIMED_FRAME => {
+            let (width, height, age_us) = (u32_field()?, u32_field()?, u32_field()?);
+            if len as u64 != 12 + u64::from(width) * u64::from(height) * 4 {
+                bail!(
+                    "browser helper sent a picture whose size doesn't match ({width}x{height}, {len} bytes)"
+                );
+            }
+            Header::TimedFrame {
+                width,
+                height,
+                age_us,
+            }
         }
         AUDIO => {
             let rate = u32_field()?;
@@ -243,6 +265,26 @@ pub fn frame(record: &mut Vec<u8>, width: u32, height: u32) -> &mut [u8] {
     &mut record[16..]
 }
 
+/// Make `record` (a reused buffer) a `FRMT` record of a `width` × `height`
+/// picture and return its pixels, zeroed; set the capture age with
+/// [`set_frame_age`] once readback finishes.
+pub fn timed_frame(record: &mut Vec<u8>, width: u32, height: u32) -> &mut [u8] {
+    let len = width as usize * height as usize * 4;
+    record.clear();
+    record.extend_from_slice(TIMED_FRAME);
+    record.extend_from_slice(&((12 + len) as u32).to_le_bytes());
+    record.extend_from_slice(&width.to_le_bytes());
+    record.extend_from_slice(&height.to_le_bytes());
+    record.extend_from_slice(&0u32.to_le_bytes());
+    record.resize(20 + len, 0);
+    &mut record[20..]
+}
+
+/// Patch the `age_us` field of a `FRMT` record built by [`timed_frame`].
+pub fn set_frame_age(record: &mut [u8], age_us: u32) {
+    record[16..20].copy_from_slice(&age_us.to_le_bytes());
+}
+
 /// An `AUDI` record: the rate and interleaved stereo f32 samples' bytes.
 pub fn audio(rate: u32, samples: &[u8]) -> Vec<u8> {
     let mut record = record(AUDIO, 4 + samples.len());
@@ -295,6 +337,10 @@ mod tests {
         let mut picture = Vec::new();
         frame(&mut picture, 2, 1).copy_from_slice(&[7; 8]);
         bytes.extend(&picture);
+        let mut timed_picture = Vec::new();
+        timed_frame(&mut timed_picture, 2, 1).copy_from_slice(&[9; 8]);
+        set_frame_age(&mut timed_picture, 14_500);
+        bytes.extend(&timed_picture);
         bytes.extend(audio(44100, &[0; 8]));
         bytes.extend(timed_audio(48000, true, 75_000, &[1; 8]));
         bytes.extend(fail("no runtime"));
@@ -308,6 +354,16 @@ mod tests {
             })
         );
         assert_eq!(&input[..8], &[7; 8]);
+        input = &input[8..];
+        assert_eq!(
+            read_header(&mut input).unwrap(),
+            Some(Header::TimedFrame {
+                width: 2,
+                height: 1,
+                age_us: 14_500,
+            })
+        );
+        assert_eq!(&input[..8], &[9; 8]);
         input = &input[8..];
         assert_eq!(
             read_header(&mut input).unwrap(),
