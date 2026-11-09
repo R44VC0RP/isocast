@@ -12,7 +12,7 @@ depends=(alsa-lib fontconfig freetype2 gtk4 webkitgtk-6.0 openssl
          gstreamer gst-plugins-base gst-plugins-good gst-libav
          'openh264>=2.6' 'libopenh264.so=8-64' vulkan-icd-loader vulkan-driver
          libglvnd wayland libx11 libxcursor libxrandr libxi libxkbcommon libxkbcommon-x11)
-makedepends=(cargo clang cmake git nasm 'libpipewire>=1.0.5')
+makedepends=(cargo clang cmake git nasm ninja 'libpipewire>=1.0.5')
 optdepends=('xdg-desktop-portal: interactive screen selection' 'libpipewire>=1.0.5: PipeWire capture and sound playback' 'pipewire: desktop audio and video capture')
 options=(!lto !debug)
 source=("git+$url.git")
