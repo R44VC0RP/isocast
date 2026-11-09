@@ -131,6 +131,8 @@ jobs:
           # warm it); pull requests read it.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - uses: ./.github/actions/skia-binaries
+
       # The head's render and diff scripts draw both sides, so both use the
       # same views, sizes and setup.
       - name: Keep the head's scripts
