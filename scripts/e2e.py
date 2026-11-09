@@ -4990,9 +4990,9 @@ def scenario_win_take_device_recovery(e, cfg, evidence):
         rows = live().get('files', [])
         return len(rows) == 3 and all((r.get('committed_seconds') or 0) >= 2 for r in rows)
     with pinned_window_fixture() as (title, change, _, _):
-        for case in ('developer-off', 'unsupported', 'active-replay', 'single', 'rollover', 'double', 'preview', 'stop-held', 'timed-held'):
+        for case in ('developer-off', 'unsupported', 'active-replay', 'single', 'rollover', 'double', 'double-legacy', 'preview', 'stop-held', 'timed-held'):
             e.stop(); change('new')
-            if case in ('developer-off','preview'): e.env.pop('ISOCAST_ENABLE_LIVE_GPU_RECOVERY', None)
+            if case in ('developer-off','preview','double-legacy'): e.env.pop('ISOCAST_ENABLE_LIVE_GPU_RECOVERY', None)
             else: e.env['ISOCAST_ENABLE_LIVE_GPU_RECOVERY']='1'
             bypass = case in ('developer-off','unsupported','active-replay')
             e.env['ISOCAST_TEST_TAKE_GPU'] = 'developer-off' if bypass else 'remove'
@@ -5011,7 +5011,7 @@ def scenario_win_take_device_recovery(e, cfg, evidence):
                 cfg['sources'].extend([dict(id='still',kind='image',path=str(image)),dict(id='label',kind='text',text='live',width=160,height=90),dict(id='web',kind='browser',file=str(page),width=160,height=90,fps=fps)])
                 cfg['scenes'].append(dict(id='gallery', name='Gallery',items=[item(id,(0,0,1,1),(160,90)) for id in ('still','label','web')]))
             e.apply(cfg)
-            path = Path(e.rpc('start', {} if bypass or case=='double' else {'seconds': 7 if case=='timed-held' else 14},timeout=60)['manifest'])
+            path = Path(e.rpc('start', {} if bypass or case.startswith('double') else {'seconds': 7 if case=='timed-held' else 14},timeout=60)['manifest'])
             until(committed, description='program and both ISOs committed')
             initial = {f['source']:f['path'] for f in read_json(path)['files']}
             change('bright')  # only a *new* helper reads this level as its generation marker
@@ -5079,7 +5079,7 @@ def scenario_win_take_device_recovery(e, cfg, evidence):
                 incidents = live().get('video_recovery', {}).get('incidents', [])
                 return len([i for i in incidents if i['scope']=='output' and i['state']=='resumed']) == 3
             until(resumed, 16, 'verified IDRs on all three outputs')
-            if case == 'double':
+            if case.startswith('double'):
                 entries=live()['video_recovery']['incidents']; count=count_log('test RemoveDevice confirmed: mode=remove'); prev=live()['elapsed_seconds']
                 e.rpc('debug_set', {'enabled':False}); time.sleep(.25); e.rpc('debug_set', {'enabled':True})
                 until(lambda:count_log('test RemoveDevice confirmed: mode=remove')>count,5,'second native removal')
@@ -5087,7 +5087,26 @@ def scenario_win_take_device_recovery(e, cfg, evidence):
                 require(kept['video_recovery']['incidents']==entries and not finished(path),'double loss changed the ledger or ended take')
                 e.rpc('stop'); m=until(lambda:finished(path),8,'Stop after second loss')
                 require(m['video_recovery']['incidents']==entries,'second loss attributed a recovery incident')
+                until(lambda:e.rpc('status')['state']=='idle', description='idle after double loss')
+                if case=='double-legacy':
+                    require(not e.rpc('status')['windows_gpu'].get('idle_replacement_block'),'developer-only recovery armed the opt-in guard')
+                    e.rpc('debug_set', {'enabled':False}); _, legacy=take(e,2)
+                    require(legacy['status']=='complete', 'developer-only double loss changed the next Start')
+                    evidence[case]=dict(idle_start='complete',cooldown=False); continue
+                reset='GPU reset twice within 15 s'; previous=count_log('idle GPU replacement: generation')
+                for _ in range(2):
+                    try: e.rpc('start', {'seconds':2})
+                    except RpcError as ex:
+                        refusal=ex.error['message']; require(reset in refusal and 'restart Isocast' in refusal, f'wrong Start refusal: {refusal}')
+                    else: raise Failure('idle Start replaced the recently failed replacement')
+                require(count_log('idle GPU replacement: generation')==previous, 'idle GPU replacement ran during cooldown')
+                for method, params in [('status',None), ('doctor',{})]:
+                    require(reset in e.rpc(method,params)['windows_gpu']['idle_replacement_block'], f'{method}: repeat loss not visible')
                 for f in m['files']: ffmpeg('-xerror','-i',path.parent/f['path'],'-map','0','-f','null','-')
+                e.stop(); e.env['ISOCAST_TEST_TAKE_GPU']='disarmed'; e.start(); e.apply(cfg)
+                require(not e.rpc('status')['windows_gpu'].get('idle_replacement_block'), 'cooldown survived daemon restart')
+                _, fresh=take(e,2); require(fresh['status']=='complete' and len(fresh['files'])==3, f'new daemon could not record: {fresh}')
+                evidence['idle_after_double']=dict(refused_starts=2, reason=refusal, after_restart=fresh['status'])
                 evidence[case]=dict(second_removal=True,new_incidents=0,finalized=len(m['files'])); continue
             m = until(lambda: finished(path), 25, 'all files finalized')
             require(m['status'] == 'complete', f'{case}: {m}')

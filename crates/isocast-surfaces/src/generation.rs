@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 const CLEANUP: &str = "idle cache retirement";
 const TAKE: &str = "active take";
+const REPEAT_COOLDOWN: Duration = Duration::from_secs(60);
 
 pub fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
@@ -16,6 +17,8 @@ pub fn registry() -> &'static Registry {
 
 struct Epoch {
     number: u64,
+    // Observation only: do not freeze this epoch or interrupt the active take.
+    repeat_loss: OnceLock<Instant>,
     accepting: AtomicBool,
     counts: Mutex<BTreeMap<&'static str, Count>>,
     released: Condvar,
@@ -31,6 +34,7 @@ impl Epoch {
     fn new(number: u64, accepting: bool) -> Arc<Self> {
         Arc::new(Self {
             number,
+            repeat_loss: OnceLock::new(),
             accepting: AtomicBool::new(accepting),
             counts: Mutex::default(),
             released: Condvar::new(),
@@ -141,6 +145,23 @@ impl Default for Registry {
     }
 }
 impl Registry {
+    /// A confirmed loss of the replacement inside the opted-in incident
+    /// window. Late reports cannot mark a successor; retries never rearm it.
+    pub fn note_repeat_loss(&self, generation: u64, now: Instant) {
+        let epoch = self.current.lock().unwrap();
+        if epoch.number == generation {
+            let _ = epoch.repeat_loss.set(now);
+        }
+    }
+
+    /// Shared by the idle Start guard and the read-only status/doctor route.
+    pub fn idle_replacement_block(&self, now: Instant) -> Option<String> {
+        let epoch = self.current.lock().unwrap();
+        let elapsed = now.saturating_duration_since(*epoch.repeat_loss.get()?);
+        let seconds = REPEAT_COOLDOWN.as_secs().saturating_sub(elapsed.as_secs());
+        (seconds != 0).then(|| format!("the GPU reset twice within 15 s; retry Start in {seconds} s or restart Isocast; if resets continue, restart the driver (GPU generation {})", epoch.number))
+    }
+
     pub fn take(&self) -> Result<Owner> {
         self.register(TAKE)
     }
@@ -329,6 +350,34 @@ pub const RECEIPT_ID: windows::core::GUID =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opted_in_repeat_blocks_only_the_removed_epoch_for_one_minute() {
+        let r = Registry::default();
+        let now = Instant::now();
+        let take = r.take().unwrap();
+        let g = take.number();
+        r.note_repeat_loss(g + 1, now); // an observation for another generation
+        assert!(r.idle_replacement_block(now).is_none());
+        r.note_repeat_loss(g, now);
+        assert!(
+            r.idle_replacement_block(now)
+                .unwrap()
+                .contains("retry Start in 60 s")
+        );
+        take.check().unwrap();
+        r.register("healthy ISO").unwrap().check().unwrap();
+        drop(take); // the idle Start guard must outlive this take
+        r.note_repeat_loss(g, now + Duration::from_secs(59));
+        assert!(
+            r.idle_replacement_block(now + Duration::from_millis(59_999))
+                .unwrap()
+                .contains("retry Start in 1 s")
+        );
+        assert!(r.idle_replacement_block(now + REPEAT_COOLDOWN).is_none());
+        // Nothing from the old daemon is persisted or restored into a new one.
+        assert!(Registry::default().idle_replacement_block(now).is_none());
+    }
 
     #[test]
     fn only_the_current_take_can_replace_and_quarantine_its_successor() {

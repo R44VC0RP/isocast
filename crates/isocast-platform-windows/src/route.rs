@@ -199,6 +199,8 @@ pub(crate) fn snapshot(
         .map(|_| isocast_surfaces::shader_compiler().unwrap_or_else(|e| e.to_string()));
     WindowsGpuRoute {
         session_type: session(),
+        idle_replacement_block: isocast_surfaces::generation::registry()
+            .idle_replacement_block(std::time::Instant::now()),
         graphics_adapter,
         render_adapter,
         shader_compiler,

@@ -3247,6 +3247,9 @@ pub struct Doctor {
 /// (low, high), local to this machine and boot, as in `gpu_adapter`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WindowsGpuRoute {
+    /// Why idle Start is temporarily refused after an opted-in repeat device loss, with retry advice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_replacement_block: Option<String>,
     pub session_type: WindowsSessionType,
     /// Opened D3D11 device; not evidence a capture has started.
     pub graphics_adapter: Option<WindowsAdapter>,

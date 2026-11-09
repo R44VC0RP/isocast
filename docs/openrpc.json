@@ -22966,6 +22966,13 @@
             ],
             "description": "Opened D3D11 device; not evidence a capture has started."
           },
+          "idle_replacement_block": {
+            "description": "Why idle Start is temporarily refused after an opted-in repeat device loss, with retry advice.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "render_adapter": {
             "anyOf": [
               {

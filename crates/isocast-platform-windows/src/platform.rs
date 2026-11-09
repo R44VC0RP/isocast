@@ -75,9 +75,15 @@ impl WindowsPlatform {
         if self.lost_generation.load(Ordering::Acquire) == g {
             return true;
         }
-        policy.decide(g, std::time::Instant::now(), || {
-            self.lost_generation.store(g, Ordering::Release)
-        })
+        let now = std::time::Instant::now();
+        match policy.decide(g, now, || self.lost_generation.store(g, Ordering::Release)) {
+            LossDecision::Admitted => true,
+            LossDecision::Repeat if self.reconnect_live_video() => {
+                isocast_surfaces::generation::registry().note_repeat_loss(g, now);
+                false
+            }
+            _ => false,
+        }
     }
     /// Called by the daemon under start admission, BEFORE reserving a take.
     /// Never called by an encoder, a capture fault, or a compositor retry.
@@ -87,6 +93,11 @@ impl WindowsPlatform {
         release_idle: impl FnOnce() + Send + 'static,
     ) -> Result<()> {
         let registry = isocast_surfaces::generation::registry();
+        // The recorded repeat is positive native evidence even if a cache
+        // is busy. Refuse before freezing, releasing caches or reserving files.
+        if let Some(reason) = registry.idle_replacement_block(std::time::Instant::now()) {
+            bail!(reason);
+        }
         let gpu = Gpu::cached_windows();
         #[cfg(debug_assertions)]
         let _held_importer = inject_idle_removal(gpu.as_ref(), &check_idle)?;
@@ -222,28 +233,38 @@ struct LossHistory {
     accepted_at: Option<std::time::Instant>,
     declined: Option<u64>,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LossDecision {
+    Admitted,
+    Declined,
+    Repeat,
+}
 impl Eligibility {
-    fn decide(&self, g: u64, now: std::time::Instant, mut commit: impl FnMut()) -> bool {
+    fn decide(&self, g: u64, now: std::time::Instant, mut commit: impl FnMut()) -> LossDecision {
         let mut history = self.history.lock();
         if history.declined == Some(g) {
-            return false;
+            return LossDecision::Declined;
         }
         // Remember the *removed generation*. An unchanged removal doesn't
         // become a new incident when replay stops or the 15s window expires.
-        let decision = if history
+        if history
             .accepted_at
             .is_some_and(|first| now.duration_since(first) < Duration::from_secs(15))
         {
-            Some(false)
-        } else {
-            (self.graph)(&mut commit)
-        };
-        match decision {
-            Some(true) => history.accepted_at = Some(now),
-            Some(false) => history.declined = Some(g),
-            None => {} // busy: never admit on the basis of a stale snapshot
+            history.declined = Some(g);
+            return LossDecision::Repeat;
         }
-        decision == Some(true)
+        match (self.graph)(&mut commit) {
+            Some(true) => {
+                history.accepted_at = Some(now);
+                LossDecision::Admitted
+            }
+            Some(false) => {
+                history.declined = Some(g);
+                LossDecision::Declined
+            }
+            None => LossDecision::Declined, // busy: don't latch an unproved graph
+        }
     }
 }
 
@@ -1798,18 +1819,33 @@ mod tests {
             history: Mutex::default(),
         };
         let t = Instant::now();
-        assert!(!policy.decide(10, t, || panic!("published ineligible generation")));
+        assert_eq!(
+            policy.decide(10, t, || panic!("published ineligible generation")),
+            LossDecision::Declined
+        );
         allowed.store(true, Ordering::Release);
-        assert!(!policy.decide(10, t, || panic!("reconsidered same removal")));
+        assert_eq!(
+            policy.decide(10, t, || panic!("reconsidered same removal")),
+            LossDecision::Declined
+        );
         let mut writes = 0;
-        assert!(policy.decide(11, t, || writes += 1));
-        assert!(!policy.decide(12, t + Duration::from_secs(2), || panic!(
-            "published double loss"
-        )));
-        assert!(!policy.decide(12, t + Duration::from_secs(20), || panic!(
-            "timer manufactured a new loss"
-        )));
-        assert!(policy.decide(13, t + Duration::from_secs(20), || writes += 1));
+        assert_eq!(policy.decide(11, t, || writes += 1), LossDecision::Admitted);
+        assert_eq!(
+            policy.decide(12, t + Duration::from_secs(2), || panic!(
+                "published double loss"
+            )),
+            LossDecision::Repeat
+        );
+        assert_eq!(
+            policy.decide(12, t + Duration::from_secs(20), || panic!(
+                "timer manufactured a new loss"
+            )),
+            LossDecision::Declined
+        );
+        assert_eq!(
+            policy.decide(13, t + Duration::from_secs(20), || writes += 1),
+            LossDecision::Admitted
+        );
         assert_eq!(writes, 2);
     }
 
