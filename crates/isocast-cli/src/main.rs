@@ -3353,6 +3353,9 @@ fn print_windows_gpu_route(route: &isocast_protocol::api::WindowsGpuRoute) {
             .as_ref()
             .map_or_else(|| "not observed".into(), label)
     );
+    if let Some(reason) = &route.idle_replacement_block {
+        println!("  Idle replacement blocked: {reason}");
+    }
     if let Some(devices) = &route.display_devices {
         println!("  Display devices: {}", devices.join(", "));
     }

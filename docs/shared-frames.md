@@ -286,6 +286,14 @@ replay, or a second device removal within 15 seconds of the first. In those
 cases the take continues until Stop; recovery does not retire owners, discard
 caches, or add incidents for the declined loss. Missing pictures need not resume.
 
+With live recovery opted in, if the replacement GPU is itself removed within
+that 15-second window, idle Start is blocked for **60 seconds from the second
+loss**. Retrying does not extend the timer. `status` and `doctor` show the
+remaining wait under `windows_gpu.idle_replacement_block`. Restarting Isocast
+clears it immediately. A single loss, an ineligible source graph, ordinary
+idle replacement, or developer-mode recovery without the opt-in does not arm
+this cooldown.
+
 Live recovery is **off by default** pending supervised physical TDR qualification.
 To opt in, set `ISOCAST_ENABLE_LIVE_GPU_RECOVERY=1` before starting the daemon.
 Without that exact value, developer mode off means no take-wide recovery;
