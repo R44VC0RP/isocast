@@ -209,6 +209,7 @@ fn page() -> BrowserPage<'static> {
         height: 4,
         fps: 30,
         css: "",
+        epoch: None,
     }
 }
 

@@ -666,8 +666,27 @@ impl<P: FramePool> Source<P> {
         let spec = &self.spec;
         let helper = Ended::Helper;
         let mut discard = Vec::new();
+        struct StamperGuard<'a> {
+            sink: Option<&'a AudioSink>,
+            stamper: BrowserAudioStamper,
+            now: &'a dyn Fn() -> Time,
+        }
+        impl Drop for StamperGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(sink) = self.sink
+                    && let Some((until, gap)) = self.stamper.finish((self.now)())
+                {
+                    (sink.report_gap)(until, gap);
+                }
+            }
+        }
         // A restarted helper cannot continue the previous one's sample clock.
-        let mut stamper = BrowserAudioStamper::default();
+        let now_fn = || shared.os.now();
+        let mut audio_guard = StamperGuard {
+            sink: self.audio.as_ref(),
+            stamper: BrowserAudioStamper::default(),
+            now: &now_fn,
+        };
         let mut resampler = Resampler::default();
         let mut last_frame: Option<Time> = None;
         loop {
@@ -766,7 +785,12 @@ impl<P: FramePool> Source<P> {
                     };
                     if len == 0 {
                         // Ordered before samples on every top-level document start.
-                        stamper = BrowserAudioStamper::default();
+                        if let Some(sink) = &self.audio
+                            && let Some((until, gap)) = audio_guard.stamper.finish(shared.os.now())
+                        {
+                            (sink.report_gap)(until, gap);
+                        }
+                        audio_guard.stamper = BrowserAudioStamper::default();
                         resampler = Resampler::default();
                         continue;
                     }
@@ -787,8 +811,11 @@ impl<P: FramePool> Source<P> {
                             .collect();
                         let samples = resampler.run(rate, samples);
                         let frames = samples.len() / 2;
-                        if frames > 0 {
-                            let (at, gap) = stamper.stamp_timed(frames, timing, wall_us, now);
+                        if frames > 0
+                            && let Some((at, gap)) = audio_guard
+                                .stamper
+                                .stamp_timed(frames, timing, wall_us, now)
+                        {
                             if let Some(gap) = gap {
                                 (sink.report_gap)(at, gap);
                             }

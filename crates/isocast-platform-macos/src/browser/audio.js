@@ -15,14 +15,24 @@
   const suspend = Context.prototype.suspend;
   const play = HTMLMediaElement.prototype.play;
   const appleWebKit = Boolean(window.__isocastAppleWebKit);
-  const mediaDelaySeconds = appleWebKit ? 0.1 : 0;
+  const appleWebKitVersion = Number(window.__isocastAppleWebKitVersion);
+  delete window.__isocastAppleWebKitVersion;
+  // Apple WebKit's MTAudioProcessingTap delivered <video>/<audio> PCM ~99 ms
+  // ahead of video.currentTime in WebKit 21624 (macOS 26.7) and ~14 ms ahead
+  // in WebKit 22625 (macOS 27.0); unknown versions use the newer 15 ms value.
+  const mediaDelaySeconds = !appleWebKit
+    ? 0
+    : (Number.isFinite(appleWebKitVersion) && appleWebKitVersion > 0 && appleWebKitVersion < 22625
+      ? 0.1
+      : 0.015);
   const CHUNK_FRAMES = 1024;
   const CHUNK_SAMPLES = CHUNK_FRAMES * 2;
   // See docs/browser-sources.md for measured A/V latencies per engine:
   // - Media elements (<video>/<audio>): Apple WebKit's AVPlayer delays video
   //   frames by CoreAudio outputLatency (up to 250 ms) while MTAudioProcessingTap
-  //   delivers PCM ~100 ms early; Chromium and WebKitGTK switch media elements
-  //   to WebAudio's pull clock, so only baseLatency applies there.
+  //   delivers PCM ~100 ms early on WebKit < 22625 and ~15 ms early on WebKit >= 22625;
+  //   Chromium and WebKitGTK switch media elements to WebAudio's pull clock, so
+  //   only baseLatency applies there.
   // - Pure WebAudio: capped at 25 ms on Apple WebKit (whose getOutputTimestamp
   //   equals currentTime and offscreen snapshots have ~10 ms latency) and 55 ms
   //   elsewhere (matching Windows WASAPI + DWM composition latency).

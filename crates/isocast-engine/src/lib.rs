@@ -844,7 +844,7 @@ pub trait AudioEncoder: Send {
 }
 
 /// A web page to render.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserPage<'a> {
     pub location: PageLocation<'a>,
     /// Size in CSS pixels, which is also the frame size.
@@ -853,6 +853,9 @@ pub struct BrowserPage<'a> {
     pub fps: u32,
     /// CSS added to the page.
     pub css: &'a str,
+    /// Session frame-grid epoch once started, so snapshot pacers can phase-align
+    /// to recorder slots.
+    pub epoch: Option<Arc<std::sync::OnceLock<Time>>>,
 }
 
 /// Control of a running browser source's page.

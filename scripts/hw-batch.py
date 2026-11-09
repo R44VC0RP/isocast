@@ -46,7 +46,8 @@ Kinds (all strict: the test Macs' zero-drop bar):
             worse beyond noise (#124; --args '--warmup 2' adds bench options)
             (--scenario flagship-1080, --runs 3, --seconds 20)
   smoke     the tier-1 merge smoke (about 15 min): e2e --only record, iso,
-            split, pause, shutdown, then bench flagship-1080 3 x 20 s A/B
+            split, pause, shutdown, browser_audio_gap, then bench
+            flagship-1080 3 x 20 s A/B
   motion    scripts/motion.sh --window [--scenario NAME] [--variant V]
             (desktop session)
   drag-lag  scripts/drag-lag.py with --args '...' (desktop session)
@@ -108,7 +109,7 @@ ROOT = BUILD / "hw-queue"
 LOCK = BUILD / ".bench.lock"
 MACS = {"m2-a": "isocast-m2-a", "m2-b": "isocast-m2-b"}
 KINDS = ("e2e", "bench", "smoke", "motion", "drag-lag", "soak", "stress", "cmd")
-SMOKE_E2E = ("record", "iso", "split", "pause", "shutdown")
+SMOKE_E2E = ("record", "iso", "split", "pause", "shutdown", "browser_audio_gap")
 # Remote checkout name: testmac.sh puts it in ~/dev/isocast-worktrees/hw-batch.
 REMOTE_NAME = "hw-batch"
 TIMEOUT_MIN = {"e2e": 45, "bench": 30, "smoke": 30, "motion": 45, "drag-lag": 30, "stress": 120, "cmd": 60}
