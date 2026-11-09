@@ -1659,6 +1659,16 @@ impl Isocast {
     }
 
     #[tool(
+        description = "List the Windows engine's compatible adapters, selection and reason. Give adapter=auto or a listed stable ID to save a machine-local preference while idle for the next daemon launch."
+    )]
+    async fn gpu_preference(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<isocast_protocol::api::GpuPreferenceParams>>,
+    ) -> Result<Json<isocast_protocol::api::WindowsGpuSelection>, String> {
+        self.call(Method::GpuPreference(Some(params))).await
+    }
+
+    #[tool(
         description = "Start a silent synthetic self-test, at most 30 seconds, without capture, windows or network access. Refused while outputs are active; starting an output cancels it. Poll machine_profile for completion."
     )]
     async fn machine_calibrate(

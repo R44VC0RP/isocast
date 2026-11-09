@@ -41,12 +41,39 @@ static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static ADAPTER: Mutex<Option<(u32, i32)>> = Mutex::new(None);
 
 #[cfg(feature = "wgpu")]
+type AdapterPlanner =
+    fn(Vec<wgpu::Adapter>, &dyn Fn() -> Result<wgpu::Adapter>) -> Result<wgpu::Adapter>;
+#[cfg(feature = "wgpu")]
+static PLANNER: OnceLock<AdapterPlanner> = OnceLock::new();
+
+/// Installed by the daemon before accepting clients. Capture-first and
+/// render-first take the same lock; a recovery never re-enters the planner.
+#[cfg(feature = "wgpu")]
+pub fn install_adapter_planner(planner: AdapterPlanner) -> Result<()> {
+    let selected = ADAPTER.lock().unwrap();
+    ensure!(
+        selected.is_none() && PLANNER.set(planner).is_ok(),
+        "Windows GPU selection was already initialized"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "wgpu")]
 fn preferred_adapter(instance: &wgpu::Instance) -> Result<wgpu::Adapter> {
-    block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .context("no compatible DX12 adapter found")
+    let default = || {
+        block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))
+        .context("no compatible DX12 adapter found")
+    };
+    match PLANNER.get() {
+        Some(plan) => plan(
+            block_on(instance.enumerate_adapters(wgpu::Backends::DX12)),
+            &default,
+        ),
+        None => default(),
+    }
 }
 
 /// Native D3D11 needs the adapter identity, not the renderer's compiler or

@@ -135,6 +135,9 @@ pub fn local_only_reason(method: &Method) -> Option<&'static str> {
             "calibration loads the engine's encoders for up to 30 seconds and is started by \
              someone at it",
         ),
+        Method::GpuPreference(Some(p)) if p.adapter.is_some() => {
+            Some("the engine adapter preference belongs to this machine")
+        }
         Method::MachineCancel => {
             Some("calibration is started and stopped by someone at the engine's computer")
         }
@@ -254,6 +257,7 @@ pub fn local_only_reason(method: &Method) -> Option<&'static str> {
         | Method::ProjectorPlace(_)
         | Method::MachineProfile
         | Method::GpuAdapter
+        | Method::GpuPreference(_)
         | Method::Hello
         | Method::FolderRoots
         | Method::FilesRoots

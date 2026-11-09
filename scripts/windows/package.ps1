@@ -47,7 +47,22 @@ $innoVersion = '7.1.0'
 $innoHash = '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f'
 $installer = "$ToolsDir\innosetup-$innoVersion-x64.exe"
 if (-not (Test-Path $installer)) {
-    Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-$innoVersion-x64.exe" -OutFile $installer -UseBasicParsing
+    $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-$innoVersion-x64.exe"
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Invoke-WebRequest $url -Headers @{Accept='application/octet-stream'} -OutFile "$installer.part" -UseBasicParsing -TimeoutSec 60
+            break
+        } catch {
+            Remove-Item -LiteralPath "$installer.part" -Force -ErrorAction SilentlyContinue
+            if ($attempt -eq 3) { throw }
+            # Same pinned release asset; avoid retrying a cached 504 redirect.
+            $url = 'https://api.github.com/repos/jrsoftware/issrc/releases/assets/511336600'
+            Write-Warning "Inno Setup download failed (attempt $attempt of 3); retrying: $_"
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+    if ((Get-FileHash -LiteralPath "$installer.part" -Algorithm SHA256).Hash -ne $innoHash) { throw 'Inno Setup download SHA-256 mismatch' }
+    Move-Item -LiteralPath "$installer.part" $installer -Force
 }
 if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $innoHash) { throw 'Inno Setup download SHA-256 mismatch' }
 $compilerDir = "$ToolsDir\inno-$innoVersion"

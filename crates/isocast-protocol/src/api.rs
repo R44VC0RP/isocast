@@ -486,6 +486,9 @@ pub enum Method {
     /// renderer. Windows returns its DX12 LUID as [low: u32, high: i32];
     /// other platforms return null. Does not start capture or recording.
     GpuAdapter,
+    /// Read the Windows engine's GPU selection and valid stable IDs, or save
+    /// an override while idle for its next launch. Does not switch a live GPU.
+    GpuPreference(Option<GpuPreferenceParams>),
     /// What this engine is: its machine's operating system and name, its
     /// identity, build, protocol version and methods. Remote clients call
     /// it first; local ones may. Returns [`Hello`](crate::hello::Hello).
@@ -3247,6 +3250,9 @@ pub struct Doctor {
 /// (low, high), local to this machine and boot, as in `gpu_adapter`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WindowsGpuRoute {
+    /// The startup selection, once made. Actual devices are reported separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<WindowsGpuSelection>,
     /// Why idle Start is temporarily refused after an opted-in repeat device loss, with retry advice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_replacement_block: Option<String>,
@@ -3261,6 +3267,35 @@ pub struct WindowsGpuRoute {
     pub display_devices: Option<Vec<String>>,
     pub captures: Vec<WindowsCaptureRoute>,
     pub encoders: Vec<WindowsEncoderRoute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GpuPreferenceParams {
+    /// Omit to read; "auto" or one of the reported stable IDs to save.
+    pub adapter: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowsGpuSelection {
+    /// Machine-local preference saved for the next launch.
+    pub preference: String,
+    pub restart_required: bool,
+    /// Actual pin for this daemon, including its current-boot LUID.
+    pub chosen: WindowsGpuCandidate,
+    pub reason: String,
+    pub warning: Option<String>,
+    /// Compatible adapters observed at selection time; never enumeration indices.
+    pub candidates: Vec<WindowsGpuCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowsGpuCandidate {
+    pub id: String,
+    pub name: String,
+    pub luid: (u32, i32),
+    pub software: bool,
+    pub driver: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

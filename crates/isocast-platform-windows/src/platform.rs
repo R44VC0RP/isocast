@@ -463,7 +463,7 @@ fn idle_start_is_a_noop_while_d3d11_open_owns_the_cache() -> Result<()> {
 /// The per-engine NVENC preset calibration, beside the machine calibration
 /// (`setup.toml` -> `setup.nvenc-budget.json`), so `$ISOCAST_SETUP` and
 /// `$ISOCAST_SOCKET` isolate it the same way. Only ever read here.
-fn budget_cache_path() -> PathBuf {
+pub(super) fn budget_cache_path() -> PathBuf {
     isocast_protocol::api::setup_path().with_extension("nvenc-budget.json")
 }
 
@@ -476,7 +476,9 @@ const CALIBRATION_UNITS: &str = "completed 1080p-equivalent frames/s";
 /// spatial AQ8, no temporal AQ/B-frames/lookahead, two-second GOP, and this
 /// build's admission queue. Every structured field must match exactly;
 /// descriptive text is never interpreted.
-fn check_calibration_policy(cache: &encoder_calibration::PresetCalibration) -> Result<()> {
+pub(super) fn check_calibration_policy(
+    cache: &encoder_calibration::PresetCalibration,
+) -> Result<()> {
     if cache.qualification != ACCEPTED_QUALIFICATION {
         bail!(
             "qualification is {:?}, not {ACCEPTED_QUALIFICATION:?}",
@@ -543,7 +545,7 @@ enum Figures {
 /// Whether a session runs the measured policy (see
 /// `check_calibration_policy`): its QP, BGRA8 input and frame rate, so its
 /// two-second GOP is the measured GOP too. `Some` names the difference.
-fn calibration_mismatch(
+pub(super) fn calibration_mismatch(
     policy: &encoder_calibration::CalibrationPolicy,
     qp: Option<u32>,
     input: PixelFormat,
@@ -1047,12 +1049,18 @@ impl Platform for WindowsPlatform {
                 Some(error.fix().into()),
             ),
         };
-        vec![Check {
+        let mut checks = vec![Check {
             name: "DX12 shader compiler".into(),
             status,
             detail,
             fix,
-        }]
+        }];
+        checks.extend(
+            crate::adapter_choice::observed()
+                .as_ref()
+                .and_then(crate::adapter_choice::doctor_warning),
+        );
+        checks
     }
 
     fn machine(&self) -> Machine {

@@ -5,6 +5,7 @@
 #![cfg(windows)]
 
 mod aac;
+pub mod adapter_choice;
 mod audio;
 mod audio_apps;
 mod broker;

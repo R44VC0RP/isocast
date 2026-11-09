@@ -545,6 +545,54 @@ fn select_display<'a>(displays: &'a [DisplayInfo], name: &str) -> Result<&'a Dis
     }
 }
 
+/// Weights are unique configured display streams, never a count of scene layers.
+pub(crate) fn capture_affinity(
+    setup: &isocast_protocol::Setup,
+) -> std::collections::BTreeMap<(u32, i32), u64> {
+    use isocast_protocol::SourceKind;
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut weights = BTreeMap::new();
+    let mut referenced = BTreeSet::new();
+    for view in std::iter::once(None).chain(
+        setup
+            .extra_canvas_ids()
+            .into_iter()
+            .filter_map(|c| setup.for_canvas(c))
+            .map(Some),
+    ) {
+        for scene in &view.as_ref().unwrap_or(setup).scenes {
+            referenced.extend(scene.all_sources().into_iter().map(str::to_owned));
+        }
+    }
+    if setup.recording.iso.enabled {
+        referenced.extend(setup.recording.iso.sources.iter().cloned());
+    }
+    if referenced.iter().all(|id| {
+        !setup
+            .source(id)
+            .is_some_and(|s| matches!(s.kind, SourceKind::Display(_)))
+    }) {
+        return weights;
+    }
+    let inventory = displays(&mut Vec::new()).unwrap_or_default();
+    for id in referenced {
+        let Some(SourceKind::Display(s)) = setup.source(&id).map(|s| &s.kind) else {
+            continue;
+        };
+        let Ok(info) = select_display(&inventory, &s.display) else {
+            continue;
+        };
+        if let WindowsDisplayOwner::Known { adapter } = owner(Some(info)) {
+            let bytes = u64::from(info.display.width)
+                .saturating_mul(u64::from(info.display.height))
+                .saturating_mul(u64::from(setup.canvas.fps) * 4);
+            let sum = weights.entry(adapter.luid).or_insert(0u64);
+            *sum = sum.saturating_add(bytes);
+        }
+    }
+    weights
+}
+
 /// One window, matching the documented WindowSource contract (as macOS):
 /// app is the program's name, file name or full path, or part of its name;
 /// title is part of the window's title; both ignore case. The largest match

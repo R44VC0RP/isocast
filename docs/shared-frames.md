@@ -249,6 +249,29 @@ Windows login session and use the exact adapter LUID; mismatches fail
 without CPU or cross-adapter fallback. Existing D3D11 capture imports stay
 upstream of the daemon's D3D12 render pass.
 
+`isocast gpu-adapter --choices --json` (RPC/MCP `gpu_preference`) lists the daemon's
+compatible DX12 adapters, stable IDs, driver versions and current LUIDs. Auto
+prefers compatible hardware over WARP. On a multi-adapter system it first
+checks same-adapter D3D11 texture/fence sharing. A driver- and policy-matched
+NVENC calibration that covers the known recording workload takes priority;
+an insufficient estimate and an unknown capacity rank equally. Otherwise
+preserve the high-performance device class: a panel on the iGPU alone does
+not move encoding off the dGPU. Among equally ranked devices, favor the owner
+of the most configured physical display capture bytes per second, then native
+enumeration order. Unknown window/indirect-display ownership casts no vote.
+If none passes the extra checks, try wgpu's normal high-performance adapter
+request and report a warning rather than refusing startup on the probes alone.
+Actual encoder preflight is unchanged; selection is not a throughput guarantee.
+
+While all outputs are idle, `isocast gpu-adapter --set ID --json` saves a
+machine-local override (`auto` clears the override). Restart the idle daemon
+to apply it. The current process never migrates an open device, even at idle.
+The preference is separate from portable scenes/profiles; it uses the adapter's
+PnP interface path when available, else an unambiguous PCI/model fingerprint,
+not a LUID or list index. If a saved adapter is missing, ambiguous or no longer
+compatible, the engine keeps the preference, uses auto, and reports why in
+status/doctor. `gpu_adapter` still returns just the actual current-boot LUID.
+
 The Windows compositor starts with system FXC and draws a test picture before
 publishing the device. A dev build without the packaged `dxcompiler.dll` and
 `dxil.dll` beside its executable can use FXC but has no DXC fallback; Isocast

@@ -154,6 +154,7 @@ if sys.platform == "win32":
     SCENARIOS += (
         "win_program_cut",
         "win_idle_gpu_replacement",
+        "win_adapter_preference",
         "win_media",
         "win_encoder_preflight",
         "win_preflight_no_decoder",
@@ -4737,6 +4738,43 @@ def check_pattern_take(e, path, manifest, cfg, layout, evidence, t0=None, label=
             lost = {round(h["time"] * fps) for h in checked.get("held", [])} if loss_limit(evidence) else None
             evidence.setdefault("sync", []).append(dict(sync_check(file, fps, lost=lost), output=file.name))
     return t0
+
+
+def scenario_win_adapter_preference(e, cfg, evidence):
+    """A stable setting survives restart; a vanished device is not a startup failure."""
+    cli = e.binary.with_name('isocast.exe'); fps=30; size=(320,180)
+    def preference(*args):
+        p=subprocess.run([cli,'gpu-adapter',*(['--set',args[0]] if args else ['--choices']),'--json'],env=e.env,cwd=e.root,text=True,capture_output=True,timeout=30)
+        require(p.returncode==0,p.stderr); return json.loads(p.stdout)
+    cfg=setup(e.root,'h264',width=size[0],height=size[1],fps=fps); e.apply(cfg)
+    def cold_start(mode):
+        e.stop(); began=time.monotonic(); e.start(); path=Path(e.rpc('start',{'seconds':2})['manifest'])
+        evidence[mode+'_cold_start_seconds']=time.monotonic()-began
+        until(lambda:finished(path),25,'cold take complete'); until(lambda:e.rpc('status')['state']=='idle',description='idle after cold take')
+    cold_start('auto'); first=preference()
+    picked=first['chosen']; id=picked['id']; expected=e.env.get('ISOCAST_TEST_EXPECT_ADAPTER')
+    require(first['preference']=='auto' and first['reason'] and (expected.lower() in picked['name'].lower() if expected else picked['software']),str(first))
+    require(picked['luid']==e.rpc('gpu_adapter') and picked in first['candidates'], 'plan and native pin disagree')
+    try: e.rpc('gpu_preference',{'adapter':'not-a-valid-id'})
+    except RpcError as ex: require('params.adapter:' in str(ex) and 'valid: auto' in str(ex) and id in ex.error['message'].replace('\\\\','\\'), str(ex))
+    else: raise Failure('accepted an unknown override')
+    pending=preference(id); require(pending['preference']==id and pending['restart_required'] and pending['chosen']==picked,'did not stage preference')
+    def selection_warnings(doctor): return [c for c in doctor['checks'] if c['name']=='Windows GPU selection' and c['status']=='warning']
+    require(any('restart' in c['detail'] and c.get('fix') for c in selection_warnings(e.rpc('doctor',{}))), 'doctor did not explain pending GPU restart')
+    cold_start('explicit'); explicit=e.rpc('gpu_preference',{})
+    require(explicit['chosen']==picked and explicit['preference']==id and not explicit['restart_required'] and 'explicit' in explicit['reason'],str(explicit))
+    e.stop(); missing='pnp:removed-e2e-adapter'; e.sock.with_suffix('.gpu-adapter').write_text(missing+'\n',encoding='utf8'); e.start()
+    doctor=e.rpc('doctor',{}); plan=doctor['windows_gpu']['selection']; require(plan['preference']==missing and missing in plan['warning'] and plan['chosen']==picked, str(plan))
+    require(any(missing in c['detail'] and c.get('fix') for c in selection_warnings(doctor)), 'doctor checks omitted missing GPU')
+    path=Path(e.rpc('start',{'seconds':5})['manifest'])
+    try: e.rpc('gpu_preference',{'adapter':'auto'})
+    except RpcError as ex: require('stop recording' in str(ex).lower(),str(ex))
+    else: raise Failure('mutated preference during capture')
+    live=e.rpc('status')['windows_gpu']; require(live['selection']==plan and all(live[k]['luid']==picked['luid'] for k in ('render_adapter','graphics_adapter')),str(live))
+    m=until(lambda:finished(path),35,'fallback recording finalization'); check_take(path,m,5,expected_sources=['program'])
+    movie,row=manifest_file(path,m,'program'); rows=pattern_rows(movie,pattern_specs([('p',(0,0,1,1))],*size),size,fps); origin=pattern_fit(rows,'p',pattern_period(fps))
+    require(len(rows)==150 and row['dropped_frames']==row['repeated_frames']==0 and all(slot==n and v['p']==('id',PATTERN_TAGS['bars'],(origin+n)%pattern_period(fps)) for n,(slot,_,v) in enumerate(rows)),'expected 150 consecutive decoded program pictures')
+    evidence.update(adapter=id,luid=picked['luid'],reason=plan['reason'],warning=plan['warning'],decoded=len(rows))
 
 
 def scenario_win_idle_gpu_replacement(e, cfg, evidence):
