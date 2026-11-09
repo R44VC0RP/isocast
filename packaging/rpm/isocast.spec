@@ -6,7 +6,7 @@ License:        MIT OR Apache-2.0
 URL:            https://github.com/anomalyco/isocast
 Source0:        %{name}-%{version}.tar.gz
 
-BuildRequires:  cargo rust gcc gcc-c++ make cmake nasm clang clang-devel perl-core
+BuildRequires:  cargo rust gcc gcc-c++ make cmake nasm ninja-build clang clang-devel perl-core
 BuildRequires:  pkgconf-pkg-config openssl-devel fontconfig-devel freetype-devel
 BuildRequires:  libxkbcommon-devel wayland-devel libX11-devel libXcursor-devel
 BuildRequires:  libXrandr-devel libXi-devel libglvnd-devel pipewire-devel
@@ -32,6 +32,9 @@ from fedora-cisco-openh264; Fedora's noopenh264 stub cannot encode.
 # and full type debug info exhaust hosted builders; keep line tables and
 # leave the rest of Fedora's hardening and package-note flags intact.
 export RUSTFLAGS="${RUSTFLAGS:-} -Ccodegen-units=16 -Cdebuginfo=line-tables-only"
+# skia-bindings passes --target when building Skia from source. Select Clang
+# for that build without overriding RPM's CC/CXX for other native crates.
+export CLANGCC=clang CLANGCXX=clang++
 cargo build --locked --release -p isocast-media -p isocast-cli -p isocast-daemon -p isocast-ui -p isocast-browser
 
 %install
