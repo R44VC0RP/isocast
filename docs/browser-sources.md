@@ -30,11 +30,17 @@ the helper pipe:
   absolute `NOTE_CRITICAL | NOTE_MACHTIME` kqueue timer) ticks at the source's
   configured `fps` (`30 Hz` for a `30 fps` source) and dispatches
   `takeSnapshotWithConfiguration` on the main queue when no snapshot is in
-  flight. Frames are never retried back-to-back on slow hosts, avoiding
-  WebContent main-thread starvation. Each snapshot's reference timestamp is
-  `host_time() - 1 / (2 * fps)` (`16.67 ms` at `30 fps`, `8.33 ms` at `60 fps`,
-  the midpoint of the snapshot polling interval) captured when the snapshot is
-  requested, before `NSImage` rasterization.
+  flight. Once the session `Timeline`'s epoch (`grid`) is started, the pacer
+  phase-aligns its deadlines to `grid.add_ticks(k, fps) + 1 / (2 * fps)` so each
+  snapshot's reference timestamp `host_time() - 1 / (2 * fps)` (`16.67 ms` at
+  `30 fps`, `8.33 ms` at `60 fps`, captured when the snapshot is requested
+  before `NSImage` rasterization) lands on the recorder slot boundary
+  (`grid.add_ticks(k, fps)`) plus main-queue dispatch latency (centered inside
+  `IsoRunner`'s `±1 / (2 * fps)` selection window), eliminating run-to-run
+  `33.33 ms` beat drift
+  between the snapshot pacer and `IsoRunner` / program composition. Frames are
+  never retried back-to-back on slow hosts, avoiding WebContent main-thread
+  starvation.
 - **Windows:** `isocast-browser.exe` subscribes to
   `Direct3D11CaptureFramePool::FrameArrived`. When a pacer tick precedes DWM's
   composition vblank (`TryGetNextFrame` empty), the helper wakes immediately on
@@ -97,13 +103,25 @@ recorder instead of the host's speakers.
    worklet records `gapEndMs` and only consumes `pause` immediately when
    `gapEndMs > pause.at`; otherwise it flushes pre-pause frames as `Continuous`
    and keeps `pauseArmed` set for the real suspend hole.
-3. Output-latency compensation is locked once per continuous run (as soon as the
-   backend reports a non-zero `outputLatency`, resetting only on `resumed`), and
-   `BrowserAudioStamper` (`crates/isocast-engine/src/time.rs`) stitches
-   `Continuous` chunks sample-accurately (`at = next`) from the run's origin, so
-   a host default-output change mid-run cannot jump timestamps or synthesize a
-   false gap.
-4. Over long takes, `PageClock::observe_wall` runs a 64-chunk (`~1.37 s`)
+3. Output-latency compensation is **effectively fixed at each continuous run's
+   first chunk**: `audio.js` locks `lockedLatencyUs` once the backend reports a
+   non-zero `outputLatency`, and `BrowserAudioStamper`
+   (`crates/isocast-engine/src/time.rs`) stitches `Continuous` chunks
+   sample-accurately (`at = next`) from the run's first chunk whenever
+   `|desired_at - next| < 150 ms` (`RESYNC`), re-anchoring only on a `Resumed`
+   boundary or `>= 150 ms` resync so a host default-output change mid-run cannot
+   jump timestamps or synthesize a false gap.
+4. In a `> MIX_DELAY` startup or IPC burst (`desired_at < now - MAX_LAG`, where
+   `MAX_LAG = 195 ms` sits inside `MIX_DELAY = 200 ms`),
+   `BrowserAudioStamper::stamp_timed` drops chunks whose target falls before the
+   lag limit (`None`) for up to `1 s` of real time while keeping `PageClock` on
+   its wall-anchored origin, and reports one coalesced gap ending at the first
+   retained chunk so the live tail stays aligned without overlap instead of
+   placing stale audio at the live edge. If continuous lag drops persist for
+   `>= 1 s` of real time, `stamp_timed` reports the accumulated gap and falls
+   back to the self-healing `now - MAX_LAG` clamp; and `BrowserAudioStamper::finish`
+   flushes any shorter pending gap on source stop or document reload.
+5. Over long takes, `PageClock::observe_wall` runs a 64-chunk (`~1.37 s`)
    tumbling min-filter on `wall_us - end_us` (picking the lowest-IPC-delay chunk
    in each window) so NTP wall-clock slew relative to the monotonic host clock
    cannot accumulate past `MAX_LAG` (`195 ms`).
@@ -118,14 +136,30 @@ across `<video>` MP4 playback and WebAudio (`raw currentTime` vs
 
 1. **`<video>` and `<audio>` media elements (the common case):**
    - **Apple WebKit (`WKWebView` on macOS):** `createMediaElementSource` attaches
-     a CoreMedia `MTAudioProcessingTap` to `AVPlayerItem`. Direct probing inside
-     `WKWebView` showed that `MTAudioProcessingTap` delivers decoded PCM **`99 ms`
-     ahead of `video.currentTime`**, while `AVPlayer` simultaneously delays
-     `<video>` frames on screen by the default CoreAudio output device's full
-     `outputLatency` (`10 ms` on built-in speakers, `90 ms` on a 90 ms virtual
-     device, `200 ms` on a 200 ms virtual device). `audio.js` therefore inserts
-     a `100 ms` `DelayNode` on `createMediaElementSource` on Apple WebKit and
-     compensates media routes by `baseLatency + outputLatency` up to `250 ms`.
+     a CoreMedia `MTAudioProcessingTap` to `AVPlayerItem`, while `AVPlayer`
+     delays `<video>` frames on screen by the default CoreAudio output device's
+     full `outputLatency` (`10 ms` on built-in speakers, `90 ms` on a 90 ms
+     virtual device, `200 ms` on a 200 ms virtual device). Direct probing across
+     two Mac hosts and both `48 kHz` and `44.1 kHz` AAC MP4s showed that
+     `MTAudioProcessingTap`'s pre-roll depends on the system `WebKit.framework`
+     version (and is independent of media sample rate):
+     - **`isocast-m2-b` (`Mac14,3` Apple M2, `macOS 26.7` `25G229`, WebKit
+       `21624` / `21624.5.1.11.3`):** `MTAudioProcessingTap` delivers decoded
+       PCM **`+99 ms`** ahead of `video.currentTime` (`48 kHz`).
+     - **`isocast-m2-a` (`Mac14,3` Apple M2, `macOS 27.0` `26A428`, WebKit
+       `22625` / `22625.1.29.11.27`):** `MTAudioProcessingTap` delivers decoded
+       PCM **`+14.48 ms`** (`48 kHz`, `[14.33 .. 14.65 ms]`) and **`+13.60 ms`**
+       (`44.1 kHz`, `[13.41 .. 13.71 ms]`) ahead of `video.currentTime` (with a
+       fixed `100 ms` `DelayNode`, `m2-a` landed `+73.66 ms` / `+78.25 ms` late).
+     - Because `WKWebView` freezes `navigator.userAgent` (`Mac OS X 10_15_7 ...
+       AppleWebKit/605.1.15`), `isocast-platform-macos` reads `WebKit.framework`'s
+       `CFBundleShortVersionString` once per process (`window.__isocastAppleWebKitVersion`)
+       and `audio.js` inserts a **`100 ms`** `DelayNode` for WebKit `< 22625` and
+       a **`15 ms`** `DelayNode` for WebKit `>= 22625` (defaulting to `15 ms` and
+       logging once if unreadable), plus `baseLatency + outputLatency` up to
+       `250 ms`. **Boundary note:** only WebKit `21624` (macOS 26.7) and `22625`
+       (macOS 27.0) have been probed on hardware; the exact upstream WebKit
+       change lies somewhere in `(21624, 22625]`.
    - **Chromium (`WebView2` on Windows) and WebKitGTK (Linux):** Calling
      `createMediaElementSource` detaches the media element from direct hardware
      output and clocks video presentation from WebAudio's pull clock (`baseLatency`
@@ -150,15 +184,23 @@ across `<video>` MP4 playback and WebAudio (`raw currentTime` vs
      `~70–83 ms` after the audio render time (`-82.81 ms`), matching what a
      viewer on the local monitor sees because the page starts painting only
      after the sample has already reached the speakers.
+3. **Mixed media + WebAudio pages:** Each browser source emits one mixed stereo
+   stream, and `hasMedia` in `audio.js` is sticky once a `<video>` or `<audio>`
+   element is routed on the page. Mixed media + WebAudio pages are therefore
+   compensated as media for the whole stream (preventing `> 150 ms` mid-run
+   `RESYNC` jumps when media elements start or pause on high-latency outputs
+   such as Bluetooth, at the trade-off that pure WebAudio sounds on that same
+   page also receive media output-latency compensation once media is attached).
 
 ### Measured A/V offsets (`beep_pts - flash_pts`, 30 fps)
 
-| Platform & default output | `base + output` | `<video>` MP4 (`pulse22.mp4`) | WebAudio (`currentTime` / `rAF`) | WebAudio (`getOutputTimestamp` / `rAF`) |
+| Platform & default output | `base + output` | `<video>` MP4 | WebAudio (`currentTime` / `rAF`) | WebAudio (`getOutputTimestamp` / `rAF`) |
 |---|---:|---:|---:|---:|
-| macOS M2 — built-in speakers | `2.7 + 10.0 = 12.7 ms` | **`-2.19 ms`** (was `-114.3 ms`) | **`-28.77 ms`** 60 s / **`+7.85 ms`** 16 s (was `-44.52 ms`) | **`-25.48 ms`** |
-| macOS M2 — virtual 90 ms output | `2.7 + 90.0 = 92.7 ms` | **`-15.7 ms`** (unscoped/no-delay `-115.7 ms`; uncomp `-208.4 ms`) | **`-3.46 ms`** (unscoped `+65.60 ms`) | **`-3.46 ms`** |
-| macOS M2 — virtual 200 ms output | `2.7 + 200.0 = 202.7 ms` | **`+2.2 ms`** (120 ms cap/no-delay `-180.5 ms`; uncomp `-300.5 ms`) | **`<= +26 ms`** (120 ms cap `+98.44 ms`) | **`<= +26 ms`** |
-| Windows RTX 5070 — USB WASAPI | `10.0 + 40.0 = 50.0 ms` | **`-7.81 ms`** (`+54.29 ms` with `outputLatency`) | **`-16.15 ms`** 16 s / **`-17.40 ms`** 60 s (was `-87.73 ms`) | `-82.81 ms` (page-delayed draw + 67 ms DWM) |
+| macOS 26.7 M2 (`m2-b`, WebKit `21624`) — built-in speakers | `2.7 + 10.0 = 12.7 ms` | **`-2.19 ms` / `-11.08 ms`** 48 kHz (`+0.03 ms` mean), **`-2.17 ms`** 44.1 kHz (`100 ms` delay; `-114.3 ms` without) | **`-28.77 ms`** 60 s / **`+7.85 ms`** 16 s (was `-44.52 ms`) | **`-25.48 ms`** |
+| macOS 26.7 M2 (`m2-b`, WebKit `21624`) — virtual 90 ms output | `2.7 + 90.0 = 92.7 ms` | **`-15.7 ms`** (`-115.7 ms` no-delay; `-208.4 ms` uncomp) | **`-3.46 ms`** (unscoped `+65.60 ms`) | **`-3.46 ms`** |
+| macOS 26.7 M2 (`m2-b`, WebKit `21624`) — virtual 200 ms output | `2.7 + 200.0 = 202.7 ms` | **`+2.2 ms`** (`-180.5 ms` 120 ms cap/no-delay; `-300.5 ms` uncomp) | **`<= +26 ms`** (120 ms cap `+98.44 ms`) | **`<= +26 ms`** |
+| macOS 27.0 M2 (`m2-a`, WebKit `22625`) — built-in speakers | `2.7 + 10.0 = 12.7 ms` | **`-11.03 ms`** 48 kHz (`+10.98 ms` 1 Hz) / **`-4.93 ms`** 44.1 kHz (`-14.90 ms` 1 Hz) (`15 ms` delay; was `+73.66` / `+78.25 ms` at `100 ms`) | **`+5.6 ms`** 10-run Take 3 median (`[+3.31 .. +14.27 ms]`, `10/10` PASS) | — |
+| Windows RTX 5070 (`exon-desk`) — USB WASAPI | `10.0 + 40.0 = 50.0 ms` | **`-7.81 ms`** (`+54.29 ms` with `outputLatency`) | **`-16.15 ms`** 16 s / **`-17.40 ms`** 60 s (was `-87.73 ms`) | `-82.81 ms` (page-delayed draw + 67 ms DWM) |
 | Linux arm64 VM — PipeWire null | `2.7 + 0.0 = 2.7 ms` | **`+17.19 ms`** | **`-5.81 ms`** 16 s / **`-21.17 ms`** 60 s (was `-40.54 ms`) | **`-5.81 ms`** |
 
 ### End-to-end test coverage (`scenario_browser_audio_gap` Take 3)
@@ -179,7 +221,8 @@ canvas flash + WebAudio beep pulses on both `web` and `program` using
   sample all 9 sub-frame phases rather than aliasing to one fixed phase, and
   enforces **`|median(beep - flash)| <= 0.5 / fps`** (`16.67 ms` at `30 fps`) so
   any constant shift of half a frame or more fails.
-- **Hardware vs hosted runners:** Test Macs and Windows GPU hardware (`exon-desk`)
+- **Hardware vs hosted runners:** Test Macs (including `scripts/hw-batch.py`'s
+  `SMOKE_E2E` merge smoke) and Windows GPU hardware (`exon-desk`)
   run Take 3 strictly (`lost = None`, zero writer drops, zero audio dropouts,
   `1 / fps + 2 ms`, and `|median| <= 0.5 / fps`). Hosted Linux (`--hosted` on
   software `gtk4-broadwayd` + `llvmpipe` + PipeWire `auto_null`) uses a

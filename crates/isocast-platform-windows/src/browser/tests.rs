@@ -105,6 +105,7 @@ fn an_unresponsive_helper_fails_instead_of_opening_a_blank_source() {
             height: 4,
             fps: 30,
             css: "",
+            epoch: None,
         },
         || Ok(Pool),
         VideoSink {
@@ -167,6 +168,7 @@ while True:
         height: 4,
         fps: 30,
         css: "",
+        epoch: None,
     };
     let (capture, _, _) = start(helper, &page, || Ok(Pool), sink, None).unwrap();
     let child = dir.join("child");

@@ -976,8 +976,25 @@ fn read(
     sink: &VideoSink<Frame>,
     audio: Option<&AudioSink>,
 ) -> Result<()> {
+    struct StamperGuard<'a> {
+        sink: Option<&'a AudioSink>,
+        stamper: Stamper,
+    }
+    impl Drop for StamperGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(sink) = self.sink
+                && let Some((until, gap)) = self.stamper.finish(system::now())
+            {
+                (sink.report_gap)(until, gap);
+            }
+        }
+    }
     // Each new reader is a new helper process, including watchdog restarts.
-    let (mut stamper, mut resampler) = (Stamper::default(), Resampler::default());
+    let mut audio_guard = StamperGuard {
+        sink: audio,
+        stamper: Stamper::default(),
+    };
+    let mut resampler = Resampler::default();
     let mut last_frame: Option<Time> = None;
     let mut discard = Vec::new();
     loop {
@@ -1068,7 +1085,11 @@ fn read(
                 if let Some(sink) = audio {
                     if len == 0 {
                         // Document-start marker, ordered with the page's audio.
-                        (stamper, resampler) = Default::default();
+                        if let Some((until, gap)) = audio_guard.stamper.finish(now) {
+                            (sink.report_gap)(until, gap);
+                        }
+                        audio_guard.stamper = Default::default();
+                        resampler = Default::default();
                         continue;
                     }
                     let samples: Vec<f32> = bytes
@@ -1080,8 +1101,11 @@ fn read(
                         .collect();
                     let samples = resampler.run(rate, samples);
                     let frames = samples.len() / 2;
-                    if frames > 0 {
-                        let (at, gap) = stamper.stamp_timed(frames, timing, wall_us, now);
+                    if frames > 0
+                        && let Some((at, gap)) = audio_guard
+                            .stamper
+                            .stamp_timed(frames, timing, wall_us, now)
+                    {
                         if let Some(gap) = gap {
                             (sink.report_gap)(at, gap);
                         }

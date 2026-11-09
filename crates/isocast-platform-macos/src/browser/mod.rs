@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -24,7 +24,9 @@ use isocast_engine::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSBackingStoreType, NSColor,
     NSImage, NSWindow, NSWindowStyleMask,
@@ -33,8 +35,8 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
 };
 use objc2_foundation::{
-    NSError, NSNumber, NSObject, NSObjectNSKeyValueCoding, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString, NSURL, NSURLRequest,
+    NSBundle, NSError, NSNumber, NSObject, NSObjectNSKeyValueCoding, NSObjectProtocol, NSPoint,
+    NSRect, NSSize, NSString, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
     WKAudiovisualMediaTypes, WKScriptMessage, WKScriptMessageHandler, WKSnapshotConfiguration,
@@ -48,15 +50,59 @@ use crate::{host_time, on_main_thread};
 /// How long setting a page up on the main thread may take.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The script that captures a page's sound. Apple WebKit's
-/// `createMediaElementSource` (`MTAudioProcessingTap`) delivers decoded media
-/// PCM ~100 ms ahead of `AVPlayer`'s display clock while `AVPlayer` still
-/// delays `<video>` frames by CoreAudio `outputLatency`.
-const AUDIO_SCRIPT: &str = concat!(
-    "window.__isocastAppleWebKit = true;\n",
-    "window.webkit.messageHandlers.isocastAudio.postMessage('48000:');\n",
-    include_str!("audio.js")
-);
+/// Parse WebKit's `CFBundleShortVersionString` major number (e.g. `"21624"` or
+/// `"22625.1"`).
+fn parse_webkit_short_version(raw: &str) -> Option<u32> {
+    raw.trim()
+        .split('.')
+        .next()?
+        .parse::<u32>()
+        .ok()
+        .filter(|&v| v > 0)
+}
+
+/// Read the loaded `WebKit.framework`'s `CFBundleShortVersionString` once per
+/// process so `audio.js` can match `MTAudioProcessingTap`'s pre-roll (`~100 ms`
+/// on WebKit < 22625 vs `~15 ms` on WebKit >= 22625). Logs once and returns
+/// `None` (selecting 15 ms) if unreadable.
+fn webkit_short_version() -> Option<u32> {
+    static VERSION: OnceLock<Option<u32>> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let key = NSString::from_str("CFBundleShortVersionString");
+        let bundle = unsafe { NSBundle::bundleForClass(WKWebView::class()) };
+        let raw = bundle
+            .objectForInfoDictionaryKey(&key)
+            .and_then(|v| v.downcast::<NSString>().ok())
+            .map(|s| s.to_string());
+        let parsed = raw.as_deref().and_then(parse_webkit_short_version);
+        if parsed.is_none() {
+            isocast_diagnostics::diagnostic!("warn";
+                "isocastd: could not read WebKit CFBundleShortVersionString ({raw:?}); using 15 ms media delay"
+            );
+        }
+        parsed
+    })
+}
+
+/// The script that captures a page's sound, prefixed with Apple WebKit's
+/// framework version for `createMediaElementSource` (`MTAudioProcessingTap`)
+/// pre-roll compensation.
+fn audio_script_source() -> &'static str {
+    static SCRIPT: OnceLock<String> = OnceLock::new();
+    SCRIPT.get_or_init(|| {
+        let version_js = match webkit_short_version() {
+            Some(v) => v.to_string(),
+            None => "null".to_string(),
+        };
+        format!(
+            "window.__isocastAppleWebKit = true;\n\
+             window.__isocastAppleWebKitVersion = {version_js};\n\
+             window.webkit.messageHandlers.isocastAudio.postMessage('48000:');\n\
+             {}",
+            include_str!("audio.js")
+        )
+    })
+}
 
 /// The message handler `audio.js` posts to.
 const AUDIO_HANDLER: &str = "isocastAudio";
@@ -77,6 +123,7 @@ struct Page {
     web: Retained<WKWebView>,
     address: Retained<NSURL>,
     snapshotter: Rc<Snapshotter>,
+    audio: Option<Retained<PageAudio>>,
     /// Whether the page is loaded, or unloaded while it isn't shown.
     loaded: Rc<Cell<bool>>,
     /// An empty frame has been sent since the page was unloaded.
@@ -126,6 +173,9 @@ impl Page {
 impl Drop for Page {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::SeqCst);
+        if let Some(audio) = self.audio.take() {
+            audio.flush(crate::host_time());
+        }
         // The handler holds the audio sink; let it go with the page.
         unsafe {
             self.web
@@ -217,12 +267,15 @@ pub fn capture_browser(
     .context("the main thread did not answer; browser sources need the daemon")??;
     let pacer_closed = closed.clone();
     let tick_fps = fps.max(1);
+    let timeline_epoch = page.epoch.clone();
     std::thread::Builder::new()
         .name(format!("browser-pacer-{id}"))
         .spawn(move || {
-            let origin = host_time();
-            for n in 1u64.. {
-                crate::pacing::sleep_until(origin.add_ticks(n, tick_fps));
+            let mut schedule = SnapshotSchedule::new(host_time(), tick_fps);
+            loop {
+                let grid = timeline_epoch.as_ref().and_then(|cell| cell.get().copied());
+                let deadline = schedule.next_deadline(host_time(), grid);
+                crate::pacing::sleep_until(deadline);
                 if pacer_closed.load(Ordering::SeqCst) {
                     break;
                 }
@@ -255,6 +308,72 @@ enum Location {
     File(String),
 }
 
+fn grid_deadline(grid: Time, slot: i64, fps: u32) -> Time {
+    let half_ns = 500_000_000i128 / i128::from(fps);
+    let offset_ns = slot as i128 * 1_000_000_000 / i128::from(fps) + half_ns;
+    Time::from_nanos((grid.as_nanos() as i128 + offset_ns) as i64)
+}
+
+/// Paces browser snapshots at `fps`, phase-aligning to `grid + 1 / (2 * fps)`
+/// once the session timeline's epoch is known so each snapshot's `captured`
+/// timestamp (`request_time - 1 / (2 * fps)`) lands on the recorder slot
+/// boundary (`grid.add_ticks(k, fps)`) plus main-queue dispatch latency.
+struct SnapshotSchedule {
+    fps: u32,
+    fallback_origin: Time,
+    fallback_step: u64,
+    aligned: Option<(Time, i64)>,
+}
+
+impl SnapshotSchedule {
+    fn new(origin: Time, fps: u32) -> Self {
+        Self {
+            fps: fps.max(1),
+            fallback_origin: origin,
+            fallback_step: 0,
+            aligned: None,
+        }
+    }
+
+    fn next_deadline(&mut self, now: Time, grid: Option<Time>) -> Time {
+        if self.aligned.is_none()
+            && let Some(g) = grid
+        {
+            let min_next = now + Duration::from_nanos(250_000_000 / u64::from(self.fps));
+            let mut slot = min_next.ticks_since(g, self.fps) - 2;
+            while grid_deadline(g, slot, self.fps) < min_next {
+                slot += 1;
+            }
+            self.aligned = Some((g, slot));
+        }
+        if let Some((g, ref mut slot)) = self.aligned {
+            let mut target = grid_deadline(g, *slot, self.fps);
+            *slot += 1;
+            if target <= now {
+                let mut jump = now.ticks_since(g, self.fps) - 1;
+                while grid_deadline(g, jump, self.fps) <= now {
+                    jump += 1;
+                }
+                target = grid_deadline(g, jump, self.fps);
+                *slot = jump + 1;
+            }
+            target
+        } else {
+            self.fallback_step += 1;
+            let mut target = self.fallback_origin.add_ticks(self.fallback_step, self.fps);
+            if target <= now {
+                let mut jump = now.ticks_since(self.fallback_origin, self.fps).max(1) as u64;
+                while self.fallback_origin.add_ticks(jump, self.fps) <= now {
+                    jump += 1;
+                }
+                self.fallback_step = jump;
+                target = self.fallback_origin.add_ticks(jump, self.fps);
+            }
+            target
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn open_page(
     mtm: MainThreadMarker,
@@ -279,7 +398,7 @@ fn open_page(
             &NSString::from_str("allowFileAccessFromFileURLs"),
         )
     };
-    if let Some(sink) = audio {
+    let page_audio = if let Some(sink) = audio {
         let controller = unsafe { config.userContentController() };
         let handler = PageAudio::new(mtm, sink);
         unsafe {
@@ -289,13 +408,16 @@ fn open_page(
             );
             let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
                 WKUserScript::alloc(mtm),
-                &NSString::from_str(AUDIO_SCRIPT),
+                &NSString::from_str(audio_script_source()),
                 WKUserScriptInjectionTime::AtDocumentStart,
                 true,
             );
             controller.addUserScript(&script);
         }
-    }
+        Some(handler)
+    } else {
+        None
+    };
     // The custom CSS, added once the document is there.
     if !css.trim().is_empty() {
         let quoted = serde_json_string(css);
@@ -386,6 +508,7 @@ fn open_page(
         web,
         address,
         snapshotter,
+        audio: page_audio,
         loaded,
         cleared,
         closed,
@@ -592,18 +715,20 @@ define_class!(
                     // The document-start script sends an empty first record.
                     // Ordered with its audio, even on page-initiated reload.
                     if samples.is_empty() {
+                        self.flush(now);
                         self.ivars().stamper.replace(Default::default());
                         self.ivars().resampler.replace(Default::default());
                         return;
                     }
                     let samples = self.ivars().resampler.borrow_mut().run(rate, samples);
                     let frames = samples.len() / 2;
-                    if frames > 0 {
-                        let (at, gap) = self
+                    if frames > 0
+                        && let Some((at, gap)) = self
                             .ivars()
                             .stamper
                             .borrow_mut()
-                            .stamp_timed(frames, timing, wall_us, now);
+                            .stamp_timed(frames, timing, wall_us, now)
+                    {
                         if let Some(gap) = gap {
                             (self.ivars().sink.report_gap)(at, gap);
                         }
@@ -631,6 +756,13 @@ impl PageAudio {
             reported: Cell::new(false),
         });
         unsafe { msg_send![super(this), init] }
+    }
+
+    fn flush(&self, now: Time) {
+        let pending = self.ivars().stamper.borrow_mut().finish(now);
+        if let Some((until, gap)) = pending {
+            (self.ivars().sink.report_gap)(until, gap);
+        }
     }
 }
 
@@ -955,7 +1087,9 @@ ObjC.import('Foundation');
                 1_000_420_000
             };
             let now = isocast_engine::Time::from_nanos(arrival_us as i64 * 1_000);
-            let (at, gap) = stamper.stamp_timed(frames, timing, Some(arrival_us), now);
+            let (at, gap) = stamper
+                .stamp_timed(frames, timing, Some(arrival_us), now)
+                .expect("burst within MAX_LAG retained");
             assert_eq!(gap, None, "unexpected dropout on {timing:?}");
             decoded_runs.push((
                 matches!(timing, BrowserAudioTiming::Resumed { .. }),
@@ -989,5 +1123,122 @@ ObjC.import('Foundation');
                 "expected {expected:?} ms hole at {pre}->{post}, got {hole_ms} ms ({decoded_runs:?})"
             );
         }
+    }
+
+    #[test]
+    fn webkit_version_parses_and_selects_expected_media_delay() {
+        assert_eq!(parse_webkit_short_version("21624"), Some(21_624));
+        assert_eq!(parse_webkit_short_version("21624.5.1.11.3"), Some(21_624));
+        assert_eq!(parse_webkit_short_version("22625"), Some(22_625));
+        assert_eq!(parse_webkit_short_version(" 22625.1.29 "), Some(22_625));
+        assert_eq!(parse_webkit_short_version(""), None);
+        assert_eq!(parse_webkit_short_version("0"), None);
+        assert_eq!(parse_webkit_short_version("unknown"), None);
+
+        let live = webkit_short_version();
+        assert!(
+            live.is_some_and(|v| v >= 18_000),
+            "expected readable WebKit CFBundleShortVersionString on macOS, got {live:?}"
+        );
+
+        let probe_delay = |apple_webkit: bool, version_js: &str| -> Vec<f64> {
+            let preamble = format!(
+                r#"
+ObjC.import('Foundation');
+const delays = [];
+class AudioNode {{ connect(t) {{ return t; }} disconnect() {{}} }}
+class AudioDestinationNode extends AudioNode {{ constructor(ctx) {{ super(); this.context = ctx; }} }}
+class FakeAudioContext {{
+  constructor() {{
+    this.state = 'running';
+    this.sampleRate = 48000;
+    this.baseLatency = 0.00267;
+    this.outputLatency = 0.01;
+    this.destination = new AudioDestinationNode(this);
+    this.audioWorklet = {{ addModule: () => new Promise(() => {{}}) }};
+  }}
+  createGain() {{ const n = new AudioNode(); n.gain = {{ value: 1 }}; return n; }}
+  createDelay() {{
+    const d = {{ value: 0 }};
+    delays.push(d);
+    const n = new AudioNode();
+    n.delayTime = d;
+    return n;
+  }}
+  createOscillator() {{ const n = new AudioNode(); n.start = () => {{}}; n.stop = () => {{}}; return n; }}
+  createMediaElementSource() {{ return new AudioNode(); }}
+  addEventListener() {{}}
+  suspend() {{}}
+  resume() {{}}
+}}
+globalThis.AudioNode = AudioNode;
+globalThis.AudioDestinationNode = AudioDestinationNode;
+globalThis.HTMLMediaElement = class {{ play() {{}} }};
+globalThis.document = {{ addEventListener: () => {{}} }};
+globalThis.console = {{ info: () => {{}}, warn: () => {{}} }};
+globalThis.window = globalThis;
+globalThis.AudioContext = FakeAudioContext;
+globalThis.webkit = {{ messageHandlers: {{ isocastAudio: {{ postMessage: () => {{}} }} }} }};
+globalThis.__isocastAppleWebKit = {apple_webkit};
+globalThis.__isocastAppleWebKitVersion = {version_js};
+"#
+            );
+            let tail = r#"
+if ('__isocastAppleWebKitVersion' in window) {
+  throw new Error('__isocastAppleWebKitVersion was not deleted');
+}
+const ctx = new AudioContext();
+ctx.createMediaElementSource({});
+const out = JSON.stringify(delays.map(d => d.value)) + '\n';
+$.NSFileHandle.fileHandleWithStandardOutput.writeData($(out).dataUsingEncoding($.NSUTF8StringEncoding));
+"#;
+            let script = format!("{preamble}\n{}\n{tail}", include_str!("audio.js"));
+            let output = std::process::Command::new("/usr/bin/osascript")
+                .args(["-l", "JavaScript", "-e", &script])
+                .output()
+                .expect("osascript runs JavaScriptCore");
+            assert!(
+                output.status.success(),
+                "osascript failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice(output.stdout.trim_ascii()).expect("JSON delays")
+        };
+
+        assert_eq!(probe_delay(true, "21624"), vec![0.1]);
+        assert_eq!(probe_delay(true, "22624"), vec![0.1]);
+        assert_eq!(probe_delay(true, "22625"), vec![0.015]);
+        assert_eq!(probe_delay(true, "null"), vec![0.015]);
+        assert_eq!(probe_delay(true, "undefined"), vec![0.015]);
+        assert_eq!(probe_delay(false, "21624"), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn snapshot_schedule_aligns_to_timeline_half_slot_grid() {
+        let ms = |n: i64| Time::from_nanos(n * 1_000_000);
+        let mut sched = SnapshotSchedule::new(ms(100), 30);
+        // Before `grid` is known, warmup ticks follow `fallback_origin` at 30 Hz.
+        let d1 = sched.next_deadline(ms(100), None);
+        assert_eq!(d1, ms(100).add_ticks(1, 30));
+        // Once `grid` is set (including slightly in the future for START_DELAY),
+        // deadlines lock to `grid.add_ticks(k, 30) + 1 / (2 * 30)` without double-ticking.
+        let grid = ms(210);
+        let d2 = sched.next_deadline(ms(167), Some(grid));
+        assert!(d2 >= ms(175), "handoff fired too soon: {d2:?}");
+        assert_eq!(d2, grid_deadline(grid, -1, 30));
+        for k in 0..10i64 {
+            let now = grid_deadline(grid, k - 1, 30) + Duration::from_micros(200);
+            let dk = sched.next_deadline(now, Some(grid));
+            let expected = grid.add_ticks(k as u64, 30) + Duration::from_nanos(500_000_000 / 30);
+            assert!(
+                (dk.as_nanos() - expected.as_nanos()).abs() <= 1,
+                "slot {k}: got {dk:?}, expected {expected:?}"
+            );
+        }
+        // A multi-hour stall jumps in O(1) to the next future half-slot without bursting.
+        let stalled_now = grid + Duration::from_secs(8 * 3_600);
+        let after_stall = sched.next_deadline(stalled_now, Some(grid));
+        assert!(after_stall > stalled_now);
+        assert!(after_stall <= stalled_now + Duration::from_secs(1) / 30);
     }
 }

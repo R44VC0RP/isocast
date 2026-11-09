@@ -43,7 +43,7 @@ const AUDIO_QUEUE: usize = 1000;
 #[derive(Default)]
 pub(crate) struct Timeline {
     pub(crate) clocks: Arc<crate::pacing::Clocks>,
-    start: OnceLock<Time>,
+    start: Arc<OnceLock<Time>>,
     /// Source ids on air in the program and when each came on air; `None`
     /// when there is no program, so every source counts as on air from the
     /// start.
@@ -61,6 +61,10 @@ impl Timeline {
 
     pub(crate) fn start(&self) -> Option<Time> {
         self.start.get().copied()
+    }
+
+    pub(crate) fn epoch(&self) -> Arc<OnceLock<Time>> {
+        self.start.clone()
     }
 
     /// Wait for the timeline to start, unless `stop` is set first.
@@ -986,6 +990,7 @@ fn open_native<P: Platform>(
                 height: browser.height,
                 fps: browser.fps,
                 css: &browser.css,
+                epoch: Some(timeline.epoch()),
             };
             let slot = Arc::new(FrameSlot::new(timeline.clone()));
             let (audio, audio_sink) = match browser.control_audio {
