@@ -141,6 +141,8 @@ jobs:
         with:
           key: distro-${{ matrix.distro }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/skia-binaries
+
       - name: Build native package
         id: build
         run: |
@@ -156,6 +158,11 @@ jobs:
             CARGO_BUILD_JOBS=2 ISOCAST_UI_NO_GALLERY=1 scripts/package-rpm.sh
           fi
           df -h "$GITHUB_WORKSPACE"
+      # Container actions run in fresh sibling containers. Only the workspace
+      - name: Inspect Skia build output (qualification)
+        run: |
+          grep -HE 'FROM: |DOWNLOAD AND INSTALL SUCCEEDED|STARTING A FULL BUILD' target/release/build/skia-bindings-*/output
+
       # Container actions run in fresh sibling containers. Only the workspace
       # is shared; neither build packages nor Cargo are on the runtime PATH.
       - name: Install and record on clean Arch
@@ -670,9 +677,16 @@ jobs:
         if: env.MODE == 'full'
         run: cargo test --release --locked -p isocast-openh264 -- --include-ignored
 
+      - uses: ./.github/actions/skia-binaries
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+
       - name: Build app, engine, CLI and browser helper
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser -p isocast-media
+
+      - name: Inspect Skia build output (qualification)
+        run: |
+          grep -HE 'FROM: |DOWNLOAD AND INSTALL SUCCEEDED|STARTING A FULL BUILD' target/release/build/skia-bindings-*/output
 
       - name: App checks
         if: env.MODE == 'full'
@@ -880,6 +894,8 @@ jobs:
         with:
           key: deb-debian12-${{ matrix.arch }}
           save-if: ${{ !inputs.linux_release_commit && github.ref == 'refs/heads/main' }}
+
+      - uses: ./.github/actions/skia-binaries
 
       - name: Build app, engine and CLI
         # No browser helper: it needs GTK 4.10+ and bookworm has 4.8, so the
@@ -1323,10 +1339,17 @@ jobs:
       # same features and `cargo test` reuses this build (with only
       # `-p isocast-ui` here, the tests rebuilt the dependencies and the
       # interface: 9.5 min, run 39947489790).
+      - uses: ./.github/actions/skia-binaries
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+
       - name: Build UI and its test binary (do not run)
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         id: native_build
         run: cargo build --locked --all-targets -j 1 -p isocast-client -p isocast-cli -p isocast-ui
+
+      - name: Inspect Skia build output (qualification)
+        run: |
+          grep -HE 'FROM: |DOWNLOAD AND INSTALL SUCCEEDED|STARTING A FULL BUILD' target/debug/build/skia-bindings-*/output
 
       - name: Check updater clients
         if: env.MODE == 'full'

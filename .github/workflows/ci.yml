@@ -152,6 +152,9 @@ jobs:
           # builds only the CLI: saving that would leave a thin cache.
           save-if: ${{ github.ref == 'refs/heads/main' && env.MODE != 'docs' }}
 
+      - uses: ./.github/actions/skia-binaries
+        if: env.MODE == 'full' || (env.MODE == 'warm' && steps.cache.outputs.cache-hit != 'true')
+
       - name: Clippy
         if: env.MODE == 'full' || (env.MODE == 'warm' && steps.cache.outputs.cache-hit != 'true')
         # The portable job lints and tests the excluded crates on ubuntu.
@@ -218,9 +221,16 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - uses: ./.github/actions/skia-binaries
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+
       - name: Build release binaries
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --locked --release -p isocast-ui -p isocast-daemon -p isocast-cli
+
+      - name: Inspect Skia build output (qualification)
+        run: |
+          grep -HE 'FROM: |DOWNLOAD AND INSTALL SUCCEEDED|STARTING A FULL BUILD' target/release/build/skia-bindings-*/output
 
       - name: Pack motion binaries (preserve executable permissions)
         if: env.MODE == 'full'
