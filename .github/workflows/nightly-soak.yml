@@ -21,7 +21,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Skips a scheduled soak when nothing it runs changed since the last soak
+  # (.github/scripts/ci_gate.py; at least weekly); manual runs always soak.
+  # macOS runners are shared org-wide and this job holds one for ~5 hours.
+  gate:
+    name: what to run
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      soak: ${{ steps.gate.outputs.soak }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/ci_gate.py soak
+
   soak:
+    needs: gate
+    if: needs.gate.outputs.soak != 'skip'
     # GitHub-hosted arm64 only: free for public repos, never our own Macs.
     runs-on: macos-15
     timeout-minutes: 350
