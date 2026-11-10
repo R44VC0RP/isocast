@@ -53,6 +53,7 @@ jobs:
     # Ryan approves; the Sparkle key exists only here.
     environment: release
     permissions:
+      id-token: write
       contents: write
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -60,6 +61,21 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # The Sparkle key is in AWS Secrets Manager as
+      # isocast/release/SPARKLE_ED_PRIVATE_KEY, read by this environment's own
+      # role (`isocast-release`).
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/isocast-release
+          role-session-name: isocast-release-secrets-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Fetch the release secrets
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            SPARKLE_ED_PRIVATE_KEY,isocast/release/SPARKLE_ED_PRIVATE_KEY
+          parse-json-secrets: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
@@ -67,7 +83,7 @@ jobs:
         run: scripts/sparkle/sparkle.sh path
       - name: Check the Sparkle update signing key
         env:
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ env.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           python3 - <<'PY'
           import base64, binascii, os, sys
@@ -81,7 +97,7 @@ jobs:
           PY
       - name: Verify the published DMG and appcast, regenerate with the notes, replace appcast.xml
         env:
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ env.SPARKLE_ED_PRIVATE_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release-finalize.py --refresh-appcast "$VERSION" --output "$RUNNER_TEMP/refresh-appcast"
       - name: Summary (both feeds)

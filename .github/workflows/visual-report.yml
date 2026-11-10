@@ -60,10 +60,12 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # OPENCODE_API_KEY lives in this environment, which only main may use,
-    # so a workflow pushed on any other branch can't read it.
+    # OPENCODE_API_KEY lives in AWS Secrets Manager, readable by this
+    # environment's role (`isocast-visual-judge`) from main only, so a
+    # workflow pushed on any other branch can't read it.
     environment: visual-judge
     permissions:
+      id-token: write # the visual-judge role
       actions: read # the other run's artifact
       contents: write # the ci-screenshots branch
       pull-requests: write # the comment and labels
@@ -81,6 +83,20 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/isocast-visual-judge
+          role-session-name: isocast-visual-judge-secrets-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Fetch the visual-judge secrets
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            OPENCODE_API_KEY,isocast/visual-judge/OPENCODE_API_KEY
+          parse-json-secrets: false
 
       - name: Download the screenshots
         id: download
@@ -177,7 +193,7 @@ jobs:
         id: judge
         if: ${{ steps.images.outcome == 'success' }}
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
           VISION_MODEL: ${{ vars.VISION_MODEL }}
         run: |
           if [ -z "$OPENCODE_API_KEY" ]; then
