@@ -141,6 +141,8 @@ jobs:
         with:
           key: distro-${{ matrix.distro }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/skia-binaries
+
       - name: Build native package
         id: build
         run: |
@@ -670,6 +672,9 @@ jobs:
         if: env.MODE == 'full'
         run: cargo test --release --locked -p isocast-openh264 -- --include-ignored
 
+      - uses: ./.github/actions/skia-binaries
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+
       - name: Build app, engine, CLI and browser helper
         if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli -p isocast-browser -p isocast-media
@@ -880,6 +885,8 @@ jobs:
         with:
           key: deb-debian12-${{ matrix.arch }}
           save-if: ${{ !inputs.linux_release_commit && github.ref == 'refs/heads/main' }}
+
+      - uses: ./.github/actions/skia-binaries
 
       - name: Build app, engine and CLI
         # No browser helper: it needs GTK 4.10+ and bookworm has 4.8, so the
@@ -1319,6 +1326,9 @@ jobs:
       # `--state kit` design board, a quarter of the module), which brings
       # each rustc to 10.8 GiB (12.2 committed). The gallery's .slint is not
       # compiled here; macOS CI and the exon-desk qualification build it.
+      - uses: ./.github/actions/skia-binaries
+        if: env.MODE == 'full' || steps.cache.outputs.cache-hit != 'true'
+
       # The same packages as the updater tests below, so Cargo resolves the
       # same features and `cargo test` reuses this build (with only
       # `-p isocast-ui` here, the tests rebuilt the dependencies and the

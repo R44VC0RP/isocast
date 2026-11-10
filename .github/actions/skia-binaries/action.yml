@@ -1,0 +1,58 @@
+name: Cache Skia binaries
+description: Supply the pinned rust-skia prebuilt for this UI build without compiling Skia from source.
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      run: |
+        version=$(awk '$1 == "name" && $3 ~ /^"skia-bindings"/ {getline; print $3}' Cargo.lock | tr -d '"\r')
+        if [[ $version != 0.153.3 ]]; then
+          echo "Update the Skia release asset pins for skia-bindings $version" >&2; exit 1
+        fi
+        target=$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')
+        # IDs and SHA-256s from rust-skia/skia-binaries release 0.153.3.
+        case "$target" in
+          x86_64-unknown-linux-gnu) features=ganesh-gl-jpegd-jpege-pdf-vulkan; id=544398006; sha=9ebe4c448cc9f789bad241cbd11739cdf759e27db5719c23a7635e096d5807b3 ;;
+          aarch64-unknown-linux-gnu) features=ganesh-gl-jpegd-jpege-pdf-vulkan; id=544364224; sha=82da2256fd0ce9419527f72ca4e9858a13c14d23073da1e618dc596397f65560 ;;
+          aarch64-apple-darwin) features=ganesh-gl-jpegd-jpege-metal-pdf; id=544402647; sha=688dc8a8f81f918cfaaae5f5af44262e75fc5d1a69589735926add090730d16a ;;
+          x86_64-pc-windows-msvc) features=d3d-ganesh-gl-jpegd-jpege-pdf; id=544286388; sha=a19adbcb3c8e9d691ce4e9350fcc3e3ce066a0793263d5358185efbceae46f30 ;;
+          *) echo "No Skia binary pin for $target" >&2; exit 1 ;;
+        esac
+        key=b7f043e0b1e2a850e702-$target-$features
+        dir="$RUNNER_TEMP/isocast-skia"
+        # makepkg runs as an unprivileged user in the Arch container.
+        if [[ $RUNNER_OS == Linux ]]; then dir=/tmp/isocast-skia; fi
+        archive="$dir/$version/skia-binaries-$key.tar.gz"
+        echo "archive=$archive" >> "$GITHUB_OUTPUT"
+        echo "key=skia-$version-$key-$sha" >> "$GITHUB_OUTPUT"
+        echo "api=https://api.github.com/repos/rust-skia/skia-binaries/releases/assets/$id" >> "$GITHUB_OUTPUT"
+        echo "url=https://github.com/rust-skia/skia-binaries/releases/download/$version/${archive##*/}" >> "$GITHUB_OUTPUT"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        # Let the crate substitute its own tag/key, never hand it a different ABI.
+        echo "SKIA_BINARIES_URL=file://$dir/{tag}/skia-binaries-{key}.tar.gz" >> "$GITHUB_ENV"
+
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      id: cache
+      with:
+        key: ${{ steps.pin.outputs.key }}
+        path: ${{ steps.pin.outputs.archive }}
+
+    - shell: bash
+      env:
+        ARCHIVE: ${{ steps.pin.outputs.archive }}
+        SHA: ${{ steps.pin.outputs.sha }}
+        API: ${{ steps.pin.outputs.api }}
+        URL: ${{ steps.pin.outputs.url }}
+        HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        umask 022
+        if [[ $HIT != true ]]; then
+          mkdir -p "$(dirname "$ARCHIVE")"
+          opts=(--fail --silent --show-error --location --retry 2 --connect-timeout 10 --max-time 90 --output "$ARCHIVE")
+          curl "${opts[@]}" -H 'Accept: application/octet-stream' "$API" || curl "${opts[@]}" "$URL"
+        fi
+        # The crate unpacks its archive but does not verify a digest.
+        cd "$(dirname "$ARCHIVE")"
+        if command -v sha256sum >/dev/null; then check=(sha256sum); else check=(shasum -a 256); fi
+        printf '%s  %s\n' "$SHA" "${ARCHIVE##*/}" | "${check[@]}" -c -
