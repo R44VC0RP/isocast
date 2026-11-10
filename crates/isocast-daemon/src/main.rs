@@ -288,6 +288,11 @@ fn main() -> ExitCode {
                 PARENT_OWNED.store(true, Ordering::SeqCst);
             }
             daemon.load_setup();
+            #[cfg(windows)]
+            if let Err(error) = daemon.configure_adapter() {
+                isocast_diagnostics::diagnostic!("error"; "could not install Windows GPU selection: {error:#}");
+                return ExitCode::FAILURE;
+            }
             daemon.load_machine();
             daemon.recover_recordings();
             #[cfg(windows)]
@@ -1887,6 +1892,7 @@ impl Daemon {
                 .gpu_adapter_luid()
                 .map_err(failed)
                 .and_then(to_json),
+            Method::GpuPreference(params) => self.gpu_preference(params.and_then(|p|p.adapter)).and_then(to_json),
             Method::MachineProfile => to_json(self.machine_status(true)),
             Method::MachineCalibrate => self.machine_calibrate().and_then(to_json),
             Method::MachineCancel => self.machine_cancel().and_then(to_json),
@@ -2504,6 +2510,8 @@ impl Daemon {
         }
         let removes_window = removes_a_window(state.setup.as_ref(), plan.setup.as_ref());
         state.setup = plan.setup;
+        #[cfg(windows)]
+        isocast_platform_windows::adapter_choice::workload(state.setup.as_ref());
         // A local caller's recordings folder is one set on this machine: a
         // folder root for network callers (decision 26). Nobody else's is.
         if let Some(setup) = &state.setup {

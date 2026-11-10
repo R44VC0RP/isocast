@@ -45,6 +45,7 @@ pub use windows::{Exporter, Surface, fetch, host_now};
 #[cfg(all(windows, feature = "wgpu"))]
 pub use windows::{
     capture_adapter_luid, check_render_queue, dx12_adapter, dx12_adapter_luid, engine_adapter,
+    install_adapter_planner,
 };
 #[cfg(all(windows, feature = "wgpu"))]
 pub use windows::{retire, retirement_failed};

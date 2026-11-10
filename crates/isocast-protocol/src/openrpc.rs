@@ -446,6 +446,7 @@ pub fn result(method: &str, g: &mut SchemaGenerator) -> Option<(String, Schema)>
         }
         // Windows: the DX12 adapter LUID as [low, high]; null elsewhere.
         "gpu_adapter" => of::<Option<(u32, i32)>>(g),
+        "gpu_preference" => of::<api::WindowsGpuSelection>(g),
         "hello" => of::<hello::Hello>(g),
         "folder_roots" | "folder_roots_set" => of::<roots::FolderRoots>(g),
         "files_roots" => of::<roots::FilesRoots>(g),

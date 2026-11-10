@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-105 tools. Arguments marked required must be given; ids, not names,
+106 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -289,6 +289,14 @@ Whether Isocast is idle or recording, with live frame and drop counters, the fil
 ## gpu_adapter
 
 Select/return the daemon's graphics adapter without starting capture: Windows DX12 LUID [low, high], or null on other platforms. Shared-preview clients must use this adapter.
+
+## gpu_preference
+
+List the Windows engine's compatible adapters, selection and reason. Give adapter=auto or a listed stable ID to save a machine-local preference while idle for the next daemon launch.
+
+| Argument | Type | Description |
+|---|---|---|
+| `adapter` | string (optional) | Omit to read; "auto" or one of the reported stable IDs to save. |
 
 ## hotkeys_actions
 

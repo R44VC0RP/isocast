@@ -7921,6 +7921,19 @@
         ],
         "type": "object"
       },
+      "GpuPreferenceParams": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter": {
+            "description": "Omit to read; \"auto\" or one of the reported stable IDs to save.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "GradientMask": {
         "description": "Fades the picture in or out along a gradient (OBS Advanced Masks'\ngradient masks).",
         "properties": {
@@ -22930,6 +22943,46 @@
         ],
         "type": "object"
       },
+      "WindowsGpuCandidate": {
+        "properties": {
+          "driver": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "luid": {
+            "items": [
+              {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "int32",
+                "type": "integer"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "software": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "luid",
+          "software",
+          "driver"
+        ],
+        "type": "object"
+      },
       "WindowsGpuRoute": {
         "description": "Observed devices in this daemon, not inferred GPU preferences. LUIDs are\n(low, high), local to this machine and boot, as in `gpu_adapter`.",
         "properties": {
@@ -22984,6 +23037,17 @@
             ],
             "description": "Published, non-lost DX12 renderer, if one has started."
           },
+          "selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WindowsGpuSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The startup selection, once made. Actual devices are reported separately."
+          },
           "session_type": {
             "$ref": "#/components/schemas/WindowsSessionType"
           },
@@ -23003,6 +23067,50 @@
           "display_devices",
           "captures",
           "encoders"
+        ],
+        "type": "object"
+      },
+      "WindowsGpuSelection": {
+        "properties": {
+          "candidates": {
+            "description": "Compatible adapters observed at selection time; never enumeration indices.",
+            "items": {
+              "$ref": "#/components/schemas/WindowsGpuCandidate"
+            },
+            "type": "array"
+          },
+          "chosen": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WindowsGpuCandidate"
+              }
+            ],
+            "description": "Actual pin for this daemon, including its current-boot LUID."
+          },
+          "preference": {
+            "description": "Machine-local preference saved for the next launch.",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "restart_required": {
+            "type": "boolean"
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "preference",
+          "restart_required",
+          "chosen",
+          "reason",
+          "warning",
+          "candidates"
         ],
         "type": "object"
       },
@@ -27394,6 +27502,41 @@
         }
       },
       "summary": "Select/return the daemon's graphics adapter before opening a client renderer."
+    },
+    {
+      "description": "Read the Windows engine's GPU selection and valid stable IDs, or save\nan override while idle for its next launch. Does not switch a live GPU.",
+      "name": "gpu_preference",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "Omit to read; \"auto\" or one of the reported stable IDs to save.",
+          "name": "adapter",
+          "schema": {
+            "description": "Omit to read; \"auto\" or one of the reported stable IDs to save.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "WindowsGpuSelection",
+        "schema": {
+          "$ref": "#/components/schemas/WindowsGpuSelection"
+        }
+      },
+      "summary": "Read the Windows engine's GPU selection and valid stable IDs, or save an override while idle for its next launch.",
+      "x-isocast-params": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/GpuPreferenceParams"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
     },
     {
       "description": "What this engine is: its machine's operating system and name, its\nidentity, build, protocol version and methods. Remote clients call\nit first; local ones may. Returns [`Hello`](crate::hello::Hello).",

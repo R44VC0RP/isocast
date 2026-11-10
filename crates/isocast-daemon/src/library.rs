@@ -837,6 +837,8 @@ impl Daemon {
         notes.extend(cleared.iter().cloned());
         self.note_local_recording_folder(&setup.recording.folder);
         state.setup = Some(setup);
+        #[cfg(windows)]
+        isocast_platform_windows::adapter_choice::workload(state.setup.as_ref());
         state.hotkey_holds.clear();
         state.revision += 1;
         let revision = state.revision;

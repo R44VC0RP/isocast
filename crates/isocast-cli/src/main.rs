@@ -177,6 +177,12 @@ enum Command {
     },
     /// Show the daemon's graphics adapter identity (Windows DX12 LUID).
     GpuAdapter {
+        /// List compatible adapter IDs, the selected GPU and why it was selected.
+        #[arg(long, conflicts_with = "set")]
+        choices: bool,
+        /// Save a stable ID (or auto) while idle for the next daemon launch.
+        #[arg(long, value_name = "ID")]
+        set: Option<String>,
         /// Print JSON.
         #[arg(long)]
         json: bool,
@@ -1679,7 +1685,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Data { command } => data::run(command),
         Command::Project { command } => project::run(command),
         Command::Hotkeys { command } => hotkeys::run(command),
-        Command::GpuAdapter { json } => {
+        Command::GpuAdapter {
+            choices: false,
+            set: None,
+            json,
+        } => {
             let luid: Option<(u32, i32)> = Client::connect_or_launch()?.call(Method::GpuAdapter)?;
             if json {
                 println!("{}", serde_json::to_string(&luid)?);
@@ -1687,6 +1697,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 println!("DX12 adapter LUID: {low}, {high}");
             } else {
                 println!("This platform does not require an explicit graphics adapter identity.");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::GpuAdapter {
+            set: adapter, json, ..
+        } => {
+            let plan: isocast_protocol::api::WindowsGpuSelection = Client::connect_or_launch()?
+                .call(Method::GpuPreference(Some(
+                    isocast_protocol::api::GpuPreferenceParams { adapter },
+                )))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                print_gpu_selection(&plan);
+                println!("Valid adapters: auto, or a unique ID below:");
+                for c in plan.candidates {
+                    println!("  {}: {} (LUID {:?}; {})", c.id, c.name, c.luid, c.driver);
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -3353,6 +3381,9 @@ fn print_windows_gpu_route(route: &isocast_protocol::api::WindowsGpuRoute) {
             .as_ref()
             .map_or_else(|| "not observed".into(), label)
     );
+    if let Some(plan) = &route.selection {
+        print_gpu_selection(plan);
+    }
     if let Some(reason) = &route.idle_replacement_block {
         println!("  Idle replacement blocked: {reason}");
     }
@@ -3393,6 +3424,22 @@ fn print_windows_gpu_route(route: &isocast_protocol::api::WindowsGpuRoute) {
         for reason in &e.fallback_reasons {
             println!("    {reason}");
         }
+    }
+}
+
+fn print_gpu_selection(plan: &isocast_protocol::api::WindowsGpuSelection) {
+    println!(
+        "Windows GPU pin: {} ({}, LUID {:?}): {}",
+        plan.chosen.name, plan.chosen.id, plan.chosen.luid, plan.reason
+    );
+    if let Some(warn) = &plan.warning {
+        println!("  Warning: {warn}");
+    }
+    if plan.restart_required {
+        println!(
+            "  Saved: {}. Restart the idle daemon to apply.",
+            plan.preference
+        );
     }
 }
 

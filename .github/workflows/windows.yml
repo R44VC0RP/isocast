@@ -1280,6 +1280,7 @@ jobs:
           cargo test --locked -j 1 -p isocast-platform-windows --lib gpu::tests::idle_retirement_counts_native_com_and_actual_mf_inputs -- --ignored --exact
           cargo test --locked -j 1 -p isocast-platform-windows --lib sibling_device_retirement -- --ignored --test-threads=1
           cargo test --locked -j 1 -p isocast-platform-windows --lib late_activity_drop
+          cargo test --locked -j 1 -p isocast-platform-windows --lib adapter_choice::tests
           cargo test --locked -j 1 -p isocast-platform-windows --lib refused_gpu_generation
 
       - name: Check hotkey mapping and native registration status
@@ -1435,6 +1436,13 @@ jobs:
       - name: Install recording recovery decoder
         timeout-minutes: 10
         uses: ./.github/actions/windows-ffmpeg
+
+      - name: Round-trip the Windows adapter preference and record on missing-pin fallback
+        shell: pwsh
+        run: |
+          python scripts/e2e.py --daemon target/debug/isocastd.exe --only win_adapter_preference --codec h264 --timeout 180 --work "$RUNNER_TEMP/adapter-choice" --keep-failures --report adapter-choice.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -c 'import json; r, = json.load(open("adapter-choice.json"))["scenarios"]; print(r["evidence"]); assert r["status"] == "PASS"'
 
       - name: List application audio (real capture needs explicit tone fixtures)
         timeout-minutes: 5

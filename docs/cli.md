@@ -550,7 +550,9 @@ Show the daemon's graphics adapter identity (Windows DX12 LUID)
 Usage: isocast gpu-adapter [OPTIONS]
 
 Options:
+      --choices          List compatible adapter IDs, the selected GPU and why it was selected
       --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --set <ID>         Save a stable ID (or auto) while idle for the next daemon launch
       --json             Print JSON
   -h, --help             Print help
 ```
