@@ -342,6 +342,9 @@ through `pr.sh` (implementers: ci/<lane> snapshots and their PRs) and `merge-pr.
   `ci_gate.py WORKFLOW --paths P…` previews a plan offline. fmt, scans and ipc/mux/obsws/remote clippy+tests run on
   ubuntu; platform-stub stays on macOS (its tests need a wgpu backend). Windows: win-build (~39 min) then recovery,
   wording and package in parallel; win-release (release services, preview qualification) runs alongside.
+  Nightly soak: its gate skips a scheduled soak when no path it runs (engine, macOS, shared crates, e2e and soak
+  harnesses, .github/, Cargo manifests) changed since the last soak that ran, and soaks anyway once that is over 7
+  days old; `gh workflow run nightly-soak.yml` always soaks.
 - Accepted risk (2026-10-24, review of ISO-40): the motion suite is skipped for shared-crate changes (protocol,
   daemon, CLI…) that can still change what the app draws. Mitigation: before a release, run everything on main with
   `gh workflow run CI --repo R44VC0RP/isocast --ref main` (manual runs ignore the gate) and check the motion suite.

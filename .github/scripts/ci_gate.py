@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decides which CI jobs a change needs, and skips trees that already passed.
 
-    ci_gate.py WORKFLOW            # in a workflow's `gate` job (ci, e2e or windows)
+    ci_gate.py WORKFLOW            # in a workflow's `gate` job (ci, e2e, windows or soak)
     ci_gate.py WORKFLOW --paths P… # offline: classify these paths, print the plan
     ci_gate.py --explain           # the path rules and job rules, as a table
 
@@ -28,10 +28,16 @@ Each job gets a mode, written to $GITHUB_OUTPUT as `<job>=<mode>`:
    base's own changes); with none, everything runs, as do manual runs and
    other events.
    On main, a job that doesn't need to run warms its cache instead.
+3. Nightly soak. A scheduled soak compares main with the last commit that
+   was soaked successfully and skips when no path it runs changed (soak.py,
+   the e2e harness, the engine and macOS code; .github/ and the Cargo
+   manifests run it). It runs anyway when that soak is older than
+   MAX_SOAK_AGE_DAYS, or can't be found; manual runs always soak.
 
 The job summary says, for every job, why it runs or not.
 """
 
+import datetime
 import functools
 import json
 import os
@@ -43,7 +49,7 @@ import urllib.request
 WORKFLOW_FILES = {"CI": "ci.yml", "Engine E2E": "e2e.yml", "Windows": "windows.yml"}
 
 # Each pattern matches a whole path; the first match wins. Tags: all, docs, tooling, ui, render, shared, mac,
-# windows, linux, e2e, motion, contracts, release_tools.
+# windows, linux, e2e, motion, contracts, release_tools, soak.
 ENGINE_NOT_RENDER = (
     "audio_filter|capacity|critical|data|doctor|encoder_calibration|estimate|governor|hotkeys|"
     "machine_profile|project|time|trace|tune|wasm")
@@ -85,6 +91,7 @@ PATH_RULES = [
     (r"scripts/(windows-[^/]*|oracle-windows\.sh)", {"windows"}, "Windows scripts"),
     (r"scripts/(e2e\.py|pacing\.py|pacing-probe\.m)", {"e2e"}, "the e2e harness"),
     (r"scripts/(platform-contracts\.py|test_platform_contracts\.py)", {"contracts"}, "contract harness"),
+    (r"scripts/soak\.py", {"tooling", "soak"}, "the nightly soak harness"),
     (r"scripts/(motion\.sh|motion/.*)", {"motion"}, "the motion harness"),
     (r"scripts/screenshots/.*", {"ui"}, "app screenshots"),
     (r"scripts/(visual[-_][^/]*|ui-screenshots\.sh|layout-audit.*)", {"ui"}, "app screenshot tools"),
@@ -133,6 +140,11 @@ JOB_RULES = {
         # the installer runs the shared daemon and CLI. Both reuse the build.
         "win_wording": ({"all", "ui", "shared", "windows"}, "Windows wording snapshots"),
         "win_package": ({"all", "ui", "shared", "windows"}, "Windows installer and update packages"),
+    },
+    # Builds isocast-daemon and records through scripts/soak.py, which drives
+    # the engine with scripts/e2e.py.
+    "soak": {
+        "soak": ({"all", "render", "shared", "mac", "e2e", "soak"}, "hours of recording on macOS"),
     },
 }
 # The jobs whose modes include `docs` (fmt, reference docs, scans).
@@ -303,6 +315,43 @@ def schedule_plan(workflow):
             for job in JOB_RULES[workflow]}
 
 
+# A scheduled soak runs even when nothing changed once the last real soak is
+# this old, so runner image, toolchain and FFmpeg updates still get soaked.
+MAX_SOAK_AGE_DAYS = 7
+
+
+def last_soak(repo):
+    """The newest successful run on main whose soak job ran and passed (not one
+    the gate skipped): the run, or None."""
+    runs = api(f"repos/{repo}/actions/workflows/nightly-soak.yml/runs?branch=main&status=success&per_page=30")
+    for run in runs["workflow_runs"]:
+        jobs = api(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=10")["jobs"]
+        if any(j["name"] == "soak" and j["conclusion"] == "success" for j in jobs):
+            return run
+    return None
+
+
+def soak_plan(repo, sha):
+    """A scheduled soak's plan: (modes, header, changed paths or None)."""
+    try:
+        last = last_soak(repo)
+    except Exception as e:  # can't tell: soak rather than skip blindly
+        return plan("soak", None, False), f"Everything runs: couldn't find the last soak ({e}).", None
+    if not last:
+        return plan("soak", None, False), "Everything runs: no successful soak on main in the last 30 runs.", None
+    created = datetime.datetime.fromisoformat(last["created_at"].replace("Z", "+00:00"))
+    age = datetime.datetime.now(datetime.timezone.utc) - created
+    link = f"[{last['head_sha'][:12]}]({last['html_url']})"
+    if age > datetime.timedelta(days=MAX_SOAK_AGE_DAYS):
+        return (plan("soak", None, False),
+                f"Everything runs: the last soak ({link}) is older than {MAX_SOAK_AGE_DAYS} days.", None)
+    try:
+        paths = git("diff", "--name-only", "--no-renames", last["head_sha"], sha).splitlines()
+    except subprocess.CalledProcessError:
+        return plan("soak", None, False), f"Everything runs: the last soaked commit {link} isn't in history.", None
+    return plan("soak", paths, False), f"{len(paths)} changed paths since the last soak, {link}.", paths
+
+
 def summary(workflow, header, modes, paths):
     lines = [f"### What runs ({workflow})", "", header, "", "| job | mode | why |", "|---|---|---|"]
     for job, (mode, why) in modes.items():
@@ -349,6 +398,8 @@ def main():
     if event == "schedule" and workflow == "windows":
         modes = schedule_plan(workflow)
         header = "Weekly rolling-distribution check."
+    elif event == "schedule" and workflow == "soak":
+        modes, header, paths = soak_plan(repo, sha)
     elif match:
         other, urls = match
         why = f"tree {tree[:12]} already passed as {other[:12]}"
