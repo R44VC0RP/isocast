@@ -23,7 +23,7 @@ concurrency:
 jobs:
   soak:
     # GitHub-hosted arm64 only: free for public repos, never our own Macs.
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 350
     env:
       CARGO_INCREMENTAL: 0

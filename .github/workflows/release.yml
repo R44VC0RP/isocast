@@ -124,7 +124,7 @@ jobs:
   release:
     needs: preflight
     if: needs.preflight.outputs.proceed == 'true'
-    runs-on: macos-26
+    runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 90
     # Ryan approves every release: the required reviewer is the gate, and the
     # signing credentials are in AWS behind the environment's own role.
