@@ -58,7 +58,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.e2e != 'skip'
     # GitHub-hosted arm64 only. Untrusted PR code never reaches test Macs.
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: 0

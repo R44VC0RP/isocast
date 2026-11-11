@@ -117,7 +117,7 @@ jobs:
     if: needs.gate.outputs.check != 'skip'
     # GitHub-hosted only: pull requests from forks must never run on our own
     # machines, so no self-hosted runners here.
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     # A cold cache (a ci/** candidate, or main after a failed run, which
     # saves no cache) needs ~29 min of clippy and ~28 of tests before the
     # contract and docs steps: 60 cut one off at 61 min (2026-10-22).
@@ -187,7 +187,7 @@ jobs:
     name: build motion binaries (macOS arm64)
     needs: gate
     if: needs.gate.outputs.motion != 'skip'
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     # A cold release build alone exceeded 60 minutes on run 41849337186.
     # Compile once for both suites, with margin independent of test time.
     timeout-minutes: 90
@@ -244,7 +244,7 @@ jobs:
       fail-fast: false
       matrix:
         suite: [controls, standard]
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
